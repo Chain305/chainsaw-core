@@ -1,0 +1,55 @@
+{
+  "_comment": "PyPI fixture for idna 3.15. Regression guard for F1: VersionCount must be >= 10 (idna has many historical releases). Pre-fix, maint.very_new_package was firing on idna because the timeline lookup returned 0 versions. Also exercises VulnDataAvailable=true (regression guard).",
+  "routes": {
+    "/pypi/idna/3.15/json": {
+      "info": {
+        "name": "idna",
+        "version": "3.15",
+        "summary": "Internationalized Domain Names in Applications (IDNA)",
+        "author": "Kim Davies",
+        "author_email": "kim+pypi@gumleaf.org",
+        "license": "BSD-3-Clause",
+        "home_page": "",
+        "project_urls": {
+          "Source": "https://github.com/kjd/idna",
+          "Issues": "https://github.com/kjd/idna/issues"
+        },
+        "requires_python": ">=3.5",
+        "yanked": false
+      },
+      "urls": [
+        {
+          "filename": "idna-3.15-py3-none-any.whl",
+          "packagetype": "bdist_wheel",
+          "size": 66836,
+          "url": "https://files.pythonhosted.org/idna/idna-3.15-py3-none-any.whl",
+          "upload_time_iso_8601": "2024-04-12T00:00:00Z",
+          "digests": {"sha256": "abc123", "md5": "def456"},
+          "has_sig": false,
+          "yanked": false
+        }
+      ]
+    },
+    "/pypi/idna/json": {
+      "info": {"version": "3.15"},
+      "releases": {
+        "2.0": [{"upload_time_iso_8601": "2014-01-01T00:00:00Z"}],
+        "2.5": [{"upload_time_iso_8601": "2017-01-01T00:00:00Z"}],
+        "2.6": [{"upload_time_iso_8601": "2017-06-01T00:00:00Z"}],
+        "2.7": [{"upload_time_iso_8601": "2018-06-01T00:00:00Z"}],
+        "2.8": [{"upload_time_iso_8601": "2019-06-01T00:00:00Z"}],
+        "2.9": [{"upload_time_iso_8601": "2020-06-01T00:00:00Z"}],
+        "2.10": [{"upload_time_iso_8601": "2020-09-01T00:00:00Z"}],
+        "3.0": [{"upload_time_iso_8601": "2020-10-01T00:00:00Z"}],
+        "3.1": [{"upload_time_iso_8601": "2021-03-01T00:00:00Z"}],
+        "3.2": [{"upload_time_iso_8601": "2021-05-01T00:00:00Z"}],
+        "3.3": [{"upload_time_iso_8601": "2022-01-01T00:00:00Z"}],
+        "3.4": [{"upload_time_iso_8601": "2023-01-01T00:00:00Z"}],
+        "3.5": [{"upload_time_iso_8601": "2023-09-01T00:00:00Z"}],
+        "3.6": [{"upload_time_iso_8601": "2023-11-01T00:00:00Z"}],
+        "3.7": [{"upload_time_iso_8601": "2024-01-01T00:00:00Z"}],
+        "3.15": [{"upload_time_iso_8601": "2024-04-12T00:00:00Z"}]
+      }
+    }
+  }
+}

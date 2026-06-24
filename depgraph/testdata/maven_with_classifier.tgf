@@ -1,0 +1,6 @@
+1 com.example:my-app:jar:1.0.0
+2 io.netty:netty-transport-native-epoll:jar:linux-x86_64:4.1.86.Final:compile
+3 io.netty:netty-common:jar:4.1.86.Final:compile
+#
+1 2
+2 3

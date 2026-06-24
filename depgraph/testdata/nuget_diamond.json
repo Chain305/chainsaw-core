@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net6.0": {
+      "App.LibA": {
+        "type": "Direct",
+        "requested": "[1.0.0, )",
+        "resolved": "1.0.0",
+        "dependencies": {
+          "App.Shared": "2.0.0"
+        }
+      },
+      "App.LibB": {
+        "type": "Direct",
+        "requested": "[1.0.0, )",
+        "resolved": "1.0.0",
+        "dependencies": {
+          "App.Shared": "2.0.0"
+        }
+      },
+      "App.Shared": {
+        "type": "Transitive",
+        "resolved": "2.0.0"
+      }
+    }
+  }
+}

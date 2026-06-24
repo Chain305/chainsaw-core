@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chainsaw.dev/schemas/policy/input.schema.json",
+  "title": "ChainsawPolicyInput",
+  "description": "Canonical OPA input shape for the chainsaw unified policy DSL. Every enforcement surface (pr|proxy|publish|promote|deploy|runtime) produces this document; missing fields stay zero-valued. The Go source-of-truth is policy.Input in internal/policy/input.go.",
+  "type": "object",
+  "required": ["surface"],
+  "additionalProperties": false,
+  "properties": {
+    "surface": {
+      "type": "string",
+      "enum": ["pr", "proxy", "publish", "promote", "deploy", "runtime"],
+      "description": "Which enforcement surface is requesting the decision."
+    },
+    "repository":      { "type": "string" },
+    "ecosystem":       { "type": "string", "description": "Lowercased registry format: npm|pypi|cargo|maven|gomod|oci|... " },
+    "package":         { "type": "string" },
+    "version":         { "type": "string" },
+
+    "clientId":        { "type": "string" },
+    "clientGroups":    { "type": "array", "items": { "type": "string" } },
+    "requestingIp":    { "type": "string" },
+    "requestingCountry": { "type": "string" },
+
+    "isInternal":      { "type": "boolean" },
+    "releaseDate":     { "type": "string", "format": "date-time" },
+    "licenseSpdx":     { "type": "string" },
+    "licenseTags":     { "type": "array", "items": { "type": "string" } },
+
+    "isVulnerable":    { "type": "boolean" },
+    "cvss":            { "type": "number", "minimum": 0, "maximum": 10 },
+    "epss":            { "type": "number", "minimum": 0, "maximum": 1 },
+    "cves":            { "type": "array", "items": { "type": "string" } },
+
+    "hasProvenance":         { "type": "boolean" },
+    "provenanceStatus":      { "type": "string" },
+    "isSuspectedTyposquat":  { "type": "boolean" },
+    "isKnownMalicious":      { "type": "boolean" },
+    "trustScore":            { "type": "integer", "minimum": 0, "maximum": 100 },
+    "publisherChanged":      { "type": "boolean" },
+
+    "slsaLevel":                  { "type": "integer", "minimum": 0, "maximum": 4 },
+    "attestationBuilderId":       { "type": "string" },
+    "attestationIssuer":          { "type": "string" },
+    "attestationSourceRepo":      { "type": "string" },
+    "attestationTransparencyLog": { "type": "string" },
+    "attestationCacheStale":      { "type": "boolean" },
+
+    "hasInstallScript":           { "type": "boolean" },
+    "installScriptFetchesRemote": { "type": "boolean" },
+
+    "versionAnomaly":      { "type": "boolean" },
+    "versionAnomalyFlags": { "type": "array", "items": { "type": "string" } },
+
+    "hasHiddenUnicode":   { "type": "boolean" },
+    "hiddenUnicodeKinds": { "type": "array", "items": { "type": "string" } },
+
+    "publishVelocity24h": { "type": "integer", "minimum": 0 },
+
+    "deprecatedByMaintainer":  { "type": "boolean" },
+    "shrinkwrapPresent":       { "type": "boolean" },
+    "manifestConfusion":       { "type": "boolean" },
+
+    "gitDependency":           { "type": "boolean" },
+    "httpTarballDependency":   { "type": "boolean" },
+    "wildcardDependencyRange": { "type": "boolean" },
+    "badDependencySemver":     { "type": "boolean" },
+
+    "usesEval":            { "type": "boolean" },
+    "networkAccess":       { "type": "boolean" },
+    "shellAccess":         { "type": "boolean" },
+    "filesystemAccess":    { "type": "boolean" },
+    "envVarAccess":        { "type": "boolean" },
+    "nativeBinaryPresent": { "type": "boolean" },
+    "highEntropyStrings":  { "type": "boolean" },
+    "urlStrings":          { "type": "boolean" },
+    "minifiedCode":        { "type": "boolean" },
+
+    "trivialPackage":           { "type": "boolean" },
+    "tooManyFiles":             { "type": "boolean" },
+    "nonExistentAuthor":        { "type": "boolean" },
+    "firstTimeCollaborator":    { "type": "boolean" },
+    "suspiciousRepoStars":      { "type": "boolean" },
+    "maintainerAccountAgeDays": {
+      "type": "integer",
+      "description": "Min publisher/maintainer account age in days. <=0 means unknown / provider disabled — rules referencing this field should fail open."
+    },
+
+    "artifactSubtype":              { "type": "string" },
+    "dangerousPickle":              { "type": "boolean" },
+    "unsafeSerializationFormat":    { "type": "boolean" },
+    "modelCardInjection":           { "type": "boolean" },
+    "agentToolDangerousCapability": { "type": "boolean" },
+    "mcpServerDeclared":            { "type": "boolean" },
+    "promptTemplateInjection":      { "type": "boolean" },
+
+    "checksumUnavailable": { "type": "boolean" }
+  }
+}

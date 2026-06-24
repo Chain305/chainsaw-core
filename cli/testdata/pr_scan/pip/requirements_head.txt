@@ -1,0 +1,4 @@
+# Head requirements — added numpy, upgraded requests
+requests==2.31.0
+flask==2.2.0
+numpy==1.24.3

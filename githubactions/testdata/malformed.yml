@@ -1,0 +1,7 @@
+name: malformed
+on: [push
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+   bad-indent: : :

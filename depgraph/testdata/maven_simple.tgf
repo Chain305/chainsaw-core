@@ -1,0 +1,4 @@
+1 com.example:my-app:jar:1.0.0
+2 org.springframework:spring-core:jar:5.3.20:compile
+#
+1 2

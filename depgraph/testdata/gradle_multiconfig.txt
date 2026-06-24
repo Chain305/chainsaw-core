@@ -1,0 +1,26 @@
+
+> Task :app:dependencies
+
+------------------------------------------------------------
+Project ':app'
+------------------------------------------------------------
+
+compileClasspath - Compile classpath for source set 'main'.
++--- com.google.guava:guava:31.1-jre
+|    \--- org.checkerframework:checker-qual:3.12.0
+\--- org.springframework:spring-core:5.3.20
+
+runtimeClasspath - Runtime classpath for source set 'main'.
++--- com.google.guava:guava:31.1-jre
+|    \--- org.checkerframework:checker-qual:3.12.0
+\--- org.springframework:spring-core:5.3.20
+     \--- org.springframework:spring-jcl:5.3.20
+
+testCompileClasspath - Compile classpath of source set 'test'.
++--- com.google.guava:guava:31.1-jre
+\--- junit:junit:4.13.2
+     \--- org.hamcrest:hamcrest-core:1.3
+
+apiElements - API elements for main. (n)
+No dependencies
+

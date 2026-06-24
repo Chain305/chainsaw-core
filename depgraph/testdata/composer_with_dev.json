@@ -1,0 +1,30 @@
+{
+  "packages": [
+    {
+      "name": "acme/app",
+      "version": "1.0.0",
+      "require": {
+        "psr/log": "^1.0"
+      }
+    },
+    {
+      "name": "psr/log",
+      "version": "1.1.4",
+      "require": {}
+    }
+  ],
+  "packages-dev": [
+    {
+      "name": "phpunit/phpunit",
+      "version": "9.5.0",
+      "require": {
+        "phpunit/php-code-coverage": "^9.0"
+      }
+    },
+    {
+      "name": "phpunit/php-code-coverage",
+      "version": "9.2.0",
+      "require": {}
+    }
+  ]
+}

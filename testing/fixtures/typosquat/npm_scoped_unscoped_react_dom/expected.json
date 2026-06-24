@@ -1,0 +1,17 @@
+{
+  "packageName": "raect-dom",
+  "ecosystem": "npm",
+  "detector": "both",
+  "popularSeeds": ["react-dom", "react", "lodash", "express"],
+  "reservedNamespaces": ["@react/*"],
+  "typosquat": {
+    "isSuspected": true,
+    "method": "edit-distance",
+    "similarTo": "react-dom",
+    "maxDistance": 2
+  },
+  "depconfusion": {
+    "isViolation": false,
+    "comment": "unscoped name is intentionally NOT flagged by @react/* reservation; this asymmetry is the gap typosquat detection covers"
+  }
+}

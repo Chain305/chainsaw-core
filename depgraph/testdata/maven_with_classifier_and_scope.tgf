@@ -1,0 +1,6 @@
+1 com.example:my-app:jar:1.0.0
+2 io.netty:netty-transport-native-epoll:jar:linux-x86_64:4.1.86.Final:runtime
+3 com.fasterxml.jackson.core:jackson-core:jar:tests:2.13.0:test
+#
+1 2
+1 3

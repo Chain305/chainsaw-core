@@ -1,0 +1,6 @@
+{
+  "_comment": "Maven fixture for org.apache.commons:commons-lang3 3.12.0. Known-good baseline: scan must complete without raising any provider warnings, no false alerts. Maven POMs are XML; the routes here carry the XML body as the `xml` field per route.",
+  "xml_routes": {
+    "/org/apache/commons/commons-lang3/3.12.0/commons-lang3-3.12.0.pom": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>org.apache.commons</groupId><artifactId>commons-lang3</artifactId><version>3.12.0</version><name>Apache Commons Lang</name><description>Apache Commons Lang, a package of Java utility classes for the classes that are in java.lang's hierarchy.</description><url>https://commons.apache.org/proper/commons-lang/</url><licenses><license><name>Apache License, Version 2.0</name><url>https://www.apache.org/licenses/LICENSE-2.0.txt</url></license></licenses><scm><url>https://gitbox.apache.org/repos/asf/commons-lang.git</url></scm><issueManagement><url>https://issues.apache.org/jira/browse/LANG</url></issueManagement><developers><developer><name>Apache Commons Developers</name><email>dev@commons.apache.org</email></developer></developers><dependencies></dependencies></project>"
+  }
+}

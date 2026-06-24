@@ -1,0 +1,3 @@
+compileClasspath - Compile classpath for source set 'main'.
++--- com.google.guava:guava:30.0-jre -> 31.1-jre
+\--- org.springframework:spring-core:5.3.18 -> 5.3.20

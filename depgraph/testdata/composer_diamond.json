@@ -1,0 +1,32 @@
+{
+  "packages": [
+    {
+      "name": "acme/app",
+      "version": "1.0.0",
+      "require": {
+        "acme/lib-a": "^2.0",
+        "acme/lib-b": "^3.0"
+      }
+    },
+    {
+      "name": "acme/lib-a",
+      "version": "2.0.0",
+      "require": {
+        "psr/log": "^1.0"
+      }
+    },
+    {
+      "name": "acme/lib-b",
+      "version": "3.0.0",
+      "require": {
+        "psr/log": "^1.0"
+      }
+    },
+    {
+      "name": "psr/log",
+      "version": "1.1.4",
+      "require": {}
+    }
+  ],
+  "packages-dev": []
+}

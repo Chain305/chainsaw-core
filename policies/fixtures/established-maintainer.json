@@ -1,0 +1,8 @@
+{
+  "surface": "proxy",
+  "ecosystem": "npm",
+  "package": "trusted-foo",
+  "version": "5.4.0",
+  "hasInstallScript": true,
+  "maintainerAccountAgeDays": 1500
+}

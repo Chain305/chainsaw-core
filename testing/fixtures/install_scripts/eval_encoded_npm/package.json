@@ -1,0 +1,8 @@
+{
+  "name": "luna-grabber-fixture",
+  "version": "1.0.0",
+  "description": "Simulates Luna-Grabber style base64 payload with no overt remote-fetch primitive.",
+  "scripts": {
+    "postinstall": "node -e \"eval(Buffer.from('AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLLMMMMNNNNOOOOPPPPQQQQRRRRSSSSTTTTUUUUVVVVWWWWXXXXYYYYZZZZ0000111122223333AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLLMMMMNNNNOOOOPPPPQQQQRRRRSSSSTTTTUUUUVVVVWWWWXXXX','base64').toString())\""
+  }
+}

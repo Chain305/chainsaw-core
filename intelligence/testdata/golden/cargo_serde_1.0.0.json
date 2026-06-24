@@ -1,0 +1,82 @@
+{
+  "_comment": "Cargo fixture for serde 1.0.0. Regression guard for F2 (cargo): VersionCount must be >= 50. Serde has 200+ historical versions; ensures the cargo timeline fetcher walks every entry in the versions array.",
+  "routes": {
+    "/api/v1/crates/serde/1.0.0": {
+      "crate": {
+        "homepage": "https://serde.rs",
+        "repository": "https://github.com/serde-rs/serde",
+        "description": "A generic serialization/deserialization framework",
+        "keywords": ["serde", "serialization"],
+        "license": "MIT OR Apache-2.0"
+      },
+      "version": {
+        "license": "MIT OR Apache-2.0",
+        "created_at": "2017-04-19T00:00:00Z",
+        "updated_at": "2017-04-19T00:00:00Z",
+        "dl_path": "/api/v1/crates/serde/1.0.0/download",
+        "crate_size": 50000,
+        "checksum": "serde-1.0.0-checksum",
+        "yanked": false,
+        "published_by": {"login": "dtolnay", "name": "David Tolnay"}
+      },
+      "dependencies": []
+    },
+    "/api/v1/crates/serde": {
+      "crate": {"max_version": "1.0.150", "max_stable_version": "1.0.150", "newest_version": "1.0.150"},
+      "versions": [
+        {"num": "0.1.0", "created_at": "2014-12-05T00:00:00Z"},
+        {"num": "0.2.0", "created_at": "2015-02-01T00:00:00Z"},
+        {"num": "0.3.0", "created_at": "2015-03-01T00:00:00Z"},
+        {"num": "0.4.0", "created_at": "2015-05-01T00:00:00Z"},
+        {"num": "0.5.0", "created_at": "2015-07-01T00:00:00Z"},
+        {"num": "0.6.0", "created_at": "2015-09-01T00:00:00Z"},
+        {"num": "0.7.0", "created_at": "2015-11-01T00:00:00Z"},
+        {"num": "0.8.0", "created_at": "2016-01-01T00:00:00Z"},
+        {"num": "0.8.1", "created_at": "2016-01-15T00:00:00Z"},
+        {"num": "0.8.5", "created_at": "2016-02-01T00:00:00Z"},
+        {"num": "0.9.0", "created_at": "2016-04-01T00:00:00Z"},
+        {"num": "0.9.5", "created_at": "2016-05-01T00:00:00Z"},
+        {"num": "0.9.10", "created_at": "2016-06-01T00:00:00Z"},
+        {"num": "0.9.15", "created_at": "2016-09-01T00:00:00Z"},
+        {"num": "1.0.0", "created_at": "2017-04-19T00:00:00Z"},
+        {"num": "1.0.1", "created_at": "2017-04-25T00:00:00Z"},
+        {"num": "1.0.2", "created_at": "2017-05-01T00:00:00Z"},
+        {"num": "1.0.3", "created_at": "2017-05-10T00:00:00Z"},
+        {"num": "1.0.5", "created_at": "2017-06-01T00:00:00Z"},
+        {"num": "1.0.10", "created_at": "2017-08-01T00:00:00Z"},
+        {"num": "1.0.15", "created_at": "2017-10-01T00:00:00Z"},
+        {"num": "1.0.20", "created_at": "2018-01-01T00:00:00Z"},
+        {"num": "1.0.25", "created_at": "2018-03-01T00:00:00Z"},
+        {"num": "1.0.30", "created_at": "2018-05-01T00:00:00Z"},
+        {"num": "1.0.35", "created_at": "2018-07-01T00:00:00Z"},
+        {"num": "1.0.40", "created_at": "2018-09-01T00:00:00Z"},
+        {"num": "1.0.45", "created_at": "2018-11-01T00:00:00Z"},
+        {"num": "1.0.50", "created_at": "2019-01-01T00:00:00Z"},
+        {"num": "1.0.55", "created_at": "2019-03-01T00:00:00Z"},
+        {"num": "1.0.60", "created_at": "2019-05-01T00:00:00Z"},
+        {"num": "1.0.65", "created_at": "2019-07-01T00:00:00Z"},
+        {"num": "1.0.70", "created_at": "2019-09-01T00:00:00Z"},
+        {"num": "1.0.75", "created_at": "2019-11-01T00:00:00Z"},
+        {"num": "1.0.80", "created_at": "2020-01-01T00:00:00Z"},
+        {"num": "1.0.85", "created_at": "2020-03-01T00:00:00Z"},
+        {"num": "1.0.90", "created_at": "2020-05-01T00:00:00Z"},
+        {"num": "1.0.95", "created_at": "2020-07-01T00:00:00Z"},
+        {"num": "1.0.100", "created_at": "2020-09-01T00:00:00Z"},
+        {"num": "1.0.105", "created_at": "2020-11-01T00:00:00Z"},
+        {"num": "1.0.110", "created_at": "2021-01-01T00:00:00Z"},
+        {"num": "1.0.115", "created_at": "2021-03-01T00:00:00Z"},
+        {"num": "1.0.120", "created_at": "2021-05-01T00:00:00Z"},
+        {"num": "1.0.125", "created_at": "2021-07-01T00:00:00Z"},
+        {"num": "1.0.130", "created_at": "2021-09-01T00:00:00Z"},
+        {"num": "1.0.135", "created_at": "2021-11-01T00:00:00Z"},
+        {"num": "1.0.140", "created_at": "2022-01-01T00:00:00Z"},
+        {"num": "1.0.145", "created_at": "2022-03-01T00:00:00Z"},
+        {"num": "1.0.148", "created_at": "2022-05-01T00:00:00Z"},
+        {"num": "1.0.149", "created_at": "2022-07-01T00:00:00Z"},
+        {"num": "1.0.150", "created_at": "2022-09-01T00:00:00Z"}
+      ]
+    },
+    "/api/v1/crates/serde/owners": {"users": [{"login": "dtolnay", "name": "David Tolnay", "kind": "user"}]},
+    "/api/v1/crates/serde/1.0.0/authors": {"users": [], "meta": {"names": ["David Tolnay <david@tolnay.example>"]}}
+  }
+}

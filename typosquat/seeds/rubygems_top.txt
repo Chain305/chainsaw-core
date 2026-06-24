@@ -1,0 +1,177 @@
+# Curated seed list of popular RubyGems gems for typosquat detection.
+#
+# Source: compiled from rubygems.org most-downloaded gem rankings
+# (https://rubygems.org/stats) as of the offline-corpus bootstrap.
+# rubygems.org exposes a live search/download API (used by fetchRubyGems
+# when the network is reachable), but air-gapped / install-hot-path
+# deployments cannot reach it, so — like the Go, CocoaPods and pub seeds —
+# we ship a curated file and fall back to it offline. This keeps the
+# detector bootstrap deterministic while still preferring the live feed
+# when one is available.
+#
+# Format:
+#   - Blank lines and lines starting with '#' are ignored.
+#   - One gem name per line, no version suffix.
+#   - RubyGems names are flat (no scopes), case-insensitive; case is
+#     preserved here but the detector lowercases at lookup time.
+#
+# Ultra-short / ambiguous names are deliberately omitted to avoid
+# false-positive edit-distance matches against unrelated short names.
+rails
+railties
+rake
+bundler
+rspec
+rspec-core
+rspec-expectations
+rspec-mocks
+rspec-rails
+rspec-support
+nokogiri
+puma
+sidekiq
+devise
+redis
+faraday
+faraday-net_http
+rubocop
+rubocop-ast
+rubocop-rails
+rubocop-performance
+rubocop-rspec
+activerecord
+activesupport
+activemodel
+activejob
+activestorage
+actionpack
+actionview
+actionmailer
+actioncable
+actiontext
+actionmailbox
+sinatra
+sinatra-contrib
+pry
+pry-byebug
+pry-rails
+capybara
+sass
+sassc
+sprockets
+sprockets-rails
+minitest
+rack
+rack-test
+rack-protection
+concurrent-ruby
+thor
+webrick
+unicorn
+thin
+mongoid
+sequel
+dalli
+connection_pool
+mysql2
+sqlite3
+bcrypt
+jwt
+warden
+omniauth
+omniauth-oauth2
+oauth2
+jbuilder
+kaminari
+will_paginate
+pagy
+ransack
+paper_trail
+paperclip
+carrierwave
+shrine
+mini_magick
+image_processing
+aws-sdk-core
+aws-sdk-s3
+google-protobuf
+grpc
+httparty
+rest-client
+typhoeus
+excon
+http
+webmock
+vcr
+factory_bot
+factory_bot_rails
+faker
+database_cleaner
+simplecov
+shoulda-matchers
+timecop
+byebug
+listen
+spring
+bootsnap
+puma_worker_killer
+sidekiq-cron
+sidekiq-scheduler
+resque
+delayed_job
+whenever
+clockwork
+sucker_punch
+good_job
+solid_queue
+mail
+premailer
+letter_opener
+roadie
+nokogiri-diff
+loofah
+rails-html-sanitizer
+sanitize
+redcarpet
+kramdown
+commonmarker
+rdoc
+yard
+asciidoctor
+i18n
+globalize
+mobility
+money
+money-rails
+chronic
+ice_cube
+tzinfo
+public_suffix
+addressable
+uri
+multi_json
+oj
+json
+msgpack
+yajl-ruby
+nio4r
+eventmachine
+celluloid
+parallel
+parser
+ast
+racc
+ruby-progressbar
+diff-lcs
+method_source
+coderay
+colorize
+rainbow
+tty-prompt
+tty-spinner
+pastel
+dotenv
+dotenv-rails
+figaro
+config
+chamber

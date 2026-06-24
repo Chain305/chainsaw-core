@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net6.0": {
+      "Newtonsoft.Json": {
+        "type": "Direct",
+        "requested": "[13.0.1, )",
+        "resolved": "13.0.1",
+        "contentHash": "abc"
+      },
+      "Microsoft.Extensions.Logging.Abstractions": {
+        "type": "Direct",
+        "requested": "[6.0.0, )",
+        "resolved": "6.0.0",
+        "contentHash": "def",
+        "dependencies": {
+          "System.Buffers": "4.5.1"
+        }
+      },
+      "System.Buffers": {
+        "type": "Transitive",
+        "resolved": "4.5.1",
+        "contentHash": "ghi"
+      }
+    }
+  }
+}

@@ -1,0 +1,575 @@
+# Chainsaw event registry — single source of truth.
+#
+# Every telemetry event emitted from ANY surface (web, api, cli, mcp, proxy,
+# landing) must have an entry here. The registry is consumed by:
+#   - internal/telemetry/events.go       (Go constants + Validate)
+#   - ui_new/src/lib/events.generated.ts (TS constants + typed wrappers)
+#   - scripts/lint-events.go             (AST-level CI gate)
+#
+# Naming: <surface>.<object>.<action>  (past tense on actions).
+#
+# PII classes:
+#   none        — no user data
+#   identifier  — opaque IDs (install_id, user_id, request_id)
+#   ip          — IP address or country
+#   email       — email or domain
+#   content     — user-supplied names, paths, queries (sanitize)
+#
+# Sample rates: 1.0 == every event; 0.05 == 5%; adaptive means
+# sampling is negotiated at runtime (see chainproxy Tier C).
+#
+# Retention tiers:
+#   hot   — 90d, full resolution (funnels, retention)
+#   warm  — 1y, aggregated (cohorts, rollups)
+#   cold  — 2y, compliance only
+
+version: 2
+
+common_properties:
+  - event_version
+  - source
+  - surface
+  - channel
+  - install_id
+  - user_id        # nullable pre-auth
+  - org_id         # nullable pre-auth
+  - session_id
+  - chainsaw_version
+  - plan
+  - persona
+  - env
+
+events:
+  # ---- WEB ----
+  - name: web.page.viewed
+    surface: web
+    description: SPA route change or full page load.
+    required: [pathname]
+    optional: [referrer, title]
+    pii: identifier
+    sample_rate: 1.0
+    retention: hot
+
+  - name: web.org.first_login
+    surface: web
+    description: First authenticated session load for an org.
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: web.action.first
+    surface: web
+    description: First meaningful user-initiated action after signup.
+    required: [action_type]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  # ---- LANDING ----
+  - name: landing.cta.clicked
+    surface: landing
+    description: Any marketing-site CTA clicked.
+    required: [cta_id]
+    optional: [variant, position]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: landing.procurement_kit.requested
+    surface: landing
+    description: Procurement-kit email-gated form submitted; lead row written and Postmark delivery email queued.
+    required: []
+    optional: [company, role, source]
+    pii: email
+    sample_rate: 1.0
+    retention: hot
+
+  # ---- API / BACKEND ----
+  - name: api.signup.started
+    surface: api
+    description: Signup form submitted, account row created, pending email verification.
+    required: []
+    optional: [invited_via]
+    pii: email
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.signup.verified
+    surface: api
+    description: Email verification completed; account active.
+    required: []
+    pii: email
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.org.created
+    surface: api
+    description: Organization created (either on signup or subsequent create).
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.persona.set
+    surface: api
+    description: User persona selected (dev, infra, security, eng_leader, ...).
+    required: [persona_new]
+    optional: [persona_prev, inferred]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.paywall.hit
+    surface: api
+    description: A feature returned 402 because the org's plan does not include it.
+    required: [feature, plan_current]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.upgrade.clicked
+    surface: api
+    description: User clicked Upgrade in the paywall dialog or billing page.
+    required: []
+    optional: [from_feature]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.checkout.started
+    surface: api
+    description: Billing checkout session created (Paddle transaction opened).
+    required: [plan_target]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.subscription.created
+    surface: api
+    description: Paddle subscription webhook confirmed; plan applied to org.
+    required: [plan_target]
+    optional: [plan_interval, amount_cents, currency]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.sso.configured
+    surface: api
+    description: SSO provider enabled for org.
+    required: [provider]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.siem.webhook_added
+    surface: api
+    description: SIEM webhook destination saved.
+    required: [destination_kind]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.scim.enabled
+    surface: api
+    description: SCIM token issued for org (directory sync enabled).
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.teammate.invited
+    surface: api
+    description: Invitation created for a teammate.
+    required: [role]
+    optional: [suggested_persona]
+    pii: email
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.device_code.approved
+    surface: api
+    description: Device-code grant approved; CLI/agent identity bound to user.
+    required: [hostname]
+    optional: [mcp_client]
+    pii: identifier
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.onboarding.step_completed
+    surface: api
+    description: One of the 12 onboarding checklist steps transitioned to done.
+    required: [step]
+    optional: [time_to_complete_sec]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: api.dormancy.flagged
+    surface: api
+    description: Nightly cron marked the org as dormant (no events in N days).
+    required: [days_since_last_event]
+    pii: none
+    sample_rate: 1.0
+    retention: warm
+
+  # ---- CLI ----
+  - name: cli.session.started
+    surface: cli
+    description: CLI invocation PersistentPreRun fired.
+    required: [cli_command]
+    optional: [args_shape, ci, tty, first_run]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.session.completed
+    surface: cli
+    description: CLI invocation PersistentPostRun fired (success or error).
+    required: [cli_command, exit_code, duration_ms]
+    optional: [error_class]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.auth.device_started
+    surface: cli
+    description: Device-code auth initiated (CLI called /api/auth/cli/device).
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.auth.device_approved
+    surface: cli
+    description: Device-code poll returned approved + token.
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.auth.device_failed
+    surface: cli
+    description: Device-code flow expired, errored, or was cancelled.
+    required: [reason]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.auth.browser_started
+    surface: cli
+    description: CLI opened the browser-flow (loopback callback) login path.
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.auth.logout
+    surface: cli
+    description: CLI credential cleared (token removed from keyring).
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.setup.completed
+    surface: cli
+    description: Interactive `chainsaw setup` wizard finished.
+    required: []
+    optional: [ecosystems]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.setup.abandoned
+    surface: cli
+    description: Setup wizard exited before completion.
+    required: [step]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.introduce.shown
+    surface: cli
+    description: First-run `chainsaw introduce` banner rendered.
+    required: []
+    optional: [persona]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.scan.completed
+    surface: cli
+    description: `chainsaw scan` finished.
+    required: [duration_ms]
+    optional: [packages_scanned, blocked_count, ecosystems]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.policy.created
+    surface: cli
+    description: Policy created via CLI.
+    required: []
+    optional: [policy_kind]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.policy.updated
+    surface: cli
+    description: Policy updated via CLI.
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.policy.deleted
+    surface: cli
+    description: Policy deleted via CLI.
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.policy.listed
+    surface: cli
+    description: `chainsaw policy list` or similar.
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.policy.simulated
+    surface: cli
+    description: `chainsaw policy simulate` ran.
+    required: []
+    optional: [simulated_decisions_count]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.pkg.inspected
+    surface: cli
+    description: `chainsaw pkg` inspected a package.
+    required: [ecosystem]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.sbom.generated
+    surface: cli
+    description: `chainsaw sbom` produced an SBOM.
+    required: []
+    optional: [format]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.doctor.run
+    surface: cli
+    description: `chainsaw doctor` executed.
+    required: [checks_passed, checks_failed]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.install_hook.installed
+    surface: cli
+    description: Git/CI hook installed by `chainsaw install-hook`.
+    required: [hook_kind]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: cli.error.unexpected
+    surface: cli
+    description: Unhandled panic recovered in root.go.
+    required: [error_class]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  # ---- MCP ----
+  - name: mcp.session.initialized
+    surface: mcp
+    description: JSON-RPC initialize handshake completed.
+    required: [mcp_client, mcp_client_version]
+    optional: [protocol_version]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: mcp.tool.invoked
+    surface: mcp
+    description: A tool handler was called.
+    required: [tool_name]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: mcp.tool.completed
+    surface: mcp
+    description: Tool handler returned successfully.
+    required: [tool_name, latency_ms]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: mcp.tool.failed
+    surface: mcp
+    description: Tool handler returned an error.
+    required: [tool_name, error_class]
+    optional: [latency_ms]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: mcp.resource.read
+    surface: mcp
+    description: MCP resource read (doc catalog fetch).
+    required: [resource_uri]
+    pii: content
+    sample_rate: 1.0
+    retention: hot
+
+  - name: mcp.resource.listed
+    surface: mcp
+    description: MCP resources/list handler called.
+    required: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: mcp.suggestion.emitted
+    surface: mcp
+    description: Suggester callback proposed a next tool.
+    required: [suggested_tool]
+    optional: [context_tool]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: mcp.suggestion.followed
+    surface: mcp
+    description: A previously suggested tool was invoked next.
+    required: [tool_name]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  # ---- CHAINPROXY ----
+  - name: proxy.package.blocked
+    surface: proxy
+    description: Package blocked by policy.
+    required: [ecosystem, decision]
+    optional: [reason, package_name, sample_rate]
+    pii: content
+    sample_rate: 1.0
+    retention: hot
+
+  - name: proxy.package.allowed
+    surface: proxy
+    description: Package explicitly allowed by a policy hit (not passthrough).
+    required: [ecosystem, decision]
+    optional: [reason, package_name, sample_rate]
+    pii: content
+    sample_rate: 1.0
+    retention: hot
+
+  - name: proxy.package.passthrough
+    surface: proxy
+    description: Package passed without a policy hit — sampled to 1-5% adaptive.
+    required: [ecosystem]
+    optional: [package_name, sample_rate]
+    pii: content
+    sample_rate: 0.05
+    retention: hot
+
+  - name: proxy.package.denied
+    surface: proxy
+    description: Upstream returned 4xx/5xx or package was not found.
+    required: [ecosystem, status]
+    optional: [reason, package_name]
+    pii: content
+    sample_rate: 1.0
+    retention: hot
+
+  - name: proxy.ecosystem.first_seen
+    surface: proxy
+    description: First package request in an ecosystem for this org in 24h.
+    required: [ecosystem]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: proxy.sbom.ingested
+    surface: proxy
+    description: SBOM ingested via chainproxy.
+    required: []
+    optional: [format, components]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: proxy.malware.detected
+    surface: proxy
+    description: Known-malicious package blocked.
+    required: [ecosystem, package_name]
+    optional: [indicator_kind]
+    pii: content
+    sample_rate: 1.0
+    retention: hot
+
+  - name: proxy.vuln.critical_found
+    surface: proxy
+    description: Scan found a critical vulnerability in a requested package.
+    required: [ecosystem, package_name]
+    optional: [cve_id]
+    pii: content
+    sample_rate: 1.0
+    retention: hot
+
+  - name: proxy.rollup.hourly
+    surface: proxy
+    description: Hourly aggregate of passthrough volume per (org, ecosystem, decision).
+    required: [ecosystem, decision, count]
+    pii: none
+    sample_rate: 1.0
+    retention: warm
+
+  - name: proxy.health.degraded
+    surface: proxy
+    description: Circuit breaker opened or closed.
+    required: [state]
+    optional: [upstream]
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: proxy.activation.first_block
+    surface: proxy
+    description: First blocked install observed for an org — the activation milestone for the "first block in 60 seconds" quickstart funnel. Process-local dedup; cross-replica dupes are tolerated and absorbed by PostHog's first-event-per-user funnel semantics.
+    required: [ecosystem, package_name]
+    optional: [policy_id, policy_name, is_demo_policy]
+    pii: content
+    sample_rate: 1.0
+    retention: hot
+
+  - name: install.guard.scan
+    surface: install
+    description: One emitted per free local-guard run (chainsaw npm/pip/cargo/gem/go). Anonymous aggregate — the conversion-funnel signal that the local guard is in use. D-NUDGE.
+    required: [bin, ecosystem, packages, blocked_count]
+    optional: []
+    pii: none
+    sample_rate: 1.0
+    retention: hot
+
+  - name: install.guard.block
+    surface: install
+    description: A package was refused at the install path by the free local guard. Carries the identifying package payload (package, version, reason) when refusal sharing is enabled (default-on, opt-out via CHAINSAW_REFUSAL_SHARING_DISABLED). D-NUDGE.
+    required: [bin, ecosystem, severity]
+    optional: [package, version, reason]
+    pii: content
+    sample_rate: 1.0
+    retention: hot

@@ -1,0 +1,116 @@
+# Curated seed list of popular pub.dev packages for typosquat detection.
+#
+# Source: compiled from pub.dev's "most popular" / top-package rankings
+# (https://pub.dev/packages?sort=popularity) and the Flutter Favorites
+# program as of Dart/pub.dev Phase 2. pub.dev exposes per-package score
+# endpoints but no stable public top-N list, so — like the Go and CocoaPods
+# seeds — we ship a curated file and refresh it out-of-band. This keeps the
+# detector bootstrap deterministic in air-gapped deployments while leaving
+# the door open to swap in a live fetcher later.
+#
+# Format:
+#   - Blank lines and lines starting with '#' are ignored.
+#   - One package name per line, no version suffix.
+#   - pub.dev names are flat snake_case (no scopes); case preserved here
+#     but the detector lowercases at lookup time (NormalizeGeneric).
+#   - Order is popularity-descending.
+http
+provider
+shared_preferences
+path_provider
+url_launcher
+intl
+cupertino_icons
+flutter_bloc
+bloc
+get
+dio
+collection
+google_fonts
+image_picker
+sqflite
+path
+flutter_svg
+firebase_core
+firebase_auth
+cloud_firestore
+firebase_messaging
+firebase_storage
+firebase_analytics
+firebase_crashlytics
+permission_handler
+package_info_plus
+device_info_plus
+connectivity_plus
+shared_preferences_android
+flutter_local_notifications
+fluttertoast
+cached_network_image
+flutter_launcher_icons
+flutter_native_splash
+go_router
+riverpod
+flutter_riverpod
+hooks_riverpod
+hive
+hive_flutter
+freezed
+freezed_annotation
+json_annotation
+json_serializable
+build_runner
+equatable
+rxdart
+logger
+uuid
+crypto
+web_socket_channel
+google_sign_in
+geolocator
+geocoding
+google_maps_flutter
+webview_flutter
+video_player
+audioplayers
+just_audio
+photo_view
+lottie
+shimmer
+fl_chart
+table_calendar
+flutter_screenutil
+auto_route
+get_it
+injectable
+dartz
+fpdart
+retrofit
+chopper
+flutter_dotenv
+mockito
+mocktail
+test
+flutter_test
+flutter_lints
+lints
+analyzer
+source_gen
+ffi
+win32
+path_provider_android
+camera
+share_plus
+file_picker
+open_file
+flutter_secure_storage
+local_auth
+url_strategy
+flutter_inappwebview
+sign_in_with_apple
+in_app_purchase
+purchases_flutter
+flutter_stripe
+sentry_flutter
+firebase_remote_config
+firebase_dynamic_links
+google_mobile_ads

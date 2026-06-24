@@ -1,0 +1,6 @@
+1 com.example:my-app:jar:1.0.0
+2 org.springframework:spring-core:jar:5.3.20:compile
+3 org.junit.jupiter:junit-jupiter-api:jar:5.9.0:test
+#
+1 2
+1 3

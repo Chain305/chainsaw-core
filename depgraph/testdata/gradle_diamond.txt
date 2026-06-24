@@ -1,0 +1,5 @@
+compileClasspath - Compile classpath for source set 'main'.
++--- org.springframework:spring-core:5.3.20
+|    \--- org.slf4j:slf4j-api:1.7.36
+\--- org.springframework:spring-beans:5.3.20
+     \--- org.slf4j:slf4j-api:1.7.36 (*)

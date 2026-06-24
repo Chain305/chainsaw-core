@@ -1,0 +1,99 @@
+[
+  {
+    "id": "CHW-FLOOR-flatmap-stream",
+    "summary": "Malicious package from the event-stream supply-chain attack (2018); exfiltrated cryptocurrency wallet credentials. Published solely as malware.",
+    "modified": "2018-11-26T00:00:00Z",
+    "affected": [
+      { "package": { "name": "flatmap-stream", "ecosystem": "npm" } }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-event-stream-3.3.6",
+    "summary": "event-stream 3.3.6 added a dependency on the malicious flatmap-stream package (2018).",
+    "modified": "2018-11-26T00:00:00Z",
+    "affected": [
+      { "package": { "name": "event-stream", "ecosystem": "npm" }, "versions": [ "3.3.6" ] }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-ua-parser-js",
+    "summary": "ua-parser-js compromised releases (Oct 2021); shipped a cryptominer and password stealer.",
+    "modified": "2021-10-22T00:00:00Z",
+    "affected": [
+      { "package": { "name": "ua-parser-js", "ecosystem": "npm" }, "versions": [ "0.7.29", "0.8.0", "1.0.0" ] }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-node-ipc",
+    "summary": "node-ipc malicious/protestware releases (Mar 2022); destructive payload triggered by geolocation.",
+    "modified": "2022-03-15T00:00:00Z",
+    "affected": [
+      { "package": { "name": "node-ipc", "ecosystem": "npm" }, "versions": [ "10.1.1", "10.1.2", "10.1.3" ] }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-colourama",
+    "summary": "Typosquat of colorama published as malware on PyPI; clipboard cryptocurrency-address hijacker.",
+    "modified": "2018-10-01T00:00:00Z",
+    "affected": [
+      {
+        "package": { "name": "colourama", "ecosystem": "PyPI" },
+        "ranges": [ { "type": "ECOSYSTEM", "events": [ { "introduced": "0" } ] } ]
+      }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-python3-dateutil",
+    "summary": "Typosquat of python-dateutil published as malware on PyPI (2019).",
+    "modified": "2019-12-01T00:00:00Z",
+    "affected": [
+      {
+        "package": { "name": "python3-dateutil", "ecosystem": "PyPI" },
+        "ranges": [ { "type": "ECOSYSTEM", "events": [ { "introduced": "0" } ] } ]
+      }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-jeIlyfish",
+    "summary": "Typosquat of jellyfish (capital-I homoglyph) published as malware on PyPI (2019); stole SSH/GPG keys.",
+    "modified": "2019-12-01T00:00:00Z",
+    "affected": [
+      {
+        "package": { "name": "jeIlyfish", "ecosystem": "PyPI" },
+        "ranges": [ { "type": "ECOSYSTEM", "events": [ { "introduced": "0" } ] } ]
+      }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-rustdecimal",
+    "summary": "Typosquat of rust_decimal published as malware on crates.io (May 2022); injected a payload that fetched and executed a GitLab CI credential stealer. Published solely as malware.",
+    "modified": "2022-05-10T00:00:00Z",
+    "affected": [
+      { "package": { "name": "rustdecimal", "ecosystem": "crates.io" } }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-rest-client-1.6.13",
+    "summary": "rest-client RubyGems account hijack (Aug 2019); malicious release 1.6.13 exfiltrated environment/credentials and pulled remote code via a backdoor.",
+    "modified": "2019-08-19T00:00:00Z",
+    "affected": [
+      { "package": { "name": "rest-client", "ecosystem": "RubyGems" }, "versions": [ "1.6.13" ] }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-strong_password-0.0.7",
+    "summary": "strong_password RubyGems account takeover (Jun 2019); malicious release 0.0.7 fetched and eval'd remote code (Pastebin) for a backdoor.",
+    "modified": "2019-07-03T00:00:00Z",
+    "affected": [
+      { "package": { "name": "strong_password", "ecosystem": "RubyGems" }, "versions": [ "0.0.7" ] }
+    ]
+  },
+  {
+    "id": "CHW-FLOOR-bootstrap-sass-3.2.0.3",
+    "summary": "bootstrap-sass RubyGems hijack (Mar 2019); malicious release 3.2.0.3 contained a remote-code-execution backdoor triggered via a crafted cookie.",
+    "modified": "2019-03-26T00:00:00Z",
+    "affected": [
+      { "package": { "name": "bootstrap-sass", "ecosystem": "RubyGems" }, "versions": [ "3.2.0.3" ] }
+    ]
+  }
+]
