@@ -1,0 +1,40 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "chainsaw-sbom",
+      "digest": {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "predicateType": "https://cyclonedx.org/bom/v1.6",
+  "predicate": {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.6",
+    "version": 1,
+    "metadata": {
+      "timestamp": "2026-04-29T00:00:00Z"
+    },
+    "components": [
+      {
+        "type": "library",
+        "name": "left-pad",
+        "version": "1.3.0",
+        "purl": "pkg:npm/left-pad@1.3.0"
+      },
+      {
+        "type": "library",
+        "name": "lodash",
+        "version": "4.17.20",
+        "purl": "pkg:npm/lodash@4.17.20"
+      },
+      {
+        "type": "library",
+        "name": "requests",
+        "version": "2.30.0",
+        "purl": "pkg:pypi/requests@2.30.0"
+      }
+    ]
+  }
+}

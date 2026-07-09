@@ -1,0 +1,11 @@
+{
+  "packageName": "lod_ash",
+  "ecosystem": "npm",
+  "detector": "typosquat",
+  "popularSeeds": ["lodash", "express", "react", "axios", "chalk"],
+  "isSuspected": true,
+  "method": "edit-distance",
+  "similarTo": "lodash",
+  "distance": 1,
+  "confidence": "high"
+}

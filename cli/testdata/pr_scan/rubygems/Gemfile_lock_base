@@ -1,0 +1,12 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rails (7.0.4)
+      actioncable (= 7.0.4)
+    actioncable (7.0.4)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rails (~> 7.0.4)

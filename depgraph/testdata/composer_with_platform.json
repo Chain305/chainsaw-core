@@ -1,0 +1,23 @@
+{
+  "packages": [
+    {
+      "name": "acme/app",
+      "version": "1.0.0",
+      "require": {
+        "php": ">=7.4",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "lib-openssl": "*",
+        "psr/log": "^1.0"
+      }
+    },
+    {
+      "name": "psr/log",
+      "version": "1.1.4",
+      "require": {
+        "php": ">=5.3.0"
+      }
+    }
+  ],
+  "packages-dev": []
+}

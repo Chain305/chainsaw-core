@@ -1,0 +1,28 @@
+GIT
+  remote: https://github.com/rails/rails.git
+  revision: abc1234567890
+  specs:
+    rails (7.1.0)
+      activesupport (= 7.1.0)
+
+PATH
+  remote: ../my-local-gem
+  specs:
+    my-local-gem (0.1.0)
+      activesupport (>= 6.0)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    activesupport (7.1.0)
+      concurrent-ruby (~> 1.0, >= 1.0.2)
+    concurrent-ruby (1.2.0)
+    rake (13.0.6)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  my-local-gem!
+  rails!
+  rake

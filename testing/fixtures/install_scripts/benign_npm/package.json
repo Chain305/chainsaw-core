@@ -1,0 +1,9 @@
+{
+  "name": "benign-npm-fixture",
+  "version": "1.0.0",
+  "description": "A harmless package with no install-time scripts.",
+  "scripts": {
+    "test": "jest",
+    "start": "node index.js"
+  }
+}

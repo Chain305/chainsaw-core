@@ -1,0 +1,47 @@
+{
+  "_comment": "PyPI fixture for requests 2.31.0. Regression guard for F5 OSV: must produce a non-nil Vulns section once OSV provider lands. Today the assertion that depends on OSV provider integration is skipped (pending agent-osv).",
+  "routes": {
+    "/pypi/requests/2.31.0/json": {
+      "info": {
+        "name": "requests",
+        "version": "2.31.0",
+        "summary": "Python HTTP for Humans.",
+        "author": "Kenneth Reitz",
+        "author_email": "me@kennethreitz.org",
+        "license": "Apache-2.0",
+        "home_page": "https://requests.readthedocs.io",
+        "project_urls": {
+          "Source": "https://github.com/psf/requests",
+          "Documentation": "https://requests.readthedocs.io"
+        },
+        "requires_python": ">=3.7",
+        "yanked": false
+      },
+      "urls": [
+        {
+          "filename": "requests-2.31.0-py3-none-any.whl",
+          "packagetype": "bdist_wheel",
+          "size": 62574,
+          "url": "https://files.pythonhosted.org/requests/requests-2.31.0-py3-none-any.whl",
+          "upload_time_iso_8601": "2023-05-22T00:00:00Z",
+          "digests": {"sha256": "req-sha-2.31.0"},
+          "has_sig": false,
+          "yanked": false
+        }
+      ]
+    },
+    "/pypi/requests/json": {
+      "info": {"version": "2.31.0"},
+      "releases": {
+        "2.0.0": [{"upload_time_iso_8601": "2013-09-24T00:00:00Z"}],
+        "2.10.0": [{"upload_time_iso_8601": "2016-04-29T00:00:00Z"}],
+        "2.20.0": [{"upload_time_iso_8601": "2018-10-29T00:00:00Z"}],
+        "2.25.0": [{"upload_time_iso_8601": "2020-11-11T00:00:00Z"}],
+        "2.28.0": [{"upload_time_iso_8601": "2022-06-09T00:00:00Z"}],
+        "2.29.0": [{"upload_time_iso_8601": "2023-04-26T00:00:00Z"}],
+        "2.30.0": [{"upload_time_iso_8601": "2023-05-03T00:00:00Z"}],
+        "2.31.0": [{"upload_time_iso_8601": "2023-05-22T00:00:00Z"}]
+      }
+    }
+  }
+}

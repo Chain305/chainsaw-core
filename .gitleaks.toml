@@ -1,0 +1,21 @@
+# gitleaks config for the chainsaw-core (open-core) repo.
+#
+# Extends the default ruleset. The allowlist below covers SYNTHETIC secrets that
+# exist on purpose: the codesmell package IS a leaked-credential detector, so its
+# tests are full of fake tokens used to verify detection; the hook tests embed
+# placeholder auth tokens to assert the generated package-manager config. None of
+# these are real credentials. Keep this list narrow — do not allowlist real source.
+title = "chainsaw-core"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic secrets in test fixtures (codesmell detector corpus + hook tests)"
+paths = [
+  '''codesmell/.*_test\.go''',
+]
+regexes = [
+  '''tier1aSecret-z9q7''',
+  '''ghp_abcdefghijABCDEFGHIJabcdefghij123456''',
+]

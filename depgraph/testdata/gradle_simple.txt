@@ -1,0 +1,10 @@
+
+> Task :dependencies
+
+------------------------------------------------------------
+Project ':app'
+------------------------------------------------------------
+
+compileClasspath - Compile classpath for source set 'main'.
+\--- org.springframework:spring-core:5.3.20
+

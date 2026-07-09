@@ -1,0 +1,16 @@
+# Sanitized PyPI dependency-confusion fixture.
+#
+# Represents an attacker who registered the internal-only distribution
+# name `acme-internal-billing` on the public PyPI index. A target tenant's
+# private builder, if it falls back to public PyPI for unresolved names
+# (the default pip behaviour), will resolve to the attacker's package
+# instead of the internal one — the canonical 2021 Birsan attack shape.
+#
+# The detection signal is namespace-membership, not lifecycle scripts:
+# `internal/depconfusion.Checker.Check("acme-internal-billing", ["acme-internal-*"])`
+# should return IsViolation=true, MatchedPattern="acme-internal-*".
+[project]
+name = "acme-internal-billing"
+version = "0.0.1"
+description = "Sanitized PyPI namespace-confusion fixture. The distribution name matches a tenant's reserved internal-* namespace; the chainsaw depconfusion checker should refuse this resolution from public PyPI. No install hooks, no payload — the namespace match is the signal."
+requires-python = ">=3.9"

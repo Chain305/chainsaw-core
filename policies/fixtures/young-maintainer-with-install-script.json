@@ -1,0 +1,9 @@
+{
+  "surface": "proxy",
+  "ecosystem": "npm",
+  "package": "evil-foo",
+  "version": "1.0.0",
+  "hasInstallScript": true,
+  "installScriptFetchesRemote": false,
+  "maintainerAccountAgeDays": 7
+}

@@ -1,0 +1,9 @@
+{
+  "packageName": "acme-internal-billing",
+  "ecosystem": "pypi",
+  "detector": "depconfusion",
+  "reservedNamespaces": ["acme-internal-*"],
+  "isViolation": true,
+  "matchedPattern": "acme-internal-*",
+  "reason": "package matches reserved namespace; may be a dependency confusion attempt"
+}

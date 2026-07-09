@@ -1,0 +1,49 @@
+# reputation_hosts.txt — OFFLINE known-bad host/domain reputation feed.
+#
+# Bundled (embedded via go:embed) snapshot of known-bad C2 / exfil / dropper
+# hosts. The iocscan matcher loads this list at init and flags a package whose
+# source references one of these hosts — but ONLY as a strong signal when the
+# reference is COUPLED with an actual import-time/install-time network send
+# (reusing the existing netSend coupling). A bare reference is advisory.
+#
+# This is an OFFLINE snapshot. The matcher NEVER live-queries a feed at scan
+# time — that would be a network dependency on the install hot path and a
+# privacy leak (telling a third party which packages you scan). Refresh the
+# snapshot out-of-band with scripts/detection-eval/ingest-reputation.sh.
+#
+# SOURCES (spine + tier-2), per the detection-lead roadmap:
+#   1. OSSF malicious-packages — exfil/C2 domains extracted from the OSV
+#      `database_specific` blocks of github.com/ossf/malicious-packages.
+#   2. Self-curated C2 list — hosts confirmed in the DataDog 298-sample
+#      malicious corpus (seeded below) and from incident response.
+#   3. URLhaus (abuse.ch) — tier-2 bulk offline export. Fetch the CSV dump
+#      out-of-band (https://urlhaus.abuse.ch/downloads/csv/) and run the
+#      ingest script; do NOT live-query.
+#
+# FORMAT
+#   One host per line. A host is a bare domain ("evil.tld"), a subdomain
+#   ("c2.evil.tld"), or an IPv4 literal ("203.0.113.5"). Matching is
+#   case-insensitive and suffix-aware: a feed entry "evil.tld" matches
+#   "evil.tld" and "sub.evil.tld" but NOT "notevil.tld" (label boundary
+#   enforced). Ports and paths in the source are stripped before matching.
+#   Lines beginning with '#' and blank lines are ignored. Do NOT list
+#   well-known CDNs / registries here — those are allowlisted in scan.go and
+#   would be ignored anyway, but keeping the feed clean avoids confusion.
+
+# --- self-curated C2, seeded from the DataDog malicious corpus (298 samples) ---
+# Each host below is referenced by a confirmed-malicious sample that also makes
+# an outbound send (the coupling requirement). Provenance noted per host.
+paste.bingner.com            # pypi:ai-solver-py — paste-drop exfil sink
+reward.ff.garena.com         # pypi:a-b27 — credential-phish / token relay target
+shop2game.com                # pypi:a-b27 — Garena account-takeover relay
+69.164.221.216               # pypi:airio — IP C2 (:8080 upload endpoint)
+54.254.189.27                # pypi:SentinelOne(typosquat) — IP exfil (/api/v1/file/upload)
+api.ipify.org                # recon: public-IP lookup used as install-time beacon precursor
+
+# --- OSSF / incident-response curated C2 & exfil sinks (representative spine) ---
+# A small, high-signal seed of hosts seen across published-malware campaigns.
+# Grow this from the OSSF dump via the ingest script.
+ix.io                        # paste/exfil drop favoured by PyPI stealers
+sprunge.us                   # paste drop
+dpaste.com                   # paste drop (raw)
+free-url-shortener.rb.gy     # redirector used in npm install beacons

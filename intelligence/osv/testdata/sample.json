@@ -1,0 +1,28 @@
+[
+  {
+    "ecosystem": "PyPI",
+    "package": "idna",
+    "vulnerable_versions": ["3.6", "3.7", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15"],
+    "advisory_id": "GHSA-jjg7-2v4v-x38h",
+    "summary": "idna's `idna.encode()` is vulnerable to denial of service via crafted hostname",
+    "cvss_score": 6.2,
+    "severity": "MEDIUM",
+    "fixed_versions": ["3.7"],
+    "aliases": ["CVE-2024-3651"],
+    "published": "2024-04-12T00:00:00Z",
+    "modified": "2024-04-12T00:00:00Z"
+  },
+  {
+    "ecosystem": "npm",
+    "package": "lodash",
+    "vulnerable_versions": ["4.17.20"],
+    "advisory_id": "GHSA-35jh-r3h4-6jhm",
+    "summary": "Command Injection in lodash",
+    "cvss_score": 7.2,
+    "severity": "HIGH",
+    "fixed_versions": ["4.17.21"],
+    "aliases": ["CVE-2021-23337"],
+    "published": "2021-02-15T00:00:00Z",
+    "modified": "2021-05-10T00:00:00Z"
+  }
+]

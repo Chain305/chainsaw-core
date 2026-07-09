@@ -1,0 +1,8 @@
+{
+  "name": "raect-dom",
+  "version": "18.0.0",
+  "description": "Sanitized npm scoped-vs-unscoped typosquat fixture. Mimics an attacker who publishes 'raect-dom' (transposed 'react') as an unscoped npm package competing with the legitimate 'react-dom' under what some teams reserve as the '@react/*' scope. The attack surface is two-pronged: (a) the typosquat detector should fire on the transposed name against popular 'react-dom', and (b) the depconfusion checker, with @react/* in reservedNamespaces, would block the scoped variant — but NOT this unscoped attacker, which is exactly the gap an unscoped typosquat exploits. This fixture pins the typosquat-detector behaviour for the unscoped half.",
+  "scripts": {
+    "postinstall": "echo TYPOSQUAT_FIXTURE_PLACEHOLDER"
+  }
+}

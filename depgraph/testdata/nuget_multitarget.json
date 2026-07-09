@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net6.0": {
+      "OnlyInBaseTarget": {
+        "type": "Direct",
+        "requested": "[1.0.0, )",
+        "resolved": "1.0.0"
+      },
+      "Shared.Lib": {
+        "type": "Direct",
+        "requested": "[2.0.0, )",
+        "resolved": "2.0.0",
+        "dependencies": {
+          "Shared.Transitive": "1.0.0"
+        }
+      },
+      "Shared.Transitive": {
+        "type": "Transitive",
+        "resolved": "1.0.0"
+      }
+    },
+    "net6.0/win-x64": {
+      "OnlyInRuntimeTarget": {
+        "type": "Direct",
+        "requested": "[9.9.9, )",
+        "resolved": "9.9.9"
+      },
+      "Shared.Lib": {
+        "type": "Direct",
+        "requested": "[2.0.0, )",
+        "resolved": "2.0.0",
+        "dependencies": {
+          "Shared.Transitive": "1.0.0"
+        }
+      },
+      "Shared.Transitive": {
+        "type": "Transitive",
+        "resolved": "1.0.0"
+      }
+    }
+  }
+}

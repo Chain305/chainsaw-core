@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net6.0": {
+      "MySolution.SiblingProject": {
+        "type": "Project"
+      },
+      "Newtonsoft.Json": {
+        "type": "Direct",
+        "requested": "[13.0.1, )",
+        "resolved": "13.0.1"
+      }
+    }
+  }
+}

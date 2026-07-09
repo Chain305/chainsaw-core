@@ -1,0 +1,8 @@
+{
+  "name": "lod_ash",
+  "version": "4.17.21",
+  "description": "Sanitized typosquat fixture. Mimics the popular npm package 'lodash' with a one-character substitution ('-' replaced by '_', and a synthetic underscore inserted) so the typosquat detector's edit-distance branch fires against the loaded popular-package index. Uses lodash's real version string to look like a drop-in replacement at the manifest level — the same trick attackers use when squatting top-100 names. No payload bytes; the postinstall is a placeholder echo so the manifest parses but the install-script detector does not also fire.",
+  "scripts": {
+    "postinstall": "echo TYPOSQUAT_FIXTURE_PLACEHOLDER"
+  }
+}
