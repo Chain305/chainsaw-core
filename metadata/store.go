@@ -202,6 +202,11 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 		versionAnomalyFlags        pgstore.PgTextArray
 		hiddenUnicodeHits          sql.NullInt64
 		provenanceStatus           sql.NullString
+		malwareStatus              sql.NullString
+		malwareID                  sql.NullString
+		typosquatStatus            sql.NullString
+		typosquatSimilarTo         sql.NullString
+		trustScore                 sql.NullInt64
 		attestationBuilderID       sql.NullString
 		attestationIssuer          sql.NullString
 		attestationSourceRepo      sql.NullString
@@ -224,12 +229,26 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 	// RequireSLSALevel / RequireBuilderID / RequireSourceRepo etc. can
 	// fire on the cached row without a second round-trip to the
 	// dedicated `attestations` table.
+	// malware_status / malware_id / typosquat_status / typosquat_similar_to /
+	// trust_score are read here because interceptPolicyViolation
+	// (internal/server/server_repo_pipeline.go) derives
+	// ctx.IsKnownMalicious, ctx.IsSuspectedTyposquat and ctx.TrustScore
+	// straight off this struct. They were written by
+	// UpdateSupplyChainMetadata but never selected back, so those three
+	// EvaluationContext bits were permanently false/zero on the proxy
+	// download hot path and any policy conditioned on isKnownMalicious /
+	// isSuspectedTyposquat / trustScoreMin could not fire from cached
+	// metadata. (Live malware-feed hits still blocked via the
+	// enforceRepositoryViolations fast path, which reads the
+	// orchestrator's CheckResult rather than this row — which is why the
+	// gap stayed invisible in production.)
 	row := s.sql.DB().QueryRow(`SELECT repository, package, version, license_spdx, package_release_date,
 		version_release_date, sha256_hash, upstream_url, internal_package, source_repo,
 		repo_link_status, repo_link_last_checked_at, install_script_kind, publisher_set, version_anomaly_flags, hidden_unicode_hits,
 		checksum_declared, checksum_actual,
 		provenance_status, slsa_level, attestation_builder_id, attestation_issuer,
 		attestation_source_repo, attestation_transparency_log, attestation_cache_stale,
+		malware_status, malware_id, typosquat_status, typosquat_similar_to, trust_score,
 		yanked, created_at, updated_at
 		FROM package_metadata WHERE org_id=? AND repository=? AND package=? AND version=?`,
 		orgID, repository, packageName, version)
@@ -240,6 +259,7 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 		&checksumDeclared, &checksumActual,
 		&provenanceStatus, &slsaLevel, &attestationBuilderID, &attestationIssuer,
 		&attestationSourceRepo, &attestationTransparencyLog, &attestationCacheStale,
+		&malwareStatus, &malwareID, &typosquatStatus, &typosquatSimilarTo, &trustScore,
 		&yanked, &meta.CreatedAt, &meta.UpdatedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -258,6 +278,11 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 	meta.ChecksumActual = checksumActual.String
 	meta.InternalPackage = internalPackage == 1
 	meta.InstallScriptKind = installScriptKind.String
+	meta.MalwareStatus = malwareStatus.String
+	meta.MalwareID = malwareID.String
+	meta.TyposquatStatus = typosquatStatus.String
+	meta.TyposquatSimilarTo = typosquatSimilarTo.String
+	meta.TrustScore = int(trustScore.Int64)
 	if packageReleaseDate.Valid {
 		meta.PackageReleaseDate = &packageReleaseDate.Time
 	}

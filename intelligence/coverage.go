@@ -1,6 +1,8 @@
 package intelligence
 
 import (
+	"time"
+
 	"github.com/chain305/chainsaw-core/coverage"
 )
 
@@ -66,14 +68,27 @@ func LedgerFromReport(r *Report) coverage.Ledger {
 			continue
 		}
 		prev := led[src]
+		// Preserve a GENUINELY EARLIER healthy observation so Gate's grace
+		// window can still recognise a blip — but never the OK stamp this
+		// same scan wrote in the loop above. A provider that ran and failed at
+		// `at` was not OK at `at`, and treating it as such would rescue every
+		// fresh failure through the grace window, silently making the gate
+		// inert for the whole grace period after every scan.
+		//
+		// A single Report carries one CollectedAt, so in practice this zeroes
+		// LastOKAt: the intelligence producer has no cross-scan history. Grace
+		// is therefore a rail for producers that do keep history (the
+		// workstation guard); on this path the fresh status stands on its own.
+		lastOK := prev.LastOKAt
+		if !lastOK.Before(at) {
+			lastOK = time.Time{}
+		}
 		led[src] = coverage.Entry{
 			Status:     status,
 			Producer:   w.Provider,
 			Code:       w.Code,
 			ObservedAt: at,
-			// Preserve any earlier healthy observation so Gate's grace window
-			// can still recognise a blip.
-			LastOKAt: prev.LastOKAt,
+			LastOKAt:   lastOK,
 		}
 	}
 	return led

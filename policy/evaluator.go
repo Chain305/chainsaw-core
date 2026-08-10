@@ -1612,6 +1612,24 @@ func matchesPattern(value, pattern string) bool {
 }
 
 func matchesVersion(version, constraint string) bool {
+	// "*" is the identifier wildcard, NOT a semver constraint. It has to
+	// short-circuit here to stay consistent with matchesPattern (which
+	// handles repo/name wildcards the same way): a rule targeting
+	// {repo:*, name:*, version:*} means "every version", full stop.
+	//
+	// Without this branch the wildcard fell through to the semver
+	// constraint path, where Masterminds/semver deliberately refuses to
+	// match a PRE-RELEASE version against a constraint that carries no
+	// pre-release of its own. That silently excluded every pre-release
+	// coordinate — including the `<pkg>@0.0.1-security` shape npm itself
+	// publishes for taken-down malware — from org-wide block rules such
+	// as the seeded "Block known malware" demo policy. Enforcement gap,
+	// not a matching nicety: see
+	// internal/server/exception_bypass_e2e_test.go.
+	if strings.TrimSpace(constraint) == "*" {
+		return true
+	}
+
 	// Try semver constraint matching
 	v, err := semver.NewVersion(version)
 	if err != nil {

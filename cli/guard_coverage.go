@@ -11,79 +11,35 @@ package cli
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/chain305/chainsaw-core/coverage"
 )
 
 const (
-	coverageModeEnv       = "CHAINSAW_COVERAGE_MODE"
-	coverageRequiredEnv   = "CHAINSAW_COVERAGE_REQUIRED"
-	coverageGraceEnv      = "CHAINSAW_COVERAGE_GRACE"
-	coverageMaxAgeEnv     = "CHAINSAW_COVERAGE_MAX_LEDGER_AGE"
-	coverageBreakGlassEnv = "CHAINSAW_COVERAGE_BREAK_GLASS"
+	coverageModeEnv       = coverage.EnvMode
+	coverageRequiredEnv   = coverage.EnvRequired
+	coverageGraceEnv      = coverage.EnvGrace
+	coverageMaxAgeEnv     = coverage.EnvMaxAge
+	coverageBreakGlassEnv = coverage.EnvBreakGlass
 )
 
 // guardPosture reads the operator's posture from the environment (MDM, a
 // dotfile, or a CI runner). Local config only — there is no org distribution;
 // see decision D4.
 //
-// An explicitly-configured posture that fails validation returns an error, and
-// the caller MUST surface it and refuse to run rather than continuing with the
-// gate disabled. Silently degrading to off would reproduce exactly the failure
-// this option exists to prevent.
+// Thin wrapper over coverage.PostureFromEnv: the parsing lives in the shared
+// package so the guard, the proxy, the publish path, CI and admission cannot
+// end up with subtly different readings of the same variables. That drift is
+// the failure the single-Gate design exists to prevent.
 func guardPosture() (coverage.Posture, error) {
-	mode := strings.TrimSpace(strings.ToLower(os.Getenv(coverageModeEnv)))
-	if mode == "" {
-		return coverage.Posture{Version: 1, Mode: coverage.ModeOff}, nil
-	}
-
-	// Break-glass: documented escape hatch for an operator whose build is
-	// wedged by an upstream outage. Loud on purpose — a silent bypass of a
-	// security control is worse than no control.
-	if envTruthy(os.Getenv(coverageBreakGlassEnv)) {
+	return coverage.PostureFromEnv(os.Getenv, func() {
+		// Break-glass is loud on purpose — a silent bypass of a security
+		// control is worse than no control.
 		fmt.Fprintf(os.Stderr,
 			"chainsaw: %s=1 — coverage fail-closed gate DISABLED for this invocation\n",
-			coverageBreakGlassEnv)
-		return coverage.Posture{Version: 1, Mode: coverage.ModeOff}, nil
-	}
-
-	p := coverage.Posture{
-		Version:      1,
-		Mode:         coverage.Mode(mode),
-		Grace:        coverage.DefaultGrace,
-		MaxLedgerAge: coverage.DefaultMaxLedgerAge,
-	}
-	for _, raw := range strings.Split(os.Getenv(coverageRequiredEnv), ",") {
-		name := strings.TrimSpace(raw)
-		if name == "" {
-			continue
-		}
-		src, err := coverage.ParseSource(name)
-		if err != nil {
-			return coverage.Posture{}, err
-		}
-		p.Required = append(p.Required, src)
-	}
-	if raw := strings.TrimSpace(os.Getenv(coverageGraceEnv)); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			return coverage.Posture{}, fmt.Errorf("%s: %w", coverageGraceEnv, err)
-		}
-		p.Grace = d
-	}
-	if raw := strings.TrimSpace(os.Getenv(coverageMaxAgeEnv)); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			return coverage.Posture{}, fmt.Errorf("%s: %w", coverageMaxAgeEnv, err)
-		}
-		p.MaxLedgerAge = d
-	}
-	if err := p.Validate(); err != nil {
-		return coverage.Posture{}, err
-	}
-	return p, nil
+			coverage.EnvBreakGlass)
+	})
 }
 
 // guardLedger reports what the offline guard could actually evaluate.

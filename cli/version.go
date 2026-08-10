@@ -24,7 +24,7 @@ var (
 	// (the open-core default) or "enterprise". It is a BUILD tag, not a paid
 	// plan gate — server-side entitlements are enforced separately via the
 	// plan-feature gate. Overridable at build time via
-	// `-X drsgit.com/zeeshan/chainsaw/core/cli.Edition=enterprise` (mirrors
+	// `-X github.com/chain305/chainsaw-core/cli.Edition=enterprise` (mirrors
 	// the DefaultServer override pattern). Surfaced by `chainsaw version` and
 	// `chainsaw features`.
 	Edition = "community"
