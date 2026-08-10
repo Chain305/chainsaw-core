@@ -459,6 +459,12 @@ fn main() {
 	if !containsSeen(partial.Scan.ManifestFilesSeen, "build.rs:") {
 		t.Fatalf("expected build.rs sub-finding in ManifestFilesSeen: %v", partial.Scan.ManifestFilesSeen)
 	}
+	if !partial.Scan.BuildRsExecutes {
+		t.Fatalf("BuildRsExecutes should be true (build.rs runs /bin/sh + curl)")
+	}
+	if len(partial.Scan.BuildRsPrimitives) == 0 {
+		t.Fatalf("expected BuildRsPrimitives populated: %v", partial.Scan.BuildRsPrimitives)
+	}
 }
 
 // ---------------------------------------------------------------------------

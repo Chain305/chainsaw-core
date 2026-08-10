@@ -36,6 +36,9 @@ type CheckResult struct {
 	// MaliciousIOC: source embeds an exfil sink host or a coupled stealer
 	// string (iocscan provider). Cross-ecosystem.
 	MaliciousIOC bool
+	// BuildRsExecutes: a cargo crate's build.rs performs shell/network
+	// execution at build time (installscripts provider). Cargo-only.
+	BuildRsExecutes bool
 	// InstallScriptKind is the text enum persisted to
 	// package_metadata.install_script_kind — one of
 	// "none" | "present" | "fetches_remote" | "eval_encoded" |
@@ -96,6 +99,7 @@ func (r CheckResult) Signals() map[string]bool {
 		"installScriptFetchesRemote": r.InstallScriptFetchesRemote,
 		"importTimeExecution":        r.ImportTimeExecution,
 		"maliciousIOC":               r.MaliciousIOC,
+		"buildRsExecutes":            r.BuildRsExecutes,
 		"publisherChanged":           r.PublisherChanged,
 	}
 }

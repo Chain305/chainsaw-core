@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,6 +95,19 @@ func TestBrowserLikelyAvailableHeadless(t *testing.T) {
 func TestRunBrowserAuth_PrintsWaitingHeartbeat(t *testing.T) {
 	const wantToken = "minted-api-key"
 
+	// Stub the browser launcher so the production caller (runBrowserAuth)
+	// exercises the openBrowser seam without shell-exec'ing open/xdg-open/
+	// start — otherwise a real browser tab pops on every test run. We record
+	// the URL it was asked to open so the assertion below still proves the
+	// caller invoked the seam with the loopback login_url.
+	var openedURL string
+	prevOpen := openBrowser
+	openBrowser = func(u string) error {
+		openedURL = u
+		return nil
+	}
+	t.Cleanup(func() { openBrowser = prevOpen })
+
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -138,5 +152,14 @@ func TestRunBrowserAuth_PrintsWaitingHeartbeat(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte("Ctrl-C to cancel")) {
 		t.Errorf("heartbeat should mention Ctrl-C to cancel; output:\n%s", out.String())
+	}
+	// The production caller must have handed the server-composed loopback
+	// login_url to the openBrowser seam. This keeps the open-the-browser
+	// behaviour covered even though the launch itself is stubbed out.
+	if !strings.HasPrefix(openedURL, "http://127.0.0.1:") {
+		t.Errorf("openBrowser was not invoked with the loopback login_url; got %q", openedURL)
+	}
+	if !strings.Contains(openedURL, "token="+wantToken) {
+		t.Errorf("openBrowser URL missing expected token param; got %q", openedURL)
 	}
 }

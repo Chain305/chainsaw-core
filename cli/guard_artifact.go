@@ -43,6 +43,7 @@ import (
 	"github.com/chain305/chainsaw-core/installscripts"
 	"github.com/chain305/chainsaw-core/intelligence"
 	"github.com/chain305/chainsaw-core/intelligence/artifactmap"
+	"github.com/chain305/chainsaw-core/iocscan"
 )
 
 // guardArtifactDirEnv points at a directory of pre-staged package tarballs the
@@ -140,6 +141,19 @@ func analyzeArtifact(ecosystem string, archive []byte) behavioralVerdict {
 			} else if v.Severity != "" && warning.Severity == "" {
 				warning = v
 			}
+		}
+	}
+
+	// Embedded-IOC scan over the artifact's source bodies, any ecosystem (an
+	// exfil webhook or coupled stealer string is malicious in any package, so
+	// this lives OUTSIDE the ecosystem switch). Same detector the server-side
+	// intelligence provider runs (core/intelligence/provider_iocscan.go), so
+	// guard and server never drift on what counts as an indicator. A hit is
+	// high-confidence and dispositive — block outright rather than warn.
+	if src := sourceFileMap(files); len(src) > 0 {
+		if r := iocscan.Scan(src); r.Detected {
+			return behavioralVerdict{Block: true, Severity: "behavioral-high",
+				Reason: "embedded malicious indicator (" + r.Kind + ": " + r.Detail + ")"}
 		}
 	}
 
@@ -413,10 +427,168 @@ func guardArtifactBytes(spec packageSpec) []byte {
 	if b := npmCacheArtifactBytes(spec); len(b) > 0 {
 		return b
 	}
+	if b := cargoCacheArtifactBytes(spec); len(b) > 0 {
+		return b
+	}
+	if b := pipCacheArtifactBytes(spec); len(b) > 0 {
+		return b
+	}
 	if b := fetchArtifactBytes(spec); len(b) > 0 {
 		return b
 	}
 	return nil
+}
+
+// cargoCacheArtifactBytes reads a pinned crate's .crate archive straight out of
+// cargo's on-disk registry cache, so behavioral analysis works with zero
+// pre-staging on any machine that has already fetched the crate. Cargo stores
+// the download at $CARGO_HOME/registry/cache/<registry-hash>/<name>-<ver>.crate
+// (a gzip tarball analyzeArtifact("cargo", …) already unpacks). The
+// <registry-hash> segment is an opaque per-source hash, so we can't template the
+// exact path — a BOUNDED one-level walk under registry/cache/ matches the crate
+// by filename. Fully offline (local disk only). nil on any miss — fail-open.
+func cargoCacheArtifactBytes(spec packageSpec) []byte {
+	if !strings.EqualFold(spec.Ecosystem, "cargo") || spec.Version == "" {
+		return nil // need a pinned version to match the crate file deterministically
+	}
+	home := strings.TrimSpace(os.Getenv("CARGO_HOME"))
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil || h == "" {
+			return nil
+		}
+		home = filepath.Join(h, ".cargo")
+	}
+	cacheRoot := filepath.Join(home, "registry", "cache")
+	if fi, err := os.Stat(cacheRoot); err != nil || !fi.IsDir() {
+		return nil
+	}
+	want := spec.Name + "-" + spec.Version + ".crate"
+	// One level of <registry-hash> subdirs, each holding the .crate files.
+	// Bounded by the same caps as the npm fallback walk so a giant cache can't
+	// turn a single `cargo build` into a stat storm.
+	filesRead := 0
+	deadline := time.Now().Add(guardCacheWalkDeadline)
+	var found []byte
+	_ = filepath.WalkDir(cacheRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || found != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filesRead >= guardCacheWalkMaxFiles || time.Now().After(deadline) {
+			return fs.SkipAll
+		}
+		filesRead++
+		if strings.EqualFold(filepath.Base(p), want) {
+			if data, rerr := os.ReadFile(p); rerr == nil && len(data) > 0 {
+				found = data
+				return fs.SkipAll
+			}
+		}
+		return nil
+	})
+	return found
+}
+
+// pipCacheArtifactBytes reads a pinned wheel out of pip's on-disk HTTP/wheel
+// cache. pip stores built/downloaded wheels under <cache>/wheels/**, sharded by
+// hash, named per PEP 427 (<normalized_name>-<version>-<pytag>-…-<platform>.whl).
+// A .whl is a zip that analyzeArtifact("pip", …) handles. Fully offline.
+//
+// Coverage is partial by design: wheels rarely carry setup.py, so a wheel-cache
+// hit mainly feeds the hidden-unicode and embedded-IOC detectors (which read the
+// package's source bodies) rather than the install-script detector. Still worth
+// it — those are exactly the in-no-feed-yet payloads the byte scan exists for.
+// nil on any miss — fail-open.
+func pipCacheArtifactBytes(spec packageSpec) []byte {
+	if !strings.EqualFold(spec.Ecosystem, "pip") && !strings.EqualFold(spec.Ecosystem, "pypi") {
+		return nil
+	}
+	if spec.Version == "" {
+		return nil // need a pinned version to match the wheel deterministically
+	}
+	root := pipCacheDir()
+	if root == "" {
+		return nil
+	}
+	wheels := filepath.Join(root, "wheels")
+	if fi, err := os.Stat(wheels); err != nil || !fi.IsDir() {
+		return nil
+	}
+	// PEP 503 normalization of the distribution name for the wheel filename:
+	// lowercase, runs of -_. collapsed to a single _.
+	prefix := pep503WheelName(spec.Name) + "-" + spec.Version + "-"
+	filesRead := 0
+	deadline := time.Now().Add(guardCacheWalkDeadline)
+	var found []byte
+	_ = filepath.WalkDir(wheels, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || found != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filesRead >= guardCacheWalkMaxFiles || time.Now().After(deadline) {
+			return fs.SkipAll
+		}
+		filesRead++
+		base := filepath.Base(p)
+		if strings.HasSuffix(strings.ToLower(base), ".whl") && strings.HasPrefix(strings.ToLower(base), prefix) {
+			if data, rerr := os.ReadFile(p); rerr == nil && len(data) > 0 {
+				found = data
+				return fs.SkipAll
+			}
+		}
+		return nil
+	})
+	return found
+}
+
+// pipCacheDir resolves pip's cache root: $PIP_CACHE_DIR when set, else the
+// per-OS default (~/.cache/pip on Linux, ~/Library/Caches/pip on macOS).
+// Returns "" if none exists.
+func pipCacheDir() string {
+	if c := strings.TrimSpace(os.Getenv("PIP_CACHE_DIR")); c != "" {
+		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+			return c
+		}
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	candidates := []string{
+		filepath.Join(home, ".cache", "pip"),
+		filepath.Join(home, "Library", "Caches", "pip"),
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// pep503WheelName lowercases a distribution name and collapses runs of -_. into
+// a single _, the escaping wheel filenames use for the name component.
+func pep503WheelName(name string) string {
+	var b strings.Builder
+	prevSep := false
+	for _, r := range strings.ToLower(name) {
+		if r == '-' || r == '_' || r == '.' {
+			if !prevSep {
+				b.WriteByte('_')
+				prevSep = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		prevSep = false
+	}
+	return b.String()
 }
 
 // guardDeepFetchEnv opts the guard into fetching a pinned package's archive from

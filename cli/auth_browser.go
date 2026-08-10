@@ -90,10 +90,27 @@ func runBrowserAuth(ctx context.Context, out io.Writer, server string) (string, 
 			errCh <- fmt.Errorf("callback nonce mismatch")
 			return
 		}
+		// Preferred path: the server handed us a single-use ?code= instead
+		// of the raw token, so the PAT never rode the browser URL. Swap it
+		// for the token over our own localhost POST to the server.
+		if code := r.URL.Query().Get("code"); code != "" {
+			tok, err := exchangeCLICode(server, code, nonce)
+			if err != nil {
+				http.Error(w, "code exchange failed", http.StatusBadGateway)
+				errCh <- fmt.Errorf("exchange code: %w", err)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, cliCallbackSuccessHTML)
+			tokenCh <- tok
+			return
+		}
+		// Legacy path: a pre-exchange server 302'd us with ?token= directly.
+		// Accepted so a new CLI still works against an older server.
 		tok := r.URL.Query().Get("token")
 		if tok == "" {
 			http.Error(w, "missing token", http.StatusBadRequest)
-			errCh <- fmt.Errorf("callback missing token")
+			errCh <- fmt.Errorf("callback missing token or code")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -125,6 +142,9 @@ func runBrowserAuth(ctx context.Context, out io.Writer, server string) (string, 
 		"port":       port,
 		"hostname":   cliHostname(),
 		"install_id": cliInstallID(),
+		// Advertise one-time-code exchange support so the server keeps the
+		// token out of the loopback redirect URL (delivered via /exchange).
+		"exchange": true,
 	}, &initResp); err != nil {
 		return "", fmt.Errorf("cli init: %w", err)
 	}
@@ -249,6 +269,27 @@ func runDeviceAuth(ctx context.Context, out io.Writer, server, hostname string) 
 		case <-time.After(interval):
 		}
 	}
+}
+
+// exchangeCLICode swaps the single-use code the browser delivered to our
+// loopback listener for the actual bearer token, over a direct POST to the
+// server. This is what keeps the durable PAT out of the browser URL: the
+// server 302s us a short-lived code; we redeem it here. The nonce is sent
+// alongside so the server can bind the redemption to this CLI's flow.
+func exchangeCLICode(server, code, nonce string) (string, error) {
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := NewAPIClient(server, "").Post("/api/auth/cli/exchange", map[string]string{
+		"code":  code,
+		"nonce": nonce,
+	}, &resp); err != nil {
+		return "", err
+	}
+	if resp.Token == "" {
+		return "", fmt.Errorf("server returned an empty token on exchange")
+	}
+	return resp.Token, nil
 }
 
 // newAuthNonce returns a 32-char hex string used as a shared secret

@@ -2,10 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -352,5 +356,78 @@ func TestInstallHook_NpmEmitsChainproxyOrgScopedURL(t *testing.T) {
 	want := "registry=https://chain305.com/chainproxy/repository/@acme-corp/npmjs/"
 	if !strings.Contains(got, want) {
 		t.Fatalf(".npmrc missing chainproxy-prefixed registry line\nwant: %s\ngot:\n%s", want, got)
+	}
+}
+
+func TestInstallHook_NpmDoesNotDoubleChainproxyForCloudAPIBase(t *testing.T) {
+	npmrc, _, _ := withHookEnv(t)
+
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	viper.Set("server_url", "https://chain305.com/chainproxy")
+
+	cmd := newInstallHookCmd()
+	cmd.SetArgs([]string{"npm", "--org", "trackb", "--credentials", "demo-id:demo-secret"})
+	var out, errb bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\nstderr: %s", err, errb.String())
+	}
+	data, err := os.ReadFile(npmrc)
+	if err != nil {
+		t.Fatalf("read npmrc: %v", err)
+	}
+	got := string(data)
+	want := "registry=https://chain305.com/chainproxy/repository/@trackb/npmjs/"
+	if !strings.Contains(got, want) {
+		t.Fatalf(".npmrc missing normalized chainproxy registry line\nwant: %s\ngot:\n%s", want, got)
+	}
+	if strings.Contains(got, "/chainproxy/chainproxy/") {
+		t.Fatalf(".npmrc contains duplicated /chainproxy segment:\n%s", got)
+	}
+}
+
+func TestMintClientCredentialsSendsDefaultExpiryDate(t *testing.T) {
+	var gotBody map[string]any
+	srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/clients" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Fatalf("decode body: %v\n%s", err, body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"client":        map[string]any{"client_id": "demo-id"},
+			"client_secret": "demo-secret",
+		})
+	})
+	withConfiguredServer(t, srv.URL)
+
+	creds, err := mintClientCredentials("demo-id")
+	if err != nil {
+		t.Fatalf("mintClientCredentials: %v", err)
+	}
+	if creds != "demo-id:demo-secret" {
+		t.Fatalf("creds = %q, want demo-id:demo-secret", creds)
+	}
+	rawExpiry, ok := gotBody["expiry_date"].(string)
+	if !ok || strings.TrimSpace(rawExpiry) == "" {
+		t.Fatalf("request missing non-empty expiry_date: %#v", gotBody)
+	}
+	expiry, err := time.Parse(time.RFC3339, rawExpiry)
+	if err != nil {
+		t.Fatalf("expiry_date is not RFC3339: %q (%v)", rawExpiry, err)
+	}
+	if expiry.Before(time.Now().UTC().Add(80*24*time.Hour)) || expiry.After(time.Now().UTC().Add(100*24*time.Hour)) {
+		t.Fatalf("expiry_date = %s, want about 90 days from now", expiry.Format(time.RFC3339))
+	}
+	if gotBody["client_id"] != "demo-id" {
+		t.Fatalf("client_id = %v, want demo-id", gotBody["client_id"])
+	}
+	if gotBody["client_type"] != "service-token" {
+		t.Fatalf("client_type = %v, want service-token", gotBody["client_type"])
 	}
 }

@@ -43,13 +43,15 @@ func TestDetectGuardShim(t *testing.T) {
 
 func TestGuardedManagerSet(t *testing.T) {
 	set := guardedManagerSet()
-	for _, name := range []string{"npm", "pip", "go"} {
+	// cargo and gem are now shell-shimmed too (guardedTools), so the shim
+	// coverage matches what the installer advertises (npm/pip/go/cargo/gem).
+	for _, name := range []string{"npm", "pip", "go", "cargo", "gem"} {
 		if !set[name] {
 			t.Errorf("expected %q in guarded set", name)
 		}
 	}
-	if set["cargo"] {
-		t.Error("cargo is not shell-shimmed; must not be in guarded set")
+	if set["maven"] {
+		t.Error("maven is not shell-shimmed; must not be in guarded set")
 	}
 }
 
@@ -85,9 +87,13 @@ func TestDoctor_ShimStateShownForGuardedManagers(t *testing.T) {
 	if !rowHasState(t, text, "npm", "shim") {
 		t.Fatalf("expected npm row to show shim state:\n%s", text)
 	}
-	// cargo is not shell-shimmed ⇒ stays "no".
-	if !rowHasState(t, text, "cargo", "no") {
-		t.Fatalf("expected cargo row to show no state:\n%s", text)
+	// cargo is now guarded too (guardedTools includes cargo/gem) ⇒ shim.
+	if !rowHasState(t, text, "cargo", "shim") {
+		t.Fatalf("expected cargo row to show shim state:\n%s", text)
+	}
+	// maven is not shell-shimmed ⇒ stays "no".
+	if !rowHasState(t, text, "maven", "no") {
+		t.Fatalf("expected maven row to show no state:\n%s", text)
 	}
 	if !strings.Contains(text, "shim = routed through the shell guard") {
 		t.Fatalf("expected shim explanation footnote:\n%s", text)

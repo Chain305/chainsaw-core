@@ -33,6 +33,26 @@ var ansiSGRRe = regexp.MustCompile("\\x1b\\[[0-9;]*m")
 // stripANSI removes ANSI SGR escape sequences, leaving the visible text.
 func stripANSI(s string) string { return ansiSGRRe.ReplaceAllString(s, "") }
 
+// sanitizeForTerminal neutralizes terminal control-sequence injection in an
+// untrusted single-line field before it is echoed (package names and block
+// reasons can originate from a crafted install arg or a lockfile). It drops
+// every C0 control char (0x00–0x1F, which includes ESC — so no CSI/OSC/SGR
+// escape can begin), DEL (0x7F), and every C1 control char (0x80–0x9F, some
+// terminals treat these as single-byte CSI introducers). Printable text,
+// including Unicode, is preserved; the residue of a stripped ESC (e.g. "[2J")
+// is left as inert literal text. This is the security-grade counterpart to
+// stripANSI, which only removes color codes.
+func sanitizeForTerminal(s string) string {
+	return strings.Map(func(r rune) rune {
+		// RuneError catches invalid UTF-8 bytes — including a lone 0x9B, the raw
+		// single-byte C1 CSI introducer an attacker could inject outside UTF-8.
+		if r == utf8.RuneError || r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1 // drop
+		}
+		return r
+	}, s)
+}
+
 // displayWidth returns the number of visible (printable) columns a string
 // occupies once ANSI escape sequences are stripped. All current table cells
 // are ASCII, so this equals len() on the stripped string, but counting runes

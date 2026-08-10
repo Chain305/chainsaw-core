@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -64,10 +67,32 @@ func init() {
 	authLoginCmd.Flags().String("server", "", "Server URL")
 	authLoginCmd.Flags().String("token", "", "Paste an existing API token instead of opening a browser")
 	authLoginCmd.Flags().Bool("device", false, "Use the device-code flow (for headless / CI / no-browser environments)")
+	authLoginCmd.Flags().Bool("force", false, "Re-authenticate even if a valid session already exists")
 	authCmd.AddCommand(authLoginCmd, authLogoutCmd)
 	authCmd.AddCommand(authStatusCmd())
 	authCmd.AddCommand(authClientCmd())
 	rootCmd.AddCommand(authCmd)
+
+	// `login` / `signin` are the two most common auth guesses, and cobra
+	// aliases can't cross command levels (they'd have to live under `auth`).
+	// Register a hidden top-level forwarder with the same flags that delegates
+	// to the same runner, so `chainsaw login` just works instead of erroring
+	// with a misleading "did you mean logs?". Hidden keeps `auth login` the one
+	// canonical entry in --help.
+	loginAlias := &cobra.Command{
+		Use:          "login",
+		Aliases:      []string{"signin"},
+		Short:        "Alias for `auth login`",
+		Hidden:       true,
+		GroupID:      GrpConfig,
+		SilenceUsage: true,
+		RunE:         runAuthLogin,
+	}
+	loginAlias.Flags().String("server", "", "Server URL")
+	loginAlias.Flags().String("token", "", "Paste an existing API token instead of opening a browser")
+	loginAlias.Flags().Bool("device", false, "Use the device-code flow (for headless / CI / no-browser environments)")
+	loginAlias.Flags().Bool("force", false, "Re-authenticate even if a valid session already exists")
+	rootCmd.AddCommand(loginAlias)
 }
 
 // runAuthLogin drives the three supported auth flows:
@@ -100,6 +125,45 @@ func runAuthLogin(cmd *cobra.Command, _ []string) error {
 
 	pasted, _ := cmd.Flags().GetString("token")
 	forceDevice, _ := cmd.Flags().GetBool("device")
+	force, _ := cmd.Flags().GetBool("force")
+
+	// Ride an existing valid session instead of blindly restarting the
+	// browser/device dance. Only short-circuits when the requested server
+	// matches the configured one AND the stored token still authenticates.
+	// --force, --token (explicitly replacing the token), and a mismatched
+	// --server all skip the check. A stale/expired token also falls
+	// through to a fresh login rather than blocking here.
+	if !force && pasted == "" && server == cfgServerURL() {
+		if existing := cfgToken(); existing != "" {
+			var me struct {
+				UserID string `json:"user_id"`
+				OrgID  string `json:"org_id"`
+				Email  string `json:"email"`
+				Role   string `json:"role"`
+			}
+			if err := NewAPIClient(server, existing).Get("/api/auth/me", &me); err == nil {
+				emit("cli.auth.already_logged_in", nil)
+				if useJSON(cmd) {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]any{
+						"server":            server,
+						"org_id":            me.OrgID,
+						"role":              me.Role,
+						"email":             me.Email,
+						"already_logged_in": true,
+					})
+				}
+				label := me.Email
+				if label == "" {
+					label = me.UserID
+				}
+				printSuccess(out, cmd, fmt.Sprintf("Already logged in as %s (org: %s, role: %s)", label, me.OrgID, me.Role))
+				fmt.Fprintln(out, "Re-authenticate with `chainsaw auth login --force`.")
+				return nil
+			}
+		}
+	}
 
 	var token string
 	var err error
@@ -125,7 +189,7 @@ func runAuthLogin(cmd *cobra.Command, _ []string) error {
 		// message before assuming device-code, since token paste is
 		// often what the user actually wants in CI.
 		if !stdinIsTerminal() {
-			return errHeadlessAuth(server)
+			return errHeadlessAuth(server, resolveMintURL(server))
 		}
 		emit("cli.auth.device_started", nil)
 		token, err = runDeviceAuth(cmd.Context(), out, server, cliHostname())
@@ -165,23 +229,112 @@ func runAuthLogin(cmd *cobra.Command, _ []string) error {
 		label = me.UserID
 	}
 	printSuccess(out, cmd, fmt.Sprintf("Logged in as %s (org: %s, role: %s)", label, me.OrgID, me.Role))
+	// Login is the pivot from "installed" to "installs actually route through
+	// Chainsaw". Without this, `auth login` is a dead end — the user is
+	// authenticated but nothing is wired yet. Name the exact next commands
+	// (not a pitch, not a URL) so no one is left wondering what to do next.
+	fmt.Fprintln(out, "\nNext:")
+	fmt.Fprintln(out, "  1. Wire your package managers so installs are checked:  chainsaw install-hook --all")
+	fmt.Fprintln(out, "  2. Verify the wiring:                                   chainsaw doctor")
 	return nil
+}
+
+// consoleURL maps a Chainsaw server/API base URL to the web console (dashboard)
+// base URL. Released binaries bake the API base (`…/chainproxy`); the dashboard
+// lives at `…/chainsaw` on the same host for the SaaS and k3s-guide split
+// deployments, and at the server root for a root-basepath self-host. A
+// split-hostname deploy (CHAINSAW_WEB_UI_URL on a different host) can't be
+// derived from the API host alone and is left unmapped — that shape needs a
+// server-provided console URL (a deferred follow-up); it is no worse off than
+// before this helper existed.
+func consoleURL(server string) string {
+	s := strings.TrimRight(strings.TrimSpace(server), "/")
+	if s == "" {
+		return ""
+	}
+	if strings.HasSuffix(s, "/chainproxy") {
+		return strings.TrimSuffix(s, "/chainproxy") + "/chainsaw"
+	}
+	return s
+}
+
+// apiKeyMintURL is the OFFLINE-FALLBACK "mint an API token / client credential"
+// URL, derived from the server URL via the consoleURL heuristic. Prefer
+// resolveMintURL, which asks the server for its real console base first and
+// only falls back to this when the server is unreachable.
+func apiKeyMintURL(server string) string {
+	base := consoleURL(server)
+	if base == "" {
+		return ""
+	}
+	return base + "/settings/api-keys/new"
+}
+
+// mintMetaClient is the HTTP client used to resolve the console URL from the
+// server. Overridable in tests. Short timeout so it never noticeably blocks the
+// error/guidance paths that call it — a failed fetch just falls back to the
+// heuristic.
+var mintMetaClient = &http.Client{Timeout: 2 * time.Second}
+
+// resolveMintURL returns the best "mint an API token" URL for a server. It first
+// asks the server for its web console base via GET /api/public/meta — correct
+// for EVERY deployment shape, including a split-hostname UI the consoleURL
+// heuristic can't derive — and falls back to the heuristic when the server is
+// unreachable, too old to serve /api/public/meta, or returns nothing usable.
+// Unauthenticated: the mint URL is shown before the user has a token.
+func resolveMintURL(server string) string {
+	server = strings.TrimRight(strings.TrimSpace(server), "/")
+	if server != "" {
+		if base := fetchWebUIBase(server); base != "" {
+			return strings.TrimRight(base, "/") + "/settings/api-keys/new"
+		}
+	}
+	return apiKeyMintURL(server)
+}
+
+// fetchWebUIBase does a best-effort GET <server>/api/public/meta and returns the
+// deployment's web console base URL, or "" on any error. Never returns an error
+// — the caller falls back to the heuristic.
+func fetchWebUIBase(server string) string {
+	req, err := http.NewRequest(http.MethodGet, server+"/api/public/meta", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := mintMetaClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var payload struct {
+		WebUIURL string `json:"web_ui_url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.WebUIURL)
 }
 
 // errHeadlessAuth is returned when the CLI is in an environment that can't
 // open a browser AND stdin isn't a TTY to drive the device-code prompts.
 // The error body lists the three supported recovery paths so the user
 // doesn't have to grep docs.
-func errHeadlessAuth(server string) error {
+func errHeadlessAuth(server, mintURL string) error {
+	if mintURL == "" {
+		mintURL = "your Chainsaw dashboard → Settings → API Keys → New"
+	}
 	return fmt.Errorf(`cannot sign in: no browser available and stdin is not a terminal
 
 Pick one:
   • Run this command on a machine with a browser:   chainsaw auth login
   • Use device-code from another device:            chainsaw auth login --device
   • Paste a pre-minted API token (CI/automation):   chainsaw auth login --token <pat>
-      (generate one at %s/dashboard/api-keys)
+      (generate one at %s)
 
-If your org uses SSO, chainsaw auth sso remains available.`, server)
+If your org uses SSO, chainsaw auth sso remains available.`, mintURL)
 }
 
 func authStatusCmd() *cobra.Command {

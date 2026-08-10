@@ -207,6 +207,7 @@ type Conditions struct {
 	InstallScriptFetchesRemote *bool    `json:"installScriptFetchesRemote,omitempty" yaml:"installScriptFetchesRemote,omitempty"` // nil=any, true=install script body references curl/wget/fetch/subprocess/etc.
 	ImportTimeExecution        *bool    `json:"importTimeExecution,omitempty" yaml:"importTimeExecution,omitempty"`               // nil=any, true=PyPI package runs malicious behavior at import/install (top-level obfuscated exec / exfil / shell)
 	MaliciousIOC               *bool    `json:"maliciousIOC,omitempty" yaml:"maliciousIOC,omitempty"`                             // nil=any, true=source embeds an exfil sink host or a coupled stealer string
+	BuildRsExecutes            *bool    `json:"buildRsExecutes,omitempty" yaml:"buildRsExecutes,omitempty"`                       // nil=any, true=cargo crate's build.rs performs shell/network execution at build time (cargo-only)
 
 	// PublisherChanged fires when the incoming version's publisher/maintainer
 	// set differs from the most recent prior persisted version's set. Catches
@@ -1567,6 +1568,9 @@ func hasPolicyCondition(conditions Conditions) bool {
 		return true
 	}
 	if conditions.MaliciousIOC != nil {
+		return true
+	}
+	if conditions.BuildRsExecutes != nil {
 		return true
 	}
 	if conditions.PublisherChanged != nil {

@@ -95,11 +95,13 @@ func (p *installScriptsProvider) Run(ctx context.Context, req Request, prior *Re
 	files := ManifestsFor(req.Artifact)
 
 	var (
-		result      installscripts.Result
-		extraSeen   []string
-		extraScript bool
-		extraFetch  bool
-		extraMutate bool
+		result            installscripts.Result
+		extraSeen         []string
+		extraScript       bool
+		extraFetch        bool
+		extraMutate       bool
+		buildRsExecutes   bool
+		buildRsPrimitives []string
 	)
 
 	astEnabled := installscriptAstEnabled(ctx, req.OrgID)
@@ -170,6 +172,10 @@ func (p *installScriptsProvider) Run(ctx context.Context, req Request, prior *Re
 				}
 				if hasNetworkOrShell(hits) {
 					extraFetch = true
+					// First-class buildRsExecutes signal: a cargo build.rs
+					// performing shell/network execution at build time.
+					buildRsExecutes = true
+					buildRsPrimitives = append(buildRsPrimitives, hits...)
 				}
 			}
 		}
@@ -257,6 +263,8 @@ func (p *installScriptsProvider) Run(ctx context.Context, req Request, prior *Re
 		InstallScriptKind:    kind,
 		HasInstallScript:     hasInstall,
 		InstallScriptFetches: fetches,
+		BuildRsExecutes:      buildRsExecutes,
+		BuildRsPrimitives:    buildRsPrimitives,
 	}
 	seen := make([]string, 0, len(files)+len(extraSeen))
 	for name := range files {

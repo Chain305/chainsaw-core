@@ -223,8 +223,16 @@ func ssoManualTokenFlow(out io.Writer, server string) (string, error) {
 	return tok, nil
 }
 
-// openBrowser opens url in the system default browser.
-func openBrowser(url string) error {
+// openBrowser opens url in the system default browser. It is a package var
+// (not a plain func) so tests can stub the browser launch — runBrowserAuth's
+// mock login_url points at a loopback listener, and the real launcher would
+// otherwise pop a browser tab on every `go test ./core/cli/...`. Production
+// always binds openBrowserReal; only tests reassign it (save/restore via
+// t.Cleanup).
+var openBrowser = openBrowserReal
+
+// openBrowserReal is the production browser launcher.
+func openBrowserReal(url string) error {
 	var cmd string
 	var args []string
 	switch runtime.GOOS {

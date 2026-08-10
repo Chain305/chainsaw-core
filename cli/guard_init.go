@@ -60,12 +60,17 @@ func init() {
 }
 
 // guardedTools are the package managers the shim wraps. pip3 maps to the pip
-// guard so both common invocations are covered.
+// guard so both common invocations are covered. cargo and gem are included so
+// the shim matches what the installer advertises ("routes npm/pip/go/cargo/gem
+// installs"); the standalone `chainsaw cargo`/`chainsaw gem` guards these
+// delegate to already parse install/add subcommands and pass through the rest.
 var guardedTools = []struct{ fn, tool string }{
 	{"npm", "npm"},
 	{"pip", "pip"},
 	{"pip3", "pip"},
 	{"go", "go"},
+	{"cargo", "cargo"},
+	{"gem", "gem"},
 }
 
 func runGuardInit(cmd *cobra.Command, args []string) error {
@@ -94,6 +99,14 @@ func runGuardInit(cmd *cobra.Command, args []string) error {
 		}
 	default:
 		return fmt.Errorf("unsupported shell %q (supported: bash, zsh, fish)", shell)
+	}
+	// Bare `chainsaw guard init` on a terminal dumps shell functions with no
+	// context — a user who ran it expecting a setup action is left staring at
+	// them. Point them at the one-shot installer. stdout stays clean for the
+	// documented `eval "$(chainsaw guard init bash)"` usage (piped → not a
+	// terminal → no hint); the note goes to stderr regardless.
+	if stdoutIsTerminal() {
+		fmt.Fprintln(cmd.ErrOrStderr(), "# ^ these are shell functions meant for `eval`. To install them for good, run: chainsaw guard init --install")
 	}
 	return nil
 }

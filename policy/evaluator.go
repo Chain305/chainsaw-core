@@ -76,6 +76,7 @@ type EvaluationContext struct {
 	InstallScriptFetchesRemote bool // true if the install-script body references curl/wget/fetch/subprocess/etc.
 	ImportTimeExecution        bool // true if a PyPI package runs malicious behavior at import/install time (pysource)
 	MaliciousIOC               bool // true if source embeds an exfil sink host / coupled stealer string (iocscan)
+	BuildRsExecutes            bool // true if a cargo crate's build.rs performs shell/network execution at build time (cargo-only)
 
 	// Version anomaly signals (PR 3). VersionAnomaly is the coarse bool:
 	// true when the metadiff helper reported at least one flag against the
@@ -1297,6 +1298,11 @@ func matchesConditions(ctx EvaluationContext, cond Conditions) bool {
 	}
 	if cond.MaliciousIOC != nil {
 		if *cond.MaliciousIOC != ctx.MaliciousIOC {
+			return false
+		}
+	}
+	if cond.BuildRsExecutes != nil {
+		if *cond.BuildRsExecutes != ctx.BuildRsExecutes {
 			return false
 		}
 	}

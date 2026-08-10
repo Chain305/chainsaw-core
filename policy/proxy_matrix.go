@@ -56,6 +56,7 @@ const (
 	ConditionInstallScriptFetchesRemote ConditionType = "InstallScriptFetchesRemote"
 	ConditionImportTimeExecution        ConditionType = "ImportTimeExecution"
 	ConditionMaliciousIOC               ConditionType = "MaliciousIOC"
+	ConditionBuildRsExecutes            ConditionType = "BuildRsExecutes"
 	ConditionPublisherChanged           ConditionType = "PublisherChanged"
 	ConditionVersionAnomaly             ConditionType = "VersionAnomaly"
 	// ConditionHasHiddenUnicode — PR 8. Matches when the artifact's text
@@ -157,6 +158,7 @@ func AllConditions() []ConditionType {
 		ConditionInstallScriptFetchesRemote,
 		ConditionImportTimeExecution,
 		ConditionMaliciousIOC,
+		ConditionBuildRsExecutes,
 		ConditionPublisherChanged,
 		ConditionVersionAnomaly,
 		ConditionHasHiddenUnicode,
@@ -274,6 +276,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportFull,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportFull, // maintainers[].name
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -325,6 +328,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportFull,
 		ConditionImportTimeExecution:        SupportFull,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportFull, // info.author_email + info.maintainer_email
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -377,6 +381,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportFull, // developers[].id / email
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -454,6 +459,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportFull, // fetchPubPublisherSet
 		ConditionVersionAnomaly:             SupportFull, // pub is semver
 		ConditionHasHiddenUnicode:           SupportFull, // Dart source is text
@@ -508,6 +514,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportFull,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportFull, // build.rs static scan ships for cargo crates
 		ConditionPublisherChanged:           SupportNone, // not extracted in PR 2
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -561,6 +568,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportFull,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone, // not extracted in PR 2
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -615,6 +623,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportFull,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportFull, // authors (comma-split)
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -664,10 +673,11 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionTyposquat:                  SupportFull,
 		ConditionCVSS:                       SupportFull,
 		ConditionReservedNamespaces:         SupportFull,
-		ConditionHasInstallScript:           SupportNone, // no lifecycle-script concept
-		ConditionInstallScriptFetchesRemote: SupportNone,
+		ConditionHasInstallScript:           SupportFull, // legacy PowerShell tools/{install,uninstall,init}.ps1 hooks (walkNuGetHooks)
+		ConditionInstallScriptFetchesRemote: SupportFull, // fetchesRemoteRE over the same PS hooks
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportFull, // authors (comma/semicolon-split)
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -722,6 +732,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone, // no per-version publisher metadata
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -776,6 +787,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone, // not extracted in PR 2
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportPartial, // text files only — model weights are binary and skipped
@@ -827,6 +839,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone,
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -881,6 +894,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone,
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
@@ -932,6 +946,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone,
 		ConditionVersionAnomaly:             SupportNone, // Docker tags are not semver
 		ConditionHasHiddenUnicode:           SupportNone, // PR 7 (layer text-file scan) is a separate PR not yet on this branch
@@ -983,6 +998,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone,
 		ConditionVersionAnomaly:             SupportNone, // Debian-style versioning is non-semver
 		ConditionHasHiddenUnicode:           SupportNone, // OS-package control files, not source
@@ -1035,6 +1051,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone,
 		ConditionVersionAnomaly:             SupportNone, // RPM epoch-version-release is non-semver
 		ConditionHasHiddenUnicode:           SupportNone, // OS-package control files, not source
@@ -1084,6 +1101,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionInstallScriptFetchesRemote: SupportNone,
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
+		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone,
 		ConditionVersionAnomaly:             SupportNone, // RPM epoch-version-release is non-semver
 		ConditionHasHiddenUnicode:           SupportNone, // OS-package control files, not source

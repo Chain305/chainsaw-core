@@ -58,7 +58,14 @@ CycloneDX and in-toto in a single diff is not supported in this iteration.`,
 }
 
 func init() {
-	sbomExportCmd.Flags().String("repo", "", "Filter by ecosystem/format (e.g. npm, pip, maven)")
+	// --ecosystem is the truthful name: /api/sbom filters by ecosystem, NOT
+	// by repository (events.BOMQueryParams has no repository dimension). The
+	// old --repo flag mapped to the ecosystem/format query param despite its
+	// name promising a repository filter — kept as a deprecated alias so
+	// existing scripts don't break, but it forwards to --ecosystem.
+	sbomExportCmd.Flags().String("ecosystem", "", "Filter by ecosystem (e.g. npm, pip, maven)")
+	sbomExportCmd.Flags().String("repo", "", "Deprecated: use --ecosystem (this never filtered by repository)")
+	_ = sbomExportCmd.Flags().MarkDeprecated("repo", "use --ecosystem instead (it never filtered by repository)")
 	sbomExportCmd.Flags().String("package", "", "Filter by package name@version")
 	sbomExportCmd.Flags().String("format", "cyclonedx", "SBOM format: cyclonedx (default) or spdx (SPDX 2.3, rendered client-side from the CycloneDX document)")
 	sbomExportCmd.Flags().String("output", "", "Write SBOM to file instead of stdout")
@@ -199,8 +206,16 @@ func runSBOMExport(cmd *cobra.Command, _ []string) error {
 	}
 
 	q := url.Values{}
-	if repo, _ := cmd.Flags().GetString("repo"); repo != "" {
-		q.Set("format", repo)
+	// Ecosystem filter. Prefer the truthful --ecosystem; fall back to the
+	// deprecated --repo alias. Map to the canonical `ecosystem` query param
+	// (not the legacy `format` alias, which now means output schema and
+	// makes the server emit a deprecation Warning header).
+	ecosystem, _ := cmd.Flags().GetString("ecosystem")
+	if ecosystem == "" {
+		ecosystem, _ = cmd.Flags().GetString("repo")
+	}
+	if ecosystem != "" {
+		q.Set("ecosystem", ecosystem)
 	}
 	if withAttribution, _ := cmd.Flags().GetBool("with-attribution"); withAttribution {
 		// One-off override of the server's sbom.attribution_enabled

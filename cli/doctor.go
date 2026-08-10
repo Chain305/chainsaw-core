@@ -218,6 +218,25 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 			shimSource)
 	}
 
+	// Remediation footer: a fresh user sees "wired: no" in the table with no
+	// idea how to fix it. Name the installed-but-unwired-and-unshimmed managers
+	// and the exact command. Deliberately says "not wired" — NOT "unprotected"
+	// (a fear claim that outruns what doctor actually knows; doctor is an ops
+	// surface, keep it operational).
+	var unwired []string
+	for _, e := range report.Managers {
+		if e.Installed && !e.Wired && !e.Shimmed {
+			unwired = append(unwired, e.Name)
+		}
+	}
+	if len(unwired) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"\n%d manager(s) installed but not wired: %s\n"+
+				"  Wire one:  chainsaw install-hook %s\n"+
+				"  Wire all:  chainsaw install-hook --all\n",
+			len(unwired), strings.Join(unwired, ", "), unwired[0])
+	}
+
 	if warning := chainsawPathWarning(); warning != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), warning)
 	}

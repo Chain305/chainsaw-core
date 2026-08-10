@@ -22,6 +22,11 @@ package cli
 //     signal bundle's "osv-malware" blob when present — combined into one index.
 //   - Fail-open with a visible notice when coverage is thin: a tool that breaks
 //     `npm install` gets uninstalled, so we never hard-fail on missing signal.
+//     EXCEPTION, opt-in and off by default: an operator who sets
+//     CHAINSAW_COVERAGE_MODE=closed with CHAINSAW_COVERAGE_REQUIRED=<sources>
+//     asks us to refuse instead. See guard_coverage.go and
+//     docs/plan_optional_fail_closed.md. With the variable unset, behaviour is
+//     byte-identical to the fail-open default described above.
 
 import (
 	"context"
@@ -37,6 +42,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/chain305/chainsaw-core/coverage"
 	"github.com/chain305/chainsaw-core/intelligence"
 	"github.com/chain305/chainsaw-core/malware"
 	"github.com/chain305/chainsaw-core/typosquat"
@@ -438,8 +444,42 @@ func supplementalInstallAdvisory(spec packageSpec) (string, bool) {
 }
 
 // evaluateAll runs every spec and returns the verdicts plus whether any blocks.
+//
+// The optional coverage gate runs first and independently of the per-package
+// signals: if a data source the operator declared mandatory could not be
+// evaluated, no per-package verdict can be trusted to mean "clean". Off by
+// default, so the common path is unchanged. See
+// docs/plan_optional_fail_closed.md.
 func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verdicts []guardVerdict, blocked bool) {
 	verdicts = make([]guardVerdict, 0, len(specs))
+
+	posture, err := guardPosture()
+	if err != nil {
+		// A posture the operator explicitly configured but which we cannot
+		// honour is fatal. Refusing every spec is the fail-closed reading and
+		// keeps the promise the configuration made.
+		for _, s := range specs {
+			verdicts = append(verdicts, guardVerdict{
+				Spec: s, Block: true, Severity: "coverage",
+				Reason: fmt.Sprintf("invalid coverage configuration: %v", err),
+			})
+		}
+		return verdicts, true
+	}
+	// One clock read, shared by the ledger and the gate: two calls could
+	// straddle the grace or staleness boundary and disagree.
+	now := time.Now()
+	if d := coverage.Gate(posture, guardLedger(g, now), now); d.Block {
+		for _, s := range specs {
+			verdicts = append(verdicts, guardVerdict{
+				Spec: s, Block: true, Severity: "coverage", Reason: d.Reason,
+			})
+		}
+		return verdicts, true
+	} else if d.Warn {
+		fmt.Fprintf(os.Stderr, "chainsaw: coverage warning — %s (mode=warn, not blocking)\n", d.Reason)
+	}
+
 	for _, s := range specs {
 		v := g.evaluate(ctx, s)
 		if v.Block {

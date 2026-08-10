@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -24,6 +26,7 @@ import (
 func newInstallHookCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "install-hook [manager]",
+		Aliases: []string{"wire"},
 		GroupID: GrpGuard,
 		Short:   "Wire chainsaw into a package manager",
 		Long: `Insert the chainsaw-managed configuration block into a supported package
@@ -132,6 +135,7 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 	// CHAINSAW_SERVER env, or YAML). Keeping this single-source avoids the
 	// precedence ambiguity a local --server flag would introduce.
 	serverURL := cfgServerURL()
+	hookServerURL := normalizeHookServerURL(serverURL)
 
 	creds, err := resolveCredentials(cmd, serverURL, credsFlag, noCredsFlag)
 	if err != nil {
@@ -152,7 +156,7 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 	binary := resolveChainsawBinary(cmd)
 	opts := hook.WireOpts{
 		ChainsawBinary: binary,
-		ServerURL:      serverURL,
+		ServerURL:      hookServerURL,
 		Credentials:    creds,
 		OrgSlug:        orgSlug,
 		Scope:          scope,
@@ -209,8 +213,10 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 		return writeJSON(cmd, map[string]any{"results": results})
 	}
 
+	wroteAny := false
 	for _, r := range results {
 		if r.Wired != nil && *r.Wired {
+			wroteAny = true
 			if r.NotOnPath {
 				fmt.Fprintf(cmd.OutOrStdout(), "wired %s at %s (%s not currently on PATH)\n", r.Manager, r.ConfigPath, r.Manager)
 			} else {
@@ -221,10 +227,42 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// No server configured means the block we just wrote is a commented-out
+	// placeholder with no real registry URL — the manager still hits the public
+	// registry, so "wired" overstates reality. Say so plainly and name the two
+	// real next steps so the user isn't left in a false-safe state. (Guidance
+	// goes to stderr so `--json`/scripted callers keep a clean stdout.)
+	if wroteAny && strings.TrimSpace(serverURL) == "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "\nnote: no server configured, so this is a placeholder — installs are NOT routed yet.")
+		fmt.Fprintln(cmd.ErrOrStderr(), "  • Local-only protection (no account, no server):  chainsaw guard init --install")
+		fmt.Fprintln(cmd.ErrOrStderr(), "  • Route through a server:  chainsaw auth login   (then re-run install-hook)")
+	}
+
 	if firstErr != nil {
 		return firstErr
 	}
 	return nil
+}
+
+// normalizeHookServerURL converts the API base URL into the host base used by
+// package-manager registry snippets. Cloud builds use /chainproxy as the API
+// base, while hook renderers append the production /chainproxy/repository/...
+// mount themselves. Leaving /chainproxy in both places produces
+// /chainproxy/chainproxy/repository/... and every install 401s/404s.
+func normalizeHookServerURL(serverURL string) string {
+	raw := strings.TrimRight(strings.TrimSpace(serverURL), "/")
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	if strings.TrimRight(u.Path, "/") == "/chainproxy" {
+		u.Path = ""
+		u.RawPath = ""
+	}
+	return strings.TrimRight(u.String(), "/")
 }
 
 func runUninstallHook(cmd *cobra.Command, args []string) error {
@@ -502,7 +540,7 @@ func resolveCredentials(cmd *cobra.Command, serverURL, flagValue string, noCreds
 		// recipes. Writing them produces a file that looks installed
 		// but 401s on every install — the worst kind of silent break.
 		if _, bad := placeholderCredentials[strings.ToLower(creds)]; bad {
-			return "", fmt.Errorf("--credentials %q is a known placeholder, not a real client credential. Mint a real pair via `chainsaw client create` or the dashboard", creds)
+			return "", fmt.Errorf("--credentials %q is a known placeholder, not a real client credential. Mint a real pair via `chainsaw auth client create` or the dashboard", creds)
 		}
 		return creds, nil
 	}
@@ -586,6 +624,7 @@ func mintClientCredentials(clientID string) (string, error) {
 	body := map[string]any{
 		"client_id":   clientID,
 		"client_type": "service-token",
+		"expiry_date": time.Now().UTC().Add(90 * 24 * time.Hour).Format(time.RFC3339),
 	}
 	var resp struct {
 		Client struct {

@@ -50,8 +50,14 @@ func TestPrintSetupNextStep_AppSecGetsTyposquatDemo(t *testing.T) {
 	if !strings.Contains(out, "npm install lodahs") {
 		t.Errorf("appsec output missing typosquat demo command:\n%s", out)
 	}
-	if !strings.Contains(out, "Next step") {
-		t.Errorf("output missing block header:\n%s", out)
+	// C1: the closing message must surface the WIRING prerequisite as an actual
+	// command (not a URL), and it must come BEFORE the demo — otherwise the demo
+	// `npm install lodahs` does nothing because nothing is routed yet.
+	if !strings.Contains(out, "chainsaw install-hook") {
+		t.Errorf("output missing the install-hook wiring step:\n%s", out)
+	}
+	if wire, demo := strings.Index(out, "chainsaw install-hook"), strings.Index(out, "npm install lodahs"); wire < 0 || demo < 0 || wire > demo {
+		t.Errorf("install-hook wiring step must appear before the demo command:\n%s", out)
 	}
 }
 
@@ -62,8 +68,13 @@ func TestPrintSetupNextStep_DevSecOpsGetsCIHint(t *testing.T) {
 	if !strings.Contains(out, "npm install lodahs") {
 		t.Errorf("devsecops output missing typosquat demo command:\n%s", out)
 	}
-	if !strings.Contains(out, "chainsaw run") {
+	// The CI hint must be a REAL command. `chainsaw run` does not exist; the
+	// guard-init-in-CI form uses only real, auth-free commands.
+	if !strings.Contains(out, "chainsaw guard init bash") {
 		t.Errorf("devsecops output missing CI hint:\n%s", out)
+	}
+	if strings.Contains(out, "chainsaw run") {
+		t.Errorf("devsecops CI hint references nonexistent `chainsaw run`:\n%s", out)
 	}
 }
 
@@ -71,8 +82,12 @@ func TestPrintSetupNextStep_EnterpriseITGetsAuditCommand(t *testing.T) {
 	out := captureStdout(t, func() {
 		printSetupNextStep(agenticux.PersonaEnterpriseIT)
 	})
-	if !strings.Contains(out, "chainsaw audit logs --since 24h") {
+	// Must be the REAL subcommand: `audit view` (not `audit logs`, which errors).
+	if !strings.Contains(out, "chainsaw audit view --since 24h") {
 		t.Errorf("enterprise_it output missing audit command:\n%s", out)
+	}
+	if strings.Contains(out, "audit logs") {
+		t.Errorf("enterprise_it references nonexistent `audit logs` subcommand:\n%s", out)
 	}
 }
 

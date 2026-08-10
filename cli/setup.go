@@ -20,7 +20,11 @@ import (
 // same rationale.
 
 var setupCmd = &cobra.Command{
-	Use:     "setup",
+	Use: "setup",
+	// Catch the obvious first-run guesses so they resolve to the wizard
+	// instead of "unknown command". See renderError's unknown-command backstop
+	// in root.go for verbs we can't alias.
+	Aliases: []string{"init", "get-started", "getting-started", "quickstart", "start"},
 	GroupID: GrpConfig,
 	Short:   "Interactive first-time setup wizard",
 	Long: `Walk through server URL, authentication, org selection, and optional default policy,
@@ -158,7 +162,7 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 			// instead of blocking on the browser callback or silently reading
 			// "" from PromptPassword. Point the operator at the two inputs
 			// that work in automation.
-			return fmt.Errorf("non-interactive setup requires a token: pass --token <pat> or set CHAINSAW_TOKEN (mint one at %s/chainsaw/settings/api-keys/new)", prog.ServerURL)
+			return fmt.Errorf("non-interactive setup requires a token: pass --token <pat> or set CHAINSAW_TOKEN (mint one at %s)", resolveMintURL(prog.ServerURL))
 
 		case resolvedToken != "":
 			// Token supplied (TTY or not): skip the method picker entirely and
@@ -197,7 +201,7 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 
 			switch authMethod {
 			case "API key (paste existing)":
-				fmt.Printf("Mint an API key at: %s/chainsaw/settings/api-keys/new\n", prog.ServerURL)
+				fmt.Printf("Mint an API key at: %s\n", resolveMintURL(prog.ServerURL))
 				fmt.Println("(An API key is the bearer token the CLI uses — distinct from the")
 				fmt.Println(" client_credential that goes into .npmrc / pip.conf.)")
 				token = PromptPassword("API key")
@@ -470,35 +474,42 @@ func runSetupPersonaStep(client *APIClient, yes, skipPersona bool) (string, erro
 func printSetupNextStep(persona string) {
 	const (
 		typosquatCmd = "npm install lodahs"
-		auditCmd     = "chainsaw audit logs --since 24h"
+		auditCmd     = "chainsaw audit view --since 24h"
 	)
 
+	// Step 1 must be the prerequisite, stated as the exact command — not a URL.
+	// The old copy told the user to run the demo `npm install lodahs` and only
+	// then, as an afterthought, to "wire your package manager … see <url>". But
+	// setup wires nothing, so the demo did nothing → "the next command doesn't
+	// work." Lead with the wiring command so the demo actually blocks.
 	fmt.Println()
-	fmt.Println("Next step — try a real block:")
+	fmt.Println("First — route your installs through Chainsaw (one time):")
+	fmt.Println()
+	fmt.Println("    chainsaw install-hook --all      # or a single manager, e.g. install-hook npm")
+	fmt.Println("    chainsaw doctor                  # confirm what's wired")
+	fmt.Println()
+	fmt.Println("Then — try a real block:")
 	fmt.Println()
 
 	switch persona {
 	case agenticux.PersonaDevSecOps:
 		fmt.Printf("    %s\n", typosquatCmd)
 		fmt.Println()
-		fmt.Println("    # CI hint: run the same check in GitHub Actions —")
-		fmt.Println("    #   - run: chainsaw run")
+		fmt.Println("    # CI hint: wire the guard in GitHub Actions, then your normal install is checked —")
+		fmt.Println("    #   - run: eval \"$(chainsaw guard init bash)\" && npm ci")
 		fmt.Println()
-		fmt.Println("Chainsaw will refuse the install (typosquat of `lodash`). The refusal will")
-		fmt.Println("appear in your audit log within 5s. Wire your package manager to the proxy")
-		fmt.Println("first — see https://chain305.com/cli-download.")
+		fmt.Println("Chainsaw refuses the install (typosquat of `lodash`); the refusal lands in")
+		fmt.Println("your audit log within 5s.")
 	case agenticux.PersonaEnterpriseIT:
 		fmt.Printf("    %s\n", auditCmd)
 		fmt.Println()
 		fmt.Println("Lists every block, allow, and policy decision in the last 24h — the tenant-")
-		fmt.Println("wide audit feed you'll wire into SIEM. See https://chain305.com/cli-download")
-		fmt.Println("for proxy + SIEM webhook setup.")
+		fmt.Println("wide audit feed you'll wire into SIEM.")
 	default: // appsec, end_user_dev, skipped, or unknown — typosquat demo
 		fmt.Printf("    %s\n", typosquatCmd)
 		fmt.Println()
-		fmt.Println("Chainsaw will refuse the install (typosquat of `lodash`). The refusal will")
-		fmt.Println("appear in your audit log within 5s. Wire your package manager to the proxy")
-		fmt.Println("first — see https://chain305.com/cli-download.")
+		fmt.Println("Chainsaw refuses the install (typosquat of `lodash`); the refusal lands in")
+		fmt.Println("your audit log within 5s.")
 	}
 	fmt.Println()
 }

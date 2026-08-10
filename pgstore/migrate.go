@@ -456,6 +456,16 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_custom_roles_org_slug ON custom_roles(org_id, slug)`,
 		`CREATE INDEX IF NOT EXISTS idx_custom_roles_org_deleted ON custom_roles(org_id, deleted_at)`,
+		// Resource/feature-scoped RBAC (docs/plan_rbac_scoped_roles.md, Phase 1).
+		// Additive, nullable-by-default column carrying a per-role JSON scope
+		// map: {"findings": {"repo_ids": ["..."], "self": false}}. Empty '{}'
+		// means UNSCOPED = full org-wide access, so every existing role keeps
+		// today's behaviour with no backfill. IF NOT EXISTS is MANDATORY:
+		// migrate() re-executes this whole statement list on every boot with
+		// no migration runner, so a plain ADD COLUMN would crash the second
+		// boot after this deploy. DARK in Phase 1: read only when
+		// CHAINSAW_RBAC_SCOPES_ENABLED is on.
+		`ALTER TABLE custom_roles ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT '{}'`,
 		`CREATE TABLE IF NOT EXISTS revoked_tokens (
 			token_hash TEXT PRIMARY KEY,
 			expires_at TIMESTAMPTZ NOT NULL
@@ -1487,6 +1497,34 @@ func (s *Store) migrate() error {
 			END IF;
 		END
 		$$`,
+		// cli_exchange_codes backs the browser-flow one-time-code exchange.
+		// SECURITY: the browser login flow historically 302'd the loopback
+		// listener to http://127.0.0.1:<port>/cb?token=<PAT>, putting a
+		// long-lived personal API key into the browser's history, referer
+		// chain, and any shoulder-surfer's URL bar. Instead, handleCLISession
+		// now stashes the minted token here under a short-lived, single-use
+		// `code` and redirects with ?code=<otc>; the CLI's loopback then
+		// POSTs /api/auth/cli/exchange to swap the code for the token over
+		// its own localhost channel. The PAT never enters a URL.
+		//
+		// The code is a 24-byte (48 hex) crypto/rand value with a 2-minute
+		// TTL, stored raw for the same reason device_code is (see above):
+		// the leak-plus-race threat is dominated by single-use consumption
+		// and the tiny lifetime. `nonce` binds the code to the specific CLI
+		// listener that started the flow — the exchange requires both.
+		// state: unconsumed until the CLI swaps it, then consumed_at is set
+		// and the row can never yield the token again (replay guard).
+		`CREATE TABLE IF NOT EXISTS cli_exchange_codes (
+			code TEXT PRIMARY KEY,
+			nonce TEXT NOT NULL,
+			token TEXT NOT NULL,
+			org_id TEXT,
+			user_id TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL,
+			consumed_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cli_exchange_codes_expires_at ON cli_exchange_codes(expires_at)`,
 		// Repo→Team routing (opt-in). Default OFF: an empty table means
 		// the violation pipeline records team='' exactly as before. The
 		// admin maintains rows via the /api/repo-team-mappings CRUD

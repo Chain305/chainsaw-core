@@ -307,7 +307,13 @@ func runPkgInfo(cmd *cobra.Command, args []string) error {
 	if pkgVersion != "" {
 		q.Set("version", pkgVersion)
 	}
-	q.Set("limit", "1")
+	// The same package can be installed across many repositories; a
+	// limit of 1 hid every repo but the first (the "(showing 1 of N)"
+	// footer was the only tell). Fetch a full page so all matching repo
+	// entries render. 100 is the sensible cap — a single coordinate in
+	// more than 100 distinct repos is vanishingly rare and the footer
+	// still reports the true total when the page is capped.
+	q.Set("limit", "100")
 
 	var resp struct {
 		Entries []bomEntry `json:"entries"`
@@ -319,10 +325,22 @@ func runPkgInfo(cmd *cobra.Command, args []string) error {
 
 	asJSON := useJSON(cmd)
 	if asJSON {
-		if len(resp.Entries) == 0 {
-			return PrintJSONTo(cmd, map[string]any{"package": args[0], "found": false})
+		// Stable envelope: the top level is ALWAYS an object and `entries`
+		// is ALWAYS an array, so a consumer's `jq '.entries[].repository'`
+		// keeps working whether the coordinate is in zero, one, or many
+		// repos. (The old shape switched between object and array on the row
+		// count, silently breaking scripts the day a package appeared in a
+		// second repo.)
+		entries := resp.Entries
+		if entries == nil {
+			entries = []bomEntry{}
 		}
-		return PrintJSONTo(cmd, resp.Entries[0])
+		return PrintJSONTo(cmd, map[string]any{
+			"package": args[0],
+			"found":   len(entries) > 0,
+			"entries": entries,
+			"total":   resp.Total,
+		})
 	}
 
 	if len(resp.Entries) == 0 {
@@ -378,8 +396,27 @@ func runPkgInfo(cmd *cobra.Command, args []string) error {
 		printSupplyChainSection(e)
 	}
 
-	if resp.Total > 1 {
-		fmt.Printf("\n(showing 1 of %d matching entries)\n", resp.Total)
+	// When the coordinate appears in more than one repository, list every
+	// matching entry so the developer sees the full blast radius instead of
+	// just the first repo. The detailed block above describes entries[0];
+	// this table enumerates all of them (including entries[0]).
+	if len(resp.Entries) > 1 {
+		fmt.Printf("\nFound in %d entries", len(resp.Entries))
+		if resp.Total > len(resp.Entries) {
+			fmt.Printf(" (showing %d of %d)", len(resp.Entries), resp.Total)
+		}
+		fmt.Println(":")
+		rows := make([][]string, len(resp.Entries))
+		for i, m := range resp.Entries {
+			rows[i] = []string{
+				m.Repository,
+				m.PackageVersion,
+				fmt.Sprintf("%d", m.InstallCount),
+				m.LastInstallAttempt,
+				m.LastOutcome,
+			}
+		}
+		PrintTable([]string{"REPOSITORY", "VERSION", "INSTALLS", "LAST_SEEN", "OUTCOME"}, rows)
 	}
 
 	// Show license from SBOM if available.

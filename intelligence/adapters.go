@@ -119,6 +119,7 @@ func (r *Report) ToLegacyCheckResult() *supplychain.CheckResult {
 		InstallScriptFetchesRemote: r.Scan.InstallScriptFetches,
 		ImportTimeExecution:        r.Scan.ImportTimeExecution,
 		MaliciousIOC:               r.Scan.MaliciousIOC,
+		BuildRsExecutes:            r.Scan.BuildRsExecutes,
 		InstallScriptKind:          r.Scan.InstallScriptKind,
 
 		PublisherChanged:    deref(r.SupplyChain.PublisherChanged),
@@ -146,6 +147,7 @@ func (r *Report) ToLegacyCheckResult() *supplychain.CheckResult {
 		"installScriptFetchesRemote": res.InstallScriptFetchesRemote,
 		"importTimeExecution":        res.ImportTimeExecution,
 		"maliciousIOC":               res.MaliciousIOC,
+		"buildRsExecutes":            res.BuildRsExecutes,
 		"installScriptKind":          res.InstallScriptKind,
 	}
 

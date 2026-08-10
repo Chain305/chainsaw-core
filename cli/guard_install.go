@@ -400,6 +400,20 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	// full coordinate set isn't cached, newLocalGuard() surfaces a one-line
 	// nudge to run `chainsaw guard update` on the user's own schedule.
 	guard := newLocalGuard()
+	// Interactive-only: when the full OpenSSF feed is absent (only the embedded
+	// floor is loaded) or the signed bundle is stale, OFFER a one-time network
+	// refresh instead of only nudging. maybeAutoFetchFeed gates on a real TTY and
+	// respects CHAINSAW_OFFLINE, so CI / air-gapped / quiet runs never fetch — the
+	// offline guarantee holds. On a yes we reload so this very install uses the
+	// fresh set. --quiet suppresses the prompt entirely (no blocking on a scripted run).
+	if !isQuiet {
+		stale := guard.bundle != nil && guard.bundle.Stale()
+		if fetched, ferr := maybeAutoFetchFeed(guard.fullFeed, stale, prodAutoFetchDeps()); ferr != nil {
+			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, "feed refresh failed; continuing with the offline floor ("+ferr.Error()+")"))
+		} else if fetched {
+			guard = newLocalGuard() // reload the index with the freshly-downloaded feed
+		}
+	}
 	if !isQuiet {
 		for _, n := range guard.notices {
 			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, n))
@@ -419,14 +433,16 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	for _, v := range verdicts {
 		switch {
 		case v.Block:
-			// A block verdict is NEVER suppressed by --quiet.
+			// A block verdict is NEVER suppressed by --quiet. Spec + Reason carry
+			// untrusted text (a crafted install arg or a lockfile name), so scrub
+			// terminal control sequences before echoing — see sanitizeForTerminal.
 			fmt.Fprintf(os.Stderr, "%s  %s  %s — %s\n",
-				tag, c(ansiRed+ansiBold, "✗ blocked"), c(ansiBold, fmt.Sprint(v.Spec)), v.Reason)
+				tag, c(ansiRed+ansiBold, "✗ blocked"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))), sanitizeForTerminal(v.Reason))
 		case v.Severity == "typosquat-medium" || v.Severity == "behavioral-medium":
 			// Medium-confidence ALLOW warning is chatter — gated by --quiet.
 			if !isQuiet {
 				fmt.Fprintf(os.Stderr, "%s  %s  %s — %s %s\n",
-					tag, c(ansiYellow, "! warning"), fmt.Sprint(v.Spec), v.Reason, c(ansiDim, "(medium confidence — allowed)"))
+					tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason), c(ansiDim, "(medium confidence — allowed)"))
 			}
 		}
 	}

@@ -317,6 +317,46 @@ func TestEvaluateInstallScriptFetchesRemote(t *testing.T) {
 	}
 }
 
+// TestEvaluateBuildRsExecutes covers the buildRsExecutes condition — a
+// cargo crate whose build.rs performs shell/network execution at build
+// time. Cargo-supported (SupportFull); the gate fires for true and
+// respects false. Mirrors TestEvaluateInstallScriptFetchesRemote.
+func TestEvaluateBuildRsExecutes(t *testing.T) {
+	store, _ := NewStore(nil)
+	eval := NewEvaluator(store)
+
+	ctx := EvaluationContext{
+		Repository:       "my-cargo-proxy",
+		RepositoryFormat: "cargo",
+		PackageName:      "evil-crate",
+		PackageVersion:   "1.0.0",
+		BuildRsExecutes:  true,
+	}
+
+	pol := Policy{
+		ID:         "block-buildrs-exec",
+		Precedence: 1,
+		Mode:       ModeBlock,
+		Status:     StatusEnabled,
+		CreatedAt:  time.Now(),
+		Conditions: Conditions{
+			BuildRsExecutes: boolPtr(true),
+		},
+	}
+
+	result := eval.EvaluateWithPolicies(ctx, []Policy{pol}, 0)
+	if result.Action != ModeBlock {
+		t.Errorf("expected block for buildRsExecutes=true, got %s", result.Action)
+	}
+
+	// Same rule must not fire on a crate whose build.rs does not execute.
+	ctx.BuildRsExecutes = false
+	result = eval.EvaluateWithPolicies(ctx, []Policy{pol}, 0)
+	if result.Action != ModeAllow {
+		t.Errorf("expected allow when BuildRsExecutes=false, got %s", result.Action)
+	}
+}
+
 // TestEvaluateSkipsUnsupportedMavenInstallScript documents that an
 // install-script policy scoped to a maven proxy is silently inert —
 // maven has no lifecycle-script concept, so the evaluator must skip it

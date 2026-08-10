@@ -67,7 +67,9 @@ Examples:
   chainsaw why pip requests@2.31.0
   chainsaw why npm lodash@4.17.20 --request-id a22794f3a2134e13
   chainsaw why pip requests@2.31.0 --json`,
-	Args: cobra.ExactArgs(2),
+	Args: exactArgsWithUsage(2,
+		"chainsaw why <ecosystem> <package>@<version>",
+		"chainsaw why npm lodash@4.17.20"),
 	RunE: runWhy,
 }
 
@@ -205,11 +207,17 @@ func renderWhyTable(w *os.File, ecosystem string, v *blockedViolation, reqID, so
 	if policy == "" {
 		policy = "(unnamed policy)"
 	}
-	fmt.Fprintf(w, "Package:    %s/%s@%s\n", ecosystem, v.PackageID, v.Version)
+	// Package name/version/reason/ecosystem trace back to an install someone
+	// attempted, so treat them as untrusted and scrub terminal control sequences
+	// before echoing. (policy is printed with %q, which already escapes them.)
+	eco := sanitizeForTerminal(ecosystem)
+	pkg := sanitizeForTerminal(v.PackageID)
+	ver := sanitizeForTerminal(v.Version)
+	fmt.Fprintf(w, "Package:    %s/%s@%s\n", eco, pkg, ver)
 	fmt.Fprintln(w, "Outcome:    BLOCKED")
 	fmt.Fprintf(w, "Policy:     %q\n", policy)
 	if v.Reason != "" {
-		fmt.Fprintf(w, "Reason:     %s\n", v.Reason)
+		fmt.Fprintf(w, "Reason:     %s\n", sanitizeForTerminal(v.Reason))
 	}
 	if len(v.CVEIDs) > 0 {
 		fmt.Fprintf(w, "CVEs:       %s\n", strings.Join(v.CVEIDs, ", "))
@@ -227,9 +235,9 @@ func renderWhyTable(w *os.File, ecosystem string, v *blockedViolation, reqID, so
 		fmt.Fprintln(w, "Source:     audit log (request-id match)")
 	}
 	fmt.Fprintln(w, "\nNext steps:")
-	fmt.Fprintf(w, "  • Pin to a patched version of %s/%s, or\n", ecosystem, v.PackageID)
-	fmt.Fprintf(w, "  • Request an exception:  chainsaw exception propose %s %s@%s\n",
-		ecosystem, v.PackageID, v.Version)
+	fmt.Fprintf(w, "  • Pin to a patched version of %s/%s, or\n", eco, pkg)
+	fmt.Fprintf(w, "  • Request an exception:  chainsaw exception create --repository <repo> --package %s --version %s\n",
+		pkg, ver)
 }
 
 // runWhyLocal answers `chainsaw why` from the local install guard's recorded
@@ -269,13 +277,15 @@ no server-side history to query here.
 	if ver == "" {
 		ver = "(unpinned)"
 	}
-	fmt.Fprintf(w, "Package:    %s/%s@%s\n", rec.Ecosystem, rec.Name, ver)
+	// rec.Name/Reason are the crafted install arg the guard recorded — scrub
+	// terminal control sequences before echoing (see sanitizeForTerminal).
+	fmt.Fprintf(w, "Package:    %s/%s@%s\n", sanitizeForTerminal(rec.Ecosystem), sanitizeForTerminal(rec.Name), sanitizeForTerminal(ver))
 	fmt.Fprintln(w, "Outcome:    BLOCKED (local install guard)")
 	if rec.Severity != "" {
-		fmt.Fprintf(w, "Severity:   %s\n", rec.Severity)
+		fmt.Fprintf(w, "Severity:   %s\n", sanitizeForTerminal(rec.Severity))
 	}
 	if rec.Reason != "" {
-		fmt.Fprintf(w, "Reason:     %s\n", rec.Reason)
+		fmt.Fprintf(w, "Reason:     %s\n", sanitizeForTerminal(rec.Reason))
 	}
 	if rec.AtUnix != 0 {
 		fmt.Fprintf(w, "Blocked:    %s\n", time.Unix(rec.AtUnix, 0).UTC().Format(time.RFC3339))

@@ -360,6 +360,7 @@ const (
 	kindUVLock          manifestKind = "pip:uv.lock"
 	kindGemfileLock     manifestKind = "rubygems:Gemfile.lock"
 	kindGoSum           manifestKind = "go:go.sum"
+	kindCargoLock       manifestKind = "cargo:Cargo.lock"
 )
 
 // manifestClassifier maps file base-names (and sometimes partial paths) to
@@ -388,6 +389,8 @@ func classifyManifest(relPath string) (manifestKind, bool) {
 		return kindGemfileLock, true
 	case "go.sum":
 		return kindGoSum, true
+	case "Cargo.lock":
+		return kindCargoLock, true
 	}
 	// requirements.txt, requirements-dev.txt, etc.
 	if strings.HasPrefix(base, "requirements") && strings.HasSuffix(base, ".txt") {
@@ -460,6 +463,9 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 	case kindGoSum:
 		baseCoords = parseGoSum(baseContent)
 		headCoords = parseGoSum(headContent)
+	case kindCargoLock:
+		baseCoords = parseCargoLock(baseContent)
+		headCoords = parseCargoLock(headContent)
 	default:
 		return nil, nil, nil
 	}

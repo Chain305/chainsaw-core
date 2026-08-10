@@ -88,7 +88,7 @@ type Input struct {
 	// `input.signalsUnavailable == true`. omitempty → the field is absent
 	// (not `false`) in the OPA document when signals were available, so a
 	// `== true` match only fires on genuine unavailability.
-	SignalsUnavailable   bool   `json:"signalsUnavailable,omitempty"`
+	SignalsUnavailable bool `json:"signalsUnavailable,omitempty"`
 
 	// Attestation context (SLSA / Sigstore).
 	SLSALevel                  int    `json:"slsaLevel,omitempty"`
@@ -103,6 +103,7 @@ type Input struct {
 	InstallScriptFetchesRemote bool `json:"installScriptFetchesRemote,omitempty"`
 	ImportTimeExecution        bool `json:"importTimeExecution,omitempty"`
 	MaliciousIOC               bool `json:"maliciousIOC,omitempty"`
+	BuildRsExecutes            bool `json:"buildRsExecutes,omitempty"`
 
 	// Version anomaly.
 	VersionAnomaly      bool     `json:"versionAnomaly,omitempty"`
@@ -213,6 +214,7 @@ func ContextToInput(surface SurfaceTag, ctx EvaluationContext) Input {
 		InstallScriptFetchesRemote:   ctx.InstallScriptFetchesRemote,
 		ImportTimeExecution:          ctx.ImportTimeExecution,
 		MaliciousIOC:                 ctx.MaliciousIOC,
+		BuildRsExecutes:              ctx.BuildRsExecutes,
 		VersionAnomaly:               ctx.VersionAnomaly,
 		VersionAnomalyFlags:          ctx.VersionAnomalyFlags,
 		HasHiddenUnicode:             ctx.HasHiddenUnicode,

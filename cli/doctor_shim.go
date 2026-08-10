@@ -62,8 +62,9 @@ func detectGuardShim(candidates []string) (bool, string) {
 }
 
 // guardedManagerSet is the set of package-manager names the shell shim wraps
-// (derived from guardedTools in guard_init.go). Only these managers can be in
-// the "shim" state; the shim doesn't touch cargo/maven/etc.
+// (derived from guardedTools in guard_init.go): npm/pip/go/cargo/gem. Only
+// these managers can be in the "shim" state; the shim doesn't touch
+// maven/gradle/nuget/etc.
 func guardedManagerSet() map[string]bool {
 	set := make(map[string]bool, len(guardedTools))
 	for _, t := range guardedTools {

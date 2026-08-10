@@ -146,7 +146,12 @@ func runDoctorOffline(cmd *cobra.Command, _ []string) error {
 				status = "○"
 				detail = detail + " — fail-open: allows installs"
 			case intelligence.FailModeClosed:
-				detail = detail + " — fail-closed: blocks installs without bundle data"
+				// CHAINSAW_OFFLINE_FAIL_MODE is ADVISORY — this command is
+				// its only consumer. Saying "blocks installs" here was
+				// false: nothing enforced it. Enforcement is the opt-in
+				// coverage gate (CHAINSAW_COVERAGE_MODE=closed), so point
+				// at that rather than claiming a block we do not perform.
+				detail = detail + " — intent: fail-closed (advisory; set CHAINSAW_COVERAGE_MODE=closed to enforce)"
 				status = "✗"
 			default:
 				detail = detail + " — condition default (SevUnknown)"
@@ -157,7 +162,8 @@ func runDoctorOffline(cmd *cobra.Command, _ []string) error {
 	w.Flush()
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Legend:  ✓ runs offline   ↻ refresh recommended   ○ no coverage (fail-open: signal off, installs allowed)   ⚠ degraded   ✗ requires bundle refresh / fail-closed")
+	fmt.Fprintln(out, "Legend:  ✓ runs offline   ↻ refresh recommended   ○ no coverage (signal off, installs allowed)   ⚠ degraded   ✗ requires bundle refresh")
+	fmt.Fprintln(out, "Note:    CHAINSAW_OFFLINE_FAIL_MODE is advisory and reported here only. To refuse installs on missing coverage, set CHAINSAW_COVERAGE_MODE=closed with CHAINSAW_COVERAGE_REQUIRED=<sources>.")
 	return nil
 }
 

@@ -20,6 +20,15 @@ var (
 	// their server URL in via `-X .../internal/cli.DefaultServer=<url>`.
 	DefaultServer = ""
 
+	// Edition names the build tier this binary was compiled as: "community"
+	// (the open-core default) or "enterprise". It is a BUILD tag, not a paid
+	// plan gate — server-side entitlements are enforced separately via the
+	// plan-feature gate. Overridable at build time via
+	// `-X drsgit.com/zeeshan/chainsaw/core/cli.Edition=enterprise` (mirrors
+	// the DefaultServer override pattern). Surfaced by `chainsaw version` and
+	// `chainsaw features`.
+	Edition = "community"
+
 	// DefaultTelemetryEndpoint is where the free/local CLI guard sends opt-out
 	// usage events when NO proxy server is configured — so free-tier adoption
 	// is measurable. Used only for CLOUD builds (telemetry.IsSelfHosted()==false)
@@ -113,6 +122,7 @@ func init() {
 					"version":    v.Version,
 					"commit":     v.Commit,
 					"build_date": v.Built,
+					"edition":    Edition,
 					"ad_hoc":     v.AdHoc,
 					"modified":   v.Modified,
 				})
@@ -128,6 +138,7 @@ func init() {
 			fmt.Fprintln(cmd.OutOrStdout(), versionLine)
 			fmt.Fprintln(cmd.OutOrStdout(), commitLine)
 			fmt.Fprintln(cmd.OutOrStdout(), "built "+v.Built)
+			fmt.Fprintln(cmd.OutOrStdout(), "edition "+Edition)
 			return nil
 		},
 	})

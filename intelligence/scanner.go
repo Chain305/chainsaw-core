@@ -1004,6 +1004,12 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 		dst.MaliciousIOCKind = src.MaliciousIOCKind
 		dst.MaliciousIOCDetail = src.MaliciousIOCDetail
 	}
+	if src.BuildRsExecutes {
+		dst.BuildRsExecutes = true
+		if len(src.BuildRsPrimitives) > 0 {
+			dst.BuildRsPrimitives = src.BuildRsPrimitives
+		}
+	}
 	if src.HiddenUnicodeHits != 0 {
 		dst.HiddenUnicodeHits = src.HiddenUnicodeHits
 	}

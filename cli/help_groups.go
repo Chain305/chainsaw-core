@@ -75,7 +75,7 @@ var commandGroupByName = map[string]string{
 
 	// DEBUG & DIAGNOSTICS.
 	"doctor": GrpDebug, "status": GrpDebug, "version": GrpDebug,
-	"telemetry": GrpDebug, "completion": GrpDebug,
+	"features": GrpDebug, "telemetry": GrpDebug, "completion": GrpDebug,
 }
 
 // init registers the help groups on rootCmd as early as possible. This MUST

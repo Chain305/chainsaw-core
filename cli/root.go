@@ -248,6 +248,17 @@ func renderError(err error) {
 		return
 	}
 	fmt.Fprintln(os.Stderr, "Error:", err)
+	// A mistyped or guessed verb (`chainsaw init`, `chainsaw login`,
+	// `chainsaw get-started`, …) reaches cobra as an "unknown command" error.
+	// Cobra's bare message (plus its sometimes-misleading "Did you mean")
+	// leaves a brand-new user with no route forward, so append the canonical
+	// start-here line. This is the "never leave them hanging" backstop for
+	// every verb we don't (and can't) alias.
+	if strings.Contains(err.Error(), "unknown command") {
+		fmt.Fprintln(os.Stderr, "  New here? Run `chainsaw setup` (guided first-time setup) or")
+		fmt.Fprintln(os.Stderr, "  `chainsaw introduce` (the concepts). `chainsaw --help` lists every command.")
+		return
+	}
 	// Append a one-line remediation hint for the two buckets where a stock
 	// next step is unambiguous. classifyCLIError is a pure function already
 	// run for telemetry in Execute; calling it again here keeps renderError
@@ -257,6 +268,21 @@ func renderError(err error) {
 		fmt.Fprintln(os.Stderr, "  Hint: run `chainsaw auth login` to re-authenticate.")
 	case "network":
 		fmt.Fprintln(os.Stderr, "  Hint: check `chainsaw status` or your --server / CHAINSAW_SERVER setting.")
+	}
+}
+
+// exactArgsWithUsage is cobra.ExactArgs(n) with a teaching error: on a count
+// mismatch it prints the command's usage shape and a concrete example instead
+// of cobra's bare "accepts N arg(s), received M", so a user who calls a command
+// with the wrong number of positional args is never left guessing the shape.
+// The "arg(s), received" fragment is preserved so classifyCLIError still buckets
+// this as a usage error (ExitUsage=4).
+func exactArgsWithUsage(n int, usage, example string) cobra.PositionalArgs {
+	return func(_ *cobra.Command, args []string) error {
+		if len(args) == n {
+			return nil
+		}
+		return fmt.Errorf("accepts %d arg(s), received %d\n  usage:   %s\n  example: %s", n, len(args), usage, example)
 	}
 }
 

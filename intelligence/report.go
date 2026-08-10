@@ -284,6 +284,14 @@ type ArtifactScanSection struct {
 	MaliciousIOCKind   string `json:"maliciousIOCKind,omitempty"`   // exfil_host|stealer_string
 	MaliciousIOCDetail string `json:"maliciousIOCDetail,omitempty"` // indicator + file
 
+	// BuildRsExecutes is set by the installscripts provider when a cargo
+	// crate ships a build.rs that performs shell or network execution at
+	// build time — the Rust supply-chain analogue of an install script
+	// that fetches remote code. Cargo-only. BuildRsPrimitives lists the
+	// detected primitives (the build.rs:<hit> tokens) for the audit trail.
+	BuildRsExecutes   bool     `json:"buildRsExecutes,omitempty"`
+	BuildRsPrimitives []string `json:"buildRsPrimitives,omitempty"`
+
 	HiddenUnicodeHits  int            `json:"hiddenUnicodeHits,omitempty"`
 	HiddenUnicodeKinds []string       `json:"hiddenUnicodeKinds,omitempty"`
 	ManifestFilesSeen  []string       `json:"manifestFilesSeen,omitempty"`
