@@ -1,12 +1,68 @@
 package pgstore
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/chain305/chainsaw-core/tenancy"
 )
 
-// migrate applies the chainsaw schema idempotently via CREATE TABLE IF NOT EXISTS.
+// migrateAdvisoryLockID is the Postgres advisory-lock key that
+// serializes migrateSchema across every process and goroutine pointed
+// at the same database. The value is the ASCII bytes of "CHAINSAW"
+// read as a big-endian int64 — arbitrary, but stable and unlikely to
+// collide with another tool's lock on a shared cluster.
+const migrateAdvisoryLockID int64 = 0x434841494E534157
+
+// migrate applies the schema under a Postgres advisory lock.
+//
+// Why the lock: migrateSchema is a list of idempotent DDL statements,
+// and "idempotent" is NOT the same as "concurrency-safe". Two sessions
+// running `CREATE INDEX IF NOT EXISTS x` (or CREATE TABLE / ALTER TABLE
+// ... ADD COLUMN IF NOT EXISTS) at the same time both pass the
+// existence check, both proceed, and the loser gets
+//
+//	ERROR: duplicate key value violates unique constraint
+//	"pg_class_relname_nsp_index"  (SQLSTATE 23505)
+//
+// — the IF NOT EXISTS guard is not atomic with the create. Every
+// pgstore.Open() runs migrate(), so this fires whenever two openers
+// race: N proxy replicas booting together against a shared database,
+// and (the way we found it) N Go test binaries or N t.Parallel tests
+// each calling newTestStore against one CI Postgres. In CI the symptom
+// was a failure count that moved between runs on an identical tree.
+//
+// pg_advisory_lock is session-scoped, so it is taken on a dedicated
+// *sql.Conn that is held for the whole migration and released before
+// the connection returns to the pool. Waiters block rather than error,
+// which is what a booting replica wants.
+func (s *Store) migrate() error {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration lock connection: %w", err)
+	}
+	defer conn.Close()
+
+	// A session statement_timeout (set from PoolConfig.StatementTimeout)
+	// would abort the lock wait while another replica migrates. Clear it
+	// for this connection only, and restore the pool default before the
+	// connection goes back.
+	if _, err := conn.ExecContext(ctx, `SET statement_timeout = 0`); err != nil {
+		return fmt.Errorf("clear statement timeout for migration: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrateAdvisoryLockID); err != nil {
+		return fmt.Errorf("acquire migration advisory lock: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockID)
+		_, _ = conn.ExecContext(ctx, `RESET statement_timeout`)
+	}()
+
+	return s.migrateSchema()
+}
+
+// migrateSchema applies the chainsaw schema idempotently via CREATE TABLE IF NOT EXISTS.
 // This function is the SOURCE OF TRUTH for the schema. There is no separate
 // migration-runner; every release boots through this function.
 //
@@ -23,8 +79,10 @@ import (
 // canonical history. Re-evaluate if it crosses 1500. TODO: refactor when a
 // real migration runner lands (see "no migration runner" TODO above).
 //
+// Callers must hold the migrate() advisory lock.
+//
 //nolint:funlen // Idempotent DDL list at 1043 lines (limit 1000). Splitting
-func (s *Store) migrate() error {
+func (s *Store) migrateSchema() error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT NOT NULL,
@@ -32,10 +90,13 @@ func (s *Store) migrate() error {
 			org_id TEXT NOT NULL DEFAULT '` + tenancy.DefaultOrgID + `',
 			PRIMARY KEY (org_id, key)
 		)`,
+		// orgs.slug is unique among LIVE orgs only — see the
+		// uniq_orgs_slug_active index below for why the column-level
+		// UNIQUE that used to sit on `slug` was removed.
 		`CREATE TABLE IF NOT EXISTS orgs (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			slug TEXT NOT NULL UNIQUE,
+			slug TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			deleted_at TIMESTAMPTZ
@@ -845,6 +906,26 @@ func (s *Store) migrate() error {
 		// An org admin flips it via PATCH /api/orgs/{id}/settings
 		// {"badge_blocked_public": true}. See docs/plan_10of10_surfaces.md.
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS badge_blocked_public INTEGER NOT NULL DEFAULT 0`,
+		// Org slugs are unique among LIVE orgs, not for all time.
+		//
+		// `slug TEXT NOT NULL UNIQUE` on the CREATE TABLE produced
+		// orgs_slug_key, an unconditional unique constraint, while every
+		// application-side availability check filters `deleted_at IS NULL`
+		// (authapi/auth_signup.go, the org-rename check in orgs.go). A
+		// SOFT-DELETED org therefore passed the application check and then
+		// violated orgs_slug_key on INSERT: the signup answered 500
+		// CHW-5001 and the slug stayed reserved forever with no way for an
+		// operator to release it short of a hard delete. The AKCobalt
+		// incident is the production case.
+		//
+		// Swapping the constraint for a partial unique index makes the
+		// database agree with the application: two live orgs still cannot
+		// share a slug, and a deleted org no longer squats one. Dropping
+		// the constraint cannot fail (IF EXISTS) and creating the index
+		// cannot fail on existing data, because orgs_slug_key already
+		// guaranteed global uniqueness — the new index is strictly weaker.
+		`ALTER TABLE orgs DROP CONSTRAINT IF EXISTS orgs_slug_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_orgs_slug_active ON orgs(slug) WHERE deleted_at IS NULL`,
 		`ALTER TABLE invitations ADD COLUMN IF NOT EXISTS suggested_persona TEXT`,
 		// Pending-invitations management surface (UX_AUDIT.md §8.4 P0):
 		// the manager dashboard needs to list, resend, and revoke pending

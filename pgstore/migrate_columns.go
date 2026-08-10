@@ -319,6 +319,23 @@ func (s *Store) ensureUserAndRoleColumns() error {
 	if err := s.addColumnIfMissing("users", "email_verified", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
+	// email_verified_at records WHEN the mailbox was proven, next to the
+	// boolean above. Five writers have been setting it since the email
+	// verification flow landed (authapi/email_verification.go,
+	// internal/server/auth.go, and both branches of orgs.acceptInvitation)
+	// but nothing ever created the column, so every one of those writes
+	// hit "column does not exist".
+	//
+	// Outside a transaction that is a silent no-op. INSIDE one it is not:
+	// Postgres aborts the whole transaction on the first failing
+	// statement and answers 25P02 for every statement after it, and both
+	// acceptInvitation branches issue the write as a discarded
+	// `_, _ = tx.Exec(...)`. The result was that accepting an invitation
+	// ALWAYS rolled back and answered 500 CHW-5002 — see
+	// TestAcceptInvitation* in internal/server/member_cap_test.go.
+	if err := s.addColumnIfMissing("users", "email_verified_at", "TIMESTAMPTZ"); err != nil {
+		return err
+	}
 	return nil
 }
 

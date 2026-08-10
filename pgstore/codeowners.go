@@ -34,14 +34,10 @@ func (s *Store) UpsertCodeowners(ctx context.Context, repoID string, mappings []
 			return fmt.Errorf("delete prior codeowners for %s: %w", repoID, err)
 		}
 		for i, m := range mappings {
-			owners := m.Owners
-			if owners == nil {
-				owners = []string{}
-			}
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO codeowners_mappings (repo_id, ordinal, pattern, owners, updated_at)
 				 VALUES (?, ?, ?, ?, NOW())`,
-				repoID, i, m.Pattern, owners,
+				repoID, i, m.Pattern, encodePgTextArray(m.Owners),
 			); err != nil {
 				return fmt.Errorf("insert codeowners row %d: %w", i, err)
 			}
