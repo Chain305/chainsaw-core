@@ -276,6 +276,31 @@ func (s *Store) ensureTenancyAndRepoColumns() error {
 	if err := s.addColumnIfMissing("repositories", "anonymous_access", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
+	// The five remote/cache columns below landed with the 0.16.0 remote-proxy
+	// work and are part of the repositories CREATE TABLE in migrate.go, but
+	// they had no addColumnIfMissing counterpart — so a database created
+	// before 0.16.0 kept the old 8-column repositories table forever
+	// (CREATE TABLE IF NOT EXISTS is a no-op on an existing table). The next
+	// config.LoadFromStore then died on
+	//   column "remote_proxy_url" does not exist
+	// because fetchRepositories SELECTs all five. Types and defaults here
+	// must stay identical to the CREATE TABLE in migrate.go; the
+	// upgrade-path test probes them column-by-column.
+	if err := s.addColumnIfMissing("repositories", "remote_proxy_url", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("repositories", "remote_skip_tls", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("repositories", "remote_timeout_seconds", "INTEGER NOT NULL DEFAULT 60"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("repositories", "remote_headers", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("repositories", "cache_negative_ttl_seconds", "INTEGER NOT NULL DEFAULT 300"); err != nil {
+		return err
+	}
 	if err := s.addColumnIfMissing("repositories", "org_id", fmt.Sprintf("TEXT NOT NULL DEFAULT '%s'", tenancy.DefaultOrgID)); err != nil {
 		return err
 	}
