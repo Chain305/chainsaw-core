@@ -348,9 +348,24 @@ type HooksConfig struct {
 	DockerLayer    DockerLayerHookConfig `yaml:"docker_layer"`
 }
 
-// DockerLayerHookConfig toggles container-image layer-level scanning (PR 7).
-// Values may also be overridden at runtime via the CHAINSAW_DOCKER_LAYER_SCAN
-// family of environment variables — see internal/hooks/docker_layer_scanner.go.
+// DockerLayerHookConfig is the YAML surface for container-image
+// layer-level scanning (PR 7).
+//
+// INERT — do not rely on these fields. Nothing reads them. The only
+// production consumer, cmd/chainsaw-proxy/main.go::initHooks, builds a
+// hooks.DockerLayerScannerConfig with just {Inspector, Logger}, so the
+// scanner always falls through to its environment gates:
+// CHAINSAW_DOCKER_LAYER_SCAN (on|off|auto),
+// CHAINSAW_DOCKER_LAYER_SIZE_CAP_BYTES and
+// CHAINSAW_DOCKER_LAYER_SCAN_TIMEOUT_SECONDS — see
+// internal/hooks/docker_layer_scanner.go. In particular
+// `hooks.docker_layer.mode: off` does NOT disable layer scanning.
+//
+// The fields (and their defaults, applied in applyDefaults) are retained
+// so existing YAML keeps parsing under decoder.KnownFields(true); the
+// values are additionally dropped by the settings-table round-trip in
+// core/config/store.go. Wiring them up is tracked in
+// docs/CONFIG_REFERENCE.md §B11/§B29.
 type DockerLayerHookConfig struct {
 	// Mode is "on", "off" or "auto". Empty means "on" (the default).
 	Mode string `yaml:"mode"`

@@ -16,11 +16,26 @@ package config
 // The value of IsOffline() drives gates in:
 //   - internal/trivydb : skip OCI registry pulls.
 //   - internal/billy (via internal/server/billy.go) : 503 on chat endpoints.
-//   - internal/telemetry : ModeDisabled overrides consent.
 //   - internal/datasource : startup_sync defaults to false; periodic
 //     refresh loops are suppressed.
 //   - internal/server/auth_cli.go : device-code OAuth returns 503 and the
 //     server refuses to boot without a fallback auth mechanism.
+//
+// The following subsystems gate on the CHAINSAW_OFFLINE ENV VAR directly
+// and never see this Config, so the YAML mirror below does NOT reach
+// them:
+//   - core/telemetry (ResolveMode) : ModeDisabled overrides consent.
+//   - core/intelligence (IsOffline) : kev / malware / weekly-downloads
+//     providers.
+//   - core/intelligence/osv (refresher) and core/risk
+//     (registry_maintenance).
+//
+// Separately, `runtime.offline: true` in YAML is dropped by the
+// settings-table round-trip on any DB-backed boot (the store-hydrated
+// Config replaces the YAML one in loadAndPersistConfig and does not
+// carry the runtime block), so in practice CHAINSAW_OFFLINE=1 is the
+// only reliable way to enable offline mode. See
+// docs/CONFIG_REFERENCE.md §B29.
 //   - Paddle / Postmark / Turnstile / signup : the per-env-var disables
 //     remain, but the server additionally treats an offline boot as "no
 //     phone-home integrations active" for logging purposes.
@@ -54,11 +69,18 @@ type RuntimeConfig struct {
 	// production. Mirrors the CHAINSAW_OFFLINE resolution order: env
 	// var wins, then this YAML field, then false.
 	AllowInsecureTLS bool `yaml:"allow_insecure_tls"`
-	// IntelBundlePath is the on-disk path to the signed
+	// IntelBundlePath was intended to mirror CHAINSAW_INTEL_BUNDLE_PATH
+	// — the on-disk path to the signed
 	// chainsaw-intel-bundle-YYYY-MM-DD.tar.gz that ships pre-mirrored
-	// snapshots of every "phone-home" data source (W4). Mirrors
-	// CHAINSAW_INTEL_BUNDLE_PATH; the env var wins. See
-	// docs/install/AIRGAP.md.
+	// snapshots of every "phone-home" data source (W4).
+	//
+	// INERT: nothing reads this field. There is no accessor and no
+	// consumer; the bundle loader in cmd/chainsaw-proxy/offline.go reads
+	// intelligence.BundleEnvVar (the env var) directly. Setting
+	// `runtime.intel_bundle_path` in YAML does not load a bundle — use
+	// CHAINSAW_INTEL_BUNDLE_PATH. Retained so existing YAML keeps
+	// parsing under decoder.KnownFields(true). See
+	// docs/install/AIRGAP.md and docs/CONFIG_REFERENCE.md §B29.
 	IntelBundlePath string `yaml:"intel_bundle_path"`
 	// OfflineFailMode controls how remote-only providers behave when
 	// air-gapped: "condition-default" (per-condition fall-back —
