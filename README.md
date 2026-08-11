@@ -22,6 +22,10 @@ in a separate private module and is not part of this repository.
   locally-computable signals (typosquat, reserved-namespaces, hidden-unicode,
   install-scripts, checksum, manifest-confusion, release-freshness, license,
   embedded-keyring provenance) that run on every ecosystem.
+- **Coverage gate** (`coverage/`) — a stdlib-only leaf package holding the whole
+  optional fail-closed decision: given a declared posture and a ledger of which
+  data sources could be evaluated, decide whether to refuse. Off by default; see
+  [Optional: refuse when a signal could not be evaluated](#optional-refuse-when-a-signal-could-not-be-evaluated).
 - **Ecosystem format parsers** (`formats/`, `depparser/`) for npm, PyPI,
   RubyGems, Maven, NuGet, Composer, Cargo, Docker, Go modules, Swift, CocoaPods,
   Hugging Face, APT, and Yum/DNF.
@@ -75,8 +79,44 @@ built-in known-malicious floor of well-known attacks. A bare `chainsaw npm insta
 / `npm ci` or `pip install -r requirements.txt` scans the whole resolved lockfile.
 The default path is offline and sends nothing; for the full OpenSSF
 malicious-packages set, run the opt-in `chainsaw guard update` (the one networked
-step). If signal coverage is thin the guard fails open with a visible notice — it
-never breaks `npm install`.
+step). **By default the guard fails open**: if a signal could not be evaluated it
+prints a visible notice and lets the install proceed, so a thin feed or an
+unreachable server never breaks `npm install`. That default can be changed — see
+below — but you have to ask for it.
+
+### Optional: refuse when a signal could not be evaluated
+
+Fail-open is the right default for a developer workstation and the wrong one for
+some regulated and air-gapped deployments. For those, an **opt-in, off-by-default**
+gate lets you name data sources that must be evaluable and refuse the package when
+one is not:
+
+```sh
+export CHAINSAW_COVERAGE_MODE=warn          # off (default) | warn | closed
+export CHAINSAW_COVERAGE_REQUIRED=typosquat,malware
+```
+
+- **`off` is the default.** Unset, none of this runs and behaviour is identical to
+  a build without the feature. Chainsaw does not fail closed as shipped.
+- **Start in `warn`.** It reports exactly what `closed` would have refused and
+  refuses nothing, so you can measure before enforcing.
+- **Valid sources:** `malware`, `cve`, `typosquat`, `provenance`,
+  `registry_metadata`, `checksum`, `install_scripts`, `hidden_unicode`. An unknown
+  name is a hard configuration error, never a silent no-op.
+- **Be honest about what an offline guard can see.** `typosquat` always works (the
+  corpus is embedded). `malware` needs `chainsaw guard update` to have fetched the
+  full feed. `cve`, `registry_metadata` and `provenance` need the server and are
+  *never* available offline. `checksum`, `install_scripts` and `hidden_unicode`
+  need the package bytes, so they need staged artifacts or deep mode. Requiring one
+  the guard cannot see refuses every install, with a readable reason — that is the
+  intended answer, not a bug.
+- `CHAINSAW_COVERAGE_BREAK_GLASS=1` disables the gate for one invocation and logs
+  loudly. An explicitly configured posture that cannot be honoured is fatal rather
+  than silently downgraded to off.
+
+The same variables exist on the Chainsaw registry proxy, the publish path, and the
+K8s admission webhook in the enterprise module. They are **not** wired into
+`chainsaw pr-scan`.
 
 To make it automatic, add `eval "$(chainsaw guard init zsh)"` (or `bash`/`fish`) to
 your shell config — `npm`, `pip`, and `go` then route through the guard with no

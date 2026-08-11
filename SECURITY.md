@@ -47,6 +47,66 @@ Also out-of-scope: third-party upstreams that Chainsaw proxies (please
 report those to the upstream project), and self-built forks that diverge
 from mainline.
 
+## Security posture — what the local guard does and does not guarantee
+
+Read this before filing a report about the guard "letting something
+through". Several of these behaviours are deliberate.
+
+**The workstation guard fails open by default.** `chainsaw npm/pip/go …`
+evaluates a package against the signals it can compute locally and, when a
+signal cannot be evaluated — feed absent or stale, artifact bytes
+unavailable, server preflight unreachable, parse error — it prints a notice
+and lets the install proceed. Breaking `npm install` on our own inability to
+look is a worse default for a developer workstation than allowing. A report
+that a signal did not run is a bug; a report that an *unevaluable* signal
+did not block is expected behaviour.
+
+**Fail-closed is available, and it is opt-in.** `CHAINSAW_COVERAGE_MODE`
+(`off` | `warn` | `closed`) with `CHAINSAW_COVERAGE_REQUIRED` names data
+sources that must be evaluable, and refuses the package when one is not.
+`off` is the default, and with the variable unset no code path changes. See
+the README for the source names and for what an offline guard can honestly
+attest. `CHAINSAW_COVERAGE_BREAK_GLASS=1` is a documented, loudly-logged
+escape hatch — its existence is intentional, not a bypass finding.
+
+**The guard is defence-in-depth, not proof.** It runs as a shell shim on a
+machine the developer controls, so it can be uninstalled, bypassed by
+invoking the package manager directly, or run with the break-glass variable
+set. It is not, and does not claim to be, a tamper-proof control. The
+enforcement chokepoints an organisation can actually rely on are the
+registry proxy, CI, publish, and K8s admission. "A developer can bypass the
+local guard" is a documented property, not a vulnerability.
+
+**Refusals on a bare `chainsaw guard` install are best-effort by design.**
+The offline path ships an embedded known-malicious floor and typosquat
+corpus; the full OpenSSF malicious-packages set arrives only after the
+opt-in `chainsaw guard update`. A package missing from the offline seed is a
+coverage gap, not a control failure.
+
+Genuinely in scope for a security report: a package that the guard *did*
+evaluate and should have refused but allowed; a way to make an
+explicitly-configured `CHAINSAW_COVERAGE_MODE=closed` posture silently
+degrade to open; a path that reads or transmits data off the machine on the
+default offline path; and anything that lets a proxied artifact be served or
+executed without the checks that were configured to run.
+
+### Notable fail-closed defaults
+
+- **Swift `github_convention` is off.** The SE-0292 `scope.name` →
+  `github.com/<scope>/<name>.git` auto-translator *guesses* a repository
+  from a package identifier, and nothing binds the two — so with it enabled
+  and unconstrained, whoever registers that GitHub org has their code served
+  as the legitimate package. It is off by default, requires a non-empty
+  `swift.github_org_allowlist` when on (an empty or all-blank list denies),
+  and the unconstrained combination is refused at construction rather than
+  downgraded. The supported way to resolve Swift packages is the explicit
+  `swift.identifier_map_path`.
+- **`CHAINSAW_OFFLINE` is honoured by the Swift git fallback**, which
+  refuses network git operations when offline mode is in force.
+- **`CHAINSAW_ALLOW_INSECURE_TLS` is off by default.** Until it is set,
+  per-remote TLS skip-verify flags are ignored and upstream certificates are
+  always validated.
+
 ## Disclosure window
 
 We follow a **90-day coordinated disclosure** window by default, measured
