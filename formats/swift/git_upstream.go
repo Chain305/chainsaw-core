@@ -40,6 +40,28 @@ type GitUpstream struct {
 	Timeout    time.Duration // per-operation timeout; defaults to 60s
 	CacheRoot  string        // working directory for clones; defaults to os.TempDir()
 	HTTPClient *http.Client  // retained for future use; not wired yet
+	// Offline, when non-nil and returning true, blocks every git
+	// operation that touches the network (ls-remote, fetch). A nil
+	// predicate means "online". The predicate is consulted per call, not
+	// cached, so a runtime config flip takes effect immediately —
+	// mirroring core/cli.deepFetchEnabled().
+	//
+	// This exists because the CHAINSAW_OFFLINE / runtime.offline umbrella
+	// otherwise did NOT reach the Swift git fallback: an air-gapped
+	// deployment would still shell out to `git ls-remote https://github.com/…`.
+	Offline func() bool
+}
+
+// errOffline is returned when a network git operation is attempted while
+// offline mode is in force.
+var errOffline = errors.New(
+	"swift git upstream: refusing network git operation — offline mode is enabled " +
+		"(CHAINSAW_OFFLINE / runtime.offline)")
+
+// offline reports whether egress is currently forbidden. Safe on a nil
+// receiver and a nil predicate.
+func (g *GitUpstream) offline() bool {
+	return g != nil && g.Offline != nil && g.Offline()
 }
 
 // NewGitUpstream constructs a GitUpstream with sane defaults.
@@ -262,6 +284,9 @@ func validateGitArg(s string) error {
 // lsRemoteTags returns a map of semver-parsed version string → commit
 // SHA for every tag advertised by the upstream git remote.
 func (g *GitUpstream) lsRemoteTags(ctx context.Context, gitURL string) (map[string]string, error) {
+	if g.offline() {
+		return nil, errOffline
+	}
 	if err := validateGitArg(gitURL); err != nil {
 		return nil, err
 	}
@@ -372,6 +397,9 @@ func (g *GitUpstream) ensureRepo(ctx context.Context, identifier, gitURL string)
 
 // fetchTag fetches a single tag into the bare repo.
 func (g *GitUpstream) fetchTag(ctx context.Context, repoDir, version, commit string) error {
+	if g.offline() {
+		return errOffline
+	}
 	if err := validateGitArg(version); err != nil {
 		return err
 	}

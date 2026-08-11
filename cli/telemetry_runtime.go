@@ -157,8 +157,18 @@ func resolveEnv() string {
 	return "prod"
 }
 
+// ciEnvVars are the environment variables whose presence marks a CI runner.
+// Kept as a package-level list rather than inlined so tests that need a
+// genuinely non-CI environment can neutralize every signal from the same
+// source of truth: clearing only CI is not enough, because a GitHub Actions
+// runner also exports GITHUB_ACTIONS. (That gap silenced the post-block guard
+// nudge and made core/cli fail only under CI, which blocked the open-core
+// publish gate.) Adding a provider here automatically extends both the
+// detection and the test isolation.
+var ciEnvVars = []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "JENKINS_URL", "TEAMCITY_VERSION"}
+
 func isCIEnvironment() bool {
-	for _, k := range []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "JENKINS_URL", "TEAMCITY_VERSION"} {
+	for _, k := range ciEnvVars {
 		if v := strings.TrimSpace(os.Getenv(k)); v != "" && !strings.EqualFold(v, "false") {
 			return true
 		}

@@ -69,6 +69,46 @@ repositories:
 	}
 }
 
+// TestLoadRejectsMisspelledSecurityBlock covers the hole
+// TestLoadRejectsUnknownFields did NOT cover. Config used to carry
+//
+//	Extra map[string]map[string]string `yaml:",inline"`
+//
+// as a "placeholder for forward compatibility". That inline map absorbed
+// any unknown top-level key whose value happened to be a string→string
+// mapping — which is the shape of every real config block. The existing
+// unknown-field test only passed because its value was a bare bool.
+//
+// So `provenence:` (typo) with `offline: "true"` under it parsed with NO
+// error, and Provenance.Offline stayed false: an operator who thought
+// they had turned provenance verification off for an air-gapped site got
+// a proxy that still dialled keys.openpgp.org, sum.golang.org, the
+// Sigstore TUF CDN and Docker Hub, with nothing in the logs to say so.
+// A typo in a security block must fail startup. Extra is gone; do not
+// reintroduce an inline catch-all.
+func TestLoadRejectsMisspelledSecurityBlock(t *testing.T) {
+	body := `
+provenence:
+  offline: "true"
+  swift_full_verify: "true"
+repositories:
+  - name: pypi
+    format: pip
+    remote:
+      url: "https://pypi.org"
+`
+	path := writeTempConfig(t, body)
+	cfg, err := Load(path)
+	if err == nil {
+		t.Fatalf("misspelled `provenence:` block parsed without error; "+
+			"Provenance.Offline=%v, so the operator's kill-switch silently did nothing",
+			cfg.Provenance.Offline)
+	}
+	if !strings.Contains(err.Error(), "provenence") {
+		t.Errorf("error should name the offending key so the operator can find the typo, got: %v", err)
+	}
+}
+
 func TestLoadAppliesDefaults(t *testing.T) {
 	body := `
 repositories:

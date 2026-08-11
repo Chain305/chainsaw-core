@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,7 +85,7 @@ func makeBareGitRepo(t *testing.T) string {
 
 func TestGitUpstreamListReleases(t *testing.T) {
 	gitURL := makeBareGitRepo(t)
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{"test.pkg": gitURL},
 	})
 	g := NewGitUpstream(m, t.TempDir())
@@ -104,9 +105,47 @@ func TestGitUpstreamListReleases(t *testing.T) {
 	}
 }
 
+// TestGitUpstreamOfflineBlocksNetworkGit pins the air-gap guarantee for
+// the Swift path. Before this gate, CHAINSAW_OFFLINE / runtime.offline
+// did not reach the Swift git fallback at all: no file under the swift
+// path consulted the offline umbrella, so an air-gapped proxy would
+// still shell out to `git ls-remote https://github.com/…`.
+//
+// The repo here is a real local one, so a failure means the gate did not
+// fire rather than that the network was simply unreachable.
+func TestGitUpstreamOfflineBlocksNetworkGit(t *testing.T) {
+	gitURL := makeBareGitRepo(t)
+	m := mustIdentifierMap(t, IdentifierMapConfig{
+		Static: map[string]string{"test.pkg": gitURL},
+	})
+
+	online := NewGitUpstream(m, t.TempDir())
+	if _, err := online.ListReleases(context.Background(), "test.pkg", "/repo/swift"); err != nil {
+		t.Fatalf("baseline (nil Offline predicate) must resolve: %v", err)
+	}
+
+	offlineFlag := true
+	g := NewGitUpstream(m, t.TempDir())
+	g.Offline = func() bool { return offlineFlag }
+
+	if _, err := g.ListReleases(context.Background(), "test.pkg", "/repo/swift"); !errors.Is(err, errOffline) {
+		t.Fatalf("offline ListReleases: want errOffline, got %v", err)
+	}
+	if _, _, err := g.BuildArchive(context.Background(), "test.pkg", "1.0.0"); !errors.Is(err, errOffline) {
+		t.Fatalf("offline BuildArchive: want errOffline, got %v", err)
+	}
+
+	// The predicate is consulted per call, so flipping offline off at
+	// runtime restores service without rebuilding the upstream.
+	offlineFlag = false
+	if _, err := g.ListReleases(context.Background(), "test.pkg", "/repo/swift"); err != nil {
+		t.Fatalf("after offline flip-off, ListReleases must work: %v", err)
+	}
+}
+
 func TestGitUpstreamBuildArchive(t *testing.T) {
 	gitURL := makeBareGitRepo(t)
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{"test.pkg": gitURL},
 	})
 	g := NewGitUpstream(m, t.TempDir())
@@ -138,7 +177,7 @@ func TestGitUpstreamBuildArchive(t *testing.T) {
 
 func TestGitUpstreamGetReleaseMetadataPublishedAt(t *testing.T) {
 	gitURL := makeBareGitRepo(t)
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{"test.pkg": gitURL},
 	})
 	g := NewGitUpstream(m, t.TempDir())

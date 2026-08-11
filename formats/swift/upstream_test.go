@@ -56,7 +56,7 @@ func TestCompositeRoundTripperRegistry404FallsBackToGit(t *testing.T) {
 	// doesn't actually exist. Since the test only asserts the
 	// fallback PATH (not the git outcome), we expect a 502 or 404
 	// from the synthetic error response — never a panic.
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{"apple.swift-nio": "https://github.com/apple/does-not-exist.git"},
 	})
 	rt := &CompositeRoundTripper{
@@ -79,7 +79,7 @@ func TestCompositeRoundTripperRegistry404FallsBackToGit(t *testing.T) {
 }
 
 func TestCompositeRoundTripperIdentifiersReverseLookup(t *testing.T) {
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{"apple.swift-nio": "https://github.com/apple/swift-nio.git"},
 	})
 	rt := &CompositeRoundTripper{

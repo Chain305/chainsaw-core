@@ -101,6 +101,41 @@ const (
 	settingSwiftGitHubOrgAllowList  = "swift.github_org_allowlist"
 	settingSwiftTrustRootBundlePath = "swift.trust_root_bundle_path"
 	settingSwiftTrustSwiftRoot      = "swift.trust_swift_root"
+	// The keys below close the twelve YAML blocks that Wave AA's Swift
+	// fix did not cover. Every one of them was declared in Config,
+	// accepted by the YAML parser, honoured by whatever ran before
+	// main.go swapped cfg for the store-loaded copy — and then zeroed,
+	// because LoadFromStoreForOrg rebuilt Config from an explicit key
+	// list and anything absent from that list was re-defaulted.
+	//
+	// The completeness ratchet in roundtrip.go is what keeps this list
+	// from falling behind Config again; adding a field without a key
+	// here (or an ephemeralFields entry) fails CI.
+	settingRuntimeOffline               = "runtime.offline"
+	settingRuntimeAllowInsecureTLS      = "runtime.allow_insecure_tls"
+	settingRuntimeIntelBundlePath       = "runtime.intel_bundle_path"
+	settingRuntimeOfflineFailMode       = "runtime.offline_fail_mode"
+	settingRuntimeWebhookLegacyPerUser  = "runtime.webhook_legacy_peruser_routing"
+	settingRuntimeMalwareTestOverrides  = "runtime.malware_test_overrides"
+	settingProvenanceOffline            = "provenance.offline"
+	settingProvenanceDisabledEcosystems = "provenance.disabled_ecosystems"
+	settingProvenanceSwiftFullVerify    = "provenance.swift_full_verify"
+	settingProvenanceSwiftRegistryURL   = "provenance.swift_registry_url"
+	settingMalwareEnableGHSA            = "malware.enable_ghsa"
+	settingSBOMAttributionEnabled       = "sbom.attribution_enabled"
+	settingSBOMAttributionWindowDays    = "sbom.attribution_window_days"
+	settingCorrelationEnabled           = "correlation.enabled"
+	settingCoverageEnabled              = "coverage.enabled"
+	settingPolicyEvalCacheTTLSeconds    = "policy.eval_cache_ttl_seconds"
+	settingDockerLayerMode              = "hooks.docker_layer.mode"
+	settingDockerLayerSizeCapBytes      = "hooks.docker_layer.size_cap_bytes"
+	settingDockerLayerTimeoutSeconds    = "hooks.docker_layer.timeout_seconds"
+	settingTrivialMaxConcurrentScans    = "hooks.trivial.max_concurrent_scans"
+	// settingRemoteDefaults carries the whole `remotes:` map as one JSON
+	// row. Per-format keys would multiply with every new ecosystem and
+	// the map is small (17 entries, ~1 KB) and always fully populated by
+	// applyDefaults, so a single blob is both lossless and stable.
+	settingRemoteDefaults = "remotes"
 )
 
 // RepositoryUpdate captures mutable fields exposed via the UI.
@@ -111,9 +146,52 @@ type RepositoryUpdate struct {
 	CacheNegativeTTLSeconds *int
 }
 
-// LoadFromStoreForOrg hydrates a Config for an org from the database store. The returned
-// boolean indicates whether any repositories already existed in the database.
+// LoadFromStoreForOrg hydrates a Config for an org purely from the
+// database store. The returned boolean indicates whether any
+// repositories already existed in the database.
+//
+// This is the "no base" entry point, for callers that want the store's
+// own view of a setting and nothing else — the per-org readers in
+// internal/server (clamAVConfigForOrg, dataSourceConfigForOrg, the
+// runtime settings API). Boot uses OverlayFromStoreForOrg instead so
+// YAML-only blocks are not zeroed; see that function for the precedence
+// rule.
 func LoadFromStoreForOrg(store *pgstore.Store, orgID string) (*Config, bool, error) {
+	return OverlayFromStoreForOrg(store, orgID, nil)
+}
+
+// OverlayFromStoreForOrg layers the settings the database owns on top of
+// base and returns the merged config. base is never mutated; a nil base
+// means "start from the zero Config", which reproduces the historical
+// load-from-scratch behaviour exactly.
+//
+// PRECEDENCE (highest first) — implemented here, documented in
+// docs/CONFIG_REFERENCE.md:
+//
+//	env var > explicit CLI flag > settings table > YAML > built-in default
+//
+// The settings table beats YAML because that is where the admin UI and
+// the runtime settings API write: an operator who toggles blocking mode
+// in the dashboard must not have it reverted by the next restart. But
+// the table only wins for keys it actually HOLDS. A key with no row is
+// a key the store does not own yet, and base's value stands.
+//
+// That single distinction is the fix. Before it, this function built a
+// Config literal naming every key it knew and left everything else at
+// the Go zero value, so twelve YAML blocks — runtime.*, provenance.*,
+// coverage, correlation, policy.eval_cache_ttl_seconds, remotes.*,
+// repositories[].apt/yum, malware, sbom, hooks.docker_layer,
+// hooks.trivial.max_concurrent_scans — were silently discarded on every
+// boot of every DB-backed deployment (which is all of them: initDatabase
+// is mandatory and fatal). Wave AA patched the same hole for Swift by
+// adding keys to the literal; the hole reopened because nothing checked
+// the list against the struct. roundtrip.go now does.
+//
+// Env vars and CLI flags sit above the store because they are stated by
+// the operator on THIS boot. cmd/chainsaw-proxy re-applies the flag
+// overrides after this call so their precedence does not depend on
+// whether the settings table happened to carry the key.
+func OverlayFromStoreForOrg(store *pgstore.Store, orgID string, base *Config) (*Config, bool, error) {
 	if store == nil {
 		return nil, false, errors.New("database store is required")
 	}
@@ -127,112 +205,130 @@ func LoadFromStoreForOrg(store *pgstore.Store, orgID string) (*Config, bool, err
 		return nil, false, err
 	}
 
-	cfg := &Config{
-		Server: ServerConfig{
-			Listen: settings.get(settingServerListen),
-			Admin: AdminConfig{
-				Username: settings.get(settingAdminUsername),
-			},
-			TLS: TLSConfig{
-				CertFile:   settings.get(settingServerTLSCertFile),
-				KeyFile:    settings.get(settingServerTLSKeyFile),
-				MinVersion: settings.get(settingServerTLSMinVersion),
-			},
-		},
-		BlobStore: BlobStoreConfig{
-			Root: settings.get(settingBlobRoot),
-		},
-		HTTPClient: HTTPClientConfig{
-			TimeoutSeconds: settings.getInt(settingHTTPTimeout),
-			TLSInsecure:    settings.getBool(settingHTTPTLSInsecure),
-			MaxIdleConns:   settings.getInt(settingHTTPMaxIdle),
-		},
-		Index: IndexConfig{
-			Path: settings.get(settingIndexPath),
-		},
-		Exceptions: ExceptionsConfig{
-			Path: settings.get(settingExceptionsPath),
-		},
-		GeoIP: GeoIPConfig{
-			DBPath: settings.get(settingGeoIPDBPath),
-		},
-		Hooks: HooksConfig{
-			RequestScript:  settings.get(settingHookScript),
-			TimeoutSeconds: settings.getInt(settingHookTimeout),
-			Trivial: TrivialHookConfig{
-				BinaryPath:     settings.get(settingTrivialBinary),
-				DBPath:         settings.get(settingTrivialDB),
-				TimeoutSeconds: settings.getInt(settingTrivialTimeout),
-			},
-		},
-		ClamAV: ClamAVConfig{
-			Enabled:        optionalBool(settings, settingClamAVEnabled),
-			SocketPath:     settings.get(settingClamAVSocketPath),
-			TimeoutSeconds: settings.getInt(settingClamAVTimeout),
-			MaxStreamBytes: settings.getInt64(settingClamAVMaxStream),
-		},
-		DataSources: DataSourcesConfig{
-			OpenSSF: DataSourceRuntimeConfig{
-				Enabled:                optionalBool(settings, settingDataSourceOpenSSFEnabled),
-				RefreshIntervalSeconds: settings.getInt(settingDataSourceOpenSSFRefresh),
-				StartupSync:            optionalBool(settings, settingDataSourceOpenSSFStartup),
-				TimeoutSeconds:         settings.getInt(settingDataSourceOpenSSFTimeout),
-				JitterPercent:          settings.getInt(settingDataSourceOpenSSFJitter),
-			},
-			TrivyDB: DataSourceRuntimeConfig{
-				Enabled:                optionalBool(settings, settingDataSourceTrivyEnabled),
-				RefreshIntervalSeconds: settings.getInt(settingDataSourceTrivyRefresh),
-				StartupSync:            optionalBool(settings, settingDataSourceTrivyStartup),
-				TimeoutSeconds:         settings.getInt(settingDataSourceTrivyTimeout),
-				JitterPercent:          settings.getInt(settingDataSourceTrivyJitter),
-			},
-			EPSS: DataSourceRuntimeConfig{
-				Enabled:                optionalBool(settings, settingDataSourceEPSSEnabled),
-				RefreshIntervalSeconds: settings.getInt(settingDataSourceEPSSRefresh),
-				StartupSync:            optionalBool(settings, settingDataSourceEPSSStartup),
-				TimeoutSeconds:         settings.getInt(settingDataSourceEPSSTimeout),
-				JitterPercent:          settings.getInt(settingDataSourceEPSSJitter),
-			},
-			ClamAVDB: DataSourceRuntimeConfig{
-				Enabled:                optionalBool(settings, settingDataSourceClamAVEnabled),
-				RefreshIntervalSeconds: settings.getInt(settingDataSourceClamAVRefresh),
-				StartupSync:            optionalBool(settings, settingDataSourceClamAVStartup),
-				TimeoutSeconds:         settings.getInt(settingDataSourceClamAVTimeout),
-				JitterPercent:          settings.getInt(settingDataSourceClamAVJitter),
-			},
-		},
-		Swift: SwiftConfig{
-			// Wave AF: GitFallbackEnabled + GitHubConvention now default
-			// TRUE when no explicit setting row exists. Real swift
-			// package resolve through chain305 requires both: the
-			// fallback engages SwiftPM's git-clone path through the
-			// proxy, and the convention auto-maps `<scope>.<name>`
-			// identifiers to `https://github.com/<scope>/<name>` so
-			// SwiftPM's /identifiers?url= probe round-trips correctly
-			// (Wave AE #141 fixed the reverse-lookup symmetry).
-			// Explicit `false` in the settings table still wins.
-			GitFallbackEnabled:  settings.getBoolDefault(settingSwiftGitFallbackEnabled, true),
-			IdentifierMapPath:   settings.get(settingSwiftIdentifierMapPath),
-			GitCacheDir:         settings.get(settingSwiftGitCacheDir),
-			GitHubConvention:    settings.getBoolDefault(settingSwiftGitHubConvention, true),
-			GitHubOrgAllowList:  splitCommaList(settings.get(settingSwiftGitHubOrgAllowList)),
-			TrustRootBundlePath: settings.get(settingSwiftTrustRootBundlePath),
-			TrustSwiftRoot:      settings.getBool(settingSwiftTrustSwiftRoot),
-		},
-		Repositories: repos,
-	}
-	cfg.ReleasePolicy.MinAgeDays = settings.getInt(settingReleaseMinAgeDays)
-	cfg.Exceptions.AgeDays = settings.getInt(settingExceptionAge)
-	if value, ok := settings.lookup(settingBlockingMode); ok {
-		enabled := strings.EqualFold(value, "true") || value == "1"
-		cfg.BlockingMode = &enabled
-	}
-	if value, ok := settings.lookup(settingRepositoryAllowAnonymous); ok {
-		allow := strings.EqualFold(value, "true") || value == "1"
-		cfg.RepositoryAnonymousAccess = boolPtr(allow)
+	cfg := base.clone()
+	applySettingsOverlay(cfg, settings)
+	if hasRepos {
+		// Repository rows are wholly store-owned: every field of
+		// RepositoryConfig has a column, including the apt/yum metadata
+		// blocks (format_options). So a populated table replaces base's
+		// list rather than merging into it.
+		cfg.Repositories = repos
 	}
 	cfg.applyDefaults("")
 	return cfg, hasRepos, nil
+}
+
+// OverlayFromStore is OverlayFromStoreForOrg for the default org.
+func OverlayFromStore(store *pgstore.Store, base *Config) (*Config, bool, error) {
+	return OverlayFromStoreForOrg(store, tenancy.DefaultOrgID, base)
+}
+
+// applySettingsOverlay writes every settings row the store holds onto
+// cfg. Absent rows leave cfg alone — see OverlayFromStoreForOrg.
+func applySettingsOverlay(cfg *Config, settings settingMap) {
+	// runtime.* — the air-gap umbrella flag and its neighbours. Dropping
+	// runtime.offline was the worst of the twelve: the boot log asserted
+	// "Offline mode active" while StartDataSources, Billy, auth_cli and
+	// the trivy-db updater all saw online, so only CHAINSAW_OFFLINE=1
+	// ever truly gated anything.
+	settings.overlayBool(settingRuntimeOffline, &cfg.Runtime.Offline)
+	settings.overlayBool(settingRuntimeAllowInsecureTLS, &cfg.Runtime.AllowInsecureTLS)
+	settings.overlayString(settingRuntimeIntelBundlePath, &cfg.Runtime.IntelBundlePath)
+	settings.overlayString(settingRuntimeOfflineFailMode, &cfg.Runtime.OfflineFailMode)
+	settings.overlayBool(settingRuntimeWebhookLegacyPerUser, &cfg.Runtime.WebhookLegacyPerUserRouting)
+	settings.overlayString(settingRuntimeMalwareTestOverrides, &cfg.Runtime.MalwareTestOverrides)
+
+	// server / http client / paths
+	settings.overlayString(settingServerListen, &cfg.Server.Listen)
+	settings.overlayString(settingAdminUsername, &cfg.Server.Admin.Username)
+	settings.overlayString(settingServerTLSCertFile, &cfg.Server.TLS.CertFile)
+	settings.overlayString(settingServerTLSKeyFile, &cfg.Server.TLS.KeyFile)
+	settings.overlayString(settingServerTLSMinVersion, &cfg.Server.TLS.MinVersion)
+	settings.overlayString(settingBlobRoot, &cfg.BlobStore.Root)
+	settings.overlayInt(settingHTTPTimeout, &cfg.HTTPClient.TimeoutSeconds)
+	settings.overlayBool(settingHTTPTLSInsecure, &cfg.HTTPClient.TLSInsecure)
+	settings.overlayInt(settingHTTPMaxIdle, &cfg.HTTPClient.MaxIdleConns)
+	settings.overlayString(settingIndexPath, &cfg.Index.Path)
+	settings.overlayString(settingExceptionsPath, &cfg.Exceptions.Path)
+	settings.overlayInt(settingExceptionAge, &cfg.Exceptions.AgeDays)
+	settings.overlayString(settingGeoIPDBPath, &cfg.GeoIP.DBPath)
+
+	// hooks
+	settings.overlayString(settingHookScript, &cfg.Hooks.RequestScript)
+	settings.overlayInt(settingHookTimeout, &cfg.Hooks.TimeoutSeconds)
+	settings.overlayString(settingTrivialBinary, &cfg.Hooks.Trivial.BinaryPath)
+	settings.overlayString(settingTrivialDB, &cfg.Hooks.Trivial.DBPath)
+	settings.overlayInt(settingTrivialTimeout, &cfg.Hooks.Trivial.TimeoutSeconds)
+	settings.overlayInt(settingTrivialMaxConcurrentScans, &cfg.Hooks.Trivial.MaxConcurrentScans)
+	settings.overlayString(settingDockerLayerMode, &cfg.Hooks.DockerLayer.Mode)
+	settings.overlayInt64(settingDockerLayerSizeCapBytes, &cfg.Hooks.DockerLayer.SizeCapBytes)
+	settings.overlayInt(settingDockerLayerTimeoutSeconds, &cfg.Hooks.DockerLayer.TimeoutSeconds)
+
+	// clamav + shared data sources
+	settings.overlayBoolPtr(settingClamAVEnabled, &cfg.ClamAV.Enabled)
+	settings.overlayString(settingClamAVSocketPath, &cfg.ClamAV.SocketPath)
+	settings.overlayInt(settingClamAVTimeout, &cfg.ClamAV.TimeoutSeconds)
+	settings.overlayInt64(settingClamAVMaxStream, &cfg.ClamAV.MaxStreamBytes)
+	overlayDataSource(settings, openSSFKeys, &cfg.DataSources.OpenSSF)
+	overlayDataSource(settings, trivyKeys, &cfg.DataSources.TrivyDB)
+	overlayDataSource(settings, epssKeys, &cfg.DataSources.EPSS)
+	overlayDataSource(settings, clamAVDBKeys, &cfg.DataSources.ClamAVDB)
+
+	// provenance — air-gapped deployments set these to stop the proxy
+	// dialling keys.openpgp.org, sum.golang.org, the Sigstore TUF CDN
+	// and Docker Hub. Zeroing them kept every one of those calls alive.
+	settings.overlayBool(settingProvenanceOffline, &cfg.Provenance.Offline)
+	settings.overlayCommaList(settingProvenanceDisabledEcosystems, &cfg.Provenance.DisabledEcosystems)
+	settings.overlayBool(settingProvenanceSwiftFullVerify, &cfg.Provenance.SwiftFullVerify)
+	settings.overlayString(settingProvenanceSwiftRegistryURL, &cfg.Provenance.SwiftRegistryURL)
+
+	// optional feature blocks
+	settings.overlayBoolPtr(settingMalwareEnableGHSA, &cfg.Malware.EnableGHSA)
+	settings.overlayBool(settingSBOMAttributionEnabled, &cfg.SBOM.AttributionEnabled)
+	settings.overlayInt(settingSBOMAttributionWindowDays, &cfg.SBOM.AttributionWindowDays)
+	settings.overlayBool(settingCorrelationEnabled, &cfg.Correlation.Enabled)
+	settings.overlayBoolPtr(settingCoverageEnabled, &cfg.Coverage.Enabled)
+	settings.overlayIntPtr(settingPolicyEvalCacheTTLSeconds, &cfg.Policy.EvalCacheTTLSeconds)
+
+	// swift — Wave AA/AF semantics preserved exactly. These two knobs
+	// carry DB-backed defaults that differ from the Go zero value, so an
+	// ABSENT row resolves to the documented default rather than to base:
+	//
+	// GitFallbackEnabled = "clone a URL the operator explicitly supplied"
+	// (via swift.identifier_map_path). Defaults TRUE; turning it off
+	// disables Swift resolution entirely.
+	//
+	// GitHubConvention = "GUESS a URL from a package name"
+	// (`acme.utils` → github.com/acme/utils). Defaults FALSE, because
+	// nothing binds an SPM identifier to a repository and whoever
+	// registers the org `acme` on GitHub would get their code served as
+	// the legitimate package — by the security proxy itself. Enabling it
+	// requires a non-empty swift.github_org_allowlist; boot fails loudly
+	// otherwise (SwiftConfig.ValidateForRuntime).
+	//
+	// They are DIFFERENT risks and deliberately do NOT share a default.
+	// Do not "helpfully" align them.
+	cfg.Swift.GitFallbackEnabled = settings.getBoolDefault(settingSwiftGitFallbackEnabled, true)
+	cfg.Swift.GitHubConvention = settings.getBoolDefault(settingSwiftGitHubConvention, false)
+	settings.overlayString(settingSwiftIdentifierMapPath, &cfg.Swift.IdentifierMapPath)
+	settings.overlayString(settingSwiftGitCacheDir, &cfg.Swift.GitCacheDir)
+	settings.overlayCommaList(settingSwiftGitHubOrgAllowList, &cfg.Swift.GitHubOrgAllowList)
+	settings.overlayString(settingSwiftTrustRootBundlePath, &cfg.Swift.TrustRootBundlePath)
+	settings.overlayBool(settingSwiftTrustSwiftRoot, &cfg.Swift.TrustSwiftRoot)
+
+	// misc
+	settings.overlayInt(settingReleaseMinAgeDays, &cfg.ReleasePolicy.MinAgeDays)
+	settings.overlayBoolPtr(settingBlockingMode, &cfg.BlockingMode)
+	settings.overlayBoolPtr(settingRepositoryAllowAnonymous, &cfg.RepositoryAnonymousAccess)
+	settings.overlayRemoteDefaults(settingRemoteDefaults, &cfg.Remotes)
+}
+
+func overlayDataSource(settings settingMap, keys dataSourceKeys, ds *DataSourceRuntimeConfig) {
+	settings.overlayBoolPtr(keys.enabled, &ds.Enabled)
+	settings.overlayInt(keys.refresh, &ds.RefreshIntervalSeconds)
+	settings.overlayBoolPtr(keys.startupSync, &ds.StartupSync)
+	settings.overlayInt(keys.timeout, &ds.TimeoutSeconds)
+	settings.overlayInt(keys.jitter, &ds.JitterPercent)
 }
 
 // LoadFromStore hydrates a Config from the database store for the default org. The returned
@@ -358,6 +454,15 @@ func SaveToStoreForOrg(store *pgstore.Store, cfg *Config, orgID string, replaceR
 		if err := saveSwiftSettings(set, cfg); err != nil {
 			return err
 		}
+		if err := saveRuntimeSettings(set, cfg); err != nil {
+			return err
+		}
+		if err := saveProvenanceSettings(set, cfg); err != nil {
+			return err
+		}
+		if err := saveFeatureSettings(set, cfg); err != nil {
+			return err
+		}
 		if err := saveMiscSettings(set, putRuntime, cfg); err != nil {
 			return err
 		}
@@ -392,6 +497,112 @@ func saveSwiftSettings(set settingSetter, cfg *Config) error {
 		return err
 	}
 	return set(settingSwiftTrustSwiftRoot, boolString(cfg.Swift.TrustSwiftRoot))
+}
+
+// saveRuntimeSettings persists the `runtime:` block. Every field here
+// has an env-var twin that still wins at read time (see offline.go) —
+// what changes is that the YAML value now survives the DB round trip
+// instead of being zeroed, so `runtime.offline: true` gates the same
+// subsystems the boot log claims it gates.
+//
+// These keys use plain `set` rather than putRuntime because nothing but
+// the YAML importer writes them: there is no admin-UI surface for the
+// runtime block, so there is no UI value to protect from a re-import.
+func saveRuntimeSettings(set settingSetter, cfg *Config) error {
+	if err := set(settingRuntimeOffline, boolString(cfg.Runtime.Offline)); err != nil {
+		return err
+	}
+	if err := set(settingRuntimeAllowInsecureTLS, boolString(cfg.Runtime.AllowInsecureTLS)); err != nil {
+		return err
+	}
+	if err := set(settingRuntimeIntelBundlePath, cfg.Runtime.IntelBundlePath); err != nil {
+		return err
+	}
+	if err := set(settingRuntimeOfflineFailMode, cfg.Runtime.OfflineFailMode); err != nil {
+		return err
+	}
+	if err := set(settingRuntimeWebhookLegacyPerUser, boolString(cfg.Runtime.WebhookLegacyPerUserRouting)); err != nil {
+		return err
+	}
+	return set(settingRuntimeMalwareTestOverrides, cfg.Runtime.MalwareTestOverrides)
+}
+
+// saveProvenanceSettings persists the `provenance:` kill-switches. These
+// are the air-gap knobs: with them zeroed, a deployment that had
+// declared `provenance.offline: true` kept dialling keys.openpgp.org,
+// sum.golang.org, the Sigstore TUF CDN and Docker Hub, and
+// swift_full_verify never engaged SE-0391 CMS verification.
+func saveProvenanceSettings(set settingSetter, cfg *Config) error {
+	if err := set(settingProvenanceOffline, boolString(cfg.Provenance.Offline)); err != nil {
+		return err
+	}
+	if err := set(settingProvenanceDisabledEcosystems, joinCommaList(cfg.Provenance.DisabledEcosystems)); err != nil {
+		return err
+	}
+	if err := set(settingProvenanceSwiftFullVerify, boolString(cfg.Provenance.SwiftFullVerify)); err != nil {
+		return err
+	}
+	return set(settingProvenanceSwiftRegistryURL, cfg.Provenance.SwiftRegistryURL)
+}
+
+// saveFeatureSettings persists the optional feature blocks: malware,
+// sbom, correlation, coverage, the policy evaluation cache, the
+// docker-layer hook, and the per-format remote defaults.
+//
+// Pointer-valued knobs are written only when non-nil. An absent row is
+// meaningful for them — it means "operator never said", which the load
+// side resolves to the documented default (coverage on, GHSA on, 60s
+// policy cache). Writing a materialised default instead would make a
+// later change to that default unreachable for existing deployments.
+func saveFeatureSettings(set settingSetter, cfg *Config) error {
+	if cfg.Malware.EnableGHSA != nil {
+		if err := set(settingMalwareEnableGHSA, boolString(*cfg.Malware.EnableGHSA)); err != nil {
+			return err
+		}
+	}
+	if err := set(settingSBOMAttributionEnabled, boolString(cfg.SBOM.AttributionEnabled)); err != nil {
+		return err
+	}
+	if err := set(settingSBOMAttributionWindowDays, strconv.Itoa(cfg.SBOM.AttributionWindowDays)); err != nil {
+		return err
+	}
+	// correlation.enabled is the ONLY surface internal/deploycorr has —
+	// no env var, no admin API — so dropping it made the feature
+	// impossible to turn on at all.
+	if err := set(settingCorrelationEnabled, boolString(cfg.Correlation.Enabled)); err != nil {
+		return err
+	}
+	if cfg.Coverage.Enabled != nil {
+		if err := set(settingCoverageEnabled, boolString(*cfg.Coverage.Enabled)); err != nil {
+			return err
+		}
+	}
+	if cfg.Policy.EvalCacheTTLSeconds != nil {
+		if err := set(settingPolicyEvalCacheTTLSeconds, strconv.Itoa(*cfg.Policy.EvalCacheTTLSeconds)); err != nil {
+			return err
+		}
+	}
+	if err := set(settingDockerLayerMode, cfg.Hooks.DockerLayer.Mode); err != nil {
+		return err
+	}
+	if err := set(settingDockerLayerSizeCapBytes, strconv.FormatInt(cfg.Hooks.DockerLayer.SizeCapBytes, 10)); err != nil {
+		return err
+	}
+	if err := set(settingDockerLayerTimeoutSeconds, strconv.Itoa(cfg.Hooks.DockerLayer.TimeoutSeconds)); err != nil {
+		return err
+	}
+	if err := set(settingTrivialMaxConcurrentScans, strconv.Itoa(cfg.Hooks.Trivial.MaxConcurrentScans)); err != nil {
+		return err
+	}
+	remotes := ""
+	if len(cfg.Remotes) > 0 {
+		encoded, err := json.Marshal(cfg.Remotes)
+		if err != nil {
+			return fmt.Errorf("encode remotes: %w", err)
+		}
+		remotes = string(encoded)
+	}
+	return set(settingRemoteDefaults, remotes)
 }
 
 // saveServerSettings persists server, HTTP-client, blob, index,
@@ -668,7 +879,8 @@ func fetchRepositories(db *sql.DB, orgID string) ([]RepositoryConfig, bool, erro
 		cache_negative_ttl_seconds,
 		COALESCE(client_configuration_guide_template, '') as client_configuration_guide,
 		COALESCE(anonymous_access, 0) as anonymous_access,
-		COALESCE(public_base_url, '') as public_base_url
+		COALESCE(public_base_url, '') as public_base_url,
+		COALESCE(format_options, '') as format_options
 		FROM repositories WHERE org_id=? ORDER BY name`, orgID)
 	if err != nil {
 		return nil, false, err
@@ -678,10 +890,11 @@ func fetchRepositories(db *sql.DB, orgID string) ([]RepositoryConfig, bool, erro
 	for rows.Next() {
 		var (
 			name, format, repoType, remoteURL, remoteProxyURL, headersJSON, configGuide, publicBaseURL string
+			formatOptions                                                                              string
 			enabled, skipTLS, anonymousAccess                                                          int
 			timeout, ttl                                                                               int
 		)
-		if err := rows.Scan(&name, &format, &repoType, &enabled, &remoteURL, &remoteProxyURL, &skipTLS, &timeout, &headersJSON, &ttl, &configGuide, &anonymousAccess, &publicBaseURL); err != nil {
+		if err := rows.Scan(&name, &format, &repoType, &enabled, &remoteURL, &remoteProxyURL, &skipTLS, &timeout, &headersJSON, &ttl, &configGuide, &anonymousAccess, &publicBaseURL, &formatOptions); err != nil {
 			return nil, false, err
 		}
 		repo := RepositoryConfig{
@@ -706,6 +919,7 @@ func fetchRepositories(db *sql.DB, orgID string) ([]RepositoryConfig, bool, erro
 				repo.Remote.Headers = headers
 			}
 		}
+		decodeRepoFormatOptions(formatOptions, &repo)
 		if enabled == 0 {
 			value := false
 			repo.Enabled = &value
@@ -733,17 +947,20 @@ func fetchRepository(db *sql.DB, orgID, name string) (RepositoryConfig, error) {
 		cache_negative_ttl_seconds,
 		COALESCE(client_configuration_guide_template, '') as client_configuration_guide,
 		COALESCE(anonymous_access, 0) as anonymous_access,
-		COALESCE(public_base_url, '') as public_base_url
+		COALESCE(public_base_url, '') as public_base_url,
+		COALESCE(format_options, '') as format_options
 		FROM repositories WHERE org_id=? AND name=?`, tenancy.NormalizeOrgID(orgID), name)
 	var (
 		format, repoType, remoteURL, remoteProxyURL, headersJSON, configGuide, publicBaseURL string
+		formatOptions                                                                        string
 		enabled, skipTLS, anonymousAccess                                                    int
 		timeout, ttl                                                                         int
 	)
 	cfg := RepositoryConfig{}
-	if err := row.Scan(&cfg.Name, &format, &repoType, &enabled, &remoteURL, &remoteProxyURL, &skipTLS, &timeout, &headersJSON, &ttl, &configGuide, &anonymousAccess, &publicBaseURL); err != nil {
+	if err := row.Scan(&cfg.Name, &format, &repoType, &enabled, &remoteURL, &remoteProxyURL, &skipTLS, &timeout, &headersJSON, &ttl, &configGuide, &anonymousAccess, &publicBaseURL, &formatOptions); err != nil {
 		return RepositoryConfig{}, err
 	}
+	decodeRepoFormatOptions(formatOptions, &cfg)
 	cfg.Format = format
 	cfg.Type = repoType
 	cfg.ClientConfigurationGuide = configGuide
@@ -1214,9 +1431,14 @@ func upsertRepository(tx *sql.Tx, orgID string, repo RepositoryConfig) error {
 		}
 		headersJSON = string(b)
 	}
-	_, err := tx.Exec(`INSERT INTO repositories(org_id, name, format, type, enabled, anonymous_access, remote_url, remote_proxy_url,
-		remote_skip_tls, remote_timeout_seconds, remote_headers, cache_negative_ttl_seconds, client_configuration_guide_template, public_base_url)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	formatOptions, err := encodeRepoFormatOptions(repo)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO repositories(org_id, name, format, type, enabled, anonymous_access, remote_url, remote_proxy_url,
+		remote_skip_tls, remote_timeout_seconds, remote_headers, cache_negative_ttl_seconds, client_configuration_guide_template, public_base_url,
+		format_options)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(org_id, name) DO UPDATE SET
 			org_id=excluded.org_id,
 			format=excluded.format,
@@ -1231,11 +1453,50 @@ func upsertRepository(tx *sql.Tx, orgID string, repo RepositoryConfig) error {
 			cache_negative_ttl_seconds=excluded.cache_negative_ttl_seconds,
 			client_configuration_guide_template=excluded.client_configuration_guide_template,
 			public_base_url=excluded.public_base_url,
+			format_options=excluded.format_options,
 			updated_at=current_timestamp`, orgID, strings.TrimSpace(repo.Name), strings.TrimSpace(repo.Format), strings.TrimSpace(repo.Type),
 		enabled, anonymousAccess, strings.TrimSpace(repo.Remote.URL), strings.TrimSpace(repo.Remote.ProxyURL), boolInt(repo.Remote.SkipTLSVerify),
 		repo.Remote.TimeoutSeconds, headersJSON, repo.Cache.NegativeTTLSeconds, strings.TrimSpace(repo.ClientConfigurationGuide),
-		strings.TrimSpace(repo.PublicBaseURL))
+		strings.TrimSpace(repo.PublicBaseURL), formatOptions)
 	return err
+}
+
+// repoFormatOptions is the JSON envelope for the per-format metadata
+// sub-blocks of a repository. It exists because apt/yum are optional
+// pointer structs with no natural scalar columns — and because they were
+// the last part of RepositoryConfig with no durable home, so a
+// hosted-apt repo's suites/components/architectures silently reverted to
+// apt.Default() on the next boot.
+type repoFormatOptions struct {
+	APT *APTRepoConfig `json:"apt,omitempty"`
+	Yum *YumRepoConfig `json:"yum,omitempty"`
+}
+
+func encodeRepoFormatOptions(repo RepositoryConfig) (string, error) {
+	if repo.APT == nil && repo.Yum == nil {
+		return "", nil
+	}
+	encoded, err := json.Marshal(repoFormatOptions{APT: repo.APT, Yum: repo.Yum})
+	if err != nil {
+		return "", fmt.Errorf("encode repository %q format options: %w", repo.Name, err)
+	}
+	return string(encoded), nil
+}
+
+// decodeRepoFormatOptions is deliberately lenient: a malformed row leaves
+// the sub-blocks nil (which means "use the format's defaults") rather
+// than failing the whole config load and wedging boot.
+func decodeRepoFormatOptions(raw string, repo *RepositoryConfig) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	var decoded repoFormatOptions
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return
+	}
+	repo.APT = decoded.APT
+	repo.Yum = decoded.Yum
 }
 
 func setSettingForOrg(store *pgstore.Store, orgID, key, value string) error {
@@ -1323,6 +1584,111 @@ func (m settingMap) getBoolDefault(key string, defaultValue bool) bool {
 	if !ok {
 		return defaultValue
 	}
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	return normalized == "true" || normalized == "1"
+}
+
+// ---------------------------------------------------------------------
+// overlay helpers
+//
+// Each writes through to dst ONLY when the settings table actually holds
+// the key. "Absent" and "present but empty" are different: an absent row
+// means the store does not own this key yet and the caller's base value
+// (YAML, flags, defaults) stands; a present row — even an empty one —
+// is the store's stated value and wins. Getting that distinction wrong
+// in either direction reintroduces a variant of the bug this file is
+// fixing: always-overwrite zeroes YAML-only blocks, never-overwrite
+// breaks the admin UI.
+//
+// Unparseable numeric rows leave dst untouched rather than writing 0.
+// A corrupted row must not silently mean "disabled" for something like
+// policy.eval_cache_ttl_seconds.
+// ---------------------------------------------------------------------
+
+func (m settingMap) overlayString(key string, dst *string) {
+	if value, ok := m.lookup(key); ok {
+		*dst = value
+	}
+}
+
+func (m settingMap) overlayInt(key string, dst *int) {
+	value, ok := m.lookup(key)
+	if !ok {
+		return
+	}
+	if value == "" {
+		*dst = 0
+		return
+	}
+	if num, err := strconv.Atoi(value); err == nil {
+		*dst = num
+	}
+}
+
+func (m settingMap) overlayInt64(key string, dst *int64) {
+	value, ok := m.lookup(key)
+	if !ok {
+		return
+	}
+	if value == "" {
+		*dst = 0
+		return
+	}
+	if num, err := strconv.ParseInt(value, 10, 64); err == nil {
+		*dst = num
+	}
+}
+
+func (m settingMap) overlayBool(key string, dst *bool) {
+	if value, ok := m.lookup(key); ok {
+		*dst = parseSettingBool(value)
+	}
+}
+
+func (m settingMap) overlayBoolPtr(key string, dst **bool) {
+	if value, ok := m.lookup(key); ok {
+		*dst = boolPtr(parseSettingBool(value))
+	}
+}
+
+func (m settingMap) overlayIntPtr(key string, dst **int) {
+	value, ok := m.lookup(key)
+	if !ok {
+		return
+	}
+	if value == "" {
+		// An empty row for a *int knob means "explicitly unset" — fall
+		// back to the built-in default via applyDefaults.
+		*dst = nil
+		return
+	}
+	if num, err := strconv.Atoi(value); err == nil {
+		*dst = &num
+	}
+}
+
+func (m settingMap) overlayCommaList(key string, dst *[]string) {
+	if value, ok := m.lookup(key); ok {
+		*dst = splitCommaList(value)
+	}
+}
+
+// overlayRemoteDefaults decodes the single JSON row that carries the
+// whole `remotes:` map. A malformed row is ignored (base stands) rather
+// than wiping every per-format upstream URL.
+func (m settingMap) overlayRemoteDefaults(key string, dst *map[string]RemoteDefaults) {
+	value, ok := m.lookup(key)
+	if !ok || value == "" {
+		return
+	}
+	var decoded map[string]RemoteDefaults
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		return
+	}
+	*dst = decoded
+}
+
+func parseSettingBool(value string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	return normalized == "true" || normalized == "1"
 }

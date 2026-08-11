@@ -1,13 +1,24 @@
 package swift
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
+// mustIdentifierMap builds a map that the caller expects to be valid.
+func mustIdentifierMap(t *testing.T, cfg IdentifierMapConfig) *IdentifierMap {
+	t.Helper()
+	m, err := NewIdentifierMap(cfg)
+	if err != nil {
+		t.Fatalf("NewIdentifierMap: %v", err)
+	}
+	return m
+}
+
 func TestIdentifierMapStaticResolve(t *testing.T) {
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{
 			"apple.swift-nio": "https://github.com/apple/swift-nio.git",
 		},
@@ -25,18 +36,54 @@ func TestIdentifierMapStaticResolve(t *testing.T) {
 	}
 }
 
+// TestIdentifierMapConventionRequiresAllowList pins the fail-closed
+// invariant: the convention cannot be enabled without something to
+// constrain which GitHub orgs it will guess. An unconstrained convention
+// is a scope-squatting vector — whoever registers `evil` on GitHub gets
+// their code served for every `evil.<anything>` identifier — so asking
+// for it with no allowlist is a configuration ERROR, not a silent grant.
+func TestIdentifierMapConventionRequiresAllowList(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		allowList []string
+	}{
+		{"nil allowlist", nil},
+		{"empty allowlist", []string{}},
+		{"blank entries only", []string{"", "   "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := NewIdentifierMap(IdentifierMapConfig{
+				EnableGitHubConvention: true,
+				GitHubOrgAllowList:     tc.allowList,
+			})
+			if !errors.Is(err, ErrConventionWithoutAllowList) {
+				t.Fatalf("want ErrConventionWithoutAllowList, got err=%v map=%v", err, m)
+			}
+			if m != nil {
+				t.Fatalf("failed construction must not return a usable map")
+			}
+		})
+	}
+}
+
 func TestIdentifierMapGitHubConvention(t *testing.T) {
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		EnableGitHubConvention: true,
+		GitHubOrgAllowList:     []string{"vapor"},
 	})
 	got, ok := m.Resolve("vapor.vapor")
 	if !ok || got != "https://github.com/vapor/vapor.git" {
 		t.Errorf("convention Resolve = (%q, %v)", got, ok)
 	}
+	// The allowlist is the whole mitigation: a scope outside it must not
+	// resolve even though the convention is on.
+	if got, ok := m.Resolve("attacker.vapor"); ok {
+		t.Errorf("squatted scope resolved to %q; allowlist did not hold", got)
+	}
 }
 
 func TestIdentifierMapGitHubConventionAllowList(t *testing.T) {
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		EnableGitHubConvention: true,
 		GitHubOrgAllowList:     []string{"apple", "vapor"},
 	})
@@ -49,7 +96,7 @@ func TestIdentifierMapGitHubConventionAllowList(t *testing.T) {
 }
 
 func TestIdentifierMapReverseLookup(t *testing.T) {
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{
 			"apple.swift-nio": "https://github.com/apple/swift-nio.git",
 		},
@@ -75,7 +122,7 @@ func TestIdentifierMapReverseLookupHonorsGitHubConvention(t *testing.T) {
 	// Positive: convention on + scope in allowlist → reverse synthesises id.
 	// This mirrors the forward Resolve path so SwiftPM's /identifiers?url=…
 	// probe round-trips for convention-only packages.
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		EnableGitHubConvention: true,
 		GitHubOrgAllowList:     []string{"apple", "vapor"},
 	})
@@ -111,7 +158,7 @@ func TestIdentifierMapReverseLookupHonorsGitHubConvention(t *testing.T) {
 func TestIdentifierMapReverseLookupConventionScopeNotAllowlisted(t *testing.T) {
 	// Negative: convention on but scope not in allowlist → reverse fails.
 	// Symmetric with the forward path which also refuses.
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		EnableGitHubConvention: true,
 		GitHubOrgAllowList:     []string{"apple"},
 	})
@@ -134,7 +181,7 @@ func TestIdentifierMapReverseLookupConventionScopeNotAllowlisted(t *testing.T) {
 func TestIdentifierMapReverseLookupConventionDisabled(t *testing.T) {
 	// Negative: convention OFF → reverse falls back to explicit reverse map
 	// only, so a github URL with no static entry returns false.
-	m := NewIdentifierMap(IdentifierMapConfig{
+	m := mustIdentifierMap(t, IdentifierMapConfig{
 		EnableGitHubConvention: false,
 		GitHubOrgAllowList:     []string{"apple"},
 	})
@@ -172,6 +219,51 @@ github_org_allowlist:
 	// not in allowlist → fails
 	if _, ok := m.Resolve("attacker.pkg"); ok {
 		t.Errorf("attacker scope must not resolve")
+	}
+}
+
+// TestLoadIdentifierMapFromYAMLConventionWithoutAllowList proves the
+// invariant is enforced on the FILE path too, not just the DB-settings
+// path. A map file is operator-supplied config like any other and must
+// not be able to reopen the squatting hole.
+func TestLoadIdentifierMapFromYAMLConventionWithoutAllowList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "map.yaml")
+	body := []byte("identifiers:\n  apple.swift-nio: \"https://github.com/apple/swift-nio.git\"\ngithub_convention: true\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadIdentifierMapFromYAML(path); !errors.Is(err, ErrConventionWithoutAllowList) {
+		t.Fatalf("want ErrConventionWithoutAllowList, got %v", err)
+	}
+}
+
+// TestParseIdentifierMapYAMLDistinguishesAbsentConvention pins the
+// tri-state the builder relies on to merge file settings over
+// deployment settings without silently discarding either.
+func TestParseIdentifierMapYAMLDistinguishesAbsentConvention(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	absent, err := ParseIdentifierMapYAML(write("absent.yaml", "identifiers: {}\n"))
+	if err != nil {
+		t.Fatalf("parse absent: %v", err)
+	}
+	if absent.GitHubConvention != nil {
+		t.Errorf("omitted github_convention must parse as nil, got %v", *absent.GitHubConvention)
+	}
+
+	explicitOff, err := ParseIdentifierMapYAML(write("off.yaml", "github_convention: false\n"))
+	if err != nil {
+		t.Fatalf("parse explicit false: %v", err)
+	}
+	if explicitOff.GitHubConvention == nil || *explicitOff.GitHubConvention {
+		t.Errorf("explicit false must parse as non-nil false, got %v", explicitOff.GitHubConvention)
 	}
 }
 

@@ -167,6 +167,12 @@ func (s *Store) migrateSchema() error {
 			cache_negative_ttl_seconds INTEGER NOT NULL DEFAULT 300,
 			client_configuration_guide_template TEXT,
 			public_base_url TEXT,
+			-- format_options carries the per-format metadata sub-blocks
+			-- (repositories[].apt, repositories[].yum) as JSON. They have
+			-- no scalar column of their own and used to be YAML-only,
+			-- which meant config.LoadFromStore zeroed them on every boot
+			-- and a hosted-apt repo silently reverted to apt.Default().
+			format_options TEXT,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (org_id, name)

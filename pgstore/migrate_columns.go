@@ -276,6 +276,13 @@ func (s *Store) ensureTenancyAndRepoColumns() error {
 	if err := s.addColumnIfMissing("repositories", "anonymous_access", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
+	// format_options: JSON for the repositories[].apt / repositories[].yum
+	// sub-blocks. Type and default must stay identical to the CREATE
+	// TABLE in migrate.go; the upgrade-path test probes them
+	// column-by-column.
+	if err := s.addColumnIfMissing("repositories", "format_options", "TEXT"); err != nil {
+		return err
+	}
 	// The five remote/cache columns below landed with the 0.16.0 remote-proxy
 	// work and are part of the repositories CREATE TABLE in migrate.go, but
 	// they had no addColumnIfMissing counterpart — so a database created

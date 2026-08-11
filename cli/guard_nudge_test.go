@@ -44,13 +44,50 @@ func passVerdict() guardVerdict {
 	return guardVerdict{Spec: packageSpec{Ecosystem: "npm", Name: "react"}}
 }
 
-// hermeticGuard isolates guard_state.json to a temp dir and grants telemetry
-// consent so the emit branch is exercised. Returns nothing — state is on disk.
+// clearCIEnv neutralizes every CI signal isCIEnvironment consults, so a test
+// that wants a non-CI environment actually gets one. Clearing just CI is not
+// enough — the GitHub Actions runner these tests must pass on also exports
+// GITHUB_ACTIONS, which suppresses guard nudges. Driven off the production
+// ciEnvVars list so a newly-supported provider cannot silently reintroduce the
+// leak. A test that wants CI re-sets its variable after hermeticGuard.
+func clearCIEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range ciEnvVars {
+		t.Setenv(k, "")
+	}
+}
+
+// hermeticGuard isolates guard_state.json to a temp dir, clears the ambient CI
+// signals, and grants telemetry consent so the emit branch is exercised.
+// Returns nothing — state is on disk.
 func hermeticGuard(t *testing.T, consent string) {
 	t.Helper()
 	t.Setenv("CHAINSAW_CONFIG_HOME", t.TempDir())
+	clearCIEnv(t)
 	if consent != "" {
 		saveGuardState(&guardState{Consent: consent})
+	}
+}
+
+// TestClearCIEnv_NeutralizesEveryCISignal locks the invariant whose absence
+// broke the open-core publish gate five runs in a row. The nudge tests below
+// need a genuinely non-CI environment, but the GitHub Actions runner they must
+// pass on exports GITHUB_ACTIONS as well as CI — clearing only CI left
+// isCIEnvironment() true, so the post-block nudge was suppressed and
+// TestProcessGuardOutcome_NudgeShownPostBlock failed on CI while passing on
+// every developer machine. This asserts the helper covers the whole ciEnvVars
+// list, so adding a provider there without extending the clearing fails
+// everywhere rather than only inside CI.
+func TestClearCIEnv_NeutralizesEveryCISignal(t *testing.T) {
+	for _, k := range ciEnvVars {
+		t.Setenv(k, "true")
+	}
+	if !isCIEnvironment() {
+		t.Fatal("sanity: with every CI variable set, isCIEnvironment must be true")
+	}
+	clearCIEnv(t)
+	if isCIEnvironment() {
+		t.Fatal("clearCIEnv must neutralize every signal isCIEnvironment reads")
 	}
 }
 
@@ -135,7 +172,6 @@ func TestProcessGuardOutcome_DailyActiveDedupsPerDay(t *testing.T) {
 func TestProcessGuardOutcome_FirstBlockSilent(t *testing.T) {
 	hermeticGuard(t, consentGranted)
 	t.Setenv("CHAINSAW_NO_NUDGE", "") // nudges allowed; the silence is the first-block gate, not suppression
-	t.Setenv("CI", "")
 	events, restore := captureGuardEmits(t)
 	defer restore()
 
@@ -155,8 +191,7 @@ func TestProcessGuardOutcome_FirstBlockSilent(t *testing.T) {
 // this drives two blocks and asserts on the second.
 func TestProcessGuardOutcome_NudgeShownPostBlock(t *testing.T) {
 	hermeticGuard(t, consentGranted)
-	t.Setenv("CHAINSAW_NO_NUDGE", "") // allow nudge
-	t.Setenv("CI", "")                // not CI
+	t.Setenv("CHAINSAW_NO_NUDGE", "") // allow nudge (hermeticGuard already cleared CI)
 	events, restore := captureGuardEmits(t)
 	defer restore()
 

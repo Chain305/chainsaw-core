@@ -1,6 +1,7 @@
 package swift
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,8 +16,11 @@ import (
 // Resolution order (first hit wins):
 //  1. Explicit user-supplied entries (YAML config or RegisterStatic).
 //  2. GitHub convention fallback — `scope.name` → https://github.com/<scope>/<name>.git.
-//     Disabled by default because an attacker who controls `evil` on GitHub
-//     could otherwise satisfy lookups for the identifier `evil.anything`.
+//     Disabled by default because nothing binds an SPM identifier to a
+//     repository: an attacker who registers the GitHub org `evil` thereby
+//     satisfies every lookup for the identifier `evil.anything`, and the
+//     proxy serves their code as the legitimate package. Enabling it
+//     REQUIRES a non-empty org allowlist — see NewIdentifierMap.
 //
 // The SwiftPackageIndex seed mentioned in the plan is intentionally
 // deferred to a follow-up: a background refresher with credential/network
@@ -37,35 +41,74 @@ type IdentifierMapConfig struct {
 	// Static maps lowercased `scope.name` identifiers to git clone URLs.
 	Static map[string]string
 	// EnableGitHubConvention turns on the `scope.name` → github.com/<scope>/<name>
-	// fallback. Defaults to false; if true, prefer also setting
-	// GitHubOrgAllowList to constrain which scopes can be auto-translated.
+	// fallback. Defaults to false. When true, GitHubOrgAllowList MUST be
+	// non-empty — NewIdentifierMap rejects the combination otherwise.
 	EnableGitHubConvention bool
-	// GitHubOrgAllowList, when non-empty, restricts the GitHub convention
-	// fallback to the listed (case-insensitive) scopes.
+	// GitHubOrgAllowList restricts the GitHub convention fallback to the
+	// listed (case-insensitive) scopes. Required whenever
+	// EnableGitHubConvention is true; it is the only thing standing between
+	// the convention and a scope-squatting attacker.
 	GitHubOrgAllowList []string
 }
 
+// ErrConventionWithoutAllowList is returned when the GitHub convention
+// fallback is requested with no org allowlist to constrain it. Callers
+// should treat this as a fatal misconfiguration: an unconstrained
+// convention lets anyone who registers a GitHub org serve arbitrary code
+// as any `<that-org>.<anything>` Swift package.
+var ErrConventionWithoutAllowList = errors.New(
+	"swift: github_convention requires a non-empty github_org_allowlist " +
+		"(an unconstrained name→URL guess is a scope-squatting vector); " +
+		"either populate swift.github_org_allowlist or set swift.github_convention=false")
+
+// normalizeOrgAllowList lowercases, trims, and drops empty entries.
+func normalizeOrgAllowList(orgs []string) map[string]bool {
+	out := make(map[string]bool, len(orgs))
+	for _, org := range orgs {
+		org = strings.ToLower(strings.TrimSpace(org))
+		if org != "" {
+			out[org] = true
+		}
+	}
+	return out
+}
+
 // NewIdentifierMap constructs an IdentifierMap from config.
-func NewIdentifierMap(cfg IdentifierMapConfig) *IdentifierMap {
+//
+// It fails closed: enabling EnableGitHubConvention without a non-empty
+// GitHubOrgAllowList returns ErrConventionWithoutAllowList rather than
+// silently granting the risky mode. This is the single choke point for
+// the invariant — every construction path (YAML file, DB settings,
+// programmatic) goes through here.
+func NewIdentifierMap(cfg IdentifierMapConfig) (*IdentifierMap, error) {
+	allowList := normalizeOrgAllowList(cfg.GitHubOrgAllowList)
+	if cfg.EnableGitHubConvention && len(allowList) == 0 {
+		return nil, ErrConventionWithoutAllowList
+	}
 	m := &IdentifierMap{
 		static:             make(map[string]string),
 		reverse:            make(map[string]string),
 		githubConvention:   cfg.EnableGitHubConvention,
-		githubOrgAllowList: make(map[string]bool),
+		githubOrgAllowList: allowList,
 	}
 	for id, gitURL := range cfg.Static {
 		m.RegisterStatic(id, gitURL)
 	}
-	for _, org := range cfg.GitHubOrgAllowList {
-		org = strings.ToLower(strings.TrimSpace(org))
-		if org != "" {
-			m.githubOrgAllowList[org] = true
-		}
-	}
-	return m
+	return m, nil
 }
 
-// LoadIdentifierMapFromYAML loads a YAML file of the form:
+// IdentifierMapFile is the parsed contents of an identifier-map YAML
+// file. GitHubConvention is a pointer so callers can distinguish
+// "absent" (inherit the deployment-level setting) from an explicit
+// `github_convention: false`.
+type IdentifierMapFile struct {
+	Identifiers        map[string]string `yaml:"identifiers"`
+	GitHubConvention   *bool             `yaml:"github_convention"`
+	GitHubOrgAllowList []string          `yaml:"github_org_allowlist"`
+}
+
+// ParseIdentifierMapYAML reads and parses an identifier-map YAML file of
+// the form:
 //
 //	identifiers:
 //	  apple.swift-nio: "https://github.com/apple/swift-nio.git"
@@ -73,33 +116,48 @@ func NewIdentifierMap(cfg IdentifierMapConfig) *IdentifierMap {
 //	github_convention: false
 //	github_org_allowlist: ["apple", "vapor"]
 //
-// Returns an error if the file is malformed. Missing file returns
-// (empty map, nil) so an unconfigured deployment still works.
-func LoadIdentifierMapFromYAML(path string) (*IdentifierMap, error) {
+// An empty path or a missing file yields a zero-value IdentifierMapFile
+// so an unconfigured deployment still works. A malformed file is an
+// error.
+//
+// Parsing is deliberately separated from construction so callers can
+// merge these values with deployment-level settings (see
+// internal/repository.buildSwiftGitUpstream) before handing the result
+// to NewIdentifierMap, which enforces the allowlist invariant.
+func ParseIdentifierMapYAML(path string) (IdentifierMapFile, error) {
+	var raw IdentifierMapFile
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return NewIdentifierMap(IdentifierMapConfig{}), nil
+		return raw, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return NewIdentifierMap(IdentifierMapConfig{}), nil
+			return IdentifierMapFile{}, nil
 		}
-		return nil, fmt.Errorf("read identifier map: %w", err)
-	}
-	var raw struct {
-		Identifiers        map[string]string `yaml:"identifiers"`
-		GitHubConvention   bool              `yaml:"github_convention"`
-		GitHubOrgAllowList []string          `yaml:"github_org_allowlist"`
+		return IdentifierMapFile{}, fmt.Errorf("read identifier map: %w", err)
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse identifier map: %w", err)
+		return IdentifierMapFile{}, fmt.Errorf("parse identifier map: %w", err)
 	}
+	return raw, nil
+}
+
+// LoadIdentifierMapFromYAML parses the file at path and builds an
+// IdentifierMap from it alone, with no deployment-level defaults merged
+// in. Returns ErrConventionWithoutAllowList if the file turns the GitHub
+// convention on without an allowlist.
+func LoadIdentifierMapFromYAML(path string) (*IdentifierMap, error) {
+	raw, err := ParseIdentifierMapYAML(path)
+	if err != nil {
+		return nil, err
+	}
+	convention := raw.GitHubConvention != nil && *raw.GitHubConvention
 	return NewIdentifierMap(IdentifierMapConfig{
 		Static:                 raw.Identifiers,
-		EnableGitHubConvention: raw.GitHubConvention,
+		EnableGitHubConvention: convention,
 		GitHubOrgAllowList:     raw.GitHubOrgAllowList,
-	}), nil
+	})
 }
 
 // RegisterStatic records a `scope.name` → git URL mapping.
@@ -138,7 +196,10 @@ func (m *IdentifierMap) Resolve(identifier string) (string, bool) {
 	if scope == "" || name == "" {
 		return "", false
 	}
-	if len(allowList) > 0 && !allowList[scope] {
+	// Strict: an empty allowlist denies everything rather than allowing
+	// everything. NewIdentifierMap already refuses that combination, but a
+	// same-package struct literal must not be able to reopen the hole.
+	if !allowList[scope] {
 		return "", false
 	}
 	return fmt.Sprintf("https://github.com/%s/%s.git", scope, name), true
@@ -191,7 +252,8 @@ func (m *IdentifierMap) ReverseLookup(gitURL string) (string, bool) {
 	if strings.Contains(name, "/") {
 		return "", false
 	}
-	if len(allowList) > 0 && !allowList[scope] {
+	// Strict, mirroring Resolve: empty allowlist denies.
+	if !allowList[scope] {
 		return "", false
 	}
 	return scope + "." + name, true

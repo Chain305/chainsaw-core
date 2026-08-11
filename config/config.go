@@ -62,10 +62,18 @@ type Config struct {
 	Coverage CoverageConfig `yaml:"coverage"`
 	// RepositoryAnonymousAccess controls whether /repository/* endpoints allow requests
 	// without client credentials. When nil, anonymous access is enabled.
-	RepositoryAnonymousAccess *bool                        `yaml:"repository_anonymous_access"`
-	Repositories              []RepositoryConfig           `yaml:"repositories"`
-	Remotes                   map[string]RemoteDefaults    `yaml:"remotes"`
-	Extra                     map[string]map[string]string `yaml:",inline"` // placeholder for forward compatibility
+	//
+	// NOTE: there is deliberately no `yaml:",inline"` catch-all map here.
+	// One used to exist ("Extra", placeholder for forward compatibility)
+	// and it silently defeated decoder.KnownFields(true): a misspelled
+	// top-level block — `provenence:` instead of `provenance:` — parsed
+	// without error and left every field in the real block at its zero
+	// value. A typo in a security block must fail startup, loudly, so
+	// unknown top-level keys are now rejected by the decoder. Do not
+	// reintroduce an inline map.
+	RepositoryAnonymousAccess *bool                     `yaml:"repository_anonymous_access"`
+	Repositories              []RepositoryConfig        `yaml:"repositories"`
+	Remotes                   map[string]RemoteDefaults `yaml:"remotes"`
 
 	// explicitKeys records which runtime-managed settings the YAML
 	// explicitly set, captured at parse time BEFORE applyDefaults fills the
@@ -366,20 +374,38 @@ type ReleasePolicyConfig struct {
 type SwiftConfig struct {
 	// GitFallbackEnabled turns on the git-to-registry translator. When
 	// true, requests that miss the configured upstream (or when no
-	// upstream is configured) are served by cloning github.com and
+	// upstream is configured) are served by cloning a git remote and
 	// synthesizing SE-0292 responses from git tags.
+	//
+	// DB-backed default: TRUE. The URLs cloned on this path come from
+	// IdentifierMapPath — i.e. an operator wrote them down — so this is
+	// "clone a URL you gave us", not "guess one". Turning it off disables
+	// Swift resolution entirely. Contrast GitHubConvention below: the two
+	// flags are separate risks and must not share a default.
 	GitFallbackEnabled bool `yaml:"git_fallback_enabled"`
 	// IdentifierMapPath is a YAML file mapping `scope.name` identifiers
-	// to git clone URLs. See IdentifierMap documentation.
+	// to git clone URLs. See IdentifierMap documentation. This is the
+	// safe Swift resolution path and works with GitHubConvention off.
 	IdentifierMapPath string `yaml:"identifier_map_path"`
 	// GitCacheDir is the working directory for bare git clones. When
 	// empty, a subdirectory of the OS temp directory is used.
 	GitCacheDir string `yaml:"git_cache_dir"`
 	// GitHubConvention auto-translates `scope.name` into
-	// github.com/<scope>/<name>.git. Disabled by default because it
-	// enables scope-squatting attacks unless combined with an allowlist.
+	// github.com/<scope>/<name>.git.
+	//
+	// DB-backed default: FALSE, because it enables scope-squatting
+	// attacks unless combined with an allowlist. Nothing binds an SPM
+	// identifier to a repository, so an attacker who registers the org
+	// named in the identifier has Chainsaw serve their code as the
+	// legitimate package. When true, GitHubOrgAllowList MUST be non-empty
+	// — ValidateForRuntime rejects the combination and the proxy refuses
+	// to start.
 	GitHubConvention bool `yaml:"github_convention"`
 	// GitHubOrgAllowList restricts GitHubConvention to the listed scopes.
+	// It is the mitigation that makes GitHubConvention safe, and is
+	// mandatory whenever GitHubConvention is true. Enforced in
+	// SwiftConfig.ValidateForRuntime and again at the construction choke
+	// point, swift.NewIdentifierMap.
 	GitHubOrgAllowList []string `yaml:"github_org_allowlist"`
 	// TrustRootBundlePath is a PEM file of CA certificates used to
 	// verify SE-0391 CMS signatures on .zip archives. When empty the
@@ -389,6 +415,48 @@ type SwiftConfig struct {
 	// signing root to the verification trust pool. Currently a no-op —
 	// the embedded root is not yet bundled.
 	TrustSwiftRoot bool `yaml:"trust_swift_root"`
+}
+
+// ErrSwiftConventionUnconstrained reports the one Swift misconfiguration
+// that must never be honoured silently: the GitHub name→URL convention
+// turned on with nothing to constrain which orgs it will guess.
+var ErrSwiftConventionUnconstrained = errors.New(
+	"swift.github_convention is true but swift.github_org_allowlist is empty: " +
+		"an unconstrained `scope.name` → github.com/<scope>/<name> guess lets " +
+		"anyone who registers <scope> on GitHub have Chainsaw serve their code as " +
+		"the legitimate package (scope squatting). Populate " +
+		"swift.github_org_allowlist with the orgs you trust, or set " +
+		"swift.github_convention=false and map packages explicitly via " +
+		"swift.identifier_map_path")
+
+// HasGitHubOrgAllowList reports whether at least one non-blank org is
+// listed. Blank/whitespace entries do not count — a list of empty
+// strings constrains nothing.
+func (s SwiftConfig) HasGitHubOrgAllowList() bool {
+	for _, org := range s.GitHubOrgAllowList {
+		if strings.TrimSpace(org) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateForRuntime rejects Swift settings that would silently grant a
+// risky mode. Mirrors ClamAVConfig.ValidateForRuntime.
+//
+// An operator who asks for the convention and gives us nothing to
+// constrain it must not get the risky mode by default — the proxy
+// refuses to start instead (the error propagates out of
+// repository.RegisterFromConfig at boot).
+//
+// The check is scoped to GitFallbackEnabled because the convention is
+// inert without the git translator: a stale github_convention row on a
+// deployment that does not use Swift should not wedge boot.
+func (s SwiftConfig) ValidateForRuntime() error {
+	if s.GitFallbackEnabled && s.GitHubConvention && !s.HasGitHubOrgAllowList() {
+		return ErrSwiftConventionUnconstrained
+	}
+	return nil
 }
 
 // TrivialHookConfig describes how to run the trivial scanner.
