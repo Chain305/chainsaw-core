@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
 
       - name: Package security scan
-        uses: Chain305/chainsaw-core/enforcement/github-actions@v1
+        uses: Chain305/chainsaw-core/enforcement/github-actions@action-v1
         with:
           mode: warn           # warn | block
           # Uncomment to attest to a control plane:
