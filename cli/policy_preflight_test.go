@@ -18,11 +18,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/chain305/chainsaw-core/policy"
 )
 
 func sampleMatrixResponse() supportMatrixResponseDTO {
@@ -159,8 +163,15 @@ func TestRunPolicyPreflight_HitsSupportMatrixEndpoint(t *testing.T) {
 	// Use viper to point newClient() at the stub server. cli.NewAPIClient
 	// reads cfgServerURL() which is backed by viper.GetString("server_url").
 	prev := viper.GetString("server_url")
+	prevTok := viper.GetString("token")
 	viper.Set("server_url", srv.URL)
-	t.Cleanup(func() { viper.Set("server_url", prev) })
+	// newClient() refuses before the network call with no token (X4); the
+	// stub server ignores Authorization.
+	viper.Set("token", "test-token")
+	t.Cleanup(func() {
+		viper.Set("server_url", prev)
+		viper.Set("token", prevTok)
+	})
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{Use: "preflight", RunE: runPolicyPreflight}
@@ -175,15 +186,15 @@ func TestRunPolicyPreflight_HitsSupportMatrixEndpoint(t *testing.T) {
 	if seenPath != "/api/policies/support-matrix" {
 		t.Fatalf("expected hit on /api/policies/support-matrix, got %q", seenPath)
 	}
-	if err == nil {
-		t.Fatalf("expected non-nil error (sample matrix has 'none' cells), got nil")
-	}
-	var coded *ExitCodeError
-	if !errors.As(err, &coded) {
-		t.Fatalf("expected *ExitCodeError, got %T: %v", err, err)
-	}
-	if coded.Code != preflightUnsupportedExitCode {
-		t.Fatalf("expected exit code %d, got %d", preflightUnsupportedExitCode, coded.Code)
+	// P9: with no --policy this is an informational dump and MUST exit 0.
+	// It used to gate on "does any printed cell say none", which is a
+	// property of the product's coverage matrix, not of the operator's
+	// policies — and every one of the 16 ecosystem rows has at least one
+	// none, so the command exited 1 for every org and every filter,
+	// forever. A CI job wired as the help text documents failed 100% of
+	// the time. The gate now lives on --policy; see the tests below.
+	if err != nil {
+		t.Fatalf("preflight without --policy is informational and must exit 0, got: %v", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "hasInstallScript") {
@@ -213,8 +224,15 @@ func TestRunPolicyPreflight_AllSupportedReturnsNil(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	prev := viper.GetString("server_url")
+	prevTok := viper.GetString("token")
 	viper.Set("server_url", srv.URL)
-	t.Cleanup(func() { viper.Set("server_url", prev) })
+	// newClient() refuses before the network call with no token (X4); the
+	// stub server ignores Authorization.
+	viper.Set("token", "test-token")
+	t.Cleanup(func() {
+		viper.Set("server_url", prev)
+		viper.Set("token", prevTok)
+	})
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{Use: "preflight", RunE: runPolicyPreflight}
@@ -226,5 +244,160 @@ func TestRunPolicyPreflight_AllSupportedReturnsNil(t *testing.T) {
 
 	if err := runPolicyPreflight(cmd, nil); err != nil {
 		t.Fatalf("expected nil error when every cell is supported, got: %v", err)
+	}
+}
+
+// newPreflightTestCmd builds a command carrying the flag set
+// runPolicyPreflight reads, pointed at a stub support-matrix server.
+func newPreflightTestCmd(t *testing.T, buf *bytes.Buffer, resp supportMatrixResponseDTO) *cobra.Command {
+	t.Helper()
+	withHookEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+
+	prevURL := viper.GetString("server_url")
+	prevTok := viper.GetString("token")
+	viper.Set("server_url", srv.URL)
+	viper.Set("token", "test-token")
+	t.Cleanup(func() {
+		viper.Set("server_url", prevURL)
+		viper.Set("token", prevTok)
+	})
+
+	cmd := &cobra.Command{Use: "preflight", RunE: runPolicyPreflight}
+	cmd.Flags().String("ecosystem", "", "")
+	cmd.Flags().Bool("unsupported-only", false, "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.Flags().String("policy", "", "")
+	cmd.Flags().String("output", "", "")
+	cmd.Flags().String("format", "table", "")
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	return cmd
+}
+
+// realConditionMatrix uses the ACTUAL condition keys the server publishes
+// (string(policy.ConditionType) — "HasInstallScript", not
+// "hasInstallScript"), because the whole point of --policy is joining
+// policy.ConditionsUsedBy output against those keys. A fixture with
+// invented names would let a key-casing bug pass.
+func realConditionMatrix() supportMatrixResponseDTO {
+	return supportMatrixResponseDTO{
+		Ecosystems: []string{"npm", "maven"},
+		Conditions: []string{
+			string(policy.ConditionHasInstallScript),
+			string(policy.ConditionCVE),
+		},
+		Matrix: []supportMatrixRowDTO{
+			{Ecosystem: "npm", Conditions: map[string]string{
+				string(policy.ConditionHasInstallScript): "full",
+				string(policy.ConditionCVE):              "full",
+			}},
+			{Ecosystem: "maven", Conditions: map[string]string{
+				string(policy.ConditionHasInstallScript): "none",
+				string(policy.ConditionCVE):              "full",
+			}},
+		},
+	}
+}
+
+func writePreflightPolicy(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "policy.json")
+	if err := os.WriteFile(fp, []byte(body), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	return dir
+}
+
+// TestRunPolicyPreflight_PolicyGateFires is the positive half of P9: a
+// rule that USES hasInstallScript, previewed against maven where that
+// condition is inert, exits 1 — and the message names the rule, the
+// condition and the ecosystem so the operator can act on it.
+func TestRunPolicyPreflight_PolicyGateFires(t *testing.T) {
+	dir := writePreflightPolicy(t, `{
+		"id":"p1","name":"block-install-scripts","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"hasInstallScript":true}
+	}`)
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, realConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "maven")
+
+	err := runPolicyPreflight(cmd, nil)
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) || coded.Code != preflightUnsupportedExitCode {
+		t.Fatalf("expected ExitCodeError{%d}, got %v\n%s", preflightUnsupportedExitCode, err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{"block-install-scripts", "HasInstallScript", "maven"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report must name %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunPolicyPreflight_PolicyGateIgnoresUnusedConditions is the whole
+// point of the change: maven has an inert cell, but the operator's policy
+// does not use it, so there is nothing to fail on. Under the old gate
+// this exited 1.
+func TestRunPolicyPreflight_PolicyGateIgnoresUnusedConditions(t *testing.T) {
+	dir := writePreflightPolicy(t, `{
+		"id":"p1","name":"block-criticals","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"cvssMin":9.0}
+	}`)
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, realConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "maven")
+
+	if err := runPolicyPreflight(cmd, nil); err != nil {
+		t.Fatalf("a condition the policy does not use must not fail the gate, got %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "every condition used by") {
+		t.Errorf("expected the all-clear line, got:\n%s", buf.String())
+	}
+}
+
+// TestRunPolicyPreflight_PolicyGateScopedByEcosystem: a run scoped to npm
+// must not fail because maven has the hole — same scoping rule the old
+// anyUnsupported applied to printed rows.
+func TestRunPolicyPreflight_PolicyGateScopedByEcosystem(t *testing.T) {
+	dir := writePreflightPolicy(t, `{
+		"id":"p1","name":"block-install-scripts","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"hasInstallScript":true}
+	}`)
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, realConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "npm")
+
+	if err := runPolicyPreflight(cmd, nil); err != nil {
+		t.Fatalf("--ecosystem npm must not fail on maven's hole, got %v\n%s", err, buf.String())
+	}
+}
+
+// TestRunPolicyPreflight_UnreadablePolicyIsAnError: gating on a
+// partially-parsed policy set would silently under-report, so a bad
+// --policy is an operational failure, not a pass.
+func TestRunPolicyPreflight_UnreadablePolicyIsAnError(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, realConditionMatrix())
+	_ = cmd.Flags().Set("policy", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	err := runPolicyPreflight(cmd, nil)
+	if err == nil {
+		t.Fatal("a --policy path that cannot be read must fail, not silently pass the gate")
+	}
+	var coded *ExitCodeError
+	if errors.As(err, &coded) && coded.Code == preflightUnsupportedExitCode {
+		t.Errorf("an unreadable policy is an operational error, not a gate failure: %v", err)
 	}
 }

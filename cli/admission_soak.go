@@ -162,39 +162,49 @@ func runAdmissionSoakClear(cmd *cobra.Command, _ []string) error {
 	if err := client.Post("/api/admission/soak/clear"+soakQuery(cmd), nil, &resp); err != nil {
 		return err
 	}
-	if asJSON := useJSON(cmd); asJSON {
-		return PrintJSONTo(cmd, resp)
-	}
-	if resp.Cleared {
-		fmt.Fprintln(cmd.OutOrStdout(), "Soak gate cleared.")
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "Review the conditions one more time, then run:")
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "  "+resp.KubectlPatch)
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "After the patch lands, failurePolicy=Fail means the webhook is fail-closed:")
-		fmt.Fprintln(cmd.OutOrStdout(), "pod admission will be BLOCKED if the webhook becomes unreachable.")
+	// C2: the --json branch used to `return PrintJSONTo(...)` BEFORE the
+	// resp.Cleared check, so `admission soak clear --json` exited 0 while the
+	// gate was still failing — precisely the invocation a pipeline uses to
+	// decide whether to flip failurePolicy to Fail. emitAndGate makes the gate
+	// structurally unskippable: rendering is a formatting choice, never a
+	// verdict. Note useJSON also trips on the global `--format json`.
+	return emitAndGate(cmd, resp, func() error {
+		if resp.Cleared {
+			fmt.Fprintln(cmd.OutOrStdout(), "Soak gate cleared.")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "Review the conditions one more time, then run:")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "  "+resp.KubectlPatch)
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "After the patch lands, failurePolicy=Fail means the webhook is fail-closed:")
+			fmt.Fprintln(cmd.OutOrStdout(), "pod admission will be BLOCKED if the webhook becomes unreachable.")
+			return nil
+		}
+		// Print missing conditions to stderr so a CI consumer can tee
+		// stdout (which stays empty on the unhappy path) and grep stderr.
+		fmt.Fprintln(cmd.ErrOrStderr(), "Soak gate NOT cleared. Missing criteria:")
+		for _, c := range resp.Missing {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  - %s: %s\n", c.Name, c.Evidence)
+		}
+		if resp.Suggestion != "" {
+			fmt.Fprintln(cmd.ErrOrStderr())
+			fmt.Fprintf(cmd.ErrOrStderr(), "Suggestion: %s\n", resp.Suggestion)
+		}
 		return nil
-	}
-	// Print missing conditions to stderr so a CI consumer can tee
-	// stdout (which stays empty on the unhappy path) and grep stderr.
-	fmt.Fprintln(cmd.ErrOrStderr(), "Soak gate NOT cleared. Missing criteria:")
-	for _, c := range resp.Missing {
-		fmt.Fprintf(cmd.ErrOrStderr(), "  - %s: %s\n", c.Name, c.Evidence)
-	}
-	if resp.Suggestion != "" {
-		fmt.Fprintln(cmd.ErrOrStderr())
-		fmt.Fprintf(cmd.ErrOrStderr(), "Suggestion: %s\n", resp.Suggestion)
-	}
-	// ExitSoakNotCleared(10) distinguishes "gate not cleared" from "HTTP /
-	// auth failure" (ExitOpError/ExitConfigAuth) and "happy path" (ExitOK).
-	// It used to be 3, which collided with ExitConfigAuth(3); renumbered into
-	// the >=10 command-specific range (see exitcodes.go). We use SilenceUsage
-	// + ExitCodeError so the operator sees just the message we printed and CI
-	// can branch on the exit code.
-	cmd.SilenceErrors = true
-	cmd.SilenceUsage = true
-	return &ExitCodeError{Code: ExitSoakNotCleared, Err: errors.New("soak gate not cleared")}
+	}, func() error {
+		if resp.Cleared {
+			return nil
+		}
+		// ExitSoakNotCleared(10) distinguishes "gate not cleared" from "HTTP /
+		// auth failure" (ExitOpError/ExitConfigAuth) and "happy path" (ExitOK).
+		// It used to be 3, which collided with ExitConfigAuth(3); renumbered into
+		// the >=10 command-specific range (see exitcodes.go). We use SilenceUsage
+		// + ExitCodeError so the operator sees just the message we printed and CI
+		// can branch on the exit code.
+		cmd.SilenceErrors = true
+		cmd.SilenceUsage = true
+		return &ExitCodeError{Code: ExitSoakNotCleared, Err: errors.New("soak gate not cleared")}
+	})
 }
 
 func printSoakStatus(cmd *cobra.Command, s soakStatusDTO) {

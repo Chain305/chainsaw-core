@@ -104,9 +104,17 @@ type scanActionsReport struct {
 // high-severity finding without polluting the test surface — tests call
 // runScanActions directly and assert on the returned exitCode.
 func runScanActions(cmd *cobra.Command, args []string) (int, error) {
-	format, _ := cmd.Flags().GetString("format")
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format == "" {
+	// S8 — resolveFormat, not a bare GetString("format"): --json is a root
+	// persistent flag documented as "alias for --format=json" (root.go), and
+	// scan / scan-repo / deps / affected all honor it. Reading only the local
+	// --format meant `chainsaw scan-actions ./wf --json` printed the human
+	// table plus "Risk evaluation: …" to a consumer expecting JSON.
+	format := strings.ToLower(strings.TrimSpace(resolveFormat(cmd)))
+	switch format {
+	case "", "table":
+		// resolveFormat's no-format default is "table"; this command's human
+		// format is spelled "text". Treat them as the same thing rather than
+		// erroring on a value the user never typed.
 		format = "text"
 	}
 	if format != "text" && format != "json" && format != "sarif" {
@@ -135,7 +143,12 @@ func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 
 	switch format {
 	case "json":
-		if err := writeScanActionsJSON(out, report); err != nil {
+		// S9 — JSON is a machine-readable result, so it honors --output the
+		// same way the SARIF branch below already did (`scan-actions --format
+		// json -o out.json` used to create no file and print to stdout).
+		// cmd.OutOrStdout() stays the fallback so tests capturing via
+		// cmd.SetOut keep working.
+		if err := writeScanActionsJSON(outWriterOr(cmd, out), report); err != nil {
 			return 0, err
 		}
 	case "sarif":

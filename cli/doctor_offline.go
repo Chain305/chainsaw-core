@@ -13,6 +13,9 @@ package cli
 //                       coverage rather than a degraded-but-running one.
 //   ⚠ degraded       — remote-only signal under the condition default;
 //                       honours CHAINSAW_OFFLINE_FAIL_MODE for the verdict.
+//   ℹ informational  — the doctor cannot decide this row from anything
+//                       readable on a workstation, so it reports the
+//                       situation instead of inventing a verdict.
 //
 // The output matrix is the operator-facing equivalent of the per-
 // provider table in docs/install/AIRGAP.md — keep the two in sync
@@ -34,9 +37,24 @@ import (
 type providerOfflineRow struct {
 	Name      string
 	Category  string // "local", "refreshable", "remote-only"
-	Status    string // "✓", "↻", "⚠", "✗"
+	Status    string // "✓", "↻", "⚠", "✗", "ℹ"
 	Detail    string
 	BundleKey string // empty for local providers
+	// Informational marks a row the doctor must REPORT but must not GRADE.
+	//
+	// Three refreshable rows named a bundle key that no provider reads, and
+	// grading them on that key was wrong in both directions. An air-gapped
+	// operator who pre-seeded the Trivy DB on disk but built a bundle
+	// without trivy-db/db.bolt was told "cve ✗ requires bundle refresh" and
+	// sent to rebuild a bundle that would change nothing; conversely a
+	// bundle that CONTAINED the key reported "cve ✓ runs offline" while CVE
+	// classification was failing open as SevUnknown.
+	//
+	// We report the situation instead of inventing a verdict. Deliberately
+	// NOT re-graded against hooks.trivial.db_path: that is a server-side,
+	// DB-backed setting which this command — running on a workstation —
+	// cannot read, so grading on it would just relocate the wrong answer.
+	Informational bool
 }
 
 // providerMatrix is the canonical mapping consulted by the doctor. New
@@ -67,11 +85,15 @@ var providerMatrix = []providerOfflineRow{
 
 	// Refreshable — ships in the intel bundle; offline mode loads from
 	// CHAINSAW_INTEL_BUNDLE_PATH instead of phoning home.
-	{Name: "cve", Category: "refreshable", BundleKey: "trivy-db", Detail: "Trivy DB snapshot — consumed on-disk at hooks.trivial.dbpath (pre-seed the DB), not via the bundle handle"},
+	// kev and malware are the only two rows a bundle key genuinely decides:
+	// provider_kev.go and provider_malware.go are the only callers of
+	// ActiveBundle().
 	{Name: "kev", Category: "refreshable", BundleKey: "kev", Detail: "CISA KEV catalogue (loaded from the bundle offline)"},
 	{Name: "malware", Category: "refreshable", BundleKey: "osv-malware", Detail: "OSV / GHSA malware feed (loaded from the bundle offline)"},
-	{Name: "ghsa-swift", Category: "refreshable", BundleKey: "ghsa-swift", Detail: "GHSA snapshot for Swift — RESERVED: shipped in the bundle but no provider consumes it yet"},
-	{Name: "typosquat-refdata", Category: "refreshable", BundleKey: "typosquat", Detail: "BK-tree reference data refresh"},
+	// Informational — see providerOfflineRow.Informational.
+	{Name: "cve", Category: "refreshable", BundleKey: "trivy-db", Informational: true, Detail: "Trivy DB snapshot — consumed on-disk at hooks.trivial.db_path (pre-seed the DB), not via the bundle handle, so the bundle cannot decide this row"},
+	{Name: "ghsa-swift", Category: "refreshable", BundleKey: "ghsa-swift", Informational: true, Detail: "GHSA snapshot for Swift — RESERVED: shipped in the bundle but no provider consumes it yet"},
+	{Name: "typosquat-refdata", Category: "refreshable", BundleKey: "typosquat", Informational: true, Detail: "BK-tree reference data refresh — the detector runs from embedded seeds; no provider reads this bundle key yet"},
 
 	// Remote-only — no bundle counterpart. Honours CHAINSAW_OFFLINE_FAIL_MODE.
 	{Name: "downloads", Category: "remote-only", Status: "⚠", Detail: "npm/PyPI download counts (5-day rolling)"},
@@ -122,6 +144,12 @@ func runDoctorOffline(cmd *cobra.Command, _ []string) error {
 	for _, row := range providerMatrix {
 		status := row.Status
 		detail := row.Detail
+		if row.Informational {
+			// Reported, never graded. Skipping the switch entirely is the
+			// point: no bundle state can turn this row into a ✓ or a ✗.
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", row.Name, row.Category, "ℹ", detail)
+			continue
+		}
 		switch row.Category {
 		case "refreshable":
 			if bundle == nil {
@@ -162,7 +190,7 @@ func runDoctorOffline(cmd *cobra.Command, _ []string) error {
 	w.Flush()
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Legend:  ✓ runs offline   ↻ refresh recommended   ○ no coverage (signal off, installs allowed)   ⚠ degraded   ✗ requires bundle refresh")
+	fmt.Fprintln(out, "Legend:  ✓ runs offline   ↻ refresh recommended   ○ no coverage (signal off, installs allowed)   ⚠ degraded   ✗ requires bundle refresh   ℹ informational (not graded — see detail)")
 	fmt.Fprintln(out, "Note:    CHAINSAW_OFFLINE_FAIL_MODE is advisory and reported here only. To refuse installs on missing coverage, set CHAINSAW_COVERAGE_MODE=closed with CHAINSAW_COVERAGE_REQUIRED=<sources>.")
 	return nil
 }

@@ -87,14 +87,32 @@ var repoCreateCmd = &cobra.Command{
 	RunE:         runRepoCreate,
 }
 
+// R5: `repo create` is the ONE command of the eleven that shadow --format
+// where the shadowing corrupts semantics rather than merely shadowing an
+// output selector. The other ten either accept `json` correctly by accident
+// (report ×4, policy lint, audit export, scan-actions, sbom diff, policy
+// export) or fail cleanly (`sbom export` → unknown format "json"). Here,
+// `chainsaw --format json repo create --name demo …` POSTed
+// {"format":"json", …} and CREATED A REPOSITORY WITH ECOSYSTEM "json" —
+// and MarkFlagRequired("format") was satisfied by what the user meant as an
+// output selector. Only this one is renamed; do NOT rename the other ten.
+//
+// Migration shape (release N): --ecosystem is the real flag, --format is
+// kept and deprecated so no existing script breaks, either satisfies the
+// requirement, and --ecosystem wins if both are given. Release N+1 removes
+// --format; old scripts then fail loudly at rc=4. Never silently remap.
 func init() {
 	repoCreateCmd.Flags().String("name", "", "Repository name (required)")
 	repoCreateCmd.Flags().String("type", "proxy", "Repository type: proxy|hosted|group")
-	repoCreateCmd.Flags().String("format", "", "Ecosystem format: npm|pypi|maven|cargo|gem|nuget|go|docker (required)")
+	repoCreateCmd.Flags().String("ecosystem", "", "Package ecosystem: npm|pypi|maven|cargo|gem|nuget|go|docker (required)")
+	repoCreateCmd.Flags().String("format", "", "Deprecated alias for --ecosystem")
+	_ = repoCreateCmd.Flags().MarkDeprecated("format", "use --ecosystem")
 	repoCreateCmd.Flags().String("upstream", "", "Upstream registry URL (required for proxy type)")
 	repoCreateCmd.Flags().Bool("json", false, "Output created repository as JSON")
 	_ = repoCreateCmd.MarkFlagRequired("name")
-	_ = repoCreateCmd.MarkFlagRequired("format")
+	// MarkFlagRequired("format") is deliberately GONE: with two accepted
+	// spellings cobra cannot express "one of these", so the requirement is
+	// validated in RunE where it can name both.
 	repoCmd.AddCommand(repoCreateCmd)
 }
 
@@ -106,17 +124,40 @@ func runRepoCreate(cmd *cobra.Command, _ []string) error {
 
 	name, _ := cmd.Flags().GetString("name")
 	repoType, _ := cmd.Flags().GetString("type")
-	format, _ := cmd.Flags().GetString("format")
 	upstream, _ := cmd.Flags().GetString("upstream")
+
+	// R5: --ecosystem is canonical; --format is the deprecated alias. When
+	// both are supplied --ecosystem wins (the explicit, current spelling).
+	ecosystem := strings.TrimSpace(mustString(cmd, "ecosystem"))
+	if ecosystem == "" {
+		legacy := strings.TrimSpace(mustString(cmd, "format"))
+		// The precise failure R5 describes: the user typed
+		// `chainsaw --format json repo create …` meaning "give me JSON
+		// output", cobra bound it to this command's local --format, and the
+		// repository was created with ecosystem "json". Refuse the two
+		// RESULT-format words outright — no package ecosystem is named
+		// "json" or "table", so this can never reject a legitimate value.
+		if globalResultFormats[strings.ToLower(legacy)] {
+			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+				"--format %q looks like an output selector, but on `repo create` it names the package ECOSYSTEM. Use --ecosystem <npm|pypi|…> for the repository, and --json for JSON output", legacy)}
+		}
+		ecosystem = legacy
+	}
+	if ecosystem == "" {
+		return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+			"--ecosystem is required (npm|pypi|maven|cargo|gem|nuget|go|docker)")}
+	}
 
 	if strings.ToLower(repoType) == "proxy" && upstream == "" {
 		return fmt.Errorf("--upstream is required for proxy repositories")
 	}
 
 	body := map[string]any{
-		"name":   name,
-		"type":   repoType,
-		"format": format,
+		"name": name,
+		"type": repoType,
+		// The server's field is still called "format"; only the FLAG was
+		// renamed. Do not rename the wire key.
+		"format": ecosystem,
 	}
 	if upstream != "" {
 		body["remote_url"] = upstream
@@ -134,7 +175,7 @@ func runRepoCreate(cmd *cobra.Command, _ []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(resp)
 	}
-	printSuccess(out, cmd, fmt.Sprintf("Created repository %q (format: %s, type: %s)", name, format, repoType))
+	printSuccess(out, cmd, fmt.Sprintf("Created repository %q (ecosystem: %s, type: %s)", name, ecosystem, repoType))
 	return nil
 }
 

@@ -257,7 +257,9 @@ func runAuthClientList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if len(resp.Clients) == 0 {
-		fmt.Println("No client_credentials found.")
+		// A10: was a bare fmt.Println straight to os.Stdout, so cobra's
+		// SetOut redirection (and every test that captures it) was bypassed.
+		fmt.Fprintln(cmd.OutOrStdout(), "No client_credentials found.")
 		return nil
 	}
 	rows := make([][]string, len(resp.Clients))
@@ -316,8 +318,14 @@ func runAuthClientDelete(cmd *cobra.Command, args []string) error {
 
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
+		// A5 — see the identical guard on policy delete. Without it a
+		// scripted `auth client delete <id>` exits 0 having done nothing,
+		// and the credential keeps authenticating.
+		if !stdinIsTerminal() {
+			return fmt.Errorf("refusing to delete client_credential %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
+		}
 		if !PromptConfirm(fmt.Sprintf("Delete client_credential %q? This cannot be undone.", id)) {
-			fmt.Println("Aborted.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 			return nil
 		}
 	}
@@ -344,12 +352,24 @@ func authClientRotateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rotate <client_id>",
 		Short: "Rotate a client_credential's secret (delete + recreate)",
+		// A7 — DOCS FIX, deliberately not a code change. The list below used
+		// to include "expiry" among the preserved metadata, which the code
+		// never read. Making the code match the doc was rejected as net
+		// negative: rotation is most often performed BECAUSE a credential is
+		// near expiry, so preserving the absolute expiry would mint a
+		// replacement that expires tomorrow — silently, with the old
+		// credential already deleted and no undo. The 90-day reset is the
+		// safer default and matches --expires-at's own help text; the doc is
+		// what was wrong.
 		Long: "Rotate a registry client_credential. The server does not expose " +
 			"an atomic rotate verb, so the CLI performs:\n\n" +
 			"  1. fetches the existing credential's metadata (name, type, " +
-			"expiry, authorized_repositories),\n" +
+			"authorized_repositories),\n" +
 			"  2. deletes it,\n" +
 			"  3. recreates it with the same client_id.\n\n" +
+			"The rotated credential gets a FRESH 90-day window; the previous " +
+			"expiry is deliberately not carried over (rotation usually happens " +
+			"because a credential is near expiry). Override with --expires-at.\n\n" +
 			"There is a short window between steps 2 and 3 where the credential " +
 			"cannot authenticate. The new secret is shown ONCE — save it " +
 			"immediately. Use --yes to skip the confirmation prompt.",
@@ -395,8 +415,14 @@ func runAuthClientRotate(cmd *cobra.Command, args []string) error {
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
 		fmt.Fprintln(os.Stderr, "Rotation deletes and recreates this credential. There is a brief window where authentication fails.")
+		// A5 — see the identical guard on policy delete. A scripted rotate
+		// without --yes silently no-op'd at exit 0, so the operator believed
+		// the secret had been replaced when it had not.
+		if !stdinIsTerminal() {
+			return fmt.Errorf("refusing to rotate client_credential %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
+		}
 		if !PromptConfirm(fmt.Sprintf("Rotate client_credential %q?", id)) {
-			fmt.Println("Aborted.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 			return nil
 		}
 	}

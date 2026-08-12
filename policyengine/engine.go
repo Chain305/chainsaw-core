@@ -234,6 +234,68 @@ func (e *Engine) Decide(ctx context.Context, surface policy.SurfaceTag, ec polic
 	return out, nil
 }
 
+// DecideInput is the Input-native entry point. Callers that already
+// hold a canonical policy.Input — the on-disk fixture shape that
+// `chainsaw policy gate` reads, the wire shape a remote surface posts —
+// hand it here instead of manufacturing an EvaluationContext for
+// Decide to immediately project back into an Input.
+//
+// That round-trip is the whole reason this exists. Reconstructing an
+// EvaluationContext from an Input requires a hand-maintained
+// field-by-field copy, and such a copy silently drops every field added
+// to Input after it was written. `chainsaw policy gate` carried exactly
+// one (cli.inputToContext) and had fallen three fields behind — most
+// consequentially SignalsUnavailable, the documented fail-CLOSED knob —
+// so the same bundle and fixture blocked under `policy eval` and
+// allowed under `policy gate`. There is no copy layer to fall behind
+// here: the Input the caller supplies IS the Input OPA evaluates.
+//
+// The native Go evaluator is deliberately NOT consulted. It is driven
+// by an EvaluationContext plus a policy store, neither of which an
+// Input can reconstruct; a caller holding an EvaluationContext must use
+// Decide. MatchedNative is therefore always ModeAllow here.
+//
+// Everything else matches Decide's DSL leg verbatim: safeDecide's panic
+// recovery, the fail-open-with-a-loud-log posture on a rule error (a
+// buggy custom rule must not wedge production), and the BundleDigest
+// stamp for reproducing the decision.
+//
+// in.Surface is authoritative: it is stamped onto the Decision and
+// reaches Rego as `input.surface`.
+func (e *Engine) DecideInput(ctx context.Context, in policy.Input) (Decision, error) {
+	out := Decision{
+		Action:        dsl.ActionAllow,
+		Surface:       in.Surface,
+		MatchedNative: policy.ModeAllow,
+	}
+	if e == nil {
+		return out, nil
+	}
+
+	if d := e.dslAtom.Load(); d != nil && !d.Empty() {
+		input := in
+		dec, err := safeDecide(ctx, d, input)
+		if err != nil {
+			// Fail-open. Log loudly so operators notice; do not
+			// promote the error to the caller because that would
+			// turn a buggy rule into a hard deny.
+			e.logger.Error("dsl decide error — failing open",
+				"err", err,
+				"surface", string(in.Surface),
+				"package", in.PackageName,
+				"version", in.PackageVersion,
+				"bundle_digest", d.Digest(),
+			)
+		} else {
+			out.Action = dsl.Stricter(out.Action, dec.Action)
+			out.Violations = append(out.Violations, dec.Violations...)
+		}
+		out.BundleDigest = d.Digest()
+	}
+
+	return out, nil
+}
+
 // emitOwnerRouting is the Pain 4 hook. It mutates `out` in place:
 //   - resolves the owning team from (orgID, repo, path) when a resolver
 //     is wired,

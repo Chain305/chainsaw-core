@@ -55,24 +55,7 @@ With --fix, apply auto-fixable remediations surfaced by --upgrade-check
 files). Breaking findings are never auto-fixed — operator must
 acknowledge.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			upgradeCheck, _ := cmd.Flags().GetBool("upgrade-check")
-			fix, _ := cmd.Flags().GetBool("fix")
-			if upgradeCheck || fix {
-				return runDoctorUpgradeCheck(cmd, args)
-			}
-			bypassCheck, _ := cmd.Flags().GetBool("bypass-check")
-			if bypassCheck {
-				return runDoctorBypassCheck(cmd, args)
-			}
-			offline, _ := cmd.Flags().GetBool("offline")
-			if offline {
-				return runDoctorOffline(cmd, args)
-			}
-			strict, _ := cmd.Flags().GetBool("strict")
-			if strict {
-				return runDoctorStrict(cmd, args)
-			}
-			return runDoctor(cmd, args)
+			return dispatchDoctorMode(cmd, args)
 		},
 	}
 	cmd.Flags().Bool("strict", false, "Fail (non-zero exit) on any drift: project configs, env overrides, lockfile hits, direct egress reachable.")
@@ -99,6 +82,87 @@ acknowledge.`,
 
 func init() {
 	rootCmd.AddCommand(newDoctorCmd())
+}
+
+// doctorMode names one of doctor's mutually-exclusive report modes,
+// together with the runner that produces it.
+type doctorMode struct {
+	flags string
+	run   func(*cobra.Command, []string) error
+}
+
+// dispatchDoctorMode resolves which doctor report to run.
+//
+// It reads EVERY mode flag up front, for two reasons that used to be two
+// separate bugs in one if-chain:
+//
+//   - --attest was never consulted at all. Its own help text says "Implies
+//     --strict", and postAttestation is only reachable from runDoctorStrict,
+//     so `chainsaw doctor --bundle-id=<id> --attest` — the exact command in
+//     docs/DEPLOYMENT.md step 8 — printed the plain manager table, exited 0
+//     ("returns OK"), POSTed nothing, and left applied_at NULL. The operator
+//     then concluded the hardening-bundle loop was broken server-side.
+//   - The chain dispatched by PRECEDENCE with no conflict detection, so a CI
+//     job wired as `doctor --strict --bypass-check` (a natural "check both"
+//     reading, since --bypass-check advertises that it "exits 0 even when a
+//     config is missing") silently ran only the bypass report and exited 0.
+//     The strict gate never ran and nothing said so.
+//
+// Combining modes is refused rather than ordered: each mode has its own exit
+// ladder, and silently honouring one of two requested gates is how a gate
+// stops being a gate.
+func dispatchDoctorMode(cmd *cobra.Command, args []string) error {
+	mode, err := resolveDoctorMode(cmd)
+	if err != nil {
+		return err
+	}
+	return mode.run(cmd, args)
+}
+
+// resolveDoctorMode picks the single mode to run, or errors when more than
+// one was requested. Split out from dispatchDoctorMode so tests can assert
+// WHICH mode a flag combination selects against the real resolution logic
+// rather than a copy of it.
+func resolveDoctorMode(cmd *cobra.Command) (doctorMode, error) {
+	getBool := func(name string) bool {
+		v, _ := cmd.Flags().GetBool(name)
+		return v
+	}
+	upgradeCheck, fix := getBool("upgrade-check"), getBool("fix")
+	bypassCheck := getBool("bypass-check")
+	offline := getBool("offline")
+	strict, attest := getBool("strict"), getBool("attest")
+
+	var requested []doctorMode
+	if upgradeCheck || fix {
+		requested = append(requested, doctorMode{"--upgrade-check/--fix", runDoctorUpgradeCheck})
+	}
+	if bypassCheck {
+		requested = append(requested, doctorMode{"--bypass-check", runDoctorBypassCheck})
+	}
+	if offline {
+		requested = append(requested, doctorMode{"--offline", runDoctorOffline})
+	}
+	if strict || attest {
+		requested = append(requested, doctorMode{"--strict/--attest", runDoctorStrict})
+	}
+
+	switch len(requested) {
+	case 0:
+		return doctorMode{"(default)", runDoctor}, nil
+	case 1:
+		return requested[0], nil
+	}
+
+	names := make([]string, 0, len(requested))
+	for _, m := range requested {
+		names = append(names, m.flags)
+	}
+	return doctorMode{}, &ExitCodeError{
+		Code: ExitUsage,
+		Err: fmt.Errorf("doctor modes are mutually exclusive, but %s were requested together; each has its own exit-code ladder, so run them as separate invocations",
+			strings.Join(names, " and ")),
+	}
 }
 
 type doctorManagerEntry struct {
@@ -177,6 +241,13 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		report.Onboarding = ob
 	}
 
+	// Tally + emit BEFORE the --json early return. runDoctor used to emit
+	// cli.doctor.run only on the human path, so every scripted and CI
+	// invocation — the population whose blockers the event exists to
+	// surface — was invisible to the funnel.
+	tally := tallyDoctorManagers(report.Managers)
+	cliEmit(telemetry.EventCLIDoctorRun, tally.telemetryProps())
+
 	if useJSON(cmd) {
 		// WS2 #10: attach the wrong-org-slug verdict to the JSON report, then
 		// still fail non-zero when it's a genuine wrong slug so CI branches on
@@ -223,12 +294,11 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	// and the exact command. Deliberately says "not wired" — NOT "unprotected"
 	// (a fear claim that outruns what doctor actually knows; doctor is an ops
 	// surface, keep it operational).
-	var unwired []string
-	for _, e := range report.Managers {
-		if e.Installed && !e.Wired && !e.Shimmed {
-			unwired = append(unwired, e.Name)
-		}
-	}
+	//
+	// Same slice the telemetry tally reports as installed_failed_checks, so
+	// the footer the user reads and the field the funnel reads can never
+	// disagree.
+	unwired := tally.InstalledFailedChecks
 	if len(unwired) > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(),
 			"\n%d manager(s) installed but not wired: %s\n"+
@@ -241,26 +311,6 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), warning)
 	}
 
-	passed, failed := 0, 0
-	failedChecks := []string{}
-	for _, e := range report.Managers {
-		if e.Wired {
-			passed++
-		} else {
-			failed++
-			// Record WHICH manager isn't wired, not just how many. Lets the
-			// funnel surface the most common blocker (e.g. "npm" dominating
-			// failed_checks) instead of an opaque count. A shimmed-but-not-
-			// config-wired manager still counts as a check that didn't pass.
-			failedChecks = append(failedChecks, e.Name)
-		}
-	}
-	cliEmit(telemetry.EventCLIDoctorRun, map[string]any{
-		"checks_passed": passed,
-		"checks_failed": failed,
-		"failed_checks": failedChecks,
-	})
-
 	// WS2 #10 (load-bearing): the wrong-org-slug check. Probes the org-scoped
 	// repo path and, on a genuine CHW-4314/CHW-1303 rejection, prints the
 	// explicit "block did NOT fire" remediation and returns a non-zero error.
@@ -270,6 +320,69 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	// config. Kept out of the manager loop above so its exit semantics (loud,
 	// non-zero) stay independent of the wiring table.
 	return runDoctorOrgSlugCheck(cmd, false)
+}
+
+// doctorTally is the manager rollup runDoctor reports to telemetry and
+// renders in its remediation footer. Extracted as a pure function of the
+// report so it can be tested without executing the command.
+type doctorTally struct {
+	// ChecksPassed / ChecksFailed / FailedChecks are the ORIGINAL,
+	// unchanged dimensions: every registered manager, wired or not.
+	ChecksPassed int
+	ChecksFailed int
+	FailedChecks []string
+
+	// ManagersInstalled and InstalledFailedChecks are additive. They exist
+	// because the original three count managers the user does not have:
+	// a laptop with only npm installed and wired reports checks_failed: 10
+	// with failed_checks [yarn,bun,pip,cargo,maven,gradle,sbt,nuget,go,docker]
+	// while the SAME run prints "0 manager(s) installed but not wired".
+	//
+	// Redefining the original three in place was rejected: they are shipped
+	// dimensions with history, and silently changing what they count breaks
+	// longitudinal comparison with no marker in the data to say when the
+	// meaning changed. Adding fields lets the funnel move over deliberately
+	// and keeps both series readable.
+	ManagersInstalled     int
+	InstalledFailedChecks []string
+}
+
+// tallyDoctorManagers rolls up a doctor report's manager rows.
+func tallyDoctorManagers(entries []doctorManagerEntry) doctorTally {
+	t := doctorTally{FailedChecks: []string{}}
+	for _, e := range entries {
+		if e.Wired {
+			t.ChecksPassed++
+		} else {
+			t.ChecksFailed++
+			// Record WHICH manager isn't wired, not just how many. A
+			// shimmed-but-not-config-wired manager still counts as a
+			// check that didn't pass.
+			t.FailedChecks = append(t.FailedChecks, e.Name)
+		}
+		if e.Installed {
+			t.ManagersInstalled++
+			if !e.Wired && !e.Shimmed {
+				t.InstalledFailedChecks = append(t.InstalledFailedChecks, e.Name)
+			}
+		}
+	}
+	return t
+}
+
+// telemetryProps renders the tally as the cli.doctor.run payload.
+func (t doctorTally) telemetryProps() map[string]any {
+	installedFailed := t.InstalledFailedChecks
+	if installedFailed == nil {
+		installedFailed = []string{}
+	}
+	return map[string]any{
+		"checks_passed":           t.ChecksPassed,
+		"checks_failed":           t.ChecksFailed,
+		"failed_checks":           t.FailedChecks,
+		"managers_installed":      t.ManagersInstalled,
+		"installed_failed_checks": installedFailed,
+	}
 }
 
 // loadDoctorOnboardingState calls /api/onboarding/progress. Returns

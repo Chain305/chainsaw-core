@@ -167,9 +167,77 @@ func TestSbtManager_Wire_CoursierEnvSnippetPresent(t *testing.T) {
 	}
 	// coursier's required shape is `host user:password` — a single
 	// space-separated value, NOT host:user:password or url-form.
-	want := `export COURSIER_CREDENTIALS="chain305.com boot-id:boot-secret"`
+	//
+	// H4: the quoting changed from double to SINGLE quotes. This file is
+	// sourced by the user's shell (its own header tells them to add it to
+	// ~/.zshrc), and inside double quotes a secret containing `"` or `$`
+	// was interpreted — a secret of the form `x"; touch /tmp/PWNED; #`
+	// executed as a command. Single quotes make the value one shell
+	// literal; TestSbtCoursierEnvIsShellSafe pins the escape.
+	want := `export COURSIER_CREDENTIALS='chain305.com boot-id:boot-secret'`
 	if !strings.Contains(body, want) {
 		t.Errorf("coursier env line wrong shape;\nwant: %s\ngot:\n%s", want, body)
+	}
+}
+
+// TestSbtCoursierEnvIsShellSafe pins H4: a hostile credential must not become
+// a command when the user sources the generated snippet. Two layers, both
+// asserted here — parseCreds refuses the characters that have no business in
+// a credential at all, and shellSingleQuote neutralises the rest.
+func TestSbtCoursierEnvIsShellSafe(t *testing.T) {
+	m, dir := setupSbt(t)
+	base := WireOpts{
+		Scope:     ScopeProject,
+		ServerURL: "https://chain305.com/",
+		OrgSlug:   "acme",
+	}
+
+	// Layer 1: the reported payload carried a double quote, which
+	// rejectDangerous refuses outright — it could tear any of the six
+	// generated formats open, not just this one.
+	hostile := base
+	hostile.Credentials = `boot-id:x"; touch /tmp/PWNED; #`
+	err := m.Wire(hostile)
+	if err == nil {
+		t.Fatal("Wire accepted a credential containing a double quote")
+	}
+	if !strings.Contains(err.Error(), "client_secret") {
+		t.Errorf("refusal does not name the offending half: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "chainsaw-coursier-env.sh")); statErr == nil {
+		t.Error("Wire wrote the coursier env file despite refusing the credential")
+	}
+
+	// Layer 2: `;`, `$` and backticks ARE legal in a secret, and inside the
+	// old double-quoted form they were interpreted by the shell the moment
+	// the user followed the file's own instruction to source it.
+	shelly := base
+	shelly.Credentials = "boot-id:a;b$c`d`"
+	if err := m.Wire(shelly); err != nil {
+		t.Fatalf("Wire: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "chainsaw-coursier-env.sh"))
+	if err != nil {
+		t.Fatalf("read coursier env: %v", err)
+	}
+	want := "export COURSIER_CREDENTIALS='chain305.com boot-id:a;b$c`d`'"
+	if !strings.Contains(string(data), want) {
+		t.Errorf("credential was not shell-quoted;\nwant: %s\ngot:\n%s", want, data)
+	}
+
+	// A single quote inside the secret must be spliced, not left to close
+	// our quoting early.
+	quoted := base
+	quoted.Credentials = `boot-id:a'b`
+	if err := m.Wire(quoted); err != nil {
+		t.Fatalf("Wire with an embedded quote: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(dir, "chainsaw-coursier-env.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `'chain305.com boot-id:a'\''b'`) {
+		t.Errorf("embedded single quote not spliced:\n%s", data)
 	}
 }
 

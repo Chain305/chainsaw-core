@@ -8,17 +8,23 @@ package cli
 //	chainsaw telemetry reset   — forget the install_id (next run generates a new one)
 //
 // This command is the user-facing seam for
-// docs/plans/posthog-rehaul.md's opt-out flow. It never emits events of
-// its own (would be a weird chicken-and-egg), and its runtime is cheap
-// so we leave it out of the PersistentPreRun telemetry hook.
+// docs/plans/posthog-rehaul.md's opt-out flow.
+//
+// CORRECTION (was stale): this header used to claim the command "never
+// emits events of its own (would be a weird chicken-and-egg)". It does —
+// Execute() wraps EVERY invocation, including this one, in
+// cli.session.started + cli.session.completed. Both are now gated on
+// explicit consent (see cliTelemetryConsented in telemetry_runtime.go), so
+// `chainsaw telemetry off` no longer emits a session pair on its way out,
+// but the events exist and this file is not exempt from them.
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
+	"sort"
 
 	"github.com/spf13/cobra"
 
@@ -60,19 +66,26 @@ func newTelemetryOnCmd() *cobra.Command {
 		Use:   "on",
 		Short: "Opt in to anonymous usage + blocked-package telemetry (free guard)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			setGuardConsent(true)
+			consent := setGuardConsent(true)
 			// Consent is recorded regardless, but telemetry_runtime's
 			// initTelemetry hands back a *disabled* client when no server URL
 			// is configured (empty/relative endpoint). Saying a bare
 			// "telemetry on" there over-promises — nothing actually flows
 			// until a server is set. Mirror that exact condition so the
 			// message tells the truth.
-			if cfgServerURL() == "" {
-				fmt.Fprintln(cmd.OutOrStdout(), "chainsaw: telemetry recorded. Data starts flowing once you sign in / set a server (`chainsaw auth login`). Disable anytime with `chainsaw telemetry off`.")
-				return nil
+			pending := cfgServerURL() == ""
+			msg := "chainsaw: telemetry on. Anonymous usage and blocked-package data help improve detection. Disable anytime with `chainsaw telemetry off`."
+			if pending {
+				msg = "chainsaw: telemetry recorded. Data starts flowing once you sign in / set a server (`chainsaw auth login`). Disable anytime with `chainsaw telemetry off`."
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "chainsaw: telemetry on. Anonymous usage and blocked-package data help improve detection. Disable anytime with `chainsaw telemetry off`.")
-			return nil
+			// X8: `--json` used to print this human sentence verbatim.
+			return emitTelemetryResult(cmd, map[string]any{
+				"consent":        consent,
+				"enabled":        true,
+				"pending_server": pending,
+				"server_url":     cfgServerURL(),
+				"message":        msg,
+			}, msg)
 		},
 	}
 }
@@ -82,20 +95,36 @@ func newTelemetryOffCmd() *cobra.Command {
 		Use:   "off",
 		Short: "Opt out of telemetry (the free guard sends nothing)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			setGuardConsent(false)
-			fmt.Fprintln(cmd.OutOrStdout(), "chainsaw: telemetry off. Nothing is sent. Re-enable anytime with `chainsaw telemetry on`.")
-			return nil
+			consent := setGuardConsent(false)
+			const msg = "chainsaw: telemetry off. Nothing is sent. Re-enable anytime with `chainsaw telemetry on`."
+			return emitTelemetryResult(cmd, map[string]any{
+				"consent": consent,
+				"enabled": false,
+				"message": msg,
+			}, msg)
 		},
 	}
+}
+
+// emitTelemetryResult renders one of the small telemetry mutation results
+// either as JSON (--json / --format=json) or as its human line.
+//
+// X8: `telemetry on|off|reset --json` printed human prose on stdout at
+// rc=0, so a script parsing the output of its own opt-out call got a
+// sentence. Results go through outWriter so --output is honored too.
+func emitTelemetryResult(cmd *cobra.Command, payload map[string]any, human string) error {
+	if useJSON(cmd) {
+		return PrintJSONTo(cmd, payload)
+	}
+	_, err := fmt.Fprintln(outWriterOr(cmd, cmd.OutOrStdout()), human)
+	return err
 }
 
 func newTelemetryStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Print the current telemetry mode and install_id",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTelemetryStatus(cmd.OutOrStdout())
-		},
+		RunE:  runTelemetryStatus,
 	}
 }
 
@@ -135,15 +164,33 @@ func newTelemetryResetCmd() *cobra.Command {
 			if err := telemetry.ResetInstall(dir); err != nil {
 				return fmt.Errorf("reset install: %w", err)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "install_id cleared. Next chainsaw invocation will mint a new one.")
-			return nil
+			// Drop the per-process cache too, so anything later in THIS
+			// invocation (the session-completed event, for one) does not keep
+			// using the id the user just asked us to forget.
+			telemetry.ResetProcessInstall()
+			const msg = "install_id cleared. Next chainsaw invocation will mint a new one."
+			return emitTelemetryResult(cmd, map[string]any{
+				"reset":      true,
+				"config_dir": dir,
+				"message":    msg,
+			}, msg)
 		},
 	}
 }
 
-// runTelemetryStatus prints a concise diagnostic. Json-encoded when --json
-// is set globally so scripts can consume it.
-func runTelemetryStatus(out io.Writer) error {
+// runTelemetryStatus prints a concise diagnostic.
+//
+// R15: this UNCONDITIONALLY encoded JSON while its own doc comment claimed
+// "Json-encoded when --json is set globally", and it wrote straight to
+// cmd.OutOrStdout() so --output was silently ignored. It now honors both:
+// --json / --format=json emits the JSON object, the human default prints
+// the same fields as sorted key/value lines, and the sink is the resolved
+// result writer.
+//
+// RELEASE NOTE: a bare `chainsaw telemetry status` no longer emits JSON.
+// Scripts piping it to jq must add --json (which worked before and still
+// works).
+func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
 	mode := telemetry.ResolveMode()
 	dir, dirErr := telemetry.ConfigDir()
 	install, installErr := telemetry.ProcessInstall()
@@ -170,6 +217,20 @@ func runTelemetryStatus(out io.Writer) error {
 		payload["install_error"] = installErr.Error()
 	}
 
+	out := outWriterOr(cmd, cmd.OutOrStdout())
+	if !useJSON(cmd) {
+		keys := make([]string, 0, len(payload))
+		for k := range payload {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if _, err := fmt.Fprintf(out, "%-16s %v\n", k, payload[k]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)

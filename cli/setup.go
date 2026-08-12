@@ -90,9 +90,13 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	fmt.Println("=== Chainsaw Setup ===")
+	// X8: `setup` was the only command in the tree that put banner text on
+	// STDOUT. That is chatter, not a result — and it meant `chainsaw setup
+	// --json` emitted "=== Chainsaw Setup ===" ahead of anything a caller
+	// might parse. Banner and progress go to stderr regardless of format.
+	fmt.Fprintln(cmd.ErrOrStderr(), "=== Chainsaw Setup ===")
 	if prog.Step != "" {
-		fmt.Printf("Resuming from step: %s\n", prog.Step)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Resuming from step: %s\n", prog.Step)
 	} else {
 		// First-run: keep it to a single welcome line. The user typed
 		// `chainsaw setup` to point the CLI at a server — get them to

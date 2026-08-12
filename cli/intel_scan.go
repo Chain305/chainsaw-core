@@ -18,8 +18,10 @@ package cli
 // operational failure (see exitcodes.go, invariant B).
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -92,16 +94,80 @@ func lockfileTypeFromPath(path string) string {
 	return ""
 }
 
+// lockfileTypeFromContent identifies a lockfile by what is IN it.
+//
+// X12: --lockfile used to dispatch purely on the basename and never open the
+// file, so a genuine npm lockfile saved as `npm-lock.json`, `lock.json`, or
+// anything a monorepo tool renamed was rejected as "unsupported lockfile" —
+// a claim the CLI had not actually checked. Basename stays the fast path
+// (it is what npm/pnpm themselves write); this is the fallback.
+//
+// npm lockfiles are JSON carrying "lockfileVersion"; pnpm lockfiles are YAML
+// whose first meaningful line is `lockfileVersion: …`. Both markers are
+// mandatory in their formats, so a hit is definitive and a miss is honest.
+func lockfileTypeFromContent(data []byte) string {
+	trimmed := bytes.TrimSpace(stripUTF8BOM(data))
+	if len(trimmed) == 0 {
+		return ""
+	}
+	if trimmed[0] == '{' {
+		var probe struct {
+			LockfileVersion any `json:"lockfileVersion"`
+			Packages        any `json:"packages"`
+			Dependencies    any `json:"dependencies"`
+		}
+		if err := json.Unmarshal(trimmed, &probe); err == nil {
+			if probe.LockfileVersion != nil || probe.Packages != nil || probe.Dependencies != nil {
+				return "npm"
+			}
+		}
+		return ""
+	}
+	for _, line := range strings.Split(string(trimmed), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "lockfileVersion:") {
+			return "pnpm"
+		}
+		// Only the head of the document can carry the version key; stop at the
+		// first other content rather than scanning a large lockfile.
+		break
+	}
+	return ""
+}
+
 func runIntelScan(cmd *cobra.Command, _ []string) error {
 	lockfileFlag, _ := cmd.Flags().GetString("lockfile")
 
 	var path, kind string
+	var raw []byte
 	if lockfileFlag != "" {
 		path = lockfileFlag
+		// X12: STAT FIRST. A missing/unreadable path is an operational failure
+		// (ExitOpError, matching scan-actions / sbom diff / bundle verify on the
+		// same condition), not a usage error — and it must not be reported as
+		// "unsupported lockfile", which is a claim about content the CLI has not
+		// looked at.
+		if _, statErr := os.Stat(path); statErr != nil {
+			return &ExitCodeError{Code: ExitOpError, Err: fmt.Errorf("--lockfile %q: %w", path, statErr)}
+		}
+		var readErr error
+		raw, readErr = os.ReadFile(path)
+		if readErr != nil {
+			return &ExitCodeError{Code: ExitOpError, Err: fmt.Errorf("read lockfile: %w", readErr)}
+		}
+		// Basename is the fast path; fall back to sniffing the CONTENT so a
+		// valid npm lockfile under another name is accepted rather than
+		// rejected sight-unseen.
 		kind = lockfileTypeFromPath(path)
 		if kind == "" {
-			// Bad argument shape → ExitUsage(4), not an operational error.
-			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("--lockfile %q: unsupported lockfile (npm or pnpm expected)", path)}
+			kind = lockfileTypeFromContent(raw)
+		}
+		if kind == "" {
+			// Genuinely unrecognized content → ExitUsage(4).
+			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("--lockfile %q: unsupported lockfile — neither the filename nor the contents identify an npm (package-lock.json) or pnpm (pnpm-lock.yaml) lockfile", path)}
 		}
 	} else {
 		cwd, err := os.Getwd()
@@ -113,14 +179,14 @@ func runIntelScan(cmd *cobra.Command, _ []string) error {
 		if !ok {
 			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("no supported lockfile found (package-lock.json, pnpm-lock.yaml) — pass --lockfile <path>")}
 		}
+		var readErr error
+		raw, readErr = os.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("read lockfile: %w", readErr)
+		}
 	}
 
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read lockfile: %w", err)
-	}
-
-	client, err := newV1Client()
+	client, err := newV1Client(cmd)
 	if err != nil {
 		// Classify via Execute(): auth → 3, network/IO → 2 (invariant B).
 		return err

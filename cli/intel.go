@@ -181,10 +181,17 @@ type v1Client struct {
 // config. Returns an actionable error (same messaging as other commands)
 // when server URL or token is missing so callers can exit 2 with a clear
 // message instead of a vague "connection refused" later.
-func newV1Client() (*v1Client, error) {
+//
+// X11: cmd names the command in that error and MUST be passed. With the
+// previous errServerNotConfigured(nil), every command in the intel tree
+// reported "'chainsaw' is a server-required command" — and because
+// trimChainsaw("chainsaw") is a no-op, the suggested fix read
+// "chainsaw --server <url> chainsaw ...". A nil cmd is still tolerated by the
+// helper, but no caller here should rely on it.
+func newV1Client(cmd *cobra.Command) (*v1Client, error) {
 	c := newClient()
 	if c.baseURL == "" {
-		return nil, errServerNotConfigured(nil)
+		return nil, errServerNotConfigured(cmd)
 	}
 	if cfgToken() == "" {
 		return nil, fmt.Errorf("not authenticated — run 'chainsaw auth login' first")
@@ -234,14 +241,11 @@ func (c *v1Client) doUnwrap(ctx context.Context, method, path string, body any) 
 
 	if resp.StatusCode >= 400 {
 		// Server error envelope is separate from v1Envelope — use the
-		// same parse as APIClient.do so messaging stays consistent.
-		var apiErr apiError
-		_ = json.Unmarshal(respBody, &apiErr)
-		if apiErr.Code == "" {
-			apiErr.Code = fmt.Sprintf("HTTP %d", resp.StatusCode)
-			apiErr.Message = strings.TrimSpace(string(respBody))
-		}
-		return nil, nil, &apiErr
+		// SAME parser as APIClient.do so messaging, the CHW- render branch,
+		// and status-based error classification stay consistent. This used
+		// to be an independent second copy of the parse, which is how the
+		// two drifted in the first place (A1′); keep it a single call.
+		return nil, nil, parseAPIError(resp.StatusCode, respBody)
 	}
 
 	var env v1Envelope

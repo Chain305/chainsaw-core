@@ -141,13 +141,21 @@ and expires after 1 hour.`,
 
 var riskWeightsApplyCmd = &cobra.Command{
 	Use:   "apply",
-	Short: "Apply a previously-previewed weight set",
-	Long: `apply PUTs the same --set values you previewed, attaching the
-simulate_id from your preview run. The server re-derives the inputs
-hash from the request body and refuses the write (CHW-4830) if the
-simulate_id is missing, stale (> 1 hour), or for a different draft.
+	Short: "UNAVAILABLE — per-signal weights are not persisted by the server",
+	Long: `apply is currently a no-op and now fails rather than reporting success.
 
-Re-run preview if apply returns CHW-4830.`,
+It PUT the same --set values you previewed, attached to your preview's
+simulate_id. The server used proposed_signal_weights only to re-derive the
+inputs hash for the CHW-4830 staleness check, then wrote an
+orgweights.Overrides row — which has no signal-weight field. The per-signal
+values were discarded on every run, while the command printed
+"Weights applied." and exited 0.
+
+Fixing this needs a server change (persist proposed_signal_weights in the
+v1 weights handler). Until then:
+
+  chainsaw risk-weights show      # read the effective per-signal weights
+  chainsaw risk-weights preview   # model a change without applying it`,
 	RunE: runRiskWeightsApply,
 }
 
@@ -218,7 +226,7 @@ func effectiveCategoryWeights(ctx context.Context, c *v1Client) (map[string]floa
 // ── show ────────────────────────────────────────────────────────────────────
 
 func runRiskWeightsShow(cmd *cobra.Command, _ []string) error {
-	client, err := newV1Client()
+	client, err := newV1Client(cmd)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
@@ -308,7 +316,7 @@ func runRiskWeightsPreview(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	client, err := newV1Client()
+	client, err := newV1Client(cmd)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
@@ -392,49 +400,38 @@ func renderRiskWeightsPreview(r riskWeightsSimulateResp, draft map[string]int) {
 
 // ── apply ───────────────────────────────────────────────────────────────────
 
-func runRiskWeightsApply(cmd *cobra.Command, _ []string) error {
+// errRiskWeightsApplyNotPersisted is what `apply` returns instead of
+// pretending. Package-level so a test can pin the operator-facing text.
+var errRiskWeightsApplyNotPersisted = fmt.Errorf(
+	"`risk-weights apply` cannot persist per-signal weights.\n" +
+		"PUT /api/v1/intel/weights reads proposed_signal_weights only to re-derive the simulate " +
+		"inputs hash, then writes an orgweights.Overrides row — a struct with no signal-weight field " +
+		"at all. Every --set value is dropped by the write.\n" +
+		"This command used to make that request, print \"Weights applied.\" and exit 0, so the whole " +
+		"preview-then-confirm gate guarded a write that never happened. It now fails instead. " +
+		"The fix is server-side: persist proposed_signal_weights in the v1 weights handler.\n" +
+		"To read the current per-signal weights: `chainsaw risk-weights show`.")
+
+// runRiskWeightsApply refuses, loudly, before touching the network.
+//
+// The flag validation above it is kept so the failure an operator sees
+// is the REAL problem and not a misleading "you forgot --simulate-id".
+//
+// Deliberately NOT worked around client-side by looping
+// PUT /api/risk/overrides/{signal}: that is a non-atomic multi-request
+// write (a partial failure strands the org on a weight set nobody
+// previewed), and it performs the real write OUTSIDE the simulate_id
+// guard, reducing that guard to decoration. A silent no-op is bad; an
+// unguarded, half-applied risk model is worse.
+func runRiskWeightsApply(_ *cobra.Command, _ []string) error {
 	if riskWeightsSimulateID == "" {
 		return fmt.Errorf("--simulate-id is required (run `chainsaw risk-weights preview` first)")
 	}
 	if len(riskWeightsApplySet) == 0 {
 		return fmt.Errorf("at least one --set <signalId>=<value> is required (must match preview)")
 	}
-	signalWeights, err := parseSetFlags(riskWeightsApplySet)
-	if err != nil {
+	if _, err := parseSetFlags(riskWeightsApplySet); err != nil {
 		return err
 	}
-	client, err := newV1Client()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
-	}
-	ctx := context.Background()
-
-	cat, err := effectiveCategoryWeights(ctx, client)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
-	}
-	body := riskWeightsSimulateReq{
-		Weights:               cat,
-		ProposedSignalWeights: signalWeights,
-		SimulateID:            riskWeightsSimulateID,
-	}
-	// PUT /api/v1/intel/weights returns the v1 envelope. doUnwrap will
-	// classify a 409 CHW-4830 into the structured apiError so we can
-	// surface the actionable message verbatim.
-	raw, _, err := client.doUnwrap(ctx, http.MethodPut, "/api/v1/intel/weights", body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
-	}
-
-	if useJSON(cmd) {
-		// Pass-through the data block — same pattern as other v1 commands.
-		_, _ = os.Stdout.Write(raw)
-		fmt.Println()
-		return nil
-	}
-	fmt.Println("Weights applied.")
-	return nil
+	return errRiskWeightsApplyNotPersisted
 }

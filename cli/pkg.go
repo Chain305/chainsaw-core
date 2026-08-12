@@ -187,7 +187,10 @@ func runPkgList(cmd *cobra.Command, _ []string) error {
 		Repository string               `json:"repository"`
 		Packages   []repoPackageSummary `json:"packages"`
 	}
-	if err := client.Get("/api/repos/"+repo+"/packages", &resp); err != nil {
+	// C13: --repo is a user flag interpolated into a URL PATH segment; escape
+	// it so a slug carrying "/" or "?" cannot reshape the request. The sibling
+	// call sites in this file already build a url.Values.
+	if err := client.Get("/api/repos/"+url.PathEscape(repo)+"/packages", &resp); err != nil {
 		return err
 	}
 

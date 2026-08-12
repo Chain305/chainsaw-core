@@ -27,11 +27,17 @@ const (
 	installFilename = "install_id"
 
 	// installIDDisabled is written instead of a real ID when the first run
-	// happens with CHAINSAW_TELEMETRY_DISABLED=1. Subsequent runs read
-	// this sentinel and remain silent even if the user later unsets the
-	// env var — the decision is sticky until they run
-	// `chainsaw telemetry reset`.
+	// happens with CHAINSAW_TELEMETRY_DISABLED set truthy. Subsequent runs
+	// read this sentinel and remain silent even if the user later unsets
+	// the env var — the decision is sticky until they run
+	// `chainsaw telemetry reset`. Only CHAINSAW_TELEMETRY_DISABLED writes
+	// it; the per-run umbrellas (CHAINSAW_OFFLINE, DO_NOT_TRACK) do not.
 	installIDDisabled = "disabled"
+
+	// envConfigHome mirrors cli/platform.EnvConfigHome. Duplicated as a
+	// string rather than imported so core/telemetry keeps no dependency on
+	// core/cli; see ConfigDir.
+	envConfigHome = "CHAINSAW_CONFIG_HOME"
 )
 
 // Install is the persistent install record. ID is the PostHog distinct_id
@@ -65,10 +71,33 @@ func LoadInstall(dir string) (Install, error) {
 	// First run — either the file is missing or it was empty. Respect
 	// CHAINSAW_TELEMETRY_DISABLED at first run so opted-out users never
 	// have an ID written.
-	if os.Getenv("CHAINSAW_TELEMETRY_DISABLED") == "1" {
+	//
+	// R8: the check used to be an EXACT `== "1"`, so the documented
+	// `CHAINSAW_TELEMETRY_DISABLED=true` opted the user out of SENDING
+	// (ResolveMode uses envTrue) while still minting and persisting a real
+	// UUIDv7 — the identifier the opt-out exists to prevent. Use the same
+	// truthy parser as ResolveMode so the two can never disagree again.
+	if envTrue("CHAINSAW_TELEMETRY_DISABLED") {
 		if err := writeInstallFile(dir, path, installIDDisabled); err != nil {
 			return Install{Disabled: true}, err
 		}
+		return Install{Disabled: true}, nil
+	}
+
+	// R8: any OTHER route to ModeDisabled (CHAINSAW_OFFLINE, DO_NOT_TRACK,
+	// a self-hosted build without CHAINSAW_TELEMETRY_ENABLED) must not mint
+	// an identifier either — telemetry/consent.go's ModeDisabled doc says
+	// verbatim "install_id is not persisted on first run", and
+	// `CHAINSAW_OFFLINE=1 chainsaw telemetry status` (the FIRST command a
+	// privacy-conscious operator runs) was minting the very id being
+	// inspected.
+	//
+	// Deliberately NOT written as the sticky `disabled` sentinel: those
+	// signals are PER-RUN umbrellas, not a telemetry decision. Writing the
+	// sentinel would make one offline invocation permanently opt the box
+	// out, and a code revert could not un-write it. Return the disabled
+	// record and leave the directory untouched.
+	if ResolveMode() == ModeDisabled {
 		return Install{Disabled: true}, nil
 	}
 
@@ -94,10 +123,33 @@ func ResetInstall(dir string) error {
 	return nil
 }
 
-// ConfigDir returns the XDG-compliant config directory for chainsaw,
-// creating it if missing. Honors XDG_CONFIG_HOME on Unix and APPDATA on
-// Windows; falls back to $HOME/.config/chainsaw.
+// ConfigDir returns the config directory for chainsaw, creating it if
+// missing. Precedence:
+//
+//  1. CHAINSAW_CONFIG_HOME (with leading ~ expansion) — the universal
+//     override documented for CI, nix, and portable installs.
+//  2. XDG_CONFIG_HOME/chainsaw on Unix, %APPDATA%/chainsaw on Windows.
+//  3. $HOME/.config/chainsaw.
+//
+// R9: step 1 used to be missing, so `CHAINSAW_CONFIG_HOME=/tmp/cfg2
+// chainsaw …` scoped config.yaml and guard_state.json into /tmp/cfg2 but
+// still persisted install_id — a stable machine identifier — outside it,
+// and `chainsaw telemetry reset` targeted a directory the operator never
+// configured.
+//
+// The override is read by NAME rather than through cli/platform on
+// purpose: core/telemetry sits below core/cli in the dependency graph and
+// a new package edge upward is not worth ten lines. The two resolvers
+// must stay in lockstep — see cli/platform.ConfigHome, whose override
+// branch likewise returns the directory ITSELF with no "chainsaw" suffix.
 func ConfigDir() (string, error) {
+	if override := strings.TrimSpace(os.Getenv(envConfigHome)); override != "" {
+		dir := expandTilde(override)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
 	var base string
 	switch runtime.GOOS {
 	case "windows":
@@ -148,6 +200,21 @@ func ProcessInstall() (Install, error) {
 	return processInstall, processInstallErr
 }
 
+// ResetProcessInstall drops the cached per-process install record so the
+// next ProcessInstall() call re-reads (and, if permitted, re-creates) it.
+//
+// Two callers: `chainsaw telemetry reset`, so the deletion takes effect
+// within the same invocation rather than only on the next one; and tests,
+// which need each case to start from a known install state rather than
+// inheriting whatever the first test in the binary happened to cache.
+//
+// Not safe to call concurrently with ProcessInstall.
+func ResetProcessInstall() {
+	processInstallOnce = sync.Once{}
+	processInstall = Install{}
+	processInstallErr = nil
+}
+
 // DistinctID returns the PostHog distinct_id for the current install.
 // Empty string when telemetry is disabled (either the sentinel file or
 // a load failure) — callers should treat that as "do not send".
@@ -156,6 +223,26 @@ func DistinctID(install Install) string {
 		return ""
 	}
 	return "install:" + install.ID
+}
+
+// expandTilde resolves a leading "~" in a CHAINSAW_CONFIG_HOME override.
+// Mirrors cli/platform.expandTilde; kept byte-compatible with it so the
+// two config-home resolvers agree on every input.
+func expandTilde(p string) string {
+	if p == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return home
+		}
+		return p
+	}
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return p
+		}
+		return filepath.Join(home, p[2:])
+	}
+	return p
 }
 
 func writeInstallFile(dir, path, value string) error {

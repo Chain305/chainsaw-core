@@ -23,12 +23,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/redact"
 )
 
 // Severity ranks a finding. Higher is worse. Worst severity across
@@ -316,7 +318,30 @@ func Run(ctx context.Context, opts Options) *Report {
 
 	report.Normalize()
 	sortFindings(report.Findings)
+	redactFindings(report.Findings)
 	return report
+}
+
+// redactFindings is the single choke point every operator-visible string in
+// a doctor report passes through before it is rendered or serialised.
+//
+// Individual checks are already careful (see checkVersionDrift), but every
+// check here reads operator-supplied files, env vars, and error strings from
+// the network and database layers — a DSN in a wrapped pq error, a token in
+// a config path, a password inside a compose file. Auditing each of those at
+// its own site is how the compose-file password leak (D1) survived review in
+// the first place. Doing it once, last, makes the class unreintroducible:
+// a new check cannot leak a recognised credential shape even if its author
+// never thinks about redaction.
+//
+// redact.Text is total and idempotent, so running it over findings that were
+// already careful is a no-op, and running it over an unparseable message
+// cannot fail.
+func redactFindings(findings []Finding) {
+	for i := range findings {
+		findings[i].Message = redact.Text(findings[i].Message)
+		findings[i].Remediation = redact.Text(findings[i].Remediation)
+	}
 }
 
 func sortFindings(findings []Finding) {
@@ -694,27 +719,52 @@ func checkVersionDrift(binaryVersion, composePath string) []Finding {
 			Remediation: "Either supply a readable compose file or omit --docker-compose-path.",
 		}}
 	}
-	// Very shallow parse: look for "chainsaw-proxy:<tag>" style pins.
-	// This is intentionally approximate — compose files vary wildly
-	// and we don't want to pull in a YAML dep just for this.
-	text := string(data)
-	for _, marker := range []string{"chainsaw-proxy:", "chainsaw:"} {
-		idx := strings.Index(text, marker)
-		if idx < 0 {
-			continue
+	// Shallow parse, but anchored on the `image:` MAPPING KEY.
+	//
+	// The previous implementation did strings.Index(text, "chainsaw:") over
+	// the whole file. That has no notion of "the image line", so on this
+	// repo's own dockerized/docker-compose.ha.yml the first hit landed
+	// inside
+	//     CHAINSAW_DATABASE_URL: "postgres://chainsaw:chainsaw@postgres:5432/…"
+	// and the remainder — starting with the DATABASE PASSWORD — was printed
+	// back to the operator as the "compose-pinned version". It could also
+	// never be right: the published image is chain305/chainsaw-firewall, so
+	// neither "chainsaw-proxy:" nor "chainsaw:" ever appears in name:tag
+	// form and the first match was always a service key or a DSN.
+	//
+	// Two rules follow from that and are load-bearing:
+	//   1. Only an anchored `^\s*image:` line is considered.
+	//   2. Nothing lifted out of the file is interpolated into a message
+	//      unless it first validates as an OCI tag (composeTagRe). A value
+	//      we could not parse is described, never quoted.
+	for _, ref := range composeChainsawImageRefs(string(data)) {
+		// A digest pin (`repo@sha256:…`) is the strongest pin there is, but
+		// it carries no version we can compare against the binary. That is
+		// "not measurable", not a misconfiguration — warning about it told
+		// operators on the most tightly pinned setup to loosen their pin.
+		if strings.Contains(ref, "@") {
+			return []Finding{{
+				Check:    "version-drift",
+				Severity: SeverityOK,
+				Message:  composePath + " pins the chainsaw image by digest — drift not measurable (and nothing to fix)",
+			}}
 		}
-		rest := text[idx+len(marker):]
-		end := strings.IndexAny(rest, " \n\t\r\"'")
-		if end < 0 {
-			end = len(rest)
-		}
-		pinned := strings.TrimSpace(rest[:end])
+		pinned := composeImageTag(ref)
 		if pinned == "" || pinned == "latest" {
 			return []Finding{{
 				Check:       "version-drift",
 				Severity:    SeverityWarn,
-				Message:     composePath + " pins image tag " + strconvQuote(pinned) + " — no drift can be measured",
-				Remediation: "Pin a specific version in docker-compose.yml.",
+				Message:     composePath + " does not pin the chainsaw image to a specific tag — no drift can be measured",
+				Remediation: "Pin a specific version (or a sha256 digest) for the chainsaw image in docker-compose.yml.",
+			}}
+		}
+		if !composeTagRe.MatchString(pinned) {
+			// Unparseable tail: say so, but never echo the bytes.
+			return []Finding{{
+				Check:       "version-drift",
+				Severity:    SeverityWarn,
+				Message:     composePath + " has a chainsaw image reference whose tag could not be parsed — no drift can be measured",
+				Remediation: "Use a plain `image: <repo>:<tag>` (or digest) reference for the chainsaw image.",
 			}}
 		}
 		if pinned != binaryVersion {
@@ -738,10 +788,46 @@ func checkVersionDrift(binaryVersion, composePath string) []Finding {
 	}}
 }
 
-// strconvQuote is a tiny fmt %q replacement so we don't drag strconv
-// into callers. Keeps the package self-contained.
-func strconvQuote(s string) string {
-	return `"` + s + `"`
+// composeImageLineRe matches a compose `image:` key at the start of a line
+// and captures the reference token. The capture stops at whitespace, a
+// quote, or `#` so a trailing YAML comment never bleeds into the value.
+// Anchoring on `^\s*image:` is the whole fix for D1: an env-var line such as
+// `CHAINSAW_DATABASE_URL: "postgres://user:pass@host/db"` cannot match.
+var composeImageLineRe = regexp.MustCompile(`(?m)^[\t ]*image:[\t ]*["']?([^\s"'#]+)`)
+
+// composeTagRe is the OCI tag grammar. A value that does not satisfy it is
+// never echoed back to the operator — that is the belt to the anchoring's
+// braces, so a future parser slip cannot reintroduce a credential leak.
+var composeTagRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
+
+// composeChainsawImageRefs returns the image references on `image:` lines
+// that name a chainsaw image, in file order. Both the published
+// chain305/chainsaw-firewall and the older chainsaw-proxy name contain
+// "chainsaw", which is the only substring we need.
+func composeChainsawImageRefs(text string) []string {
+	var refs []string
+	for _, m := range composeImageLineRe.FindAllStringSubmatch(text, -1) {
+		if strings.Contains(strings.ToLower(m[1]), "chainsaw") {
+			refs = append(refs, m[1])
+		}
+	}
+	return refs
+}
+
+// composeImageTag returns the tag portion of an image reference, or "" when
+// the reference carries no tag. The colon is only a tag separator when it
+// appears after the last `/` — otherwise it is a registry port
+// (`registry.example.com:5000/chainsaw-firewall`).
+func composeImageTag(ref string) string {
+	name := ref
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	i := strings.Index(name, ":")
+	if i < 0 {
+		return ""
+	}
+	return name[i+1:]
 }
 
 // checkDatabase pings the DB (if a prober is configured), reads the

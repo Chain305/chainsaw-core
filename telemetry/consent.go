@@ -32,7 +32,8 @@ const (
 	ModeEnabled Mode = iota
 	// ModeDisabled emits nothing; install_id is not persisted on first run.
 	ModeDisabled
-	// ModeDebug prints events to stdout as JSON but never sends.
+	// ModeDebug prints events to STDERR as JSON but never sends (stdout
+	// stays clean for scriptable CLI output — see Client.debugSink).
 	ModeDebug
 )
 
@@ -52,17 +53,24 @@ func IsSelfHosted() bool {
 // process. Checks, in order:
 //  1. CHAINSAW_TELEMETRY_DEBUG=1 → ModeDebug (wins over everything else
 //     so developers can inspect events without accidentally sending).
-//  2. CHAINSAW_OFFLINE=1 → ModeDisabled. The umbrella flag disables
+//  2. DO_NOT_TRACK=1 → ModeDisabled. The cross-vendor console opt-out
+//     (consoledonottrack.com). We honor DO_NOT_TRACK only — the bare
+//     "DNT" spelling is an HTTP-header convention with a real collision
+//     risk in a shell environment, so it is deliberately NOT consulted.
+//  3. CHAINSAW_OFFLINE=1 → ModeDisabled. The umbrella flag disables
 //     every phone-home path; telemetry would otherwise hit the
 //     backend /api/telemetry/ingest endpoint that the ingest endpoint
 //     forwards to PostHog.
-//  3. CHAINSAW_TELEMETRY_DISABLED=1 → ModeDisabled.
-//  4. Self-hosted deployments require CHAINSAW_TELEMETRY_ENABLED=1 to
+//  4. CHAINSAW_TELEMETRY_DISABLED=1 → ModeDisabled.
+//  5. Self-hosted deployments require CHAINSAW_TELEMETRY_ENABLED=1 to
 //     opt in; otherwise ModeDisabled.
-//  5. Otherwise ModeEnabled.
+//  6. Otherwise ModeEnabled.
 func ResolveMode() Mode {
 	if envTrue("CHAINSAW_TELEMETRY_DEBUG") {
 		return ModeDebug
+	}
+	if envTrue("DO_NOT_TRACK") {
+		return ModeDisabled
 	}
 	if envTrue("CHAINSAW_OFFLINE") {
 		return ModeDisabled

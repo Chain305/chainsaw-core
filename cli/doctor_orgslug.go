@@ -145,20 +145,28 @@ func (e *orgSlugCheckError) Error() string {
 	return fmt.Sprintf("wrong org slug — the install guard did NOT fire (%s)", code)
 }
 
-// resolveDoctorOrgSlug resolves the org slug doctor should probe. Precedence:
-//  1. --org flag (if present on this command),
-//  2. /api/orgs lookup via the standard resolveOrgSlug helper.
+// resolveDoctorOrgSlug resolves the org slug doctor should probe. It always
+// goes through /api/orgs, and deliberately does NOT read a --org flag.
 //
-// Returns "" when nothing resolves — the caller reports SKIPPED. doctor has
-// no --org flag today, so in practice this always goes through /api/orgs;
-// GetString on an absent flag returns "" without erroring, keeping the
-// helper reusable if a future --org lands on doctor.
+// It used to, guarded by `if f := cmd.Flags().Lookup("org"); f != nil` and a
+// comment claiming "doctor has no --org flag today". That premise was wrong:
+// cobra's mergePersistentFlags folds root's persistent flags into
+// cmd.Flags(), so Lookup("org") finds root's --org — which is an org *ID*
+// ("Org ID (overrides config)", and org.go actively teaches
+// `chainsaw --org <id>`). resolveOrgSlug returns a flag value UNCHANGED as
+// the slug, while the server resolves the probe path by slug only. So
+// `chainsaw --org <uuid> doctor` on a correctly-wired multi-org machine
+// probed a nonexistent slug, got CHW-1303, and printed the loudest failure
+// doctor has — "WRONG ORG SLUG — the install guard did NOT fire ... A
+// malicious or typosquatted package would sail through" — plus a
+// remediation telling the user to re-wire something that was never broken.
+//
+// /api/orgs already resolves the caller's identity to the right slug
+// (o.ID == me.OrgID → o.Slug), which is the ID→slug translation the flag
+// path skipped. Returns "" when nothing resolves — the caller reports
+// SKIPPED.
 func resolveDoctorOrgSlug(cmd *cobra.Command) string {
-	flagVal := ""
-	if f := cmd.Flags().Lookup("org"); f != nil {
-		flagVal, _ = cmd.Flags().GetString("org")
-	}
-	slug, err := resolveOrgSlug(cmd, cfgServerURL(), flagVal)
+	slug, err := resolveOrgSlug(cmd, cfgServerURL(), "")
 	if err != nil {
 		return ""
 	}

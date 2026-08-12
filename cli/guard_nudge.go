@@ -209,14 +209,30 @@ func guardColorEnabled() bool {
 	if os.Getenv("TERM") == "dumb" || viper.GetBool("no_color") {
 		return false
 	}
+	// R6: --no-color is now bound into viper (root.go), which covers every
+	// normally-parsed command. The guard runs with DisableFlagParsing, so
+	// cobra never parses argv here and the binding reads its default —
+	// scan argv directly for the flag placed BEFORE the guard subcommand,
+	// exactly as the --quiet path already does (quietFlagInArgs).
+	if noColorFlagInArgs(os.Args) {
+		return false
+	}
 	return stderrIsTerminal()
 }
 
 // envTruthy is a local truthy check (the telemetry package's envTrue is not
-// exported). 1/true/yes/on, case-insensitive.
+// exported). 1/true/yes/on, case-insensitive, surrounding whitespace ignored.
+//
+// The trim+lower is load-bearing, not cosmetic: this is how the guard reads the
+// CHAINSAW_OFFLINE umbrella and the telemetry kill switch, and it must agree
+// with the rest of the codebase (intelligence.IsOffline, coverage.isTruthy,
+// both `ToLower(TrimSpace(v))`). An exact-match version made `CHAINSAW_OFFLINE=Yes`
+// (or a trailing space from a dotfile) offline EVERYWHERE ELSE and not in the
+// guard — so a box the operator declared offline would still offer a network
+// feed fetch and prompt for telemetry consent. Seven call sites depend on it.
 func envTruthy(v string) bool {
-	switch v {
-	case "1", "true", "TRUE", "True", "yes", "YES", "on", "ON":
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
 		return true
 	}
 	return false

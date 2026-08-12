@@ -19,6 +19,9 @@ func TestRunGuardUpdate_NoTokenStillUsesPublicFeed(t *testing.T) {
 	// Isolated config + empty file cred store ⇒ cfgToken() resolves to "".
 	withIsolatedConfigHome(t)
 	withFileCredStore(t)
+	// Hermetic: `guard update` now refuses under the offline umbrella, so an
+	// exported CHAINSAW_OFFLINE=1 would make this assert on the wrong stderr.
+	t.Setenv(guardUpdateOfflineEnv, "")
 
 	dst := filepath.Join(t.TempDir(), "known_malicious.json")
 	t.Setenv(guardDBEnv, dst)
@@ -106,4 +109,84 @@ func TestNewGuardUpdateProgress_TTYRewritesLine(t *testing.T) {
 	if got := buf.String(); !strings.HasPrefix(got, "\r") || strings.Contains(got, "\n") {
 		t.Fatalf("TTY path should rewrite a single line via \\r and emit no newline, got %q", got)
 	}
+}
+
+// TestRunGuardUpdateRefusesUnderOfflineUmbrella pins X7: `guard update` is the
+// guard's ONLY networked command, so CHAINSAW_OFFLINE must stop it before it
+// dials — an air-gapped box should get a clear refusal, not a DNS error against
+// a procurement claim that says nothing leaves the network.
+//
+// The refusal must name BOTH ways forward. CHAINSAW_OFFLINE is also documented
+// as a telemetry kill switch, so someone who set it for THAT reason still needs
+// their malware feed: --allow-network for a box with egress, a signed bundle (or
+// a pre-populated cache file) for one without. A bare refusal would be a
+// baffling wall, and net-negative.
+func TestRunGuardUpdateRefusesUnderOfflineUmbrella(t *testing.T) {
+	withIsolatedConfigHome(t)
+	dst := filepath.Join(t.TempDir(), "known_malicious.json")
+	t.Setenv(guardDBEnv, dst)
+
+	// The tolerant truthy parse (G9) is part of the contract: these are all
+	// "offline" to intelligence.IsOffline and coverage.isTruthy too.
+	for _, value := range []string{"1", "true", "Yes", "ON", " 1 "} {
+		t.Setenv(guardUpdateOfflineEnv, value)
+		cmd := newGuardUpdateTestCmd(false)
+		err := runGuardUpdate(cmd, nil)
+		if err == nil {
+			t.Fatalf("%s=%q: want a refusal, got nil", guardUpdateOfflineEnv, value)
+		}
+		msg := err.Error()
+		for _, want := range []string{guardUpdateOfflineEnv, "--allow-network", "CHAINSAW_INTEL_BUNDLE_PATH"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s=%q: refusal should name %q, got: %v", guardUpdateOfflineEnv, value, want, msg)
+			}
+		}
+		if _, statErr := os.Stat(dst); !os.IsNotExist(statErr) {
+			t.Fatalf("nothing should be written on a refusal; stat err = %v", statErr)
+		}
+	}
+
+	// A non-truthy value is not the umbrella: the command proceeds (and then
+	// fails on the canceled fetch, not on the offline check).
+	t.Setenv(guardUpdateOfflineEnv, "0")
+	if err := runGuardUpdate(newGuardUpdateTestCmd(false), nil); err == nil ||
+		strings.Contains(err.Error(), "--allow-network") {
+		t.Fatalf("CHAINSAW_OFFLINE=0 must not refuse, got: %v", err)
+	}
+}
+
+// --allow-network is the escape hatch: offline set, flag passed, the fetch runs
+// (and here fails only because the context is already canceled).
+func TestRunGuardUpdateAllowNetworkOverridesOffline(t *testing.T) {
+	withIsolatedConfigHome(t)
+	t.Setenv(guardDBEnv, filepath.Join(t.TempDir(), "known_malicious.json"))
+	t.Setenv(guardUpdateOfflineEnv, "1")
+
+	var stderr bytes.Buffer
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	err := runGuardUpdate(newGuardUpdateTestCmd(true), nil)
+	_ = w.Close()
+	os.Stderr = oldStderr
+	_, _ = stderr.ReadFrom(r)
+
+	if err == nil || strings.Contains(err.Error(), "--allow-network") {
+		t.Fatalf("--allow-network should proceed past the offline check, got: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "fetching the OpenSSF malicious-packages dataset") {
+		t.Fatalf("--allow-network should reach the fetch, stderr:\n%s", stderr.String())
+	}
+}
+
+// newGuardUpdateTestCmd builds a cobra command carrying guard update's flags
+// with an already-canceled context, so the fetch never leaves the machine.
+func newGuardUpdateTestCmd(allowNetwork bool) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Bool("allow-network", allowNetwork, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd.SetContext(ctx)
+	return cmd
 }

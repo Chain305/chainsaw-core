@@ -38,6 +38,20 @@ type auditLogResponse struct {
 // this heuristic.
 const auditViewServerCap = 500
 
+// auditViewExportHint points a capped/filtered `audit view` at `audit export`.
+//
+// C9: it used to promise "use `chainsaw audit export` for the full range" — a
+// claim the server cannot honour. The export path has its own ceiling
+// (auditExportServerRowCap rows per source, auditExportServerWindowDays days),
+// so "full range" was false for exactly the compliance handoff that sentence was
+// written for. Offer export as the LARGER window it actually is, and name the
+// limit.
+var auditViewExportHint = fmt.Sprintf(
+	"note: `audit view` shows only the server's most-recent events. "+
+		"`chainsaw audit export` opts into a larger window (%s), "+
+		"but is not unbounded either.",
+	auditExportWindowNote)
+
 var auditCmd = &cobra.Command{
 	Use:     "audit",
 	Short:   "Audit event commands",
@@ -81,8 +95,11 @@ func runAuditView(cmd *cobra.Command, _ []string) error {
 
 	// Surface progress on a full-set fetch, but only on an interactive
 	// terminal and only to stderr so JSON/piped stdout stays pure.
+	// R14: routed through chatter() so --quiet / CHAINSAW_QUIET actually
+	// silences it — the flag is documented as a global chatter switch but
+	// had only two consumers outside the guard.
 	if stdoutIsTerminal() {
-		fmt.Fprintln(cmd.ErrOrStderr(), "Fetching audit events…")
+		chatter(cmd, "Fetching audit events…")
 	}
 
 	var resp auditLogResponse
@@ -96,19 +113,23 @@ func runAuditView(cmd *cobra.Command, _ []string) error {
 
 	var startTime, endTime time.Time
 	if startStr != "" {
-		t, err := parseDate(startStr)
+		t, _, err := parseDate(startStr)
 		if err != nil {
 			return fmt.Errorf("--start: %w", err)
 		}
 		startTime = t
 	}
 	if endStr != "" {
-		t, err := parseDate(endStr)
+		t, dateOnly, err := parseDate(endStr)
 		if err != nil {
 			return fmt.Errorf("--end: %w", err)
 		}
-		// Include everything up to end of day when only a date is given.
-		endTime = t.Add(24*time.Hour - time.Second)
+		// Include everything up to end of day when only a date is given. An
+		// explicit RFC3339 stamp means exactly what it says (C6).
+		if dateOnly {
+			t = t.Add(24*time.Hour - time.Second)
+		}
+		endTime = t
 	}
 	if sinceStr != "" {
 		d, err := parseSinceDuration(sinceStr)
@@ -148,12 +169,12 @@ func runAuditView(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "  (filters: %s)\n", desc)
 		}
 		if capped || windowActive {
-			fmt.Fprintln(cmd.ErrOrStderr(), "note: results are limited to the server's most-recent events; use `chainsaw audit export` for the full range.")
+			fmt.Fprintln(cmd.ErrOrStderr(), auditViewExportHint)
 		}
 		return nil
 	}
 	if capped {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: results are limited to the server's most-recent events; use `chainsaw audit export` for the full range.")
+		fmt.Fprintln(cmd.ErrOrStderr(), auditViewExportHint)
 	}
 
 	rows := make([][]string, len(events))
@@ -172,16 +193,26 @@ func runAuditView(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func parseDate(s string) (time.Time, error) {
+// parseDate accepts an RFC3339 timestamp or a bare YYYY-MM-DD date. The second
+// return value reports which one matched.
+//
+// C6: callers extend --end to the end of the day so that `--end 2026-04-30`
+// means "through 2026-04-30T23:59:59". That extension is only correct for a
+// DATE. Applied unconditionally it also stretched an explicit
+// `--end 2026-04-30T00:00:00Z` by a full extra day, silently widening a
+// compliance export with no indication — the comment at both call sites already
+// said "when only a date is given", but nothing checked it. dateOnly is that
+// check.
+func parseDate(s string) (t time.Time, dateOnly bool, err error) {
 	// Try RFC3339 first.
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
+		return t, false, nil
 	}
 	// Fall back to YYYY-MM-DD.
 	if t, err := time.ParseInLocation("2006-01-02", s, time.Local); err == nil {
-		return t, nil
+		return t, true, nil
 	}
-	return time.Time{}, fmt.Errorf("unrecognised date format %q — use YYYY-MM-DD or RFC3339", s)
+	return time.Time{}, false, fmt.Errorf("unrecognised date format %q — use YYYY-MM-DD or RFC3339", s)
 }
 
 func filterEvents(events []auditEvent, start, end time.Time, action, actor string) []auditEvent {

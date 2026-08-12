@@ -28,16 +28,20 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -45,6 +49,7 @@ import (
 
 	"github.com/chain305/chainsaw-core/cli/hook"
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/redact"
 )
 
 const (
@@ -91,21 +96,104 @@ type ecosystemState struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
-// envOverrides maps manager names to the env vars that silently override
-// their file config. `doctor --strict` checks each one and flags any that
-// don't resolve to a Chainsaw URL. Order is stable (sort.Strings on keys
-// before printing) so output diffs are reviewable.
-var envOverrides = map[string][]string{
-	"npm":    {"NPM_CONFIG_REGISTRY", "NPM_CONFIG_USERCONFIG"},
-	"yarn":   {"YARN_NPM_REGISTRY_SERVER", "YARN_NPM_AUTH_TOKEN"},
-	"bun":    {"BUN_CONFIG_REGISTRY"},
-	"pip":    {"PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_CONFIG_FILE"},
-	"cargo":  {"CARGO_HOME", "CARGO_REGISTRIES_CRATES_IO_PROTOCOL"},
-	"maven":  {"MAVEN_OPTS", "M2_HOME"},
-	"gradle": {"GRADLE_OPTS", "GRADLE_USER_HOME"},
-	"nuget":  {"NUGET_PACKAGES"},
-	"go":     {"GOPROXY", "GOPRIVATE", "GOSUMDB", "GOFLAGS", "GOINSECURE"},
-	"docker": {"DOCKER_CONFIG", "DOCKER_HOST"},
+// envKind says how an env var's VALUE should be judged. The original table
+// was a flat list of names run through one URL heuristic
+// (valPointsAtChainsaw), which is only meaningful for a var that actually
+// holds a registry URL. Roughly half the watched vars hold a directory
+// path, an opts string, or a credential, and every one of those failed the
+// heuristic — reporting "drifted" and exiting 10 on correctly-wired hosts.
+//
+// The in-repo proof that this was self-contradictory: cli/hook/cargo.go:49,
+// gradle.go:38 and maven.go:54 resolve their config path THROUGH
+// CARGO_HOME / GRADLE_USER_HOME / M2_HOME. evaluateManager uses the var to
+// FIND the wired file, reports the manager compliant, and then flags that
+// same var as drift.
+type envKind int
+
+const (
+	// envURL holds a registry/proxy URL. The heuristic applies: a value
+	// that does not resolve to Chainsaw is genuine drift.
+	envURL envKind = iota
+	// envConfigPath redirects the manager at a DIFFERENT config file. The
+	// value is a path, not a URL, so the verdict comes from the file it
+	// names: if that file carries the chainsaw-managed block the manager
+	// is still wired; if it demonstrably does not, the wired user config
+	// is being bypassed.
+	envConfigPath
+	// envInfo is reported for the operator's benefit and NEVER fails the
+	// run. These vars hold directory paths, opts strings, protocol
+	// selectors, or credentials — values no URL heuristic can classify,
+	// so any verdict derived from one is a coin flip dressed as a finding.
+	envInfo
+)
+
+type envWatch struct {
+	Key  string
+	Kind envKind
+}
+
+// envOverrides maps manager names to the env vars that can silently override
+// their file config, together with how each var's value must be judged (see
+// envKind). Order is stable (sort.Strings on keys before printing) so output
+// diffs are reviewable.
+//
+// YARN_NPM_AUTH_TOKEN is envInfo rather than envURL deliberately: it holds a
+// credential. A credential can never satisfy a "looks like a Chainsaw URL"
+// test, so grading it produced a guaranteed false "drifted" on every host
+// that had yarn auth configured at all.
+var envOverrides = map[string][]envWatch{
+	"npm": {
+		{"NPM_CONFIG_REGISTRY", envURL},
+		{"NPM_CONFIG_USERCONFIG", envConfigPath},
+	},
+	"yarn": {
+		{"YARN_NPM_REGISTRY_SERVER", envURL},
+		{"YARN_NPM_AUTH_TOKEN", envInfo},
+	},
+	"bun": {
+		{"BUN_CONFIG_REGISTRY", envURL},
+	},
+	"pip": {
+		{"PIP_INDEX_URL", envURL},
+		{"PIP_EXTRA_INDEX_URL", envURL},
+		{"PIP_CONFIG_FILE", envConfigPath},
+	},
+	"cargo": {
+		{"CARGO_HOME", envInfo},
+		{"CARGO_REGISTRIES_CRATES_IO_PROTOCOL", envInfo},
+	},
+	"maven": {
+		{"MAVEN_OPTS", envInfo},
+		{"M2_HOME", envInfo},
+	},
+	"gradle": {
+		{"GRADLE_OPTS", envInfo},
+		{"GRADLE_USER_HOME", envInfo},
+	},
+	"nuget": {
+		{"NUGET_PACKAGES", envInfo},
+	},
+	"go": {
+		{"GOPROXY", envURL},
+		// GOPRIVATE is a genuine bypass lever — it tells the Go toolchain to
+		// skip the proxy for matching module paths — but its value is a
+		// COMMA-SEPARATED GLOB (github.com/myorg/*), never a URL. Grading it
+		// with valPointsAtChainsaw can therefore only ever produce a false
+		// "drifted": the pattern will never contain the proxy host.
+		//
+		// Worse, the go env block this CLI itself writes tells the operator to
+		// set exactly that (cli/hook/gomod.go:187), so envURL made
+		// `doctor --strict` exit 10 on every host that followed our own
+		// instructions. Report it; let a human judge the scope.
+		{"GOPRIVATE", envInfo},
+		{"GOSUMDB", envInfo},
+		{"GOFLAGS", envInfo},
+		{"GOINSECURE", envInfo},
+	},
+	"docker": {
+		{"DOCKER_CONFIG", envInfo},
+		{"DOCKER_HOST", envInfo},
+	},
 }
 
 // publicRegistryProbes are the upstream hosts we probe for direct
@@ -143,6 +231,7 @@ func runDoctorStrict(cmd *cobra.Command, _ []string) error {
 	}
 
 	if exit != doctorExitOK {
+		flushTelemetry() // before any os.Exit in the caller drops the batch
 		os.Exit(exit)
 	}
 	return nil
@@ -170,8 +259,13 @@ func buildStrictReport(ctx context.Context, cmd *cobra.Command) (doctorStrictRep
 
 	exit := doctorExitOK
 
+	// envRaw never leaves this function: it feeds the config hash and
+	// nothing else. See evaluateManager for why the hash must see raw
+	// values while every rendered/POSTed view sees redacted ones.
+	envRaw := map[string]string{}
+
 	for _, m := range hook.All() {
-		state := evaluateManager(m, report.EnvOverrides)
+		state := evaluateManager(m, report.EnvOverrides, envRaw)
 		report.Ecosystems[m.Name()] = state
 		switch state.Status {
 		case "drifted":
@@ -203,7 +297,7 @@ func buildStrictReport(ctx context.Context, cmd *cobra.Command) (doctorStrictRep
 	}
 	exit = applyEgressExit(exit, report.DirectRegistryEgress)
 
-	report.ConfigHash = hashStateSnapshot(report)
+	report.ConfigHash = hashStateSnapshot(report, envRaw)
 	return report, exit
 }
 
@@ -228,7 +322,19 @@ func applyEgressExit(exit int, egress string) int {
 // evaluateManager combines the manager's own Status() (which detects the
 // sentinel block in the user-scope config) with strict-mode checks:
 // project-scope config present, env overrides set.
-func evaluateManager(m hook.Manager, envOut map[string]string) ecosystemState {
+//
+// Two env maps, deliberately:
+//   - envOut is the REDACTED view. It is printed and marshalled into the
+//     attestation POST body, so a var like YARN_NPM_AUTH_TOKEN or
+//     CHAINSAW-adjacent credential must never appear verbatim in it.
+//   - envRaw is the unredacted view and feeds hashStateSnapshot ONLY. The
+//     config hash must stay byte-identical to what pre-redaction builds
+//     produced, otherwise every device in the fleet emits a spurious
+//     compliance_drift audit row the first time it upgrades.
+//
+// This is the "hash the raw value, redact at the serialization boundary"
+// rule from the redact package doc, applied at its most consequential site.
+func evaluateManager(m hook.Manager, envOut, envRaw map[string]string) ecosystemState {
 	if !m.IsInstalled() {
 		return ecosystemState{Status: "unconfigured", Reason: "binary not on PATH"}
 	}
@@ -256,23 +362,61 @@ func evaluateManager(m hook.Manager, envOut map[string]string) ecosystemState {
 		}
 	}
 
-	for _, key := range envOverrides[m.Name()] {
-		val := strings.TrimSpace(os.Getenv(key))
+	for _, w := range envOverrides[m.Name()] {
+		val := strings.TrimSpace(os.Getenv(w.Key))
 		if val == "" {
 			continue
 		}
-		envOut[key] = val
-		if valPointsAtChainsaw(val) {
+		envRaw[w.Key] = val
+		envOut[w.Key] = redact.Value(w.Key, val)
+
+		reason := envDriftReason(w, val)
+		if reason == "" {
 			continue
 		}
 		state.Status = "drifted"
 		if state.Reason == "" {
-			state.Reason = key + " env var overrides config"
+			state.Reason = reason
 		} else {
-			state.Reason += "; " + key + " env var overrides config"
+			state.Reason += "; " + reason
 		}
 	}
 	return state
+}
+
+// envDriftReason returns the drift reason for one watched env var, or "" when
+// the var is not drift. It is the only place a watched env var can turn into
+// a non-zero exit code, so every kind's verdict is stated once, here.
+func envDriftReason(w envWatch, val string) string {
+	switch w.Kind {
+	case envURL:
+		if valPointsAtChainsaw(val) {
+			return ""
+		}
+		return w.Key + " env var overrides config"
+	case envConfigPath:
+		// The var names a different config FILE. Judge the file, not the
+		// path string: if it carries the chainsaw-managed block the
+		// manager is still routed through Chainsaw.
+		data, err := os.ReadFile(val)
+		switch {
+		case err == nil && hasChainsawSentinel(data):
+			return ""
+		case err == nil:
+			return w.Key + " redirects config to " + val + ", which has no chainsaw-managed block"
+		case os.IsNotExist(err):
+			return w.Key + " points at " + val + ", which does not exist — the wired user config is not read"
+		default:
+			// Unreadable for some other reason (permissions, a device
+			// node, a race). We cannot prove drift, and a strict gate
+			// must not fail on something it could not read. Report it in
+			// env overrides and move on.
+			return ""
+		}
+	default: // envInfo
+		// Reported, never graded. See envKind.
+		return ""
+	}
 }
 
 // hasChainsawSentinel inlines a dependency-light sentinel check so
@@ -412,16 +556,22 @@ func probeDirectEgressImpl(ctx context.Context, stderr io.Writer, quiet bool) st
 	client := httpclient.New(httpclient.WithTimeout(3 * time.Second))
 	reachable := 0
 	blocked := 0
+	unknown := 0
 	for _, url := range publicRegistryProbes {
 		req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 		if err != nil {
-			blocked++
+			// A malformed probe URL is our bug, not the network's answer.
+			// It says nothing about egress, so it must not read as a block.
+			unknown++
 			continue
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			// net.OpError / timeout / DNS failure — treat as blocked.
-			blocked++
+			if classifyProbeError(err) == "blocked" {
+				blocked++
+			} else {
+				unknown++
+			}
 			continue
 		}
 		resp.Body.Close()
@@ -430,11 +580,95 @@ func probeDirectEgressImpl(ctx context.Context, stderr io.Writer, quiet bool) st
 	switch {
 	case reachable > 0:
 		return "reachable"
+	case unknown > 0:
+		// We could not classify at least one probe, so we cannot certify
+		// containment. Soft-fail (exit 1) rather than print "blocked".
+		return "unknown"
 	case blocked == len(publicRegistryProbes):
 		return "blocked"
 	default:
 		return "unknown"
 	}
+}
+
+// classifyProbeError decides whether a failed egress probe proves the
+// network blocked us ("blocked") or merely proves we learned nothing
+// ("unknown").
+//
+// The bias here is deliberate and asymmetric. "blocked" is the compliant,
+// exit-0 answer, so a wrong "blocked" is a false all-clear. But "unknown"
+// soft-fails at exit 1, and the single most common real deployment of this
+// probe is an air-gapped CI runner where EVERY probe fails — if the routine
+// air-gap error shapes drifted into "unknown", every such runner would
+// start failing its preflight. That would be a far worse regression than
+// the bug being fixed.
+//
+// So the rule is: the error shapes an air-gapped or firewalled box actually
+// produces — DNS failure, connection refused, host/network unreachable, and
+// EVERY flavour of timeout — stay "blocked". Only errors that mean "the
+// connection got far enough to fail somewhere else" become "unknown":
+//
+//   - TLS / x509 verification failures. This is the case the fix exists
+//     for: behind a MITM proxy whose CA Go does not trust but npm does
+//     (NODE_EXTRA_CA_CERTS), the TCP connection SUCCEEDED. The host can
+//     reach registry.npmjs.org; only Go's trust store disagrees. Calling
+//     that "blocked" certified egress containment on a host that has none.
+//   - context.Canceled — the operator interrupted us; no verdict was reached.
+//   - anything we cannot name.
+func classifyProbeError(err error) string {
+	if err == nil {
+		return "blocked"
+	}
+
+	// Timeouts first, and unconditionally blocked. A firewall that DROPs
+	// (rather than REJECTs) produces a timeout, and that is the single most
+	// common air-gap shape. context.DeadlineExceeded reaches here too:
+	// net/url wraps it and *url.Error.Timeout() reports true.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "blocked"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return "blocked"
+	}
+
+	// Cancellation is not a network answer.
+	if errors.Is(err, context.Canceled) {
+		return "unknown"
+	}
+
+	// TLS/x509: the transport connected, then trust evaluation failed.
+	var certVerifyErr *tls.CertificateVerificationError
+	var recordErr tls.RecordHeaderError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostnameErr x509.HostnameError
+	var certInvalid x509.CertificateInvalidError
+	if errors.As(err, &certVerifyErr) || errors.As(err, &recordErr) ||
+		errors.As(err, &unknownAuthority) || errors.As(err, &hostnameErr) ||
+		errors.As(err, &certInvalid) {
+		return "unknown"
+	}
+
+	// Name resolution failed — nothing to connect to. Air-gap shape.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "blocked"
+	}
+
+	// Refused / unreachable, named portably via the dial-phase OpError so
+	// this compiles and behaves the same on every GOOS. A failure during
+	// "dial" means we never established a connection at all.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return "blocked"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) {
+		return "blocked"
+	}
+
+	return "unknown"
 }
 
 func deriveDeviceIdentity() (string, string) {
@@ -466,7 +700,13 @@ func sha256Hex(b []byte) string {
 // drift. It deliberately leaves out LastRemediatedAt and lockfileHits so
 // the hash reflects "the config we care about" rather than transient
 // state — two runs on the same config produce the same hash.
-func hashStateSnapshot(r doctorStrictReport) string {
+//
+// envRaw, not r.EnvOverrides: the hash must see the UNREDACTED env values.
+// Hashing the redacted view would collapse every credential to "<set>", so
+// a rotated token would stop changing the hash — and, on the release that
+// introduced redaction, every device in the fleet would emit one spurious
+// compliance_drift audit row as its hash shifted for no config change.
+func hashStateSnapshot(r doctorStrictReport, envRaw map[string]string) string {
 	// Keep it dependency-light: render to JSON then SHA-256.
 	type minimal struct {
 		Ecosystems map[string]ecosystemState `json:"ecosystems"`
@@ -476,7 +716,7 @@ func hashStateSnapshot(r doctorStrictReport) string {
 	b, _ := json.Marshal(minimal{
 		Ecosystems: r.Ecosystems,
 		Egress:     r.DirectRegistryEgress,
-		Env:        r.EnvOverrides,
+		Env:        envRaw,
 	})
 	return sha256Hex(b)
 }
@@ -507,8 +747,18 @@ func printStrictReport(cmd *cobra.Command, r doctorStrictReport, exit int) {
 	}
 	if len(r.EnvOverrides) > 0 {
 		fmt.Fprintln(out, "\nenv overrides:")
-		for k, v := range r.EnvOverrides {
-			fmt.Fprintf(out, "  %s=%s\n", k, v)
+		// Sorted, as the envOverrides doc comment has always promised —
+		// map iteration order made two runs on an unchanged machine
+		// produce diffable-looking output.
+		keys := make([]string, 0, len(r.EnvOverrides))
+		for k := range r.EnvOverrides {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			// Values are already redacted at assignment in
+			// evaluateManager; this loop is a pure sink.
+			fmt.Fprintf(out, "  %s=%s\n", k, r.EnvOverrides[k])
 		}
 	}
 	if len(r.LockfileHits) > 0 {

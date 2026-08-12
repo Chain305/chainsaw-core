@@ -69,13 +69,115 @@ func (m cargoManager) Wire(opts WireOpts) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
+	if err := checkSentinelIntegrity("cargo", path, data, hashMarker); err != nil {
+		return err
+	}
+	if conflicts := cargoForeignTables(data); len(conflicts) > 0 {
+		return cargoConflictError(path, conflicts)
+	}
 	if len(data) > 0 {
-		if _, err := backup(path); err != nil {
-			return fmt.Errorf("backup: %w", err)
+		if err := backupAndNotify(path, opts); err != nil {
+			return err
 		}
 	}
 	block := buildBlock(body)
-	return writeAtomic(path, replaceOrAppend(data, block))
+	return writeConfigFile(path, replaceOrAppend(data, block), opts)
+}
+
+// cargoManagedTables are the TOML tables cargoBlockBody declares. TOML forbids
+// re-declaring a table, so any of these appearing OUTSIDE our sentinel block
+// makes the merged file unparseable.
+var cargoManagedTables = []string{"source.crates-io", "source.chainsaw", "registries.chainsaw"}
+
+// cargoForeignTables returns the managed table names already declared outside
+// the chainsaw block (H6).
+//
+// `install-hook cargo` used to append [source.crates-io] unconditionally. On
+// the standard shape for anyone already on a corporate mirror —
+//
+//	[source.crates-io]
+//	replace-with = "mirror"
+//
+// that produced `Cannot declare ('source','crates-io') twice`, and cargo then
+// aborts with a config-load error on EVERY subcommand.
+//
+// Excluding tables INSIDE our own sentinel is load-bearing: without it the
+// second `install-hook cargo` would refuse and re-wiring would be impossible.
+//
+// We refuse rather than merge. Merging means rewriting somebody's
+// source-replacement chain, and a wrong guess there silently redirects their
+// dependency resolution.
+func cargoForeignTables(data []byte) []string {
+	if len(data) == 0 {
+		return nil
+	}
+	lines, _ := splitLines(data)
+	inSentinel := false
+	seen := map[string]bool{}
+	var found []string
+	for _, ln := range lines {
+		switch hashMarker(ln) {
+		case markerStart:
+			inSentinel = true
+			continue
+		case markerEnd:
+			inSentinel = false
+			continue
+		}
+		if inSentinel {
+			continue
+		}
+		name, ok := tomlTableName(ln)
+		if !ok {
+			continue
+		}
+		for _, managed := range cargoManagedTables {
+			if name == managed && !seen[name] {
+				seen[name] = true
+				found = append(found, name)
+			}
+		}
+	}
+	return found
+}
+
+// tomlTableName normalises a TOML table header line to a dotted key, e.g.
+// `[ source."crates-io" ]` → `source.crates-io`. Returns false for any line
+// that is not a plain table header (comments, key/value pairs, and array-of-
+// table `[[...]]` headers, which cannot collide with a plain table).
+func tomlTableName(line string) (string, bool) {
+	t := strings.TrimSpace(line)
+	if !strings.HasPrefix(t, "[") || !strings.HasSuffix(t, "]") {
+		return "", false
+	}
+	if strings.HasPrefix(t, "[[") {
+		return "", false
+	}
+	inner := strings.TrimSpace(t[1 : len(t)-1])
+	if inner == "" {
+		return "", false
+	}
+	parts := strings.Split(inner, ".")
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		p = strings.Trim(p, `"'`)
+		parts[i] = p
+	}
+	return strings.Join(parts, "."), true
+}
+
+func cargoConflictError(path string, conflicts []string) error {
+	return fmt.Errorf(`%s already declares [%s] outside the chainsaw-managed block.
+
+TOML forbids declaring a table twice, so adding chainsaw's block would make
+the file unparseable and cargo would fail to load its config on every
+subcommand. chainsaw will not merge into an existing source-replacement chain
+— guessing wrong there silently redirects where your dependencies come from.
+
+Remove or rename the conflicting table(s), then re-run install-hook. If you
+are already behind a corporate mirror, point that mirror at the chainsaw
+proxy instead of replacing crates-io twice`,
+		path, strings.Join(conflicts, "], ["))
 }
 
 func (m cargoManager) Unwire(scope Scope) error {
@@ -161,10 +263,14 @@ func cargoBlockBody(opts WireOpts) (string, error) {
 	// basic strings use the same escape syntax as Go string literals for
 	// these characters, so this is a valid TOML value.
 	// BUG-A6: org-scoped path required (/repository/@<org>/crates-io/).
-	registryValue := strconv.Quote("sparse+" + base + "/" + OrgScopedRepoPath(opts.OrgSlug, "crates-io") + "/")
+	cratesPath, err := orgScopedRepoPath(opts.OrgSlug, "crates-io")
+	if err != nil {
+		return "", err
+	}
+	registryValue := strconv.Quote("sparse+" + base + "/" + cratesPath + "/")
 	if creds := strings.TrimSpace(opts.Credentials); creds != "" {
-		if _, _, ok := splitCreds(creds); !ok {
-			return "", fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+		if _, _, err := parseCreds(creds); err != nil {
+			return "", err
 		}
 		return fmt.Sprintf(`# chainsaw: token embedded below; tighten this file's permissions
 # (chmod 600) if your home directory is shared.

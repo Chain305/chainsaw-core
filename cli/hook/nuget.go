@@ -1,5 +1,9 @@
 package hook
 
+// NuGet.Config is XML and carries the identical H1/H2 defects maven had — the
+// seed missed the nuget copy. Same resolution: write a complete standalone
+// document, or refuse. See maven.go and xmlsentinel.go for the reasoning.
+
 import (
 	"fmt"
 	"os"
@@ -72,18 +76,28 @@ func (m nugetManager) Wire(opts WireOpts) error {
 	if err != nil {
 		return err
 	}
+	// H12: build the document FIRST so a bad --server aborts before any
+	// file is created. The old code swallowed the validation error and
+	// wrote a config whose only source was https://your-chainsaw-server/,
+	// with nuget.org disabled — every dotnet restore then failed DNS with
+	// no hint that the URL had been rejected.
+	sourceURL, err := nugetSourceURL(opts)
+	if err != nil {
+		return err
+	}
 	data, err := readOrEmpty(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	if len(data) == 0 {
-		return writeAtomic(path, []byte(nugetStandaloneConfig(opts)))
+	switch {
+	case len(data) == 0:
+		// Fresh install: we own the whole document.
+	case xmlHasSentinel(data):
+		// Ours (possibly with the legacy same-line markers) — re-render.
+	default:
+		return xmlRefuseError("nuget", path, nugetMergeFragment(sourceURL))
 	}
-	body, err := nugetBlockBody(opts)
-	if err != nil {
-		return err
-	}
-	return writeWithBackup(path, body)
+	return writeConfigFile(path, []byte(nugetStandaloneConfig(sourceURL)), opts)
 }
 
 func (m nugetManager) Unwire(scope Scope) error {
@@ -91,47 +105,61 @@ func (m nugetManager) Unwire(scope Scope) error {
 	if err != nil {
 		return err
 	}
-	return unwireBlock(path)
+	// NOT removeSentinel: stripping the markers would leave <clear /> plus
+	// a disabled nuget.org in place while reporting success.
+	return xmlUnwire(path)
 }
 
 func (m nugetManager) Status() (Status, error) {
-	return statusForConfig(m.ConfigPath, m.IsInstalled)
+	return xmlStatus(m.ConfigPath, m.IsInstalled)
 }
 
-func nugetBlockBody(opts WireOpts) (string, error) {
+// nugetSourceURL resolves the package-source URL to install. A non-empty but
+// invalid --server is a hard error (H12); an absent one yields the visible
+// placeholder host so the generated file fails loud rather than silently
+// routing to the public registry.
+func nugetSourceURL(opts WireOpts) (string, error) {
+	nugetPath, err := orgScopedRepoPath(opts.OrgSlug, "nuget-official")
+	if err != nil {
+		return "", err
+	}
 	server := strings.TrimSpace(opts.ServerURL)
 	if server == "" {
-		return `# Uncomment and re-run ` + "`chainsaw --server <url> install-hook nuget`" + `.
-# Credentials must go in NuGet's encrypted per-user credential store
-# (dotnet nuget add source --username ... --password ...) or in CI
-# env vars of the form NuGetPackageSourceCredentials_Chainsaw.`, nil
+		return "https://your-chainsaw-server/" + nugetPath + "/", nil
 	}
 	base, err := validateServerURL(server)
 	if err != nil {
 		return "", err
 	}
-	// BUG-A6: org-scoped path required.
-	return fmt.Sprintf(`# chainsaw: source URL for nuget.config — an existing file is in place,
-# so this block is a hint. Run the CLI with --scope=system to emit a
-# standalone Chainsaw.Config instead. Target URL:
-# %s/%s/`, base, OrgScopedRepoPath(opts.OrgSlug, "nuget-official")), nil
+	return base + "/" + nugetPath + "/", nil
 }
 
-func nugetStandaloneConfig(opts WireOpts) string {
-	server := strings.TrimSpace(opts.ServerURL)
-	nugetPath := OrgScopedRepoPath(opts.OrgSlug, "nuget-official")
-	base := "https://your-chainsaw-server/" + nugetPath + "/"
-	if server != "" {
-		if validated, err := validateServerURL(server); err == nil {
-			base = validated + "/" + nugetPath + "/"
-		}
-	}
+// nugetMergeFragment is the XML an operator must paste into their own
+// NuGet.Config when chainsaw refuses to edit it (H1).
+func nugetMergeFragment(sourceURL string) string {
+	return fmt.Sprintf(`  <!-- inside <configuration><packageSources> -->
+    <add key="Chainsaw" value="%s" />
+
+  <!-- inside <configuration>; disables the public source -->
+  <disabledPackageSources>
+    <add key="nuget.org" value="true" />
+  </disabledPackageSources>
+`, xmlEscape(sourceURL))
+}
+
+// nugetStandaloneConfig renders a complete NuGet.Config with each sentinel
+// marker on its own line (H2) and every interpolated value XML-escaped (H4).
+func nugetStandaloneConfig(sourceURL string) string {
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<!-- %s
-chainsaw: source installed via install-hook nuget. Credentials live in the
-per-user encrypted store (dotnet nuget add source) or in
-NuGetPackageSourceCredentials_Chainsaw env var on CI.
-%s -->
+<!--
+%s
+     This file is managed by chainsaw. Remove it with
+     `+"`chainsaw uninstall-hook nuget`"+` rather than editing it by hand.
+     Credentials live in NuGet's per-user encrypted store
+     (dotnet nuget add source ...) or in a
+     NuGetPackageSourceCredentials_Chainsaw env var on CI.
+%s
+-->
 <configuration>
   <packageSources>
     <clear />
@@ -141,5 +169,5 @@ NuGetPackageSourceCredentials_Chainsaw env var on CI.
     <add key="nuget.org" value="true" />
   </disabledPackageSources>
 </configuration>
-`, sentinelStart, sentinelEnd, base)
+`, sentinelStart, sentinelEnd, xmlEscape(sourceURL))
 }

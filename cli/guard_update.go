@@ -104,13 +104,38 @@ evaluated entirely on-box.`,
 	RunE:         runGuardUpdate,
 }
 
+// guardUpdateOfflineEnv is the offline umbrella. `guard update` is the ONE
+// networked guard command, so it must honour it: an operator who declared the
+// box offline should get a clear refusal, not an outbound GET and a DNS error.
+// Read via envTruthy so `1/true/yes/on` (any case, trimmed) all count — the same
+// reading as intelligence.IsOffline and coverage.isTruthy. core/cli does not
+// import chainsaw-core/config, so config.IsOffline() is not callable here
+// without adding a package edge.
+const guardUpdateOfflineEnv = "CHAINSAW_OFFLINE"
+
 func init() {
 	guardUpdateCmd.Flags().Bool("force", false, "re-download and re-index even if the dataset is unchanged (skip the ETag check)")
+	guardUpdateCmd.Flags().Bool("allow-network", false, "fetch even when "+guardUpdateOfflineEnv+" is set (this command is the guard's only network call)")
 	guardCmd.AddCommand(guardUpdateCmd)
 	rootCmd.AddCommand(guardCmd)
 }
 
 func runGuardUpdate(cmd *cobra.Command, _ []string) error {
+	// Offline umbrella. The escape hatch is not polish: CHAINSAW_OFFLINE is also
+	// documented as a telemetry kill switch, so someone who set it for THAT
+	// reason must be able to keep refreshing their malware feed — a bare refusal
+	// would be a baffling wall. Name both ways forward in the message: the flag
+	// for a box that does have egress, and the signed bundle for one that
+	// genuinely does not.
+	if allowNetwork, _ := cmd.Flags().GetBool("allow-network"); !allowNetwork {
+		if envTruthy(os.Getenv(guardUpdateOfflineEnv)) {
+			return fmt.Errorf("%s is set, and this is the guard's only networked command; "+
+				"re-run with --allow-network to fetch anyway, or deliver the feed offline via a "+
+				"signed intelligence bundle (CHAINSAW_INTEL_BUNDLE_PATH) or a pre-populated %s file",
+				guardUpdateOfflineEnv, guardDBEnv)
+		}
+	}
+
 	dst := guardDBPath()
 	if dst == "" {
 		return fmt.Errorf("cannot determine cache path; set %s to a writable file path", guardDBEnv)

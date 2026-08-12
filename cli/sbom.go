@@ -68,7 +68,12 @@ func init() {
 	_ = sbomExportCmd.Flags().MarkDeprecated("repo", "use --ecosystem instead (it never filtered by repository)")
 	sbomExportCmd.Flags().String("package", "", "Filter by package name@version")
 	sbomExportCmd.Flags().String("format", "cyclonedx", "SBOM format: cyclonedx (default) or spdx (SPDX 2.3, rendered client-side from the CycloneDX document)")
-	sbomExportCmd.Flags().String("output", "", "Write SBOM to file instead of stdout")
+	// S10 — NO local --output here. root declares StringP("output","o",…), and
+	// cobra's AddFlagSet skips a persistent flag whose NAME already exists
+	// locally, which dropped the persistent flag AND its `o` shorthand for this
+	// one command: `chainsaw sbom export -o /tmp/x.json` failed with "unknown
+	// shorthand flag: 'o' in -o" (exit 4) while -o worked everywhere else.
+	// runSBOMExport reads --output off the inherited flag unchanged.
 	sbomExportCmd.Flags().Bool("with-attribution", false, "Include per-component attribution properties (chainsaw:attribution:*) derived from existing audit data. Overrides the server's sbom.attribution_enabled config for this export.")
 	sbomCmd.AddCommand(sbomExportCmd)
 
@@ -386,12 +391,10 @@ func runSBOMDiff(cmd *cobra.Command, args []string) error {
 	format, _ := cmd.Flags().GetString("format")
 	switch strings.ToLower(format) {
 	case "json":
-		buf, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(buf))
-		return nil
+		// S9 — honor --output; byte-identical to the previous
+		// MarshalIndent+Fprintln pair. cmd.OutOrStdout() stays the fallback so
+		// sbom_test.go's SetOut capture keeps working.
+		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), result)
 	case "", "text":
 		writeDiffText(cmd.OutOrStdout(), result)
 		return nil

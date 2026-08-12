@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -41,8 +42,99 @@ Then: ` + "`chainsaw setup`" + ` for an interactive first-time wizard, or
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-		return rejectPostSubcommandServerFlag(cmd, os.Args)
+		if err := rejectPostSubcommandServerFlag(cmd, os.Args); err != nil {
+			return err
+		}
+		return validateOutputFlags(cmd)
 	},
+}
+
+// globalResultFormats is the vocabulary of the ROOT --format flag, exactly
+// as its help text advertises ("Result format: table|json"). Matching is
+// case-insensitive; resolveFormat already folds JSON/Json to "json".
+var globalResultFormats = map[string]bool{"table": true, "json": true}
+
+// validateOutputFlags enforces the two contracts the global output flags
+// advertise but never checked. Both failures are ExitUsage(4) — the user
+// mistyped a flag, which is not an operational failure.
+//
+// 1. X10 — an unrecognized --format silently became `table`.
+// `chainsaw --format=jsonl scan-repo .` and `--format=JSON5` both produced
+// a human table at rc=0, so a pipeline piping that into jq got a parse
+// error instead of a flag error.
+//
+// 2. R4 — --output/-o is a documented global ("Write results to this file
+// instead of stdout") but the human/table renderers write to os.Stdout
+// directly, so `chainsaw status -o out.txt` printed the full report to
+// stdout and never created out.txt. The rejected alternative was threading
+// a writer through the EXPORTED PrintTable: a breaking API change to a
+// public open-core module across 22 call sites, to deliver table text to a
+// file that nothing consumes. Refusing the combination tells the truth in
+// ~15 lines; PrintTableTo can be added additively if a need ever appears.
+//
+// EXEMPTIONS — both checks are skipped for a command that declares its OWN
+// --format / --output flag. Eleven commands shadow --format (audit export,
+// policy export, policy lint, repo create, report ×4, sbom export, sbom
+// diff, scan-actions) with vocabularies spanning csv/ndjson/yaml/sarif/
+// text/cyclonedx/spdx; validating those against table|json would break
+// every one of them, and their machine formats legitimately want --output.
+// Cobra's mergePersistentFlags keeps the LOCAL flag, so the identity test
+// below (is this the root's own *pflag.Flag?) is exact.
+//
+// Guard wrappers (npm/pip/go/cargo/gem) and cargo-credentials run with
+// DisableFlagParsing, so cobra never parses argv for them and every flag
+// here reads its default. They would be exempt by accident; the explicit
+// check below makes it deliberate — those commands forward argv untouched
+// to the wrapped tool, and a `--format` intended for npm must never be
+// rejected by chainsaw.
+func validateOutputFlags(cmd *cobra.Command) error {
+	if cmd == nil || cmd.DisableFlagParsing {
+		return nil
+	}
+	if ownsGlobalFlag(cmd, "format") {
+		f, _ := cmd.Flags().GetString("format")
+		if f != "" && !globalResultFormats[strings.ToLower(strings.TrimSpace(f))] {
+			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+				"invalid --format %q: supported values are table, json (--json is sugar for --format=json)", f)}
+		}
+	}
+	if !ownsGlobalFlag(cmd, "output") {
+		return nil
+	}
+	path, _ := cmd.Flags().GetString("output")
+	if path == "" {
+		return nil
+	}
+	// --output only has a defined meaning for a machine-readable result.
+	// With the global --format vocabulary that means json; anything else
+	// resolves to the human table, whose renderers do not take a sink.
+	if !useJSON(cmd) {
+		return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+			"--output is only supported with a machine-readable format; add --json (or --format=json), or redirect stdout with `> %s`", path)}
+	}
+	return nil
+}
+
+// ownsGlobalFlag reports whether cmd sees the ROOT's persistent flag of
+// this name rather than a local flag of its own that shadows it. Compares
+// *pflag.Flag identity, which is what cobra's mergePersistentFlags
+// preserves: an inherited flag is the very same pointer the root
+// registered, a shadowing local flag is a different one.
+//
+// Resolved via cmd.Root() rather than the package-level rootCmd so this
+// stays usable from a synthetic command tree in tests — and so root.go's
+// var block doesn't form an initialization cycle through its own
+// PersistentPreRunE.
+func ownsGlobalFlag(cmd *cobra.Command, name string) bool {
+	root := cmd.Root()
+	if root == nil {
+		return false
+	}
+	rf := root.PersistentFlags().Lookup(name)
+	if rf == nil {
+		return false
+	}
+	return cmd.Flags().Lookup(name) == rf
 }
 
 // rejectPostSubcommandServerFlag errors when --server appears positionally
@@ -189,6 +281,16 @@ func Execute() {
 
 	markSessionEnd(cmdPath, exitCode, errClass)
 
+	// R3: os.Exit below does NOT run deferred functions, so the deferred
+	// flushTelemetry above never fired for a failing command — every
+	// non-zero-exit invocation dropped its entire batch, including the
+	// cli.session.completed carrying exit_code and error_class. Flush
+	// explicitly here, after markSessionEnd has queued that event and
+	// before the process leaves. flushTelemetry is safe to call twice (the
+	// teardown half is sync.Once-guarded), so the defer stays as the
+	// panic-path backstop.
+	flushTelemetry()
+
 	if err != nil {
 		os.Exit(exitCode)
 	}
@@ -293,9 +395,36 @@ func classifyCLIError(err error) string {
 	if err == nil {
 		return ""
 	}
+	// A1′: when the error carries the server's envelope, the HTTP status is
+	// authoritative and substring matching is actively harmful. Before the
+	// nested envelope was parsed, the raw JSON body landed in Message and
+	// this function matched INSIDE it — measured: a 500 carrying CHW-5401
+	// classified as "auth" and exited 3, so an internal server error
+	// masqueraded as an auth failure and told the user to re-login.
+	// Substring matching now applies ONLY to errors that are not *apiError.
+	var ae *apiError
+	if errors.As(err, &ae) && ae.Status != 0 {
+		switch {
+		case ae.Status == 401:
+			return "auth"
+		case ae.Status == 403:
+			return "permission"
+		case ae.Status == 404:
+			return "not_found"
+		}
+		// Everything else (5xx, 409, 429, 4xx we don't bucket) is
+		// operational from the process's point of view.
+		return "other"
+	}
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "unauthorized") || strings.Contains(msg, "401"):
+		return "auth"
+	// X3/X4: the two locally-produced configuration failures. Without these
+	// the exit code says ExitConfigAuth(3) while telemetry's errClass says
+	// "other" — the same failure reported two different ways.
+	case strings.Contains(msg, "server url not configured") ||
+		strings.Contains(msg, "not authenticated"):
 		return "auth"
 	case strings.Contains(msg, "forbidden") || strings.Contains(msg, "403"):
 		return "permission"
@@ -329,7 +458,16 @@ func init() {
 
 	rootCmd.PersistentFlags().String("server", DefaultServer, "Server URL (overrides config; default baked at build via -X .../internal/cli.DefaultServer)")
 	rootCmd.PersistentFlags().String("token", "", "Auth token (overrides config)")
-	rootCmd.PersistentFlags().String("org", "", "Org ID (overrides config)")
+	// A9: this used to read "Org ID (overrides config)", which every reader
+	// took to mean "run this command against another org". It does NOT: no
+	// request the CLI makes carries an org header or parameter, and that is
+	// BY DESIGN — the server resolves the org from the token's identity and
+	// 403s cross-org access for non-admins. Sending an org override would
+	// 403 exactly the users who are confused today, and it touches the
+	// tenancy boundary, so the FLAG is not the thing to change. The three
+	// real consumers are all local: `status` display, the `org delete`
+	// target, and a VEX document field in `sbom`.
+	rootCmd.PersistentFlags().String("org", "", "Org ID used for LOCAL purposes only (status display, `org delete` target, SBOM/VEX metadata). It is NOT sent to the server — your org is resolved from your token's identity.")
 	rootCmd.PersistentFlags().Bool("json", false, "Output JSON instead of human-readable text (alias for --format=json)")
 	rootCmd.PersistentFlags().Bool("no-color", false, "Disable colored output")
 
@@ -363,6 +501,16 @@ func init() {
 	_ = viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
 	_ = viper.BindEnv("quiet", "CHAINSAW_QUIET")
 	_ = viper.BindEnv("verbose", "CHAINSAW_VERBOSE")
+
+	// R6: --no-color was NOT bound, despite guardColorEnabled's comment
+	// claiming it read the flag "surfaced via viper". Only the NO_COLOR env
+	// var and a config-file key ever reached viper, so `chainsaw --no-color
+	// npm install <pkg>` still emitted ANSI to stderr on a TTY — including
+	// the block line, the single most important line the product prints —
+	// while --no-color DID work on the stdout paths. Binding it here makes
+	// the two streams agree. NO_COLOR keeps beating --no-color=false because
+	// initConfig's viper.Set sits in the override tier above BindPFlag.
+	_ = viper.BindPFlag("no_color", rootCmd.PersistentFlags().Lookup("no-color"))
 }
 
 func initConfig() {
@@ -380,8 +528,40 @@ func initConfig() {
 	// CHAINSAW_TOKEN binding documented in cfgToken above.
 	_ = viper.BindEnv("server_url", "CHAINSAW_SERVER")
 	_ = viper.ReadInConfig()
+
+	// A6 self-heal: strip any transient global that a PREVIOUS release baked
+	// into config.yaml. Without this an operator who once ran `chainsaw
+	// --quiet setup` stays quiet forever and has no obvious way back.
+	//
+	// viper.InConfig is what makes this safe: it is true ONLY when the key is
+	// present in the parsed CONFIG FILE. A --quiet flag on this invocation
+	// (BindPFlag) and CHAINSAW_QUIET (BindEnv) do not satisfy it, so this
+	// cannot clobber a deliberate flag or env value. viper.Set neutralizes the
+	// poisoned value for THIS run too (override tier beats the config tier),
+	// which gives relief immediately rather than at the next login. Must run
+	// BEFORE the NO_COLOR block below, so an actual NO_COLOR env var still
+	// wins over a stale `no_color: true` we just cleared.
+	stale := false
+	for _, k := range transientGlobalKeys {
+		if viper.InConfig(k) {
+			viper.Set(k, false)
+			stale = true
+		}
+	}
+	if stale {
+		// Best-effort: writeConfigYAML now drops these keys on the way out.
+		// A failure here is not worth aborting the command over — the
+		// in-memory Set above has already restored correct behavior.
+		_ = writeConfigYAML()
+	}
+
 	// no-color.org: NO_COLOR opts out when PRESENT, regardless of value (incl.
 	// the empty string). Presence test, not a non-empty value test.
+	//
+	// This viper.Set sits in the OVERRIDE tier, above BindPFlag — so NO_COLOR
+	// deliberately still beats an explicit `--no-color=false`. That precedence
+	// is correct (the env var is the ecosystem-wide opt-out) and is pinned by
+	// test.
 	if _, ok := os.LookupEnv("NO_COLOR"); ok {
 		viper.Set("no_color", true)
 	}
@@ -427,10 +607,12 @@ func cfgToken() string {
 		// Defensive support log: if the user explicitly passed --token (or
 		// CHAINSAW_TOKEN) while a keychain entry exists for the same server,
 		// note it so a support investigation can see the precedence at a glance.
-		// Gated on CHAINSAW_VERBOSE to keep normal runs quiet — emitting on every
-		// authenticated command would be noisy and could leak the existence of
-		// stored credentials into shared terminals.
-		if os.Getenv("CHAINSAW_VERBOSE") != "" {
+		// Gated on verbose (--verbose OR CHAINSAW_VERBOSE) to keep normal runs
+		// quiet — emitting on every authenticated command would be noisy and
+		// could leak the existence of stored credentials into shared terminals.
+		// R7: this used to read os.Getenv directly, so the --verbose FLAG could
+		// not reach it and CHAINSAW_VERBOSE=0 turned it ON.
+		if verboseEnabled() {
 			if server := cfgServerURL(); server != "" {
 				if _, err := credStore().Get(credService, server); err == nil {
 					fmt.Fprintf(os.Stderr,
@@ -453,7 +635,25 @@ func cfgToken() string {
 }
 
 func newClient() *APIClient {
-	return NewAPIClient(cfgServerURL(), cfgToken())
+	c := NewAPIClient(cfgServerURL(), cfgToken())
+	// X4: every command that reaches for newClient() is an AUTHENTICATED
+	// command. Opt this client into the token preflight so a missing token
+	// fails fast at ExitConfigAuth(3) instead of going out unauthenticated
+	// and coming back as a 401 the caller renders as an opaque failure.
+	// NewAPIClient itself stays token-optional — see APIClient.requireToken.
+	c.requireToken = true
+	return c
+}
+
+// newClientWithTimeout is newClient with a caller-supplied overall HTTP
+// timeout, for the few commands whose server call is legitimately long
+// (scan can POST up to 10,000 packages and blocks while they are evaluated
+// server-side, which the shared 30s default hard-caps with no override).
+// NewAPIClient's 30s default is untouched for the ~40 other commands.
+func newClientWithTimeout(timeout time.Duration) *APIClient {
+	c := newAPIClientWithTimeout(cfgServerURL(), cfgToken(), timeout)
+	c.requireToken = true
+	return c
 }
 
 // saveConfig persists non-secret settings to YAML and routes the token to the
@@ -513,15 +713,40 @@ func clearConfig() error {
 	return nil
 }
 
-// writeConfigYAML marshals the non-secret subset of viper settings to the
-// config file via secureio. We build the map explicitly (rather than using
-// viper.AllSettings) to guarantee no secret key slips in.
+// transientGlobalKeys are the viper keys backed by per-invocation global
+// FLAGS (or a per-invocation env signal). They describe how THIS run should
+// behave, never durable configuration, so they must never be persisted.
+//
+// A6: writeConfigYAML snapshots viper.AllSettings(), which includes every
+// pflag-bound key and every viper.Set override. One `chainsaw --quiet auth
+// login` therefore baked `quiet: true` into config.yaml and made EVERY
+// later invocation quiet forever, with no obvious undo (`--quiet=false`
+// works; omitting --quiet does not). Same for --verbose and for NO_COLOR,
+// which initConfig turns into viper.Set("no_color", true). The trigger is
+// worse than "on login": migrateTokenToKeychain calls writeConfigYAML on
+// the first run after ANY upgrade that still has a YAML token, so transient
+// flags from that unrelated invocation get baked with no login involved.
+//
+// DENYLIST, not allowlist. The tempting fix — "build the map explicitly
+// from server_url/org_id, as the comment already promises" — would DELETE a
+// user's hand-authored `cargo_credentials:` key, which the CLI reads
+// (cargo_credentials.go, lookupCargoCredentials) but never writes and
+// documents as a supported hand-edited fallback.
+var transientGlobalKeys = []string{"quiet", "verbose", "no_color"}
+
+// writeConfigYAML marshals the non-secret, non-transient subset of viper
+// settings to the config file via secureio.
 func writeConfigYAML() error {
 	settings := viper.AllSettings()
 	delete(settings, "token")
 	// client_secret is secret by intent; keep it out of YAML even though it's
 	// not yet routed through credstore. Non-secret client_id stays.
 	delete(settings, "client_secret")
+	// A6 — see transientGlobalKeys. Unknown keys (e.g. a hand-authored
+	// cargo_credentials) are deliberately preserved.
+	for _, k := range transientGlobalKeys {
+		delete(settings, k)
+	}
 
 	data, err := yaml.Marshal(settings)
 	if err != nil {
@@ -567,14 +792,14 @@ func migrateTokenToKeychain() {
 	store := credStore()
 	existing, err := store.Get(credService, server)
 	if err != nil && !errors.Is(err, credstore.ErrNotFound) {
-		if os.Getenv("CHAINSAW_VERBOSE") != "" {
+		if verboseEnabled() {
 			fmt.Fprintf(os.Stderr, "chainsaw: keychain read failed during migration: %v\n", err)
 		}
 		return
 	}
 	if existing == "" {
 		if err := store.Set(credService, server, tokenInYAML); err != nil {
-			if os.Getenv("CHAINSAW_VERBOSE") != "" {
+			if verboseEnabled() {
 				fmt.Fprintf(os.Stderr, "chainsaw: keychain write failed during migration: %v\n", err)
 			}
 			return
@@ -588,7 +813,7 @@ func migrateTokenToKeychain() {
 	// without touching the in-memory viper state that the rest of the request
 	// depends on.
 	if err := writeConfigYAML(); err != nil {
-		if os.Getenv("CHAINSAW_VERBOSE") != "" {
+		if verboseEnabled() {
 			fmt.Fprintf(os.Stderr, "chainsaw: rewriting config without token failed: %v\n", err)
 		}
 	}
@@ -596,7 +821,7 @@ func migrateTokenToKeychain() {
 
 // migrateLegacyConfig moves ~/.chainsaw/{config.yaml,.setup_progress} to the new
 // platform location on first access. Silent by design: never fails the CLI and
-// only reports diagnostics when CHAINSAW_VERBOSE is set. If the new path already
+// only reports diagnostics under --verbose / CHAINSAW_VERBOSE. If the new path already
 // holds a file, the legacy file is left untouched.
 func migrateLegacyConfig() {
 	legacy := platform.LegacyConfigHome()
@@ -608,7 +833,7 @@ func migrateLegacyConfig() {
 		src := filepath.Join(legacy, name)
 		dst := filepath.Join(current, name)
 		if err := moveIfAbsent(src, dst); err != nil {
-			if os.Getenv("CHAINSAW_VERBOSE") != "" {
+			if verboseEnabled() {
 				fmt.Fprintf(os.Stderr, "chainsaw: config migration skipped for %s: %v\n", name, err)
 			}
 		}

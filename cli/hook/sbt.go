@@ -113,8 +113,8 @@ func (m sbtManager) Wire(opts WireOpts) error {
 	// Validate credentials up-front so we don't half-write three files
 	// then fail on the third. Mirrors bun.go's pattern.
 	if creds := strings.TrimSpace(opts.Credentials); creds != "" {
-		if _, _, ok := splitCreds(creds); !ok {
-			return fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+		if _, _, err := parseCreds(creds); err != nil {
+			return err
 		}
 	}
 	// Validate ServerURL the same way — empty is allowed (placeholder
@@ -151,13 +151,13 @@ func (m sbtManager) Wire(opts WireOpts) error {
 		return err
 	}
 
-	if err := writeWithBackup(reposPath, reposBody); err != nil {
+	if err := writeWithBackup(m.Name(), reposPath, reposBody, opts); err != nil {
 		return fmt.Errorf("write repositories: %w", err)
 	}
-	if err := writeWithBackup(credsPath, credsBody); err != nil {
+	if err := writeWithBackup(m.Name(), credsPath, credsBody, opts); err != nil {
 		return fmt.Errorf("write credentials: %w", err)
 	}
-	if err := writeWithBackup(envPath, envBody); err != nil {
+	if err := writeWithBackup(m.Name(), envPath, envBody, opts); err != nil {
 		return fmt.Errorf("write coursier env snippet: %w", err)
 	}
 	return nil
@@ -239,7 +239,10 @@ func sbtRepositoriesBody(opts WireOpts) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	repoPath := OrgScopedRepoPath(opts.OrgSlug, "maven-central")
+	repoPath, err := orgScopedRepoPath(opts.OrgSlug, "maven-central")
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`%s[repositories]
   chainsaw: %s/%s/, [organization]/[module]/[revision]/[artifact]-[revision](-[classifier]).[ext]`,
 		header, base, repoPath), nil
@@ -271,14 +274,13 @@ func sbtCredentialsBody(opts WireOpts) (string, error) {
 	user, pass := "<client_id>", "<client_secret>"
 	credsNote := ""
 	if creds != "" {
-		id, secret, ok := splitCreds(creds)
-		if !ok {
-			return "", fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+		id, secret, err := parseCreds(creds)
+		if err != nil {
+			return "", err
 		}
 		user, pass = id, secret
 		credsNote = "# chainsaw: credentials embedded in cleartext (sbt's format\n" +
-			"# requires it); tighten this file's permissions (chmod 600) if\n" +
-			"# your home directory is shared.\n"
+			"# requires it); chainsaw keeps this file at mode 0600.\n"
 	}
 	return fmt.Sprintf(`%s%srealm=Chainsaw repository
 host=%s
@@ -319,14 +321,18 @@ func sbtCoursierEnvBody(opts WireOpts) (string, error) {
 	creds := strings.TrimSpace(opts.Credentials)
 	user, pass := "<client_id>", "<client_secret>"
 	if creds != "" {
-		id, secret, ok := splitCreds(creds)
-		if !ok {
-			return "", fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+		id, secret, err := parseCreds(creds)
+		if err != nil {
+			return "", err
 		}
 		user, pass = id, secret
 	}
-	return fmt.Sprintf(`%sexport COURSIER_CREDENTIALS="%s %s:%s"`,
-		header, host, user, pass), nil
+	// H4: this file is SOURCED by the user's shell (its own header tells
+	// them to add it to ~/.zshrc), so the value must be a single shell
+	// literal. A secret of the form `x"; touch /tmp/PWNED; #` previously
+	// executed as a command the moment the file was sourced.
+	return fmt.Sprintf(`%sexport COURSIER_CREDENTIALS=%s`,
+		header, shellSingleQuote(host+" "+user+":"+pass)), nil
 }
 
 // sbtHostFromURL returns the host (no scheme, no path) of a validated

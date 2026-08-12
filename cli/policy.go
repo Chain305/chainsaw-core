@@ -11,6 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/chain305/chainsaw-core/policy"
 )
 
 // policyItem mirrors the policy.Policy JSON returned by the server.
@@ -26,6 +28,14 @@ type policyItem struct {
 	Conditions  json.RawMessage `json:"conditions,omitempty"`
 	Scope       json.RawMessage `json:"scope,omitempty"`
 	Identifier  json.RawMessage `json:"identifier,omitempty"`
+
+	// Kind and ExpiresAt are on the wire already (policy.Policy carries
+	// both — see core/policy/store.go) but were not decoded here, so
+	// `policy simulate` treated an expired exception as live. Exceptions
+	// sort first and the simulate loop breaks on the first match, so a
+	// dead exception outranked every block rule behind it.
+	Kind      string     `json:"kind,omitempty"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 var policyCmd = &cobra.Command{
@@ -432,8 +442,32 @@ func runPolicySetStatus(status string) func(cmd *cobra.Command, args []string) e
 // ── simulate ──────────────────────────────────────────────────────────────────
 
 var policySimulateCmd = &cobra.Command{
-	Use:          "simulate <package@version>",
-	Short:        "Test whether a package would be blocked by current policies",
+	Use:   "simulate <package@version>",
+	Short: "Test whether a package would be blocked by current policies",
+	Long: `Preview which of your org's live policies a package coordinate would hit.
+
+Matching uses the proxy evaluator's own identifier matcher, so wildcards
+("*") and semver constraints ("<2.15.0", "^1.0.0") behave exactly as they
+do in enforcement. Expired exceptions are skipped, as the evaluator skips
+them.
+
+Outcomes:
+  allow|block|quarantine|monitor  a live rule matched and the CLI could
+                                  decide it (runtime conditions aside)
+  conditional                     a rule matched, but deciding it needs
+                                  something this command does not have —
+                                  server-side signals (CVSS, EPSS, trust
+                                  score), a repository (--repository), a
+                                  version, or requester scope. The
+                                  --json "unevaluated" array names them.
+  no_match                        no live rule targets this coordinate
+
+Exit code is 1 for block/quarantine, 0 otherwise — including conditional,
+which is informational.
+
+Examples:
+  chainsaw policy simulate lodash@4.17.11
+  chainsaw policy simulate log4j:log4j-core@2.14.1 --repository maven-central --json`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runPolicySimulate,
@@ -441,13 +475,9 @@ var policySimulateCmd = &cobra.Command{
 
 func init() {
 	policySimulateCmd.Flags().Bool("json", false, "Output as JSON")
+	policySimulateCmd.Flags().String("repository", "",
+		"Repository the install would come from (e.g. npm-proxy). Without it, repo-scoped policies report `conditional` rather than a guessed verdict.")
 	policyCmd.AddCommand(policySimulateCmd)
-}
-
-type policyIdentifier struct {
-	TargetPackageName    string `json:"targetPackageName,omitempty"`
-	TargetPackageRepo    string `json:"targetPackageRepo,omitempty"`
-	TargetPackageVersion string `json:"targetPackageVersion,omitempty"`
 }
 
 type policyConditionsSummary struct {
@@ -492,12 +522,23 @@ type simulateResult struct {
 	SchemaVersion string `json:"schemaVersion"`
 	Package       string `json:"package"`
 	Version       string `json:"version"`
-	Outcome       string `json:"outcome"` // "allow"|"block"|"quarantine"|"monitor"|"no_match"
-	MatchedID     string `json:"matched_id,omitempty"`
-	PolicyName    string `json:"policy_name,omitempty"`
-	Mode          string `json:"mode,omitempty"`
-	Reason        string `json:"reason,omitempty"`
-	Note          string `json:"note,omitempty"`
+	// Repository echoes --repository. Empty means the caller did not
+	// supply one, in which case a repo-scoped rule cannot be decided
+	// here — see Unevaluated.
+	Repository string `json:"repository,omitempty"`
+	Outcome    string `json:"outcome"` // "allow"|"block"|"quarantine"|"monitor"|"conditional"|"no_match"
+	MatchedID  string `json:"matched_id,omitempty"`
+	PolicyName string `json:"policy_name,omitempty"`
+	Mode       string `json:"mode,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Note       string `json:"note,omitempty"`
+	// Unevaluated names the dimensions of the matched rule this preview
+	// could not decide (a repository or version the caller did not
+	// supply, a scope the CLI cannot evaluate at all). Non-empty always
+	// implies Outcome=="conditional": the rule is neither silently
+	// matched nor silently skipped. Additive field — see
+	// simulateSchemaVersion.
+	Unevaluated []string `json:"unevaluated,omitempty"`
 	// Conditions is the human-readable list of active conditions on the
 	// matched policy. Populated so operators can see at-a-glance which
 	// supply-chain guards are in play — especially useful for the
@@ -519,6 +560,7 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 	if pkg == "" {
 		return fmt.Errorf("invalid format — expected <package@version> or <package>")
 	}
+	repository := strings.TrimSpace(mustString(cmd, "repository"))
 
 	var listResp struct {
 		Policies []policyItem `json:"policies"`
@@ -527,12 +569,14 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	now := time.Now()
 	result := simulateResult{
 		SchemaVersion: simulateSchemaVersion,
 		Package:       pkg,
 		Version:       version,
+		Repository:    repository,
 		Outcome:       "no_match",
-		Note:          "Condition evaluation (CVSS, EPSS, vulnerability, trust score) requires server-side data not available to the CLI. Only identifier-based matching is shown.",
+		Note:          simulateNote(listResp.Policies),
 	}
 
 	// identifierOnly records whether the matched policy had no runtime
@@ -545,14 +589,26 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 		if p.Status != "enabled" {
 			continue
 		}
+		// Exceptions sort FIRST (the server stamps them with
+		// Precedence: -UnixNano and lists ORDER BY precedence ASC) and
+		// this loop breaks on the first match, so an exception dominates
+		// every block rule behind it. The evaluator skips exceptions
+		// whose per-row expiry has passed (policy.IsExpiredException);
+		// simulate did not, so a package covered by yesterday's
+		// exception previewed as "allow" while the proxy blocked it.
+		if simulateExceptionExpired(p, now) {
+			continue
+		}
 		// Parse identifier
-		var ident policyIdentifier
+		var ident policy.Identifier
 		if len(p.Identifier) > 0 {
 			_ = json.Unmarshal(p.Identifier, &ident)
 		}
-		if !identifierMatches(ident, pkg, version) {
+		matched, unevaluated := simulateIdentifierMatch(ident, repository, pkg, version)
+		if !matched {
 			continue
 		}
+		unevaluated = append(unevaluated, unevaluatedScopeDimensions(p.Scope)...)
 		// Parse conditions to describe what would trigger
 		var conds policyConditionsSummary
 		if len(p.Conditions) > 0 {
@@ -570,13 +626,26 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 			conds.HasHiddenUnicode != nil || len(conds.HiddenUnicodeKinds) > 0 ||
 			conds.PublishVelocityAnomaly != nil || conds.PublishVelocityThreshold24h != nil
 
-		if hasRuntimeConditions {
+		switch {
+		case hasRuntimeConditions:
 			result.Outcome = "conditional"
 			result.Reason = "identifier matches; runtime conditions (CVSS, EPSS, etc.) require server evaluation"
-		} else {
+			if len(unevaluated) > 0 {
+				result.Reason += "; also unevaluated here: " + strings.Join(unevaluated, ", ")
+			}
+		case len(unevaluated) > 0:
+			// The rule narrows on a dimension this preview does not
+			// hold. Reporting p.Mode would claim a verdict we did not
+			// compute; skipping the rule would hide it. Neither is
+			// honest — say the rule matched on everything we could
+			// check and name what we could not.
+			result.Outcome = "conditional"
+			result.Reason = "identifier matches on the dimensions available here; unevaluated: " + strings.Join(unevaluated, ", ")
+		default:
 			result.Outcome = p.Mode
 			identifierOnly = true
 		}
+		result.Unevaluated = unevaluated
 		result.MatchedID = p.ID
 		result.PolicyName = p.Name
 		result.Mode = p.Mode
@@ -599,6 +668,9 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 	if version != "" {
 		fmt.Fprintf(out, "Version:  %s\n", version)
 	}
+	if repository != "" {
+		fmt.Fprintf(out, "Repo:     %s\n", repository)
+	}
 	if identifierOnly {
 		// The Outcome was determined solely by an identifier match; the CLI
 		// cannot evaluate runtime conditions, so qualify the headline rather
@@ -614,6 +686,12 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 	}
 	if result.Reason != "" {
 		fmt.Fprintf(out, "Reason:   %s\n", result.Reason)
+	}
+	if len(result.Unevaluated) > 0 {
+		fmt.Fprintf(out, "Unevaluated:\n")
+		for _, u := range result.Unevaluated {
+			fmt.Fprintf(out, "  - %s\n", u)
+		}
 	}
 	if len(result.Conditions) > 0 {
 		fmt.Fprintf(out, "Conditions:\n")
@@ -705,19 +783,136 @@ func summarizeConditions(c policyConditionsSummary) []string {
 	return out
 }
 
-// identifierMatches returns true if the policy identifier matches the given package/version.
-// An empty identifier matches everything.
-func identifierMatches(ident policyIdentifier, pkg, version string) bool {
-	if ident.TargetPackageName != "" &&
-		!strings.EqualFold(ident.TargetPackageName, pkg) {
+// simulateIdentifierMatch answers "would this rule target this
+// coordinate" using the EVALUATOR'S matcher (policy.MatchesIdentifier),
+// not a CLI look-alike. The look-alike it replaced wildcarded "*" on the
+// version leg but not the name leg — so every seeded org policy, all of
+// which target name "*", reported no_match — and compared versions as
+// strings, so `<2.15.0` never matched `2.14.1`.
+//
+// It also reports which identifier dimensions the caller could not
+// supply. `policy simulate` takes ONE argument, so there are two:
+//
+//   - repository, unless --repository is passed. The old matcher parsed
+//     targetPackageRepo and then never compared it, so a repo-scoped
+//     rule matched every package. Handing an empty ctx.Repository to the
+//     evaluator's matcher would flip that to the opposite error — the
+//     rule silently stops matching.
+//   - version, when the caller wrote `pkg` rather than `pkg@version` and
+//     the rule constrains versions.
+//
+// Rather than pick a wrong answer in either direction, wildcard the
+// missing dimension (so the rule is still surfaced) and return its name
+// so the caller can downgrade the verdict to `conditional`.
+func simulateIdentifierMatch(ident policy.Identifier, repository, pkg, version string) (bool, []string) {
+	var unevaluated []string
+	if repository == "" && narrowsOn(ident.TargetPackageRepo) {
+		unevaluated = append(unevaluated,
+			fmt.Sprintf("repository (rule targets %q; pass --repository to evaluate it)", ident.TargetPackageRepo))
+		ident.TargetPackageRepo = "*"
+	}
+	if version == "" && narrowsOn(ident.TargetPackageVersion) {
+		unevaluated = append(unevaluated,
+			fmt.Sprintf("version (rule targets %q; pass <package>@<version> to evaluate it)", ident.TargetPackageVersion))
+		ident.TargetPackageVersion = "*"
+	}
+	ctx := policy.EvaluationContext{
+		Repository:     repository,
+		PackageName:    pkg,
+		PackageVersion: version,
+	}
+	return policy.MatchesIdentifier(ctx, ident), unevaluated
+}
+
+// narrowsOn reports whether an identifier leg actually restricts
+// anything. "" and "*" both mean "any", matching matchesPattern /
+// matchesVersion.
+func narrowsOn(v string) bool {
+	v = strings.TrimSpace(v)
+	return v != "" && v != "*"
+}
+
+// unevaluatedScopeDimensions names the Scope dimensions a matched rule
+// sets. Scope gates on the REQUESTER (client id, group, source repo,
+// country, IP) — none of which exist in a `policy simulate` invocation,
+// and none of which the CLI could obtain without becoming the request it
+// is previewing. So this is not a gap to be closed later; it is reported
+// so the verdict reads `conditional` instead of claiming a match the
+// proxy might not make.
+func unevaluatedScopeDimensions(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var scope policy.Scope
+	if err := json.Unmarshal(raw, &scope); err != nil {
+		return nil
+	}
+	if !policy.HasMeaningfulScope(scope) {
+		return nil
+	}
+	var dims []string
+	for _, d := range []struct {
+		name   string
+		values []string
+	}{
+		{"scope.targetClient", scope.TargetClient},
+		{"scope.targetGroup", scope.TargetGroup},
+		{"scope.targetRepos", scope.TargetRepos},
+		{"scope.targetRequestingCountry", scope.TargetRequestingCountry},
+		{"scope.targetRequestingIp", scope.TargetRequestingIP},
+	} {
+		if len(d.values) > 0 {
+			dims = append(dims, fmt.Sprintf("%s (%s — requester identity is not available to the CLI)",
+				d.name, strings.Join(d.values, ",")))
+		}
+	}
+	return dims
+}
+
+// simulateExceptionExpired mirrors policy.IsExpiredException's per-row
+// leg: an allow-mode/exception rule whose expiresAt has passed is dead
+// and the evaluator skips it.
+//
+// It deliberately does NOT mirror the legacy `createdAt +
+// org.ExceptionAge` fallback. That threshold is org settings the
+// /api/policies response does not carry, so the CLI cannot compute it.
+// Undated exceptions therefore still preview as live even when the org's
+// exception age has aged them out server-side; simulateNote says so on
+// every run where such a row exists, rather than leaving the operator to
+// assume full coverage.
+func simulateExceptionExpired(p policyItem, now time.Time) bool {
+	if p.ExpiresAt == nil || p.ExpiresAt.IsZero() {
 		return false
 	}
-	if ident.TargetPackageVersion != "" && version != "" &&
-		ident.TargetPackageVersion != version &&
-		ident.TargetPackageVersion != "*" {
+	if !isExceptionRow(p) {
 		return false
 	}
-	return true
+	return now.After(*p.ExpiresAt)
+}
+
+// isExceptionRow applies the evaluator's exception discriminator:
+// Kind=="exception" (the shape /api/exceptions writes today) or the
+// legacy allow-mode row. Expiry only applies to exceptions — a block
+// rule with a stray expiresAt must not silently stop blocking.
+func isExceptionRow(p policyItem) bool {
+	return strings.EqualFold(p.Kind, string(policy.KindException)) ||
+		strings.EqualFold(p.Mode, string(policy.ModeAllow))
+}
+
+// simulateNote builds the caveat line. The base sentence is constant;
+// the exception-age sentence is appended only when the org actually has
+// an undated exception, so the note stays honest without being noise.
+func simulateNote(policies []policyItem) string {
+	const base = "Condition evaluation (CVSS, EPSS, vulnerability, trust score) requires server-side data not available to the CLI. Only identifier-based matching is shown."
+	for _, p := range policies {
+		if p.Status != "enabled" || !isExceptionRow(p) {
+			continue
+		}
+		if p.ExpiresAt == nil || p.ExpiresAt.IsZero() {
+			return base + " NOTE: this org has exception(s) with no explicit expiresAt; those age out against the org's exceptionAge setting, which this command cannot read — such an exception may already be expired server-side yet still shown as live here."
+		}
+	}
+	return base
 }
 
 // ── export ────────────────────────────────────────────────────────────────────

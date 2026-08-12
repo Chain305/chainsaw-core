@@ -161,6 +161,7 @@ func runDoctorUpgradeCheck(cmd *cobra.Command, _ []string) error {
 			doctorExitOverride(exit)
 			return nil
 		}
+		flushTelemetry() // before any os.Exit in the caller drops the batch
 		os.Exit(exit)
 	}
 	return nil

@@ -27,7 +27,7 @@ func init() {
 }
 
 func runIntelSignals(cmd *cobra.Command, _ []string) error {
-	client, err := newV1Client()
+	client, err := newV1Client(cmd)
 	if err != nil {
 		// Classify via Execute(): auth → 3, network/IO → 2 (invariant B).
 		return err

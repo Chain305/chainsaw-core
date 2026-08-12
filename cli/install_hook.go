@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -73,7 +74,14 @@ Examples:
 		RunE: runUninstallHook,
 	}
 	c.Flags().Bool("all", false, "Unwire every supported manager")
-	c.Flags().String("scope", "user", "Which config to remove the block from: \"user\" (global) or \"project\" (current dir).")
+	// H7: install-hook prompts for scope on a TTY and can write a secret
+	// into a repo-local ./.npmrc, while uninstall-hook defaulted to "user"
+	// — so the obvious removal command left the repo-local secret behind.
+	// Empty now means "resolve like install-hook does" (prompt on a TTY,
+	// ScopeUser otherwise), which leaves scripted callers unchanged.
+	c.Flags().String("scope", "", "Which config to remove the block from: \"user\" (global) or \"project\" (current dir). Prompts when unset on a TTY, matching install-hook.")
+	c.Flags().Bool("repair", false, "Repair a config whose chainsaw markers are malformed (e.g. a hand-deleted end marker). Prints the exact lines it would delete and asks first.")
+	c.Flags().String("mirror", "", "docker only: remove this exact registry-mirror URL. Needed on hosts wired before chainsaw recorded the mirror it inserted.")
 	return c
 }
 
@@ -160,6 +168,12 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 		Credentials:    creds,
 		OrgSlug:        orgSlug,
 		Scope:          scope,
+		// Managers report backups they wrote, file modes they tightened and
+		// GOFLAGS tokens they dropped. All advisory, so it goes to stderr
+		// and leaves --json's stdout clean.
+		Notify: func(msg string) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", msg)
+		},
 	}
 
 	var managers []hook.Manager
@@ -201,6 +215,17 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 				res.ConfigPath = path
 			} else if st, err := m.Status(); err == nil {
 				res.ConfigPath = st.ConfigPath
+			}
+			// H7: a project-scope config holding a live client secret sits
+			// in the repo tree, mode 0600 but perfectly `git add .`-able.
+			// Keep it out of the index and say so. All of them — sbt writes
+			// three files and two of them carry the secret.
+			if scope == hook.ScopeProject && strings.TrimSpace(creds) != "" {
+				if paths, perr := hook.ConfigPathsForScope(m, scope); perr == nil {
+					for _, p := range paths {
+						guardProjectSecret(cmd, p)
+					}
+				}
 			}
 		}
 		results = append(results, res)
@@ -268,13 +293,26 @@ func normalizeHookServerURL(serverURL string) string {
 func runUninstallHook(cmd *cobra.Command, args []string) error {
 	allFlag, _ := cmd.Flags().GetBool("all")
 	scopeFlag, _ := cmd.Flags().GetString("scope")
+	repairFlag, _ := cmd.Flags().GetBool("repair")
+	mirrorFlag, _ := cmd.Flags().GetString("mirror")
 	if allFlag && len(args) > 0 {
 		return fmt.Errorf("--all and a positional manager are mutually exclusive")
 	}
 	if !allFlag && len(args) != 1 {
 		return fmt.Errorf("specify a package manager (npm, pip, cargo) or use --all")
 	}
-	scope, err := parseScope(scopeFlag)
+	if repairFlag && allFlag {
+		return fmt.Errorf("--repair takes a single manager, not --all")
+	}
+	if strings.TrimSpace(mirrorFlag) != "" && (allFlag || args[0] != "docker") {
+		return fmt.Errorf("--mirror applies only to `uninstall-hook docker`")
+	}
+	// H7: match install-hook's scope resolution so `uninstall-hook npm`
+	// after a project-scope install actually removes the repo-local file
+	// (which may hold a live client secret) instead of reporting "no
+	// chainsaw block found in ~/.npmrc". Non-TTY callers still get
+	// ScopeUser, so existing automation is unaffected.
+	scope, err := resolveScope(cmd, scopeFlag)
 	if err != nil {
 		return err
 	}
@@ -290,6 +328,20 @@ func runUninstallHook(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("unknown package manager %q; available: %s", args[0], strings.Join(managerNames(), ", "))
 		}
 		managers = []hook.Manager{m}
+	}
+
+	if repairFlag {
+		return runHookRepair(cmd, managers[0], scope)
+	}
+	if strings.TrimSpace(mirrorFlag) != "" {
+		if err := hook.UnwireDockerMirror(scope, mirrorFlag); err != nil {
+			if errors.Is(err, hook.ErrNotWired) {
+				return fmt.Errorf("no registry mirror %q found in the docker daemon config", mirrorFlag)
+			}
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "removed registry mirror %s from the docker daemon config\n", mirrorFlag)
+		return nil
 	}
 
 	results := make([]hookActionResult, 0, len(managers))
@@ -337,6 +389,12 @@ func runUninstallHook(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "unwired %s at %s\n", r.Manager, r.ConfigPath)
 		case r.Skipped:
 			fmt.Fprintf(cmd.ErrOrStderr(), "no chainsaw block found in %s; nothing to do\n", r.ConfigPath)
+			if r.Manager == "docker" {
+				// H3: hosts wired before chainsaw recorded the mirror it
+				// inserted cannot be matched from the file alone.
+				fmt.Fprintln(cmd.ErrOrStderr(), "  if docker was wired by an older chainsaw, remove the entry explicitly:")
+				fmt.Fprintln(cmd.ErrOrStderr(), "    chainsaw uninstall-hook docker --mirror <the registry-mirrors entry>")
+			}
 		case r.Reason != "":
 			fmt.Fprintf(cmd.ErrOrStderr(), "error: unwire %s: %s\n", r.Manager, r.Reason)
 		}
@@ -346,6 +404,101 @@ func runUninstallHook(cmd *cobra.Command, args []string) error {
 		return firstErr
 	}
 	return nil
+}
+
+// runHookRepair implements `uninstall-hook <manager> --repair` (H9).
+//
+// A hand-deleted end marker used to be unrecoverable: install-hook appended a
+// fresh block on every run and uninstall-hook failed forever. Wire now
+// refuses rather than pile up another block, and this is the explicit,
+// destructive escape hatch — it prints every line it would delete and asks
+// before touching the file. Never silently truncate a config we don't own.
+func runHookRepair(cmd *cobra.Command, m hook.Manager, scope hook.Scope) error {
+	plans, err := hook.PlanRepair(m, scope)
+	switch {
+	case errors.Is(err, hook.ErrNothingToRepair):
+		fmt.Fprintf(cmd.ErrOrStderr(), "no malformed chainsaw block found for %s; nothing to repair\n", m.Name())
+		return nil
+	case err != nil:
+		return err
+	}
+	out := cmd.OutOrStdout()
+	total := 0
+	for _, p := range plans {
+		fmt.Fprintf(out, "%s — %d line(s) would be deleted:\n", p.Path, len(p.Lines))
+		for _, ln := range p.Lines {
+			fmt.Fprintf(out, "  %6d | %s\n", ln.Number, ln.Text)
+		}
+		total += len(p.Lines)
+	}
+	fmt.Fprintf(out, "\nA timestamped backup is written before anything is removed.\n")
+	if !stdinIsTerminal() {
+		return fmt.Errorf("--repair deletes %d line(s) and needs an interactive confirmation; re-run it from a terminal", total)
+	}
+	if !PromptConfirm(fmt.Sprintf("Delete these %d line(s)?", total)) {
+		fmt.Fprintln(cmd.ErrOrStderr(), "aborted; nothing was changed")
+		return nil
+	}
+	if err := hook.ApplyRepair(m, scope, plans); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "repaired %s; re-run `chainsaw install-hook %s` to wire it again\n", m.Name(), m.Name())
+	return nil
+}
+
+// guardProjectSecret keeps a repo-local, credential-bearing config out of git
+// (H7). The file is already 0600 (see hook.credentialFileMode), but mode does
+// not stop `git add .` — the secret is one careless commit from a public
+// repository.
+func guardProjectSecret(cmd *cobra.Command, configPath string) {
+	root, ok := gitRepoRoot(filepath.Dir(configPath))
+	if !ok {
+		return
+	}
+	rel, err := filepath.Rel(root, configPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return
+	}
+	entry := filepath.ToSlash(rel)
+	gitignore := filepath.Join(root, ".gitignore")
+	existing, err := os.ReadFile(gitignore)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s holds a client secret and %s could not be read (%v) — add %q to it by hand\n", configPath, gitignore, err, entry)
+		return
+	}
+	for _, line := range strings.Split(string(existing), "\n") {
+		t := strings.TrimSpace(line)
+		if t == entry || t == "/"+entry || t == filepath.Base(entry) {
+			return
+		}
+	}
+	var b strings.Builder
+	b.Write(existing)
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		b.WriteString("\n")
+	}
+	b.WriteString("\n# added by chainsaw install-hook: holds a client secret\n")
+	b.WriteString(entry)
+	b.WriteString("\n")
+	if err := os.WriteFile(gitignore, []byte(b.String()), 0o644); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s holds a client secret and %s could not be updated (%v) — add %q to it by hand\n", configPath, gitignore, err, entry)
+		return
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "note: %s holds a client secret; added %q to %s so it is not committed\n", configPath, entry, gitignore)
+}
+
+// gitRepoRoot walks up from dir looking for a .git entry.
+func gitRepoRoot(dir string) (string, bool) {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 // resolveChainsawBinary returns the absolute path to the currently running

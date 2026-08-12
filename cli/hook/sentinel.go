@@ -2,19 +2,81 @@ package hook
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"time"
 )
 
 // Sentinel markers delimit the chainsaw-managed block inside a config file.
-// All three managers use "#" for comments so the markers are shared.
+//
+// The marker BODY is comment-syntax-free; each manager wraps it in whatever
+// its config format calls a comment. Most formats (INI, TOML, .npmrc, go env,
+// yarnrc) use "#", which is why the "#"-prefixed spellings below are the
+// package defaults. Gradle's init script is Kotlin, which has no "#" line
+// comment at all (H14), and maven/nuget are XML (H2) — those managers build
+// their block with a different prefix and carry a manager-local matcher.
 const (
-	sentinelStart = "# >>> chainsaw-managed >>>"
-	sentinelEnd   = "# <<< chainsaw-managed <<<"
+	sentinelBodyStart = ">>> chainsaw-managed >>>"
+	sentinelBodyEnd   = "<<< chainsaw-managed <<<"
+
+	sentinelStart = "# " + sentinelBodyStart
+	sentinelEnd   = "# " + sentinelBodyEnd
 )
 
 // timeNow is indirected so tests can pin the generated-at timestamp.
 var timeNow = time.Now
+
+// markerKind classifies a single line of a config file as a chainsaw sentinel
+// marker (or neither).
+type markerKind int
+
+const (
+	markerNone markerKind = iota
+	markerStart
+	markerEnd
+)
+
+// markerClassifier maps a raw config line to its markerKind. Each comment
+// dialect supplies its own; see hashMarker (the shared "#" default),
+// kotlinMarker (gradle.go) and xmlMarker (xmlsentinel.go).
+type markerClassifier func(line string) markerKind
+
+// hashMarker is the strict, shared classifier: the trimmed line must equal
+// one of the "#"-prefixed markers exactly.
+//
+// Do NOT loosen this. Formats that need to accept another spelling (XML,
+// Kotlin) define their own classifier next to the manager that emits it, so
+// a relaxation there cannot leak into .npmrc / pip.conf / config.toml.
+func hashMarker(line string) markerKind {
+	switch strings.TrimSpace(line) {
+	case sentinelStart:
+		return markerStart
+	case sentinelEnd:
+		return markerEnd
+	}
+	return markerNone
+}
+
+// commentPrefixMarker builds a classifier that accepts the marker body behind
+// any of the supplied line-comment prefixes. Used by gradle, which emits "//"
+// today and must still recognise the "#" blocks earlier releases wrote.
+func commentPrefixMarker(prefixes ...string) markerClassifier {
+	return func(line string) markerKind {
+		t := strings.TrimSpace(line)
+		for _, p := range prefixes {
+			if !strings.HasPrefix(t, p) {
+				continue
+			}
+			switch strings.TrimSpace(strings.TrimPrefix(t, p)) {
+			case sentinelBodyStart:
+				return markerStart
+			case sentinelBodyEnd:
+				return markerEnd
+			}
+		}
+		return markerNone
+	}
+}
 
 // detectNewline reports the line-ending convention used by data. If the first
 // newline is CRLF we return "\r\n"; otherwise (or when data has no newline) we
@@ -50,22 +112,22 @@ func splitLines(data []byte) (lines []string, trailingNL bool) {
 	return lines, trailingNL
 }
 
-// findSentinelLines locates a well-formed chainsaw block in lines, requiring
-// each marker to occupy its own line (after whitespace trimming). Returns the
-// start and end indices (inclusive) and true on success.
-func findSentinelLines(lines []string) (start, end int, ok bool) {
+// findMarkedLines locates a well-formed chainsaw block in lines using the
+// supplied classifier, requiring each marker to occupy its own line (after
+// whitespace trimming). Returns the start and end indices (inclusive) and
+// true on success.
+func findMarkedLines(lines []string, classify markerClassifier) (start, end int, ok bool) {
 	start = -1
 	for i, ln := range lines {
-		t := strings.TrimSpace(ln)
-		switch t {
-		case sentinelStart:
+		switch classify(ln) {
+		case markerStart:
 			if start >= 0 {
 				// A second start before we've seen an end: treat the file
 				// as corrupt so we don't splice across unrelated content.
 				return 0, 0, false
 			}
 			start = i
-		case sentinelEnd:
+		case markerEnd:
 			if start < 0 {
 				return 0, 0, false
 			}
@@ -75,24 +137,76 @@ func findSentinelLines(lines []string) (start, end int, ok bool) {
 	return 0, 0, false
 }
 
-// hasSentinel reports whether data contains a well-formed chainsaw block with
-// each marker on its own line.
-func hasSentinel(data []byte) bool {
+// findSentinelLines is findMarkedLines with the shared "#" classifier.
+func findSentinelLines(lines []string) (start, end int, ok bool) {
+	return findMarkedLines(lines, hashMarker)
+}
+
+// hasMarkedBlock reports whether data contains a well-formed block under the
+// supplied classifier.
+func hasMarkedBlock(data []byte, classify markerClassifier) bool {
 	lines, _ := splitLines(data)
-	_, _, ok := findSentinelLines(lines)
+	_, _, ok := findMarkedLines(lines, classify)
 	return ok
 }
 
-// replaceOrAppend replaces an existing sentinel block with newBlock. If no
-// block is present newBlock is appended, preceded by a blank line when the
-// existing data is non-empty. The file's existing newline convention (LF vs
-// CRLF) is preserved for content outside the block; newBlock is emitted using
-// the detected convention.
-func replaceOrAppend(data, newBlock []byte) []byte {
+// hasSentinel reports whether data contains a well-formed chainsaw block with
+// each marker on its own line.
+func hasSentinel(data []byte) bool {
+	return hasMarkedBlock(data, hashMarker)
+}
+
+// sentinelCorrupt reports whether data carries chainsaw markers that do NOT
+// form exactly one well-formed block — a start with no end, an end with no
+// start, or two blocks stacked up (H9). The second return value is a
+// human-readable reason suitable for an error message.
+//
+// Callers use this to REFUSE before writing. Silently appending another block
+// (today's behaviour) grows the file without bound and leaves Unwire
+// permanently broken; silently deleting from the start marker to EOF would
+// destroy user content the tool does not own. Refusing, and offering an
+// explicit `uninstall-hook <manager> --repair`, is the only safe option.
+func sentinelCorrupt(data []byte, classify markerClassifier) (bool, string) {
+	if len(data) == 0 {
+		return false, ""
+	}
+	lines, _ := splitLines(data)
+	open := -1
+	blocks := 0
+	for i, ln := range lines {
+		switch classify(ln) {
+		case markerStart:
+			if open >= 0 {
+				return true, fmt.Sprintf("a second %q marker on line %d before the block opened on line %d was closed", sentinelBodyStart, i+1, open+1)
+			}
+			open = i
+		case markerEnd:
+			if open < 0 {
+				return true, fmt.Sprintf("a %q marker on line %d with no matching start marker above it", sentinelBodyEnd, i+1)
+			}
+			open = -1
+			blocks++
+		}
+	}
+	if open >= 0 {
+		return true, fmt.Sprintf("the block opened by %q on line %d is never closed by %q", sentinelBodyStart, open+1, sentinelBodyEnd)
+	}
+	if blocks > 1 {
+		return true, fmt.Sprintf("%d chainsaw-managed blocks are present; there must be at most one", blocks)
+	}
+	return false, ""
+}
+
+// replaceOrAppendWith replaces an existing block (located with classify) with
+// newBlock. If no block is present newBlock is appended, preceded by a blank
+// line when the existing data is non-empty. The file's existing newline
+// convention (LF vs CRLF) is preserved for content outside the block;
+// newBlock is emitted using the detected convention.
+func replaceOrAppendWith(data, newBlock []byte, classify markerClassifier) []byte {
 	nl := detectNewline(data)
 	block := normalizeNewlines(newBlock, nl)
 	lines, trailingNL := splitLines(data)
-	if start, end, ok := findSentinelLines(lines); ok {
+	if start, end, ok := findMarkedLines(lines, classify); ok {
 		// Drop the surrounding blank separator we may have inserted before
 		// the old block so we don't accumulate blank lines on each Wire.
 		leading := start
@@ -132,13 +246,18 @@ func replaceOrAppend(data, newBlock []byte) []byte {
 	return buf.Bytes()
 }
 
-// removeSentinel returns data with the chainsaw block stripped. The second
-// return value is false when no well-formed block was found (data is returned
-// unchanged). The file's newline convention is preserved.
-func removeSentinel(data []byte) ([]byte, bool) {
+// replaceOrAppend is replaceOrAppendWith using the shared "#" classifier.
+func replaceOrAppend(data, newBlock []byte) []byte {
+	return replaceOrAppendWith(data, newBlock, hashMarker)
+}
+
+// removeMarkedBlock returns data with the block located by classify stripped.
+// The second return value is false when no well-formed block was found (data
+// is returned unchanged). The file's newline convention is preserved.
+func removeMarkedBlock(data []byte, classify markerClassifier) ([]byte, bool) {
 	nl := detectNewline(data)
 	lines, trailingNL := splitLines(data)
-	start, end, ok := findSentinelLines(lines)
+	start, end, ok := findMarkedLines(lines, classify)
 	if !ok {
 		return data, false
 	}
@@ -158,6 +277,11 @@ func removeSentinel(data []byte) ([]byte, bool) {
 		writeLines(&buf, lines[:leading], nl, trailingNL)
 	}
 	return buf.Bytes(), true
+}
+
+// removeSentinel is removeMarkedBlock using the shared "#" classifier.
+func removeSentinel(data []byte) ([]byte, bool) {
+	return removeMarkedBlock(data, hashMarker)
 }
 
 // writeLines writes each line to buf separated by nl. A trailing nl is
@@ -194,22 +318,37 @@ func normalizeNewlines(data []byte, nl string) []byte {
 	return buf.Bytes()
 }
 
-// buildBlock composes a sentinel-wrapped block with the given interior body.
-// The body may span multiple lines; a trailing newline is not required. Output
-// uses LF line endings; replaceOrAppend converts to CRLF if the target file
-// already uses that convention.
+// buildBlock composes a sentinel-wrapped block with the given interior body,
+// using "#" line comments. The body may span multiple lines; a trailing
+// newline is not required. Output uses LF line endings; replaceOrAppend
+// converts to CRLF if the target file already uses that convention.
 func buildBlock(interior string) []byte {
+	return buildBlockWithPrefix(interior, "#")
+}
+
+// buildBlockWithPrefix is buildBlock with an explicit line-comment prefix.
+//
+// H14: "#" is not a comment in Kotlin, so a "#"-prefixed marker inside
+// ~/.gradle/init.d/chainsaw.gradle.kts is a syntax error — and Gradle fails
+// the whole build when any init script will not compile. gradle.go passes
+// "//" here; every other manager keeps "#".
+func buildBlockWithPrefix(interior, prefix string) []byte {
 	var b strings.Builder
-	b.WriteString(sentinelStart)
+	b.WriteString(prefix)
+	b.WriteByte(' ')
+	b.WriteString(sentinelBodyStart)
 	b.WriteByte('\n')
-	b.WriteString("# generated-at: ")
+	b.WriteString(prefix)
+	b.WriteString(" generated-at: ")
 	b.WriteString(timeNow().UTC().Format(time.RFC3339))
 	b.WriteByte('\n')
 	if interior != "" {
 		b.WriteString(strings.TrimRight(interior, "\n"))
 		b.WriteByte('\n')
 	}
-	b.WriteString(sentinelEnd)
+	b.WriteString(prefix)
+	b.WriteByte(' ')
+	b.WriteString(sentinelBodyEnd)
 	b.WriteByte('\n')
 	return []byte(b.String())
 }

@@ -1518,6 +1518,27 @@ func rejectStandaloneContextOnlyConditions(policy Policy) error {
 	return fmt.Errorf("policy uses only context-only condition(s) %v as a standalone gate; these signals are too noisy to enforce alone — pair them with another condition, an identifier, or a scope, or use them via trustscore/composite expressions", names)
 }
 
+// HasMeaningfulIdentifier reports whether an Identifier narrows anything.
+// Exported so `chainsaw policy lint` applies the SAME test the save-time
+// validator applies rather than a look-alike.
+//
+// The look-alike it replaced accepted "*" as an identifier, while this
+// path rejects it (see hasMeaningfulValue: "", "*" and "all" are all
+// "targets everything"). A policy whose only pairing was a wildcard
+// identifier therefore linted clean and was then rejected by
+// rejectStandaloneContextOnlyConditions on POST — lint exists precisely
+// to catch that rejection before the operator hits it.
+func HasMeaningfulIdentifier(identifier Identifier) bool {
+	return hasPolicyIdentifier(identifier)
+}
+
+// HasMeaningfulScope is the Scope twin of HasMeaningfulIdentifier, with
+// the same rationale: one implementation of "does this scope narrow
+// anything", shared by the validator and by `policy lint`.
+func HasMeaningfulScope(scope Scope) bool {
+	return hasPolicyScope(scope)
+}
+
 func hasPolicyIdentifier(identifier Identifier) bool {
 	return hasMeaningfulValue(identifier.TargetPackageName) ||
 		hasMeaningfulValue(identifier.TargetPackageRepo) ||

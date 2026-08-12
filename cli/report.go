@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -77,6 +76,24 @@ func init() {
 	rootCmd.AddCommand(reportCmd)
 }
 
+// resolveReportFormat resolves the output format for every `report`
+// subcommand.
+//
+// S8 — these four commands read only their LOCAL --format and ignored the root
+// persistent --json, which root.go documents as "sugar for --format=json" and
+// which scan / scan-repo / deps / affected all honor. `chainsaw report sla
+// --json | jq` therefore got a tabwriter table and exit 0. resolveFormat
+// reconciles the two; "table" (resolveFormat's no-format default) is folded
+// onto this family's "text" spelling so a value the user never typed can't
+// produce an "unknown format" error.
+func resolveReportFormat(cmd *cobra.Command) string {
+	format := strings.ToLower(strings.TrimSpace(resolveFormat(cmd)))
+	if format == "" || format == "table" {
+		return "text"
+	}
+	return format
+}
+
 type reportMultiVersionRow struct {
 	Version string   `json:"version"`
 	Repos   []string `json:"repos"`
@@ -99,11 +116,7 @@ func runReportMultiVersion(cmd *cobra.Command, _ []string) error {
 		return errServerNotConfigured(cmd)
 	}
 
-	format, _ := cmd.Flags().GetString("format")
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format == "" {
-		format = "text"
-	}
+	format := resolveReportFormat(cmd)
 	if format != "text" && format != "json" {
 		return fmt.Errorf("unknown format %q — supported values: text, json", format)
 	}
@@ -127,12 +140,9 @@ func runReportMultiVersion(cmd *cobra.Command, _ []string) error {
 	}
 
 	if format == "json" {
-		buf, err := json.MarshalIndent(env.Data, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(buf))
-		return nil
+		// S9 — honor --output. encodeJSON is byte-identical to the previous
+		// MarshalIndent+Println pair (two-space indent, trailing newline).
+		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -172,11 +182,7 @@ func runReportProvenance(cmd *cobra.Command, _ []string) error {
 		return errServerNotConfigured(cmd)
 	}
 
-	format, _ := cmd.Flags().GetString("format")
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format == "" {
-		format = "text"
-	}
+	format := resolveReportFormat(cmd)
 	if format != "text" && format != "json" {
 		return fmt.Errorf("unknown format %q — supported values: text, json", format)
 	}
@@ -197,12 +203,9 @@ func runReportProvenance(cmd *cobra.Command, _ []string) error {
 	}
 
 	if format == "json" {
-		buf, err := json.MarshalIndent(env.Data, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(buf))
-		return nil
+		// S9 — honor --output. encodeJSON is byte-identical to the previous
+		// MarshalIndent+Println pair (two-space indent, trailing newline).
+		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -247,11 +250,7 @@ func runReportExposure(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--end must be RFC3339: %w", err)
 	}
 
-	format, _ := cmd.Flags().GetString("format")
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format == "" {
-		format = "text"
-	}
+	format := resolveReportFormat(cmd)
 	if format != "text" && format != "json" {
 		return fmt.Errorf("unknown format %q — supported values: text, json", format)
 	}
@@ -269,12 +268,9 @@ func runReportExposure(cmd *cobra.Command, _ []string) error {
 	}
 
 	if format == "json" {
-		buf, err := json.MarshalIndent(env.Data, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(buf))
-		return nil
+		// S9 — honor --output. encodeJSON is byte-identical to the previous
+		// MarshalIndent+Println pair (two-space indent, trailing newline).
+		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -306,11 +302,7 @@ func runReportSLA(cmd *cobra.Command, _ []string) error {
 		return errServerNotConfigured(cmd)
 	}
 
-	format, _ := cmd.Flags().GetString("format")
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format == "" {
-		format = "text"
-	}
+	format := resolveReportFormat(cmd)
 	if format != "text" && format != "json" {
 		return fmt.Errorf("unknown format %q — supported values: text, json", format)
 	}
@@ -334,12 +326,9 @@ func runReportSLA(cmd *cobra.Command, _ []string) error {
 	}
 
 	if format == "json" {
-		buf, err := json.MarshalIndent(env.Data, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(buf))
-		return nil
+		// S9 — honor --output. encodeJSON is byte-identical to the previous
+		// MarshalIndent+Println pair (two-space indent, trailing newline).
+		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)

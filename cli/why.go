@@ -220,7 +220,17 @@ func renderWhyTable(w *os.File, ecosystem string, v *blockedViolation, reqID, so
 		fmt.Fprintf(w, "Reason:     %s\n", sanitizeForTerminal(v.Reason))
 	}
 	if len(v.CVEIDs) > 0 {
-		fmt.Fprintf(w, "CVEs:       %s\n", strings.Join(v.CVEIDs, ", "))
+		// C12: the CVE list comes from the SAME untrusted place as the fields
+		// above it — blockedFromAuditEvent lifts it out of
+		// e.Metadata["cves"].([]interface{}) — and was the one field printed
+		// raw. An id carrying ANSI (e.g. "\x1b[2K\rPackage: safe-lib") could
+		// rewrite the operator's view of the block report. Scrub per element,
+		// before joining, so the separator cannot be smuggled either.
+		cves := make([]string, len(v.CVEIDs))
+		for i, id := range v.CVEIDs {
+			cves[i] = sanitizeForTerminal(id)
+		}
+		fmt.Fprintf(w, "CVEs:       %s\n", strings.Join(cves, ", "))
 	}
 	if v.CVSS > 0 {
 		fmt.Fprintf(w, "CVSS:       %.1f\n", v.CVSS)

@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -249,7 +250,31 @@ func runDeviceAuth(ctx context.Context, out io.Writer, server, hostname string) 
 			Token  string `json:"token"`
 		}
 		err := unauth.Get("/api/auth/cli/device/poll?device_code="+url.QueryEscape(initResp.DeviceCode), &pollResp)
-		if err == nil {
+		if err != nil {
+			// A4: this branch used to be `if err == nil { … }` — every non-2xx
+			// was DISCARDED and the loop just slept again. Dots only print on
+			// "pending", so a hard server rejection produced NO OUTPUT AT ALL
+			// for up to the full 14-minute devicePollTimeout and then reported
+			// the misleading "device approval timed out".
+			//
+			// The `case "expired"` arm below is dead for the same reason: the
+			// server no longer returns {"status":"expired"} at 200; it returns
+			// 4xx envelopes (CLIDeviceCodeInvalid / Expired / Consumed). It is
+			// kept only for an older server.
+			//
+			// Retry policy: a 4xx is a TERMINAL verdict about this device_code
+			// — polling again cannot change it — so return immediately. A 5xx
+			// or a transport error is transient (the server restarting, a
+			// flaky link), so keep polling until the deadline. That split is
+			// what turns a silent 14-minute hang into an actionable failure
+			// without making a blip fatal.
+			var ae *apiError
+			if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 {
+				fmt.Fprintln(out)
+				return "", fmt.Errorf("device approval rejected by the server: %w\nRe-run `chainsaw auth login` to start a new device code", err)
+			}
+			// Transient: fall through to the sleep and try again.
+		} else {
 			switch pollResp.Status {
 			case "approved":
 				if pollResp.Token == "" {
@@ -260,6 +285,7 @@ func runDeviceAuth(ctx context.Context, out io.Writer, server, hostname string) 
 			case "pending":
 				fmt.Fprint(out, ".")
 			case "expired":
+				// Legacy 200-with-status shape; kept for older servers.
 				return "", fmt.Errorf("device approval expired; re-run `chainsaw auth login`")
 			}
 		}

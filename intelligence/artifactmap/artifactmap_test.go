@@ -165,6 +165,68 @@ func TestBuild_MaxFilesCap(t *testing.T) {
 	}
 }
 
+// TestBuild_MaxRetainedBytesCap pins the decompression-bomb fix: MaxArtifactBytes
+// bounds only the COMPRESSED input, so before MaxRetainedBytes existed a small
+// archive could retain up to MaxFiles × PerFileCap = 20 GiB. Measured: a
+// 4,224,023-byte .tgz drove 4,578,213,888 bytes of max RSS in 2.96s.
+func TestBuild_MaxRetainedBytesCap(t *testing.T) {
+	const (
+		entries   = 40
+		perEntry  = 64 * 1024
+		retainCap = 256 * 1024 // retains ~4 entries, then stops
+	)
+	in := map[string]string{}
+	for i := 0; i < entries; i++ {
+		in[fmtName(i)] = strings.Repeat("x", perEntry)
+	}
+	payload := buildTGZ(t, in)
+
+	res := Build(payload, Options{MaxRetainedBytes: retainCap})
+	if !res.Truncated {
+		t.Errorf("expected Truncated=true once MaxRetainedBytes is reached")
+	}
+	// The walk stops at the first entry that would START past the cap, so the
+	// overshoot is bounded by one PerFileCap.
+	if res.TotalBytes > retainCap+PerFileCap {
+		t.Errorf("TotalBytes=%d exceeds cap %d + PerFileCap %d", res.TotalBytes, retainCap, PerFileCap)
+	}
+	if res.TotalBytes >= int64(entries*perEntry) {
+		t.Errorf("TotalBytes=%d — nothing was capped (archive holds %d bytes)", res.TotalBytes, entries*perEntry)
+	}
+	if len(res.Files) >= entries {
+		t.Errorf("retained %d/%d files — the cap did not stop the walk", len(res.Files), entries)
+	}
+
+	// Zero value keeps the package default (256 MiB), so an ordinary archive is
+	// untouched and callers that never opt in see no behaviour change.
+	full := Build(payload, Options{})
+	if full.Truncated {
+		t.Errorf("default MaxRetainedBytes must not truncate a %d-byte archive", entries*perEntry)
+	}
+	if len(full.Files) != entries {
+		t.Errorf("default build retained %d files, want %d", len(full.Files), entries)
+	}
+	if got := (Options{}).normalize().MaxRetainedBytes; got != MaxRetainedBytes {
+		t.Errorf("normalize() MaxRetainedBytes = %d, want %d", got, MaxRetainedBytes)
+	}
+}
+
+// TestBuild_MaxRetainedBytesCapZip is the zip-side twin — wheels and .zip
+// artifacts go through a different reader and need the same cap.
+func TestBuild_MaxRetainedBytesCapZip(t *testing.T) {
+	in := map[string]string{}
+	for i := 0; i < 40; i++ {
+		in[fmtName(i)] = strings.Repeat("x", 64*1024)
+	}
+	res := Build(buildZip(t, in), Options{MaxRetainedBytes: 256 * 1024})
+	if !res.Truncated {
+		t.Errorf("expected Truncated=true for a zip past MaxRetainedBytes")
+	}
+	if res.TotalBytes > 256*1024+PerFileCap {
+		t.Errorf("zip TotalBytes=%d exceeds the cap", res.TotalBytes)
+	}
+}
+
 func TestBuild_AbsolutePathsRejected(t *testing.T) {
 	payload := buildTGZ(t, map[string]string{
 		"/etc/passwd": "root:x:0:0",

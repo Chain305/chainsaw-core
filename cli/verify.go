@@ -47,7 +47,6 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
 	cacheTTL, _ := cmd.Flags().GetDuration("cache-ttl")
-	asJSON := useJSON(cmd)
 	sourceURL, _ := cmd.Flags().GetString("source-url")
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -72,22 +71,57 @@ func runVerify(cmd *cobra.Command, args []string) error {
 
 	result := checker.CheckWithSource(ctx, ecosystem, pkgName, version, sourceURL)
 
-	if asJSON {
-		// Honor --output (invariant C): result to the file when set, else stdout.
-		return PrintJSONTo(cmd, verifyJSON(ecosystem, pkgName, version, result))
-	}
-	printVerifyHuman(ecosystem, pkgName, version, result)
+	// Render, THEN gate — always, in both formats. The --json branch used
+	// to `return` before the status switch, so `verify --json` exited 0 on
+	// MISSING / FAILED / UNVERIFIED: the verification ran, was printed, and
+	// was thrown away. useJSON also trips on the global `--format json`, so
+	// an org-wide format setting silently disarmed every verify call in the
+	// pipeline. Choosing a machine-readable rendering must never weaken a
+	// verdict; emitAndGate makes that structural (see output.go).
+	//
+	// The gate returns an error rather than calling os.Exit, so the deferred
+	// cancel() runs and a --output file is flushed before the process ends.
+	return renderAndGateVerify(cmd, ecosystem, pkgName, version, result)
+}
 
-	switch result.Status {
-	case provenance.StatusVerified:
+// renderAndGateVerify is runVerify minus the live Sigstore call: given a
+// finished result, render it in the resolved format and apply the gate.
+// Split out so the "a machine-readable rendering never weakens a verdict"
+// property is testable without a network round trip — the property is the
+// whole point of the fix, so it must be pinned by a test that exercises
+// this exact composition rather than a hand-rolled stand-in.
+func renderAndGateVerify(cmd *cobra.Command, ecosystem, pkgName, version string, result provenance.Result) error {
+	return emitAndGate(cmd,
+		verifyJSON(ecosystem, pkgName, version, result),
+		func() error {
+			printVerifyHuman(ecosystem, pkgName, version, result)
+			return nil
+		},
+		func() error { return verifyExitError(result.Status) },
+	)
+}
+
+// verifyExitError maps a provenance status to the process exit-code
+// contract. Anything short of fully-verified is a gate failure, matching
+// the command's own help ("exits non-zero on any failure") — CI gates and
+// `set -e` scripts must treat missing/failed/unverified attestations as
+// failures. Pure so the mapping is table-testable without running a live
+// Sigstore check.
+//
+// Err is left nil, mirroring the simulate/auth convention: the verdict is
+// already on stdout, and the coded error only carries the exit code, which
+// keeps the stdout JSON envelope byte-clean for parsers.
+//
+// There is deliberately no --exit-zero escape hatch here. Most packages
+// carry no attestations at all, so a flag to suppress the failure would be
+// reached for reflexively and would re-create the original bug behind a
+// flag name. Teams collecting-without-gating should branch on the `status`
+// field in the JSON envelope.
+func verifyExitError(status provenance.Status) error {
+	if status == provenance.StatusVerified {
 		return nil
-	default:
-		// Exit non-zero on anything other than fully-verified so CI
-		// gates and `set -e` shell scripts treat missing/failed/
-		// unverified attestations as failures.
-		os.Exit(1)
 	}
-	return nil
+	return &ExitCodeError{Code: ExitBlocked}
 }
 
 // verifyJSON shapes the human-readable output for machine consumption.

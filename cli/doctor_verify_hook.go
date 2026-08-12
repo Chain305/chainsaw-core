@@ -234,16 +234,23 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 	}
 
 	if jsonMode {
+		// Build the payload, THEN write it, THEN fall through. The
+		// verbose branch used to `return writeJSON(...)` directly, which
+		// skipped both the telemetry emit and the exit switch below — so
+		// adding --verbose to a failing CI step turned it green while the
+		// JSON still said "outcome":"FAIL". Choosing a richer rendering
+		// must never weaken a verdict.
+		payload := any(res)
 		if verbose && len(output) > 0 {
 			// In JSON mode the verbose output rides as a separate key so
 			// callers can ignore it without parsing free-form text.
-			return writeJSON(cmd, map[string]any{
+			payload = map[string]any{
 				"result":         res,
 				"command_output": string(output),
 				"command_error":  errString(driveErr),
-			})
+			}
 		}
-		if err := writeJSON(cmd, res); err != nil {
+		if err := writeJSON(cmd, payload); err != nil {
 			return err
 		}
 	} else {
@@ -261,6 +268,11 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 		return nil
 	case verifyFail:
 		// Exit 1 so CI gates can wire this as a preflight check.
+		if verifyExitOverride != nil {
+			verifyExitOverride(1)
+			return nil
+		}
+		flushTelemetry() // before any os.Exit in the caller drops the batch
 		os.Exit(1)
 	case verifyDegraded:
 		// Exit 0 so a flaky network doesn't break CI. The output still
@@ -269,6 +281,12 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 	}
 	return nil
 }
+
+// verifyExitOverride mirrors doctorExitOverride (doctor_upgrade.go): the
+// FAIL path ends in os.Exit, which a test cannot observe without forking a
+// process. Tests substitute this to assert the CI exit contract — most
+// importantly that --json and --verbose do not change it.
+var verifyExitOverride func(int)
 
 // newSentinelCoord returns a unique-per-run package coordinate of the
 // form `chainsaw-verify-<8hex>-<unix-seconds>`. Chosen for:
@@ -338,7 +356,20 @@ func pollAuditReceipt(ctx context.Context, sentinel string) receiptResult {
 	if firstErr != nil {
 		return receiptResult{outcome: verifyDegraded, degradedReason: fmt.Sprintf("audit API unreachable: %v", firstErr)}
 	}
-	if resp.Total > 0 || matchSentinelInEvents(resp.Events, sentinel) {
+	// The CLIENT-SIDE match decides the verdict; `total` only sizes it.
+	//
+	// This used to read `if resp.Total > 0 || matchSentinelInEvents(...)`.
+	// Go short-circuits `||`, so the client-side check — written
+	// specifically to defend against a server that ignores the
+	// package_name filter (see matchSentinelInEvents) — never ran whenever
+	// total was non-zero. But total is the server's UNFILTERED count in
+	// exactly the scenario the defence was written for: point the CLI at a
+	// version-skewed proxy, or through a gateway that strips the query
+	// string, and /api/events returns every event in the org. total=4213
+	// then certified PASS on a host whose docker daemon was never
+	// restarted and is pulling straight from Docker Hub. The one check
+	// whose job is detecting a bypass certified the bypass.
+	if matchSentinelInEvents(resp.Events, sentinel) {
 		return receiptResult{outcome: verifyPass, matchCount: countSentinelMatches(resp.Events, sentinel, resp.Total)}
 	}
 
@@ -380,7 +411,9 @@ func pollAuditReceipt(ctx context.Context, sentinel string) receiptResult {
 			// failures that persist up to the timeout can degrade.
 			consecutiveErr = 0
 			lastPollErr = nil
-			if poll.Total > 0 || matchSentinelInEvents(poll.Events, sentinel) {
+			// Same ordering rule as the fast path above: the
+			// client-side match is the verdict, total is only a count.
+			if matchSentinelInEvents(poll.Events, sentinel) {
 				return receiptResult{outcome: verifyPass, matchCount: countSentinelMatches(poll.Events, sentinel, poll.Total)}
 			}
 		}
@@ -414,18 +447,28 @@ func matchSentinelInEvents(items []eventsResponseItem, sentinel string) bool {
 	return false
 }
 
-// countSentinelMatches prefers the server's total when it's non-zero
-// (the server has the canonical count post-filter) and falls back to
-// the client-side count for the safety-net case above.
+// countSentinelMatches reports how many events matched, for the human
+// "proxy received N event(s)" line. It is never consulted for the VERDICT
+// — see pollAuditReceipt.
+//
+// Preference order:
+//   - If the page contains rows that do NOT match, the server-side filter
+//     demonstrably was not applied, so `total` counts unrelated events and
+//     the client-side tally is the only honest number.
+//   - Otherwise prefer `total`: the server has the canonical post-filter
+//     count, which can legitimately exceed the page size.
 func countSentinelMatches(items []eventsResponseItem, sentinel string, total int) int {
-	if total > 0 {
-		return total
-	}
 	n := 0
 	for _, it := range items {
 		if strings.Contains(it.RequestedPackage, sentinel) {
 			n++
 		}
+	}
+	if n > 0 && n < len(items) {
+		return n
+	}
+	if total > 0 {
+		return total
 	}
 	return n
 }

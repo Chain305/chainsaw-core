@@ -1,6 +1,7 @@
 package hook
 
 import (
+	"bytes"
 	"fmt"
 	"net/url"
 	"os"
@@ -112,49 +113,81 @@ func (m pipManager) Wire(opts WireOpts) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
+	if err := checkSentinelIntegrity("pip", path, data, hashMarker); err != nil {
+		return err
+	}
 	if len(data) > 0 {
-		if _, err := backup(path); err != nil {
-			return fmt.Errorf("backup: %w", err)
+		if err := backupAndNotify(path, opts); err != nil {
+			return err
 		}
-		// BUG-A7-b: if the existing file already has a non-sentinel
-		// [global] section, emit our keys without our own [global]
-		// header so they merge into the existing section instead of
-		// producing a duplicate [global] that pip's configparser only
-		// half-tolerates (last-wins per key, but visibly messy and a
-		// footgun for stricter INI readers).
-		if hasForeignGlobalSection(data) {
-			body = stripLeadingGlobalHeader(body)
-		}
+	}
+	// Work against the file WITHOUT any block we placed earlier, so a block
+	// sitting under the wrong section is relocated rather than duplicated
+	// (H8's repair path for existing installs).
+	stripped, _ := removeSentinel(data)
+	globalIdx := pipGlobalHeaderIndex(stripped)
+	if globalIdx >= 0 {
+		// BUG-A7-b: the file already has a user-owned [global] section, so
+		// emit our keys without our own [global] header — they merge into
+		// the existing section instead of producing a duplicate [global]
+		// that pip's configparser only half-tolerates (last-wins per key,
+		// but visibly messy and a footgun for stricter INI readers).
+		body = stripLeadingGlobalHeader(body)
 	}
 	block := buildBlock(body)
-	return writeAtomic(path, replaceOrAppend(data, block))
+	return writeConfigFile(path, pipSpliceBlock(stripped, block, globalIdx), opts)
 }
 
-// hasForeignGlobalSection reports whether the input contains a
-// `[global]` INI section header that lives OUTSIDE the chainsaw-managed
-// sentinel block. Used by pip's Wire path so the second-[global] bug
-// (BUG-A7-b) is fixed only when there's a real user-owned section to
-// merge into.
-func hasForeignGlobalSection(data []byte) bool {
-	inSentinel := false
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, sentinelStart) {
-			inSentinel = true
-			continue
-		}
-		if strings.HasPrefix(trimmed, sentinelEnd) {
-			inSentinel = false
-			continue
-		}
-		if inSentinel {
-			continue
-		}
-		if trimmed == "[global]" {
-			return true
+// pipGlobalHeaderIndex returns the line index of the first `[global]` INI
+// section header in data, or -1. Callers pass data with the chainsaw block
+// already removed, so any hit is a user-owned section.
+func pipGlobalHeaderIndex(data []byte) int {
+	lines, _ := splitLines(data)
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) == "[global]" {
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+// pipSpliceBlock places the chainsaw block immediately after the existing
+// [global] header instead of at end of file (H8).
+//
+// The header-stripping above assumed the block would land under [global], but
+// replaceOrAppend appends at EOF — so with a pip.conf shaped
+//
+//	[global]
+//	timeout = 60
+//
+//	[freeze]
+//	timeout = 10
+//
+// the keys inherited [freeze]. configparser confirmed it: `global has
+// index-url? False` / `freeze has index-url? True`. Installs were not routed
+// through the proxy at all — a silent enforcement bypass — and index-url is
+// not even a valid option for `pip freeze`.
+//
+// globalIdx < 0 means the body still carries its own [global] header, so
+// appending is correct and the section boundary is unambiguous.
+func pipSpliceBlock(data, block []byte, globalIdx int) []byte {
+	if globalIdx < 0 {
+		return replaceOrAppend(data, block)
+	}
+	nl := detectNewline(data)
+	lines, trailingNL := splitLines(data)
+	insertAt := globalIdx + 1
+	normalized := normalizeNewlines(block, nl)
+	var buf bytes.Buffer
+	writeLines(&buf, lines[:insertAt], nl, true)
+	buf.Write(normalized)
+	if !bytes.HasSuffix(normalized, []byte(nl)) {
+		buf.WriteString(nl)
+	}
+	if insertAt < len(lines) {
+		writeLines(&buf, lines[insertAt:], nl, trailingNL)
+	}
+	return buf.Bytes()
 }
 
 // stripLeadingGlobalHeader removes a single `[global]` header line (and
@@ -253,12 +286,18 @@ func pipBlockBody(opts WireOpts) (string, error) {
 	scheme, rest := splitScheme(base)
 	// When the caller passes client_id:client_secret, embed them in the
 	// index-url as percent-encoded userinfo so pip authenticates without
-	// the user having to export PIP_INDEX_URL. File mode is 0600 (see
-	// writeAtomic) so the secret stays local-only.
+	// the user having to export PIP_INDEX_URL. A credential-bearing file is
+	// created 0600 and an existing looser one is chmod'd down — except at
+	// ScopeSystem, where every user has to be able to read it (see
+	// credentialFileMode).
+	pypiPath, err := orgScopedRepoPath(opts.OrgSlug, "pypi")
+	if err != nil {
+		return "", err
+	}
 	if creds := strings.TrimSpace(opts.Credentials); creds != "" {
-		user, pass, ok := splitCreds(creds)
-		if !ok {
-			return "", fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+		user, pass, err := parseCreds(creds)
+		if err != nil {
+			return "", err
 		}
 		// BUG-A6: index-url path must be /repository/@<org>/pypi/simple/.
 		// Trailing slash matters — pip treats the suffix as a directory.
@@ -267,13 +306,12 @@ func pipBlockBody(opts WireOpts) (string, error) {
 [global]
 index-url = %s%s:%s@%s/%s/simple/
 trusted-host = %s
-%s`, scheme, url.PathEscape(user), url.PathEscape(pass), rest, OrgScopedRepoPath(opts.OrgSlug, "pypi"), host, defaults), nil
+%s`, scheme, url.PathEscape(user), url.PathEscape(pass), rest, pypiPath, host, defaults), nil
 	}
 	// pip does not expand env vars in pip.conf, so without embedded creds
 	// we only emit the unauthenticated index-url. Users whose proxy
 	// requires auth should either re-run install-hook with credentials or
 	// set PIP_INDEX_URL with embedded creds in their shell.
-	pypiPath := OrgScopedRepoPath(opts.OrgSlug, "pypi")
 	return fmt.Sprintf(`[global]
 index-url = %s/%s/simple/
 trusted-host = %s
@@ -298,6 +336,28 @@ func splitCreds(raw string) (string, string, bool) {
 		return "", "", false
 	}
 	return id, secret, true
+}
+
+// parseCreds is splitCreds plus the content check every renderer needs (H4).
+//
+// Credentials were previously only checked for "both halves non-empty", while
+// ServerURL went through rejectDangerous. A secret carrying a newline or a
+// sentinel marker could therefore tear the managed block open from inside;
+// the syntax-specific hazards (quotes, `&`, `$`) are handled by each
+// renderer's own escaper. Returns a precise error rather than a bare bool so
+// the user learns which half is wrong.
+func parseCreds(raw string) (string, string, error) {
+	id, secret, ok := splitCreds(raw)
+	if !ok {
+		return "", "", fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+	}
+	if reason := rejectDangerous(id); reason != "" {
+		return "", "", fmt.Errorf("credentials: client_id %s", reason)
+	}
+	if reason := rejectDangerous(secret); reason != "" {
+		return "", "", fmt.Errorf("credentials: client_secret %s", reason)
+	}
+	return id, secret, nil
 }
 
 // splitScheme returns ("https://", "proxy.example.com") for

@@ -38,7 +38,7 @@ func init() {
 
 func runIntelPackage(cmd *cobra.Command, args []string) error {
 	key := v1IntelKey{Ecosystem: args[0], Package: args[1], Version: args[2]}
-	client, err := newV1Client()
+	client, err := newV1Client(cmd)
 	if err != nil {
 		// Classify via Execute(): auth → 3, network/IO → 2 (invariant B).
 		return err

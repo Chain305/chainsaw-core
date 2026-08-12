@@ -223,35 +223,39 @@ func TestResolveExportWindow_BadSince(t *testing.T) {
 }
 
 func TestOpenExportSink_StdoutAndFile(t *testing.T) {
-	// stdout case — empty path and "-" both route to os.Stdout with no closer.
+	// stdout case — empty path and "-" both route to os.Stdout and are never
+	// staged through a temp file.
 	for _, p := range []string{"", "-"} {
-		w, c, err := openExportSink(p)
+		s, err := openExportSink(p)
 		if err != nil {
 			t.Fatalf("openExportSink(%q): %v", p, err)
 		}
-		if w != os.Stdout {
-			t.Errorf("openExportSink(%q): want os.Stdout, got %T", p, w)
+		if s.w != os.Stdout {
+			t.Errorf("openExportSink(%q): want os.Stdout, got %T", p, s.w)
 		}
-		if c != nil {
-			t.Errorf("openExportSink(%q): want nil closer, got %T", p, c)
+		if s.file != nil {
+			t.Errorf("openExportSink(%q): want no staged file, got %v", p, s.tmpPath)
+		}
+		if err := s.commit(); err != nil {
+			t.Errorf("commit on stdout sink: %v", err)
 		}
 	}
 
-	// file case — should create the file and return a real closer.
+	// file case — bytes land in place only after commit.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.csv")
-	w, c, err := openExportSink(path)
+	s, err := openExportSink(path)
 	if err != nil {
 		t.Fatalf("openExportSink(file): %v", err)
 	}
-	if c == nil {
-		t.Fatalf("file path should yield a non-nil closer")
+	if s.file == nil {
+		t.Fatalf("file path should stage through a real file handle")
 	}
-	if _, err := w.Write([]byte("hello")); err != nil {
+	if _, err := s.w.Write([]byte("hello")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	if err := s.commit(); err != nil {
+		t.Fatalf("commit: %v", err)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -259,5 +263,8 @@ func TestOpenExportSink_StdoutAndFile(t *testing.T) {
 	}
 	if string(got) != "hello" {
 		t.Errorf("file contents=%q, want hello", string(got))
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("temp file %s should be gone after commit", path+".tmp")
 	}
 }

@@ -1037,6 +1037,35 @@ func (e *Evaluator) matchesPolicy(ctx EvaluationContext, policy Policy) bool {
 	return true
 }
 
+// MatchesIdentifier is the exported form of the evaluator's identifier
+// matcher — the SINGLE implementation of "does this rule target this
+// coordinate". It exists so out-of-tree surfaces (notably `chainsaw
+// policy simulate`, which previews what the proxy would do) can answer
+// that question with the evaluator's own semantics instead of a
+// look-alike.
+//
+// The look-alike it replaced diverged in two ways that both biased the
+// preview toward "you are safe":
+//
+//   - it special-cased "*" on the VERSION leg but not the NAME leg, so
+//     every seeded org policy (all of which target name "*") reported
+//     no_match;
+//   - it compared versions with string equality, so a `<2.15.0`
+//     constraint never matched `2.14.1` — the log4j shape.
+//
+// Semantics, unchanged from the evaluator: an all-empty identifier
+// matches everything; "*" is a wildcard on every leg; the version leg
+// understands Masterminds semver constraints and falls back to
+// case-insensitive equality when either side is not parseable.
+//
+// Callers that cannot populate a coordinate (a preview with no
+// repository in hand) must NOT leave it empty and hope — an empty
+// ctx.Repository fails a repo-scoped rule outright. Substitute the
+// wildcard and report the dimension as unevaluated.
+func MatchesIdentifier(ctx EvaluationContext, id Identifier) bool {
+	return matchesIdentifier(ctx, id)
+}
+
 func matchesIdentifier(ctx EvaluationContext, id Identifier) bool {
 	// If all identifier fields are empty, it matches everything
 	if id.TargetPackageName == "" && id.TargetPackageRepo == "" && id.TargetPackageVersion == "" {

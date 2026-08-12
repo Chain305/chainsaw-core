@@ -187,6 +187,28 @@ See docs/integrations/cargo.md for the full setup recipe.`,
 					return cmd.Help()
 				}
 			}
+			// X5: everything that reached here USED to fall straight into
+			// the protocol loop. Under DisableFlagParsing that made this the
+			// only command of ~148 that accepted an unknown flag at exit 0
+			// (`cargo-credentials --nonexistent-flag-xyz` → `{"v":[1]}`,
+			// rc=0), and — worse — a sub-verb typo (`staus`) emitted the
+			// cargo handshake and then blocked on bufio.Scanner over stdin
+			// FOREVER. The hang does not require a TTY: a pipe hangs
+			// identically, so the blast radius is any CI wrapper script, not
+			// just an interactive typo.
+			//
+			// The discriminator is the presence of --cargo-plugin in argv.
+			// It is unforgeable by accident, MANDATORY for cargo (cargo
+			// appends it to every invocation and discards every other array
+			// element), and present on BOTH routes into the protocol: the
+			// os.Args[1] fast path in Execute() and this subcommand
+			// backstop. TestCargoCredentialsCmd_CargoPluginStillEntersProtocol
+			// pins the cargo path so nobody over-tightens this gate.
+			if !cargoPluginInArgs(args) && !cargoPluginInArgs(os.Args) {
+				return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+					"unrecognized argument(s) %v.\n\nHuman sub-verbs: store | status | clear\nCargo itself invokes this binary with --cargo-plugin; that is the only way into the credential-provider protocol.",
+					args)}
+			}
 			return runCargoCredsProtocol(cmd, os.Stdin, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -195,6 +217,18 @@ See docs/integrations/cargo.md for the full setup recipe.`,
 
 func init() {
 	rootCmd.AddCommand(cargoCredentialsCmd())
+}
+
+// cargoPluginInArgs reports whether cargo's mandatory --cargo-plugin token
+// appears in argv. See the X5 note in the RunE above for why this is the
+// discriminator between "cargo is talking to us" and "a human typo".
+func cargoPluginInArgs(argv []string) bool {
+	for _, a := range argv {
+		if a == "--cargo-plugin" {
+			return true
+		}
+	}
+	return false
 }
 
 // ── Protocol loop ─────────────────────────────────────────────────────────────
@@ -433,6 +467,17 @@ func runCargoCredsStore(cmd *cobra.Command, _ []string) error {
 				pair = rest[i]
 			}
 		}
+	}
+	// X6: the default: branch above takes the FIRST stray token containing a
+	// colon as the credential pair, and the flag-built pair only applied
+	// `if pair == ""`. So
+	//   store --client-id realid --client-secret realsecret oops:typo
+	// silently discarded both flags, printed "Stored cargo credential …",
+	// exited 0, and wrote `oops:typo` into the OS keyring — after which the
+	// user debugs a 401 from cargo. Refuse the ambiguity instead of picking.
+	if pair != "" && (clientID != "" || clientSecret != "") {
+		return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+			"both a positional %q and --client-id/--client-secret were supplied; pass exactly one form", pair)}
 	}
 	if pair == "" && clientID != "" && clientSecret != "" {
 		pair = clientID + ":" + clientSecret

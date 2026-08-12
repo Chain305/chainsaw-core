@@ -37,6 +37,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chain305/chainsaw-core/hiddenunicode"
@@ -152,6 +153,15 @@ func analyzeArtifact(ecosystem string, archive []byte) behavioralVerdict {
 	// high-confidence and dispositive — block outright rather than warn.
 	if src := sourceFileMap(files); len(src) > 0 {
 		if r := iocscan.Scan(src); r.Detected {
+			// A Weak hit is an indicator found ONLY in the package's own tests,
+			// docs examples, or vendored third-party code. Warn — do not refuse
+			// the install. Measured on 860 real top packages, treating these as
+			// dispositive refused langchain-core (its SSRF-protection test),
+			// huggingface-hub (API tests) and rapidfuzz (vendored bootstrap.js).
+			if r.Weak {
+				return behavioralVerdict{Severity: "behavioral-medium",
+					Reason: "embedded malicious indicator (" + r.Kind + ": " + r.Detail + ")"}
+			}
 			return behavioralVerdict{Block: true, Severity: "behavioral-high",
 				Reason: "embedded malicious indicator (" + r.Kind + ": " + r.Detail + ")"}
 		}
@@ -342,22 +352,84 @@ func resolveLocalScriptNames(src map[string][]byte, ref string) []string {
 	return names
 }
 
-// rootFileBytes returns the bytes of the shallowest archive entry whose base
-// name matches target (npm/pypi tarballs nest everything under a top-level
-// "package/" dir, so the shortest path is the real root manifest). nil when
-// absent.
+// packageRoot returns the archive's single top-level directory — the path the
+// package manager actually extracts (npm's `strip:1`, a pypi sdist's
+// <name>-<version>/, a .crate's <name>-<version>/) — or "" when the archive has
+// no directory entries at all (flat: a bare composer.json, a .gem) or more than
+// one (a wheel carries pkg/ AND pkg-1.0.dist-info/).
+//
+// Depth-0 files are deliberately NOT treated as disqualifying. A stray
+// root-level entry sitting next to a single top-level dir is precisely the
+// decoy shape this function exists to defeat: npm's strip:1 extract DISCARDS
+// that entry, so it is invisible to npm and must be invisible to the guard.
+func packageRoot(files artifactmap.ArtifactFileMap) string {
+	root := ""
+	// Map keys are the lower-cased archive paths, so the comparison below is
+	// already case-insensitive.
+	for key := range files {
+		i := strings.Index(key, "/")
+		if i <= 0 {
+			continue // depth-0 entry: contributes no top-level directory
+		}
+		top := key[:i]
+		if root == "" {
+			root = top
+			continue
+		}
+		if root != top {
+			return "" // several top-level dirs — no single extract root
+		}
+	}
+	return root
+}
+
+// rootFileBytes returns the bytes of the archive entry named target that the
+// package manager would actually install.
+//
+// Resolution is anchored to the archive's single top-level directory
+// (packageRoot), not to path depth. Depth alone is exploitable: an
+// attacker-published tarball that carries the real malicious
+// package/package.json AND a benign root-level package.json wins the
+// shallowest-path race, yet npm's strip:1 extract throws the root entry away —
+// so the guard would read a manifest npm never sees and the whole behavioral
+// scan goes blind. A depth-0 entry therefore never wins over <root>/<target>.
+// Same shape for setup.py, pyproject.toml, Cargo.toml, build.rs and
+// composer.json, and for all three byte sources (staged dir, package-manager
+// cache, deep fetch — all attacker-published bytes).
+//
+// Archives with no single root fall back to shallowest-wins: flat archives
+// (a bare composer.json, a .gem) legitimately keep their manifest at depth 0,
+// and multi-root archives (a wheel's pkg/ + pkg-1.0.dist-info/) have no
+// strip:1 root to anchor to. Ties are broken lexicographically so the choice is
+// deterministic across runs. nil when absent.
 func rootFileBytes(files artifactmap.ArtifactFileMap, target string) []byte {
+	if root := packageRoot(files); root != "" {
+		if f, ok := files[root+"/"+strings.ToLower(target)]; ok {
+			return f.Bytes
+		}
+	}
 	var best string
 	var bestBytes []byte
 	for path, f := range files {
 		if !strings.EqualFold(filepath.Base(path), target) {
 			continue
 		}
-		if best == "" || strings.Count(path, "/") < strings.Count(best, "/") {
+		if best == "" || shallowerArchivePath(path, best) {
 			best, bestBytes = path, f.Bytes
 		}
 	}
 	return bestBytes
+}
+
+// shallowerArchivePath orders archive paths by depth, tie-broken
+// lexicographically so two same-depth matches resolve to the same file on every
+// run (Go map iteration order is randomised).
+func shallowerArchivePath(a, b string) bool {
+	da, db := strings.Count(a, "/"), strings.Count(b, "/")
+	if da != db {
+		return da < db
+	}
+	return a < b
 }
 
 // localArtifactBytes returns a pre-staged tarball for spec from
@@ -465,10 +537,14 @@ func cargoCacheArtifactBytes(spec packageSpec) []byte {
 	}
 	want := spec.Name + "-" + spec.Version + ".crate"
 	// One level of <registry-hash> subdirs, each holding the .crate files.
-	// Bounded by the same caps as the npm fallback walk so a giant cache can't
-	// turn a single `cargo build` into a stat storm.
-	filesRead := 0
-	deadline := time.Now().Add(guardCacheWalkDeadline)
+	// Bounded by the same PROCESS-WIDE budget as the npm fallback walk so a
+	// giant cache can't turn a single `cargo build` into a stat storm.
+	if guardCacheWalk.exhausted() {
+		return nil
+	}
+	start := time.Now()
+	defer func() { guardCacheWalk.spend(time.Since(start)) }()
+	deadline := start.Add(guardCacheWalk.remaining())
 	var found []byte
 	_ = filepath.WalkDir(cacheRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || found != nil {
@@ -477,10 +553,10 @@ func cargoCacheArtifactBytes(spec packageSpec) []byte {
 		if d.IsDir() {
 			return nil
 		}
-		if filesRead >= guardCacheWalkMaxFiles || time.Now().After(deadline) {
+		if guardCacheWalk.exhausted() || time.Now().After(deadline) {
 			return fs.SkipAll
 		}
-		filesRead++
+		guardCacheWalk.chargeFile()
 		if strings.EqualFold(filepath.Base(p), want) {
 			if data, rerr := os.ReadFile(p); rerr == nil && len(data) > 0 {
 				found = data
@@ -520,8 +596,13 @@ func pipCacheArtifactBytes(spec packageSpec) []byte {
 	// PEP 503 normalization of the distribution name for the wheel filename:
 	// lowercase, runs of -_. collapsed to a single _.
 	prefix := pep503WheelName(spec.Name) + "-" + spec.Version + "-"
-	filesRead := 0
-	deadline := time.Now().Add(guardCacheWalkDeadline)
+	// Shares the process-wide fallback-walk budget with the npm and cargo walks.
+	if guardCacheWalk.exhausted() {
+		return nil
+	}
+	start := time.Now()
+	defer func() { guardCacheWalk.spend(time.Since(start)) }()
+	deadline := start.Add(guardCacheWalk.remaining())
 	var found []byte
 	_ = filepath.WalkDir(wheels, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || found != nil {
@@ -530,10 +611,10 @@ func pipCacheArtifactBytes(spec packageSpec) []byte {
 		if d.IsDir() {
 			return nil
 		}
-		if filesRead >= guardCacheWalkMaxFiles || time.Now().After(deadline) {
+		if guardCacheWalk.exhausted() || time.Now().After(deadline) {
 			return fs.SkipAll
 		}
-		filesRead++
+		guardCacheWalk.chargeFile()
 		base := filepath.Base(p)
 		if strings.HasSuffix(strings.ToLower(base), ".whl") && strings.HasPrefix(strings.ToLower(base), prefix) {
 			if data, rerr := os.ReadFile(p); rerr == nil && len(data) > 0 {
@@ -831,29 +912,92 @@ func npmCacacheDir() string {
 // walk so a huge cacache (tens of thousands of shards) can never turn a single
 // `npm install` into a multi-second stat storm. The O(1) shard lookup in
 // npmCacheArtifactBytes handles the common case; this walk only runs on a miss.
+//
+// The budget is PROCESS-WIDE, not per-call. It used to be allocated fresh on
+// every invocation, and all three fallback walks (npm cacache, cargo registry
+// cache, pip wheel cache) run once per SPEC — so a 200-package `npm ci` bought
+// 200 × 250ms of stat storm. Measured against a 6,000-shard synthetic cacache:
+// 30.36s with the cache present vs 1.37s without it. The comment above always
+// said "a single npm install"; only the implementation disagreed.
+//
+// TRADEOFF, stated plainly: once the shared budget is spent, later specs in the
+// same invocation get no cache bytes and therefore NO behavioral scan. That is
+// fail-open — identical to how a cache miss already behaves — and it is the
+// right trade for a tool that sits on the install hot path, but it is a real
+// reduction in behavioral coverage on very large installs, not a free win. The
+// O(1) shard lookup is unbudgeted and still covers the common case for every
+// spec; only the miss path degrades.
 const (
 	guardCacheWalkMaxFiles = 4096
 	guardCacheWalkDeadline = 250 * time.Millisecond
 )
 
+// cacheWalkBudget is the shared allowance for the cacache/registry fallback
+// walks. Time is tracked as CUMULATIVE SPEND rather than as a wall-clock
+// deadline latched at first use: an idle process must not burn the budget, and
+// spend-based accounting keeps a long-lived process (the test binary) from
+// starving walks that legitimately need it.
+type cacheWalkBudget struct {
+	spentNanos atomic.Int64
+	filesRead  atomic.Int64
+}
+
+var guardCacheWalk cacheWalkBudget
+
+// remaining reports the wall-clock still available to fallback walks.
+func (b *cacheWalkBudget) remaining() time.Duration {
+	return guardCacheWalkDeadline - time.Duration(b.spentNanos.Load())
+}
+
+// exhausted reports whether the shared file or time allowance is spent.
+func (b *cacheWalkBudget) exhausted() bool {
+	return b.filesRead.Load() >= guardCacheWalkMaxFiles || b.remaining() <= 0
+}
+
+// chargeFile accounts one file read against the shared allowance.
+func (b *cacheWalkBudget) chargeFile() { b.filesRead.Add(1) }
+
+// spend accounts elapsed wall-clock for one completed walk.
+func (b *cacheWalkBudget) spend(d time.Duration) {
+	if d > 0 {
+		b.spentNanos.Add(int64(d))
+	}
+}
+
+// files exposes the shared counter (test hook).
+func (b *cacheWalkBudget) files() int64 { return b.filesRead.Load() }
+
+// reset clears the shared allowance (test hook). Never called in production —
+// a guard process is one install.
+func (b *cacheWalkBudget) reset() {
+	b.spentNanos.Store(0)
+	b.filesRead.Store(0)
+}
+
 // findNpmCacheIntegrity is the BOUNDED fallback for the O(1) shard lookup: it
 // walks the cacache index shards looking for the entry whose key (the tarball
 // URL) ends with wantKeySuffix, and returns its integrity string (e.g.
 // "sha512-…"). Index entries are newline-delimited "<digest>\t<json>" lines.
-// Capped at guardCacheWalkMaxFiles files and guardCacheWalkDeadline wall-clock —
-// a cap hit just yields "" (fail-open). Best-effort: any read/parse error skipped.
+// Capped at guardCacheWalkMaxFiles files and guardCacheWalkDeadline wall-clock,
+// shared PROCESS-WIDE with the cargo and pip walks — a cap hit just yields ""
+// (fail-open, so later specs simply get no behavioral scan; see the budget's
+// tradeoff note). Best-effort: any read/parse error skipped.
 func findNpmCacheIntegrity(indexDir, wantKeySuffix string) string {
+	if guardCacheWalk.exhausted() {
+		return ""
+	}
 	found := ""
-	filesRead := 0
-	deadline := time.Now().Add(guardCacheWalkDeadline)
+	start := time.Now()
+	defer func() { guardCacheWalk.spend(time.Since(start)) }()
+	deadline := start.Add(guardCacheWalk.remaining())
 	_ = filepath.WalkDir(indexDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || found != "" {
 			return nil
 		}
-		if filesRead >= guardCacheWalkMaxFiles || time.Now().After(deadline) {
+		if guardCacheWalk.exhausted() || time.Now().After(deadline) {
 			return fs.SkipAll
 		}
-		filesRead++
+		guardCacheWalk.chargeFile()
 		data, rerr := os.ReadFile(p)
 		if rerr != nil {
 			return nil

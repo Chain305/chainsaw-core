@@ -103,3 +103,103 @@ func TestServerInstallPreflightSkipsWhenUnauthenticated(t *testing.T) {
 		t.Fatalf("notice=%q blocked=%v verdicts=%+v, want skipped", notice, blocked, verdicts)
 	}
 }
+
+// preflightServerWith returns a stub /api/scan handler serving one result.
+func preflightServerWith(t *testing.T, item scanResultItem) {
+	t.Helper()
+	// Hermetic: an exported CHAINSAW_GUARD_SERVER_BLOCK_SEVERITY must not decide
+	// the outcome of a test about the DEFAULT threshold.
+	t.Setenv(serverBlockSeverityEnv, "")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/scan", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(scanAPIResponse{Results: []scanResultItem{item}, Total: 1, Vulnerable: 1})
+	})
+	configureGuardPreflight(t, mux)
+}
+
+// TestServerInstallPreflightWarnsOnLowSeverity pins G6. The old predicate was
+// `Status != "vulnerable" && rank < high → skip`, i.e. block on vulnerable OR
+// >=high. internal/server/scan.go marks a result "vulnerable" for ANY CVE and
+// resolveHighestSeverity defaults a blank severity to "low", so a signed-in user
+// installing a pinned package with one LOW CVE got "refused at the install path
+// — nothing was installed", exit 1. Blocking now requires vulnerable AND >=high;
+// the low/medium rows are surfaced as NON-blocking warnings rather than dropped,
+// because going from "refuse" to "say nothing" is its own regression.
+func TestServerInstallPreflightWarnsOnLowSeverity(t *testing.T) {
+	for _, severity := range []string{"low", "medium"} {
+		t.Run(severity, func(t *testing.T) {
+			preflightServerWith(t, scanResultItem{
+				Name: "leftpad", Version: "1.0.0", Status: "vulnerable",
+				Severity: severity, CVEs: []string{"CVE-TEST-9"},
+			})
+			verdicts, blocked, notice := serverInstallPreflight(context.Background(), []packageSpec{
+				{Ecosystem: "npm", Name: "leftpad", Version: "1.0.0"},
+			})
+			if notice != "" {
+				t.Fatalf("notice = %q, want empty", notice)
+			}
+			if blocked {
+				t.Fatalf("severity %q must NOT block the install path", severity)
+			}
+			if len(verdicts) != 1 {
+				t.Fatalf("the finding must still be surfaced, got verdicts=%+v", verdicts)
+			}
+			if verdicts[0].Block {
+				t.Fatalf("verdict must be non-blocking: %+v", verdicts[0])
+			}
+			if verdicts[0].Severity != serverSeverityPrefix+severity {
+				t.Fatalf("severity = %q, want %q", verdicts[0].Severity, serverSeverityPrefix+severity)
+			}
+			if !strings.Contains(verdicts[0].Reason, "CVE-TEST-9") {
+				t.Fatalf("reason should still name the CVE: %q", verdicts[0].Reason)
+			}
+		})
+	}
+}
+
+// critical/high still refuse — the fix narrows the gate, it does not remove it.
+func TestServerInstallPreflightStillBlocksHighAndCritical(t *testing.T) {
+	for _, severity := range []string{"high", "critical"} {
+		t.Run(severity, func(t *testing.T) {
+			preflightServerWith(t, scanResultItem{
+				Name: "leftpad", Version: "1.0.0", Status: "vulnerable", Severity: severity,
+			})
+			verdicts, blocked, _ := serverInstallPreflight(context.Background(), []packageSpec{
+				{Ecosystem: "npm", Name: "leftpad", Version: "1.0.0"},
+			})
+			if !blocked || len(verdicts) != 1 || !verdicts[0].Block {
+				t.Fatalf("severity %q must block: blocked=%v verdicts=%+v", severity, blocked, verdicts)
+			}
+		})
+	}
+}
+
+// An operator who genuinely wants "any CVE refuses the install" keeps it — by
+// choice, via CHAINSAW_GUARD_SERVER_BLOCK_SEVERITY, not by default.
+func TestServerInstallPreflightBlockSeverityEnvOverride(t *testing.T) {
+	preflightServerWith(t, scanResultItem{
+		Name: "leftpad", Version: "1.0.0", Status: "vulnerable", Severity: "low",
+	})
+	t.Setenv(serverBlockSeverityEnv, "LOW ") // case/whitespace tolerant
+	verdicts, blocked, _ := serverInstallPreflight(context.Background(), []packageSpec{
+		{Ecosystem: "npm", Name: "leftpad", Version: "1.0.0"},
+	})
+	if !blocked || len(verdicts) != 1 || !verdicts[0].Block {
+		t.Fatalf("%s=low must restore the block: blocked=%v verdicts=%+v", serverBlockSeverityEnv, blocked, verdicts)
+	}
+}
+
+func TestServerBlockSeverityDefaultsAndRejectsGarbage(t *testing.T) {
+	t.Setenv(serverBlockSeverityEnv, "") // hermetic: ignore an exported value
+	if got := serverBlockSeverity(); got != "high" {
+		t.Fatalf("unset default = %q, want high", got)
+	}
+	t.Setenv(serverBlockSeverityEnv, "sev:high")
+	if got := serverBlockSeverity(); got != "high" {
+		t.Fatalf("unparseable value must fall back to high, got %q", got)
+	}
+	t.Setenv(serverBlockSeverityEnv, "critical")
+	if got := serverBlockSeverity(); got != "critical" {
+		t.Fatalf("critical = %q", got)
+	}
+}

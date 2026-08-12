@@ -46,6 +46,30 @@ func init() {
 func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	st := loadGuardState()
 
+	// X8: `guard status --json` printed the human table. This is the
+	// documented local-guard status surface — `telemetry status` right next
+	// to it already emitted parseable JSON — so a script reading guard
+	// activity got "Install guard — activity on this machine" at rc=0.
+	//
+	// NOTE ON THE SIBLING EXEMPTION: `guard init --json` deliberately still
+	// emits SHELL TEXT, not JSON. Its output is meant to be consumed by
+	// `eval "$(chainsaw guard init)"`; emitting JSON there would break the
+	// documented invocation. That is a correct exemption, not an oversight.
+	if useJSON(cmd) {
+		return PrintJSONTo(cmd, map[string]any{
+			"installs_checked":  st.InstallsChecked,
+			"packages_scanned":  st.PackagesScanned,
+			"blocks":            st.Blocks,
+			"activated":         st.Activated,
+			"first_block_unix":  st.FirstBlockAtUnix,
+			"first_run_unix":    st.FirstRunUnix,
+			"telemetry_consent": st.Consent,
+			"telemetry_label":   telemetryConsentLabel(st),
+			"device_id":         cliInstallID(),
+			"signed_in":         cfgToken() != "",
+		})
+	}
+
 	firstRun := "never"
 	if st.FirstRunUnix != 0 {
 		firstRun = time.Unix(st.FirstRunUnix, 0).Format("2006-01-02")

@@ -1,10 +1,20 @@
 package cli
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chain305/chainsaw-core/intelligence"
 	"github.com/chain305/chainsaw-core/malware"
 	"github.com/chain305/chainsaw-core/typosquat"
 )
@@ -188,6 +198,218 @@ func TestEvaluatePolicyMirrorsDetector(t *testing.T) {
 	default:
 		if v.Block {
 			t.Errorf("unsuspected name must not block: detector=%+v verdict=%+v", res, v)
+		}
+	}
+}
+
+// --- known-malicious coverage claim (G10) ---------------------------------
+
+// writeMalwareEntriesFile writes n synthetic OSV entries to a temp file and
+// returns its path. n controls whether the file clears guardMalwareFeedFloor.
+func writeMalwareEntriesFile(t *testing.T, n int) string {
+	t.Helper()
+	entries := make([]malware.OSVEntry, 0, n)
+	for i := 0; i < n; i++ {
+		entries = append(entries, malware.OSVEntry{
+			ID: fmt.Sprintf("MAL-TEST-%05d", i),
+			Affected: []malware.OSVAffected{{
+				Package:  malware.OSVPackage{Name: fmt.Sprintf("synthetic-mal-%05d", i), Ecosystem: "npm"},
+				Versions: []string{"1.0.0"},
+			}},
+		})
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "known_malicious.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestMalwareFeedPlausibilityFloor pins G10: `fullFeed` (which drives
+// coverage.SourceMalware in guardLedger, and therefore an operator's
+// CHAINSAW_COVERAGE_MODE=closed + CHAINSAW_COVERAGE_REQUIRED=malware gate) was a
+// bare presence check — `extra > 0`. A cache file holding ONE dummy entry
+// silently flipped that fail-closed gate from refuse to pass, the exact opposite
+// of the loud break-glass path. The typosquat corpus has had both a plausibility
+// floor and a signature requirement for this same reason.
+func TestMalwareFeedPlausibilityFloor(t *testing.T) {
+	t.Run("sub-floor file does not claim the full feed", func(t *testing.T) {
+		t.Setenv(guardDBEnv, writeMalwareEntriesFile(t, 3))
+		idx := malware.NewIndex(guardLogger)
+		var floor, extra int
+		stderr := captureStderr(t, func() { floor, extra = loadMalwareSources(idx, nil) })
+		if extra != 0 {
+			t.Fatalf("extra = %d, want 0 (3 entries is not the full OpenSSF set)", extra)
+		}
+		if floor == 0 {
+			t.Fatal("embedded floor should still be loaded")
+		}
+		// The entries are still MERGED into the index — more known-malicious
+		// coordinates can only add blocks; only the coverage CLAIM is gated.
+		if res := idx.Lookup(context.Background(), "npm", "synthetic-mal-00001", "1.0.0"); !res.IsKnownMalicious {
+			t.Error("sub-floor entries should still be indexed and blockable")
+		}
+		// And it is LOUD — a silently downgraded security claim is the failure
+		// mode this whole check exists to prevent.
+		if !strings.Contains(stderr, "WARNING") || !strings.Contains(stderr, guardDBEnv) {
+			t.Fatalf("want a loud warning naming %s, got stderr:\n%s", guardDBEnv, stderr)
+		}
+	})
+
+	t.Run("plausible file claims the full feed", func(t *testing.T) {
+		t.Setenv(guardDBEnv, writeMalwareEntriesFile(t, guardMalwareFeedFloor))
+		idx := malware.NewIndex(guardLogger)
+		var extra int
+		stderr := captureStderr(t, func() { _, extra = loadMalwareSources(idx, nil) })
+		if extra != guardMalwareFeedFloor {
+			t.Fatalf("extra = %d, want %d", extra, guardMalwareFeedFloor)
+		}
+		if strings.Contains(stderr, "WARNING") {
+			t.Fatalf("a plausible feed must not warn, got:\n%s", stderr)
+		}
+	})
+
+	t.Run("no cache file at all", func(t *testing.T) {
+		t.Setenv(guardDBEnv, filepath.Join(t.TempDir(), "absent.json"))
+		idx := malware.NewIndex(guardLogger)
+		_, extra := loadMalwareSources(idx, nil)
+		if extra != 0 {
+			t.Fatalf("extra = %d, want 0", extra)
+		}
+	})
+}
+
+// writeMalwareBundle builds a minimal intel bundle carrying an "osv-malware"
+// blob. sign=false leaves the `{}` placeholder that only loads with
+// SkipSignature (Verified() == false); sign=true writes the digest-binding
+// sidecar. Mirrors writeCorpusBundle in guard_typosquat_test.go.
+func writeMalwareBundle(t *testing.T, entries int, sign bool) string {
+	t.Helper()
+	blob, err := os.ReadFile(writeMalwareEntriesFile(t, entries))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(blob)
+	manifest := intelligence.BundleManifest{
+		Schema:    intelligence.BundleManifestSchema,
+		Version:   "test-malware-1",
+		BuildTime: time.Now().UTC(),
+		Contents:  map[string]string{"osv-malware": "malware/osv.json"},
+		SHA256:    map[string]string{"malware/osv.json": hex.EncodeToString(h[:])},
+	}
+	mb, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{"malware/osv.json": blob, "manifest.json": mb}
+
+	out := filepath.Join(t.TempDir(), "malware-bundle.tar.gz")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	for name, data := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data)), ModTime: manifest.BuildTime}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, closeFn := range []func() error{tw.Close, gz.Close, f.Close} {
+		if err := closeFn(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !sign {
+		if err := os.WriteFile(out+".sigstore", []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	probe, err := intelligence.LoadBundle(context.Background(), out, intelligence.BundleVerifyOptions{SkipSignature: true})
+	if err != nil {
+		t.Fatalf("probe load: %v", err)
+	}
+	sidecar := fmt.Sprintf(`{"messageSignature":{"messageDigest":{"algorithm":"SHA2_256","digest":"%s"}}}`, probe.Digest())
+	if err := os.WriteFile(out+".sigstore", []byte(sidecar), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// An UNVERIFIED bundle's osv-malware blob must not underwrite the full-feed
+// coverage claim — the same rule bundleCorpus already applies. Its entries are
+// still merged into the index (they can only block more); what a signature gates
+// is the CLAIM, not the data.
+func TestMalwareBundleMustBeVerifiedToClaimFullFeed(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(guardDBEnv, filepath.Join(t.TempDir(), "absent.json"))
+
+	unsigned, err := intelligence.LoadBundle(ctx, writeMalwareBundle(t, guardMalwareFeedFloor, false),
+		intelligence.BundleVerifyOptions{SkipSignature: true})
+	if err != nil {
+		t.Fatalf("load unsigned bundle: %v", err)
+	}
+	if unsigned.Verified() {
+		t.Fatal("skip-verify bundle should report Verified() == false")
+	}
+	idx := malware.NewIndex(guardLogger)
+	if _, extra := loadMalwareSources(idx, unsigned); extra != 0 {
+		t.Fatalf("unsigned bundle extra = %d, want 0 (no coverage claim without a signature)", extra)
+	}
+	if res := idx.Lookup(ctx, "npm", "synthetic-mal-00002", "1.0.0"); !res.IsKnownMalicious {
+		t.Error("unsigned bundle entries should still be indexed and blockable")
+	}
+
+	verified, err := intelligence.LoadBundle(ctx, writeMalwareBundle(t, guardMalwareFeedFloor, true),
+		intelligence.BundleVerifyOptions{})
+	if err != nil {
+		t.Fatalf("load signed bundle: %v", err)
+	}
+	if _, extra := loadMalwareSources(malware.NewIndex(guardLogger), verified); extra != guardMalwareFeedFloor {
+		t.Fatalf("verified bundle extra = %d, want %d", extra, guardMalwareFeedFloor)
+	}
+}
+
+// --- combosquat silence (G11) ---------------------------------------------
+
+// TestGuardNeverWarnsOnLowConfidenceCombosquat pins an ABSENCE, deliberately.
+//
+// checkCombosquat returns IsSuspected with Confidence "low", which matches no
+// arm of the verdict ladder — no block, no warn, no telemetry. Measured on this
+// repo's own held-out corpora (real, popular packages: npm ranks 2501–5000,
+// PyPI 1501–3000) a low-confidence combosquat fires on 274/2500 = 11.0% of npm
+// and 184/1500 = 12.3% of PyPI names. Warning on ~1 in 9 real packages would
+// recreate the 2026-07 742-false-positive incident in warn form — worse, because
+// warnings do not break builds, so they get tuned out and take every real
+// warning with them. If this test ever fails because someone "wired up" the
+// combosquat branch, re-read that number before changing the assertion.
+func TestGuardNeverWarnsOnLowConfidenceCombosquat(t *testing.T) {
+	ctx := context.Background()
+	g := &localGuard{detectors: map[string]*typosquat.Detector{}, malware: malware.NewIndex(guardLogger)}
+	d := typosquat.NewDetector(guardLogger)
+	d.LoadEcosystem("npm", []typosquat.PopularPackage{
+		{Name: "lodash", Rank: 1}, {Name: "express", Rank: 2}, {Name: "request", Rank: 3},
+	})
+	g.detectors["npm"] = d
+
+	// Shapes real popular packages take: a popular name with a prefix/suffix.
+	for _, name := range []string{"lodash-es", "lodash-utils", "express-session"} {
+		res := d.Check(ctx, "npm", name)
+		if !res.IsSuspected || res.Method != "combosquat" || res.Confidence != "low" {
+			t.Errorf("%q no longer exercises the combosquat branch (%+v) — re-pick the fixture so this pin keeps testing something", name, res)
+			continue
+		}
+		v := g.evaluate(ctx, packageSpec{Ecosystem: "npm", Name: name})
+		if v.Block || v.Severity != "" || v.Reason != "" {
+			t.Fatalf("%q: low-confidence combosquat must be SILENT (no block, no warn, no reason), got %+v", name, v)
 		}
 	}
 }

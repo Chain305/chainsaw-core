@@ -81,7 +81,7 @@ func (m bunManager) Wire(opts WireOpts) error {
 	if err != nil {
 		return err
 	}
-	return writeWithBackup(path, body)
+	return writeWithBackup(m.Name(), path, body, opts)
 }
 
 func (m bunManager) Unwire(scope Scope) error {
@@ -125,18 +125,21 @@ func bunBlockBody(opts WireOpts) (string, error) {
 		return "", fmt.Errorf("invalid server URL: could not derive host/path")
 	}
 	// BUG-A6: org-scoped path required (/repository/@<org>/npmjs/).
-	bunPath := OrgScopedRepoPath(opts.OrgSlug, "npmjs")
+	bunPath, err := orgScopedRepoPath(opts.OrgSlug, "npmjs")
+	if err != nil {
+		return "", err
+	}
 	authLine := "<base64(client_id:secret)>"
 	credsNote := ""
 	if creds := strings.TrimSpace(opts.Credentials); creds != "" {
-		id, secret, ok := splitCreds(creds)
-		if !ok {
-			return "", fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+		id, secret, err := parseCreds(creds)
+		if err != nil {
+			return "", err
 		}
 		authLine = base64.StdEncoding.EncodeToString([]byte(id + ":" + secret))
 		credsNote = "# chainsaw: credentials embedded as base64(client_id:secret) in :_auth\n" +
-			"# below; tighten this file's permissions (chmod 600) if your home\n" +
-			"# directory is shared.\n"
+			"# below; chainsaw keeps this file at mode 0600 (except machine-wide\n" +
+			"# /etc configs, which every user must be able to read).\n"
 	}
 	// hostPath carries the leading `//` already (npm _auth line format).
 	return fmt.Sprintf("%s%sregistry=%s/%s/\n%s/%s/:_auth=%s\n%s/%s/:always-auth=true",

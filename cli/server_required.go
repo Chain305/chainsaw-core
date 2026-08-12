@@ -24,12 +24,22 @@ import (
 // The phrase "server URL not configured" is retained verbatim in the
 // returned error so the telemetry classifier and existing automation
 // that greps for it keep working. Everything after is additive context.
+//
+// X3: the error is now wrapped in ExitCodeError{Code: ExitConfigAuth} at
+// this single point rather than at each of the 60+ call sites. A missing
+// server URL is a CONFIGURATION problem, and exitcodes.go documents
+// ExitConfigAuth(3) as exactly that; before this change the ~35 call sites
+// that returned the bare error fell through to exitCodeForClass's default
+// arm and exited 2 (operational error), contradicting the published
+// contract. Call sites that already wrap this in their own
+// ExitCodeError{Code: ExitConfigAuth} stay correct — Execute() reads the
+// OUTERMOST coded error via errors.As, and both codes are 3.
 func errServerNotConfigured(cmd *cobra.Command) error {
 	path := "chainsaw"
 	if cmd != nil {
 		path = cmd.CommandPath()
 	}
-	return fmt.Errorf(`server URL not configured — '%s' is a server-required command.
+	return &ExitCodeError{Code: ExitConfigAuth, Err: fmt.Errorf(`server URL not configured — '%s' is a server-required command.
 
 Offline-capable commands (no server needed): doctor, install-hook,
 scan-repo, scan-actions, pr-scan, bundle verify, sbom diff, version.
@@ -39,7 +49,7 @@ To configure a server, choose one:
   chainsaw auth login --device           # persistent (device-code flow)
   chainsaw setup                         # interactive wizard
 
-See '%s --help' for the command's flags.`, path, trimChainsaw(path), path)
+See '%s --help' for the command's flags.`, path, trimChainsaw(path), path)}
 }
 
 // trimChainsaw drops the leading "chainsaw " prefix from a CommandPath so

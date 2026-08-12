@@ -29,11 +29,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// scanRemoteExit indirects os.Exit so tests can assert on the exit code
-// runScanRemote/printRemoteSummary would produce without terminating the
-// test binary. Production code leaves it pointing at os.Exit.
-var scanRemoteExit = os.Exit
-
 // remoteScanResponse mirrors server.scanLockfileResponse. We duplicate
 // the shape rather than import the server package to keep the CLI
 // dependency graph free of server-side internals.
@@ -86,10 +81,18 @@ var scanRemoteCmd = &cobra.Command{
 maven, go, rubygems, composer, nuget, ...) and poll the server's scan
 job until the aggregate intelligence report is ready.
 
+Exit codes:
+  0 — no critical or high findings (or --exit-zero was passed)
+  1 — at least one critical or high finding
+
+The exit gate applies to EVERY output format. Choosing --json (or a repo-wide
+--format json) is a rendering decision and never weakens the verdict.
+
 Examples:
   chainsaw scan-remote ./package-lock.json
   chainsaw scan-remote ./Cargo.lock --json
-  chainsaw scan-remote ./poetry.lock --timeout 5m`,
+  chainsaw scan-remote ./poetry.lock --timeout 5m
+  chainsaw scan-remote ./package-lock.json --json --exit-zero   # collect, don't gate`,
 	Args: cobra.ExactArgs(1),
 	RunE: runScanRemote,
 }
@@ -97,11 +100,16 @@ Examples:
 func init() {
 	scanRemoteCmd.Flags().Bool("json", false, "Print the full report as JSON instead of a summary table")
 	scanRemoteCmd.Flags().Duration("timeout", 5*time.Minute, "Maximum time to wait for the server to finish processing pending packages")
+	// S1 — an explicit opt-out for teams that deliberately collect reports
+	// without gating on them. Before this change --json was an ACCIDENTAL
+	// opt-out (the gate lived inside the text renderer), so a --json CI gate
+	// silently passed a critical lockfile. Making the escape hatch explicit
+	// keeps that workflow available while the default is fail-closed.
+	scanRemoteCmd.Flags().Bool("exit-zero", false, "Always exit 0, even when critical/high findings are reported (report-only mode)")
 	rootCmd.AddCommand(scanRemoteCmd)
 }
 
 func runScanRemote(cmd *cobra.Command, args []string) error {
-	jsonOut := useJSON(cmd)
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	path := args[0]
 
@@ -179,12 +187,33 @@ func runScanRemote(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scan failed: %s", resp.FailureReason)
 	}
 
-	if jsonOut {
-		// Honor --output (invariant C): the JSON result lands in the file when
-		// set, else stdout. PrintJSONTo matches the previous 2-space-indent shape.
-		return PrintJSONTo(cmd, resp)
-	}
-	return printRemoteSummary(&resp)
+	// S1 — render, THEN gate, unconditionally. The gate used to live at the
+	// bottom of printRemoteSummary, so two paths skipped it entirely:
+	//
+	//   1. `--json` returned before the renderer ever ran. Worse than the
+	//      finding first suggested: scan-remote declares a LOCAL --json, so
+	//      resolveFormat falls through to the persistent --format and a
+	//      repo-wide `--format json` disarmed the gate on EVERY invocation.
+	//   2. In text mode, printRemoteSummary returned early when Findings was
+	//      empty — a summary can carry Critical/High counts with a truncated
+	//      or absent findings list, and that returned 0.
+	//
+	// emitAndGate makes the ordering structural: gate is the last statement and
+	// is reached on every non-error path. It also returns ExitBlocked as a
+	// typed error instead of calling os.Exit, so Execute() still flushes
+	// telemetry and prints the update notice.
+	exitZero, _ := cmd.Flags().GetBool("exit-zero")
+	return emitAndGate(cmd, resp,
+		func() error { return printRemoteSummary(&resp) },
+		func() error {
+			if exitZero {
+				return nil
+			}
+			if resp.Result != nil && (resp.Result.Summary.Critical > 0 || resp.Result.Summary.High > 0) {
+				return &ExitCodeError{Code: ExitBlocked}
+			}
+			return nil
+		})
 }
 
 func printRemoteProgress(r *remoteScanResponse) {
@@ -238,10 +267,10 @@ func printRemoteSummary(r *remoteScanResponse) error {
 		fmt.Printf("  ... %d more (use --json for the full list)\n",
 			len(r.Result.Findings)-maxRows)
 	}
-	// Exit non-zero on critical/high so CI integrations can gate.
-	if r.Result.Summary.Critical > 0 || r.Result.Summary.High > 0 {
-		scanRemoteExit(1)
-	}
+	// NOTE: the critical/high exit gate deliberately does NOT live here. A
+	// renderer that also decides the exit code means every non-rendering path
+	// (--json, an early return on an empty findings list) silently skips the
+	// verdict. See runScanRemote's emitAndGate call.
 	return nil
 }
 

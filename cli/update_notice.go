@@ -19,6 +19,9 @@ package cli
 import (
 	"fmt"
 	"os"
+
+	"github.com/Masterminds/semver/v3"
+	"github.com/spf13/viper"
 )
 
 // updateNoticeStderrIsTerminal is the TTY check, indirected for tests. Defaults
@@ -44,10 +47,17 @@ func maybeNotifyUpdateAvailable() bool {
 	if os.Getenv("CHAINSAW_OFFLINE") != "" {
 		return false
 	}
-	// Gate 2: --quiet. Scanned from argv because --quiet is not (yet) a
-	// registered persistent flag; once it is, this still works and is the
-	// cheapest possible check.
-	if argvHasQuiet(os.Args) {
+	// Gate 2: quiet. --quiet IS a registered persistent flag now (root.go),
+	// but Execute() calls this outside any RunE so there is no *cobra.Command
+	// in hand; viper carries the bound flag value, and the argv scan is the
+	// backstop for the DisableFlagParsing guard path where cobra never parsed
+	// it. CHAINSAW_QUIET is honored through the same viper binding as
+	// quiet(cmd), plus a direct read so the two can't drift.
+	//
+	// R11: the previous comment claimed --quiet was "not (yet) a registered
+	// persistent flag" and the scan matched neither -q nor CHAINSAW_QUIET, so
+	// `CHAINSAW_QUIET=1 chainsaw …` would still have printed the hint.
+	if quietForUpdateNotice() {
 		return false
 	}
 	// Gate 3: stderr must be a TTY — never write into pipes/CI/JSON consumers.
@@ -60,7 +70,14 @@ func maybeNotifyUpdateAvailable() bool {
 		return false
 	}
 	current := resolveVersion().Version
-	if latest == current {
+	// R11: this used to be `latest == current`, i.e. ANY different string
+	// fired the notice — including "v1.2.3" vs "1.2.3" (which would have
+	// printed "a newer version (v1.2.3) is available; you're on 1.2.3") and
+	// an OLDER published version. Compare as semver and only speak up when
+	// latest is genuinely NEWER. Unparseable input on either side falls back
+	// to strict inequality, which is the pre-existing behaviour and cannot
+	// be worse than it.
+	if !isNewerVersion(latest, current) {
 		return false
 	}
 
@@ -68,6 +85,14 @@ func maybeNotifyUpdateAvailable() bool {
 		"chainsaw: a newer version (%s) is available; you're on %s. Run `chainsaw guard update` or reinstall.\n",
 		latest, current)
 	return true
+}
+
+// quietForUpdateNotice resolves the quiet signal without a *cobra.Command.
+// viper covers --quiet (BindPFlag), the config file, and CHAINSAW_QUIET
+// (BindEnv); envTruthy re-reads the env var with the shared 1/true/yes/on
+// vocabulary; argvHasQuiet is the DisableFlagParsing backstop.
+func quietForUpdateNotice() bool {
+	return viper.GetBool("quiet") || envTruthy(os.Getenv("CHAINSAW_QUIET")) || argvHasQuiet(os.Args)
 }
 
 // argvHasQuiet reports whether --quiet (or -q in its long form only) appears in
@@ -85,4 +110,19 @@ func argvHasQuiet(argv []string) bool {
 		}
 	}
 	return false
+}
+
+// isNewerVersion reports whether latest is strictly newer than current.
+// Both sides tolerate a leading "v" (semver.NewVersion strips it), so
+// "v1.2.3" and "1.2.3" compare EQUAL rather than as an upgrade. When either
+// side is unparseable we fall back to plain string inequality — the old
+// behaviour, and the only sane answer for a non-semver build stamp like
+// "dev".
+func isNewerVersion(latest, current string) bool {
+	lv, lerr := semver.NewVersion(latest)
+	cv, cerr := semver.NewVersion(current)
+	if lerr != nil || cerr != nil {
+		return latest != current
+	}
+	return lv.GreaterThan(cv)
 }

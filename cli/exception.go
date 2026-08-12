@@ -160,7 +160,7 @@ func runExceptionCreate(cmd *cobra.Command, _ []string) error {
 	//   4. default (defaultExceptionDays)
 	// The three explicit forms are mutually exclusive; passing more than
 	// one is a usage error rather than a silent "last wins" surprise.
-	expiresAt, err := resolveExceptionExpiry(cmd)
+	expiresAt, expiryRequested, err := resolveExceptionExpiry(cmd)
 	if err != nil {
 		return err
 	}
@@ -233,11 +233,21 @@ func runExceptionCreate(cmd *cobra.Command, _ []string) error {
 		}
 		applyVEXOverridesFromFlags(body, cveFlag, decisionFlag, vexNoteFlag, reason)
 	}
-	// Server-side default still applies when expiresAt is the zero time;
-	// only stamp expires_at when we have a real value (caller passed a
-	// flag OR we computed the defaultExceptionDays fallback).
+	// Stamp expires_at only when we actually have a value AND we are not
+	// about to overwrite one the caller already supplied in --from-file.
+	//
+	// The default (now + defaultExceptionDays) is a GAP FILLER, not an
+	// override. It used to be stamped unconditionally, so a template
+	// carrying `"expires_at": "<tomorrow>"` was silently rewritten to 30
+	// days — a reviewed, time-boxed exception could never encode its own
+	// expiry, and the one that most needed a short fuse got the longest
+	// one. An explicit flag (--expires-at / --days / --expires) still
+	// wins over the file: the operator typed it on this invocation.
 	if !expiresAt.IsZero() {
-		body["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
+		_, fileHasExpiry := body["expires_at"]
+		if expiryRequested || !fileHasExpiry {
+			body["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
+		}
 	}
 
 	var resp struct {
@@ -291,7 +301,15 @@ func applyVEXOverridesFromFlags(body map[string]any, cve, decision, vexNote, rea
 // abstraction levels — supporting all three is a smoke-spec ask. They
 // don't compose; passing more than one with a non-empty value is an
 // error so we never silently pick a winner.
-func resolveExceptionExpiry(cmd *cobra.Command) (time.Time, error) {
+//
+// The second return value says whether the caller EXPLICITLY requested
+// an expiry on this invocation. It exists because the timestamp alone
+// cannot distinguish "the operator asked for 30 days" from "nobody said
+// anything, so here is 30 days" — and --from-file needs that
+// distinction: the default must fill a gap, never overwrite an expiry
+// the file already carries. Without it, a template declaring a one-day
+// exception was silently widened to thirty.
+func resolveExceptionExpiry(cmd *cobra.Command) (time.Time, bool, error) {
 	expiresAtFlag := strings.TrimSpace(mustString(cmd, "expires-at"))
 	expiresFlag := strings.TrimSpace(mustString(cmd, "expires"))
 	daysFlag, _ := cmd.Flags().GetInt("days")
@@ -308,36 +326,39 @@ func resolveExceptionExpiry(cmd *cobra.Command) (time.Time, error) {
 		set++
 	}
 	if set > 1 {
-		return time.Time{}, fmt.Errorf("--expires-at, --days, and --expires are mutually exclusive; pick one")
+		return time.Time{}, false, fmt.Errorf("--expires-at, --days, and --expires are mutually exclusive; pick one")
 	}
 
 	switch {
 	case expiresAtFlag != "":
 		t, err := time.Parse(time.RFC3339, expiresAtFlag)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("--expires-at: must be RFC3339 (e.g. 2026-06-01T00:00:00Z): %w", err)
+			return time.Time{}, false, fmt.Errorf("--expires-at: must be RFC3339 (e.g. 2026-06-01T00:00:00Z): %w", err)
 		}
 		if !t.After(time.Now()) {
-			return time.Time{}, fmt.Errorf("--expires-at must be in the future, got %s", t.Format(time.RFC3339))
+			return time.Time{}, false, fmt.Errorf("--expires-at must be in the future, got %s", t.Format(time.RFC3339))
 		}
-		return t, nil
+		return t, true, nil
 	case daysSet:
 		if daysFlag < 0 {
-			return time.Time{}, fmt.Errorf("--days must be non-negative, got %d", daysFlag)
+			return time.Time{}, false, fmt.Errorf("--days must be non-negative, got %d", daysFlag)
 		}
 		if daysFlag == 0 {
 			// Explicit opt-out — let the server's default kick in.
-			return time.Time{}, nil
+			return time.Time{}, true, nil
 		}
-		return time.Now().Add(time.Duration(daysFlag) * 24 * time.Hour), nil
+		return time.Now().Add(time.Duration(daysFlag) * 24 * time.Hour), true, nil
 	case expiresFlag != "":
 		d, err := parseSinceDuration(expiresFlag)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("--expires: %w", err)
+			return time.Time{}, false, fmt.Errorf("--expires: %w", err)
 		}
-		return time.Now().Add(d), nil
+		return time.Now().Add(d), true, nil
 	default:
-		return time.Now().Add(defaultExceptionDays * 24 * time.Hour), nil
+		// No expiry flag on this invocation. The value is a FALLBACK the
+		// caller did not request, so the bool is false and a
+		// --from-file-supplied expires_at wins over it.
+		return time.Now().Add(defaultExceptionDays * 24 * time.Hour), false, nil
 	}
 }
 

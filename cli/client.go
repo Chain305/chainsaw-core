@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,19 @@ type APIClient struct {
 	// Used by WithHeader to bolt on cross-cutting knobs like --dry-run
 	// without changing every call-site's method signature.
 	extraHeaders map[string]string
+	// requireToken makes do() refuse BEFORE any network call when no token is
+	// configured, returning ExitConfigAuth(3) instead of letting the request
+	// go out unauthenticated and come back as a server 401 (which the caller
+	// then rendered as an opaque operational failure).
+	//
+	// X4: set ONLY by newClient() (root.go) — the constructor every
+	// authenticated subcommand uses. NewAPIClient deliberately leaves it
+	// false: NewAPIClient(server, "") is the ANONYMOUS client used for the
+	// routes on the server's allowAnonymousPath list (SSO discover,
+	// /api/auth/cli/init, the device-code poll, /api/auth/cli/exchange,
+	// /api/public/meta). Those must keep working with no token — that is how
+	// a user obtains one.
+	requireToken bool
 }
 
 // NewAPIClient constructs an APIClient for the given server and bearer token.
@@ -38,6 +52,19 @@ func NewAPIClient(baseURL, token string) *APIClient {
 		token:   token,
 		http:    httpclient.New(httpclient.WithTimeout(30 * time.Second)),
 	}
+}
+
+// newAPIClientWithTimeout is NewAPIClient with a caller-supplied overall HTTP
+// timeout. Unexported because the 30s default is the right answer for the ~40
+// commands that make one small request; the few long-running POSTs (scan with
+// up to 10k packages) need their own budget without changing everyone else's.
+// A non-positive timeout falls back to the shared default.
+func newAPIClientWithTimeout(baseURL, token string, timeout time.Duration) *APIClient {
+	c := NewAPIClient(baseURL, token)
+	if timeout > 0 {
+		c.http = httpclient.New(httpclient.WithTimeout(timeout))
+	}
+	return c
 }
 
 // WithHeader returns a shallow copy of the client with an additional request
@@ -62,18 +89,36 @@ func (c *APIClient) WithHeader(name, value string) *APIClient {
 		token:        c.token,
 		http:         c.http,
 		extraHeaders: headers,
+		requireToken: c.requireToken,
 	}
 }
 
-// apiError is the standard error envelope returned by the server. The shape
-// mirrors internal/errcodes.responseError — Code/Message/Reason/Docs are the
-// CHW-NNNN structured fields the server emits via errcodes.WriteError. Reason
-// and Docs are optional on legacy callsites that have not yet migrated.
+// apiError is the standard error envelope returned by the server. The
+// Code/Message/Reason/Docs fields are the CHW-NNNN structured fields the
+// server emits via errcodes.WriteError.
+//
+// A1′: the server's wire shape is NESTED — internal/errcodes writes
+// `{"error":{"code":…,"message":…,"reason":…,"docs":…}}` — while this struct
+// declared the fields at the TOP level. Unmarshalling therefore always left
+// Code/Reason/Docs empty, which (a) made renderError's entire CHW- branch
+// dead code, (b) dumped the raw JSON body into Message, and (c) made
+// classifyCLIError substring-match INSIDE that JSON: a 500 carrying
+// CHW-5401 classified as "auth". parseAPIError below handles both shapes;
+// do NOT go back to unmarshalling a response body straight into this struct.
 type apiError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Reason  string `json:"reason,omitempty"`
 	Docs    string `json:"docs,omitempty"`
+	// Status is the HTTP status the envelope arrived with, stamped by the
+	// transport on EVERY construction path. It is the authoritative signal
+	// for "was this a 401" — the CHW code is not (13 distinct auth codes live
+	// in registry_auth.go alone) and the message text certainly is not.
+	//
+	// Tagged `json:"-"`: Status is never part of the wire shape, and a
+	// server-controlled "status" field must never be able to overwrite what
+	// the transport observed.
+	Status int `json:"-"`
 }
 
 func (e *apiError) Error() string {
@@ -83,7 +128,74 @@ func (e *apiError) Error() string {
 	return e.Code
 }
 
+// parseAPIError decodes a >=400 response body into an apiError. Three shapes
+// are tried in order, and Status is stamped from the response on all of them:
+//
+//  1. NESTED — {"error":{"code":"CHW-1001","message":…,"reason":…,"docs":…}}.
+//     What internal/errcodes.WriteError emits, i.e. every structured server
+//     error. This is the shape the CLI previously could not read at all.
+//  2. LEGACY FLAT — {"code":…,"message":…}, written by handlers predating
+//     errcodes. Kept so a mixed-version fleet degrades cleanly.
+//  3. SYNTHESIZED — neither parsed (an HTML page, a bare
+//     {"error":"authentication required","hint":…}, an empty body): Code
+//     becomes "HTTP <status>" and the raw body becomes Message. Byte-identical
+//     to the pre-A1′ fallback, so nothing regresses on those wire shapes.
+//
+// Total by construction: it never returns nil and never fails.
+func parseAPIError(status int, body []byte) *apiError {
+	out := &apiError{Status: status}
+
+	var nested struct {
+		Error struct {
+			Code             string `json:"code"`
+			Message          string `json:"message"`
+			Reason           string `json:"reason"`
+			Docs             string `json:"docs"`
+			DocumentationURL string `json:"documentation_url"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &nested); err == nil &&
+		(nested.Error.Code != "" || nested.Error.Message != "") {
+		out.Code = nested.Error.Code
+		out.Message = nested.Error.Message
+		out.Reason = nested.Error.Reason
+		out.Docs = nested.Error.Docs
+		if out.Docs == "" {
+			out.Docs = nested.Error.DocumentationURL
+		}
+		if out.Code == "" {
+			out.Code = fmt.Sprintf("HTTP %d", status)
+		}
+		return out
+	}
+
+	var flat apiError
+	if err := json.Unmarshal(body, &flat); err == nil &&
+		(flat.Code != "" || flat.Message != "") {
+		out.Code = flat.Code
+		out.Message = flat.Message
+		out.Reason = flat.Reason
+		out.Docs = flat.Docs
+		if out.Code == "" {
+			out.Code = fmt.Sprintf("HTTP %d", status)
+		}
+		return out
+	}
+
+	out.Code = fmt.Sprintf("HTTP %d", status)
+	out.Message = strings.TrimSpace(string(body))
+	return out
+}
+
 func (c *APIClient) do(method, path string, body, out any) error {
+	// X4 preflight: refuse before the network call rather than after a 401.
+	// Only clients built by newClient() opt into this (see requireToken).
+	if c.requireToken && c.token == "" {
+		return &ExitCodeError{
+			Code: ExitConfigAuth,
+			Err:  errors.New("not authenticated — run 'chainsaw auth login' first"),
+		}
+	}
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -132,14 +244,7 @@ func (c *APIClient) do(method, path string, body, out any) error {
 		if hint := serverURLMisconfigError(c.baseURL, resp.StatusCode, resp.Header.Get("Content-Type"), respBody); hint != nil {
 			return hint
 		}
-		var apiErr apiError
-		_ = json.Unmarshal(respBody, &apiErr)
-		if apiErr.Code == "" {
-			apiErr.Code = fmt.Sprintf("HTTP %d", resp.StatusCode)
-			if apiErr.Message == "" {
-				apiErr.Message = strings.TrimSpace(string(respBody))
-			}
-		}
+		apiErr := parseAPIError(resp.StatusCode, respBody)
 		switch resp.StatusCode {
 		case 401:
 			apiErr.Message = apiErr.Message + " — run 'chainsaw auth login' to authenticate"
@@ -153,7 +258,7 @@ func (c *APIClient) do(method, path string, body, out any) error {
 				apiErr.Message = apiErr.Message + " — rate limited; please wait before retrying"
 			}
 		}
-		return &apiErr
+		return apiErr
 	}
 
 	if out != nil && len(respBody) > 0 {

@@ -78,8 +78,9 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 	// terminal and always to stderr — the export payload itself frequently
 	// streams to stdout (openExportSink returns os.Stdout for "" / "-"), so the
 	// notice must never land on stdout or it would corrupt a `--out -` pipe.
+	// R14: chatter() honors --quiet / CHAINSAW_QUIET; a bare Fprintln did not.
 	if stdoutIsTerminal() {
-		fmt.Fprintln(cmd.ErrOrStderr(), "Fetching audit events…")
+		chatter(cmd, "Fetching audit events…")
 	}
 
 	var resp auditLogResponse
@@ -96,27 +97,29 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 		events = events[:limit]
 	}
 
-	out, closer, err := openExportSink(mustString(cmd, "out"))
+	sink, err := openExportSink(mustString(cmd, "out"))
 	if err != nil {
 		return err
 	}
-	if closer != nil {
-		defer closer.Close()
-	}
+	// Unconditional: abort is a no-op once commit has run.
+	defer sink.abort()
 
 	switch format {
 	case "csv":
-		if err := writeAuditCSV(out, events); err != nil {
+		if err := writeAuditCSV(sink.w, events); err != nil {
 			return err
 		}
 	case "json":
-		if err := writeAuditJSON(out, events); err != nil {
+		if err := writeAuditJSON(sink.w, events); err != nil {
 			return err
 		}
 	case "ndjson":
-		if err := writeAuditNDJSON(out, events); err != nil {
+		if err := writeAuditNDJSON(sink.w, events); err != nil {
 			return err
 		}
+	}
+	if err := sink.commit(); err != nil {
+		return err
 	}
 
 	// Only emit a friendly summary when writing to a real file — keep stdout
@@ -125,8 +128,33 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 	if outFile := mustString(cmd, "out"); outFile != "" && outFile != "-" {
 		fmt.Fprintf(cmd.OutOrStderr(), "Exported %d audit event(s) to %s\n", len(events), outFile)
 	}
+	// C9: the export used to report a count and nothing else, which reads as
+	// "this is the whole range". It is not — the server caps the export at
+	// auditExportServerRowCap rows per source over the last
+	// auditExportServerWindowDays days, and the response carries no
+	// total/truncated field for the CLI to check. State the real window rather
+	// than inferring truncation from len(events) (a brittle guess that would
+	// break every working export). Stderr, so a `--out -` pipe stays clean.
+	fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", auditExportWindowNote)
 	return nil
 }
+
+// The server's export ceiling, mirrored here so the CLI can describe it
+// honestly. internal/server/dashboard.go's handleAuditLogs builds the export
+// from events.ForOrg(orgID).ListSince(10000, now-90d), and the violations half
+// runs through listViolationEntries with defaultViolationLimit = 10000
+// (internal/server/violations_query.go). Neither response reports a total or a
+// truncated flag — when they do, prefer the server's own numbers over these
+// constants and drop the static note.
+const (
+	auditExportServerWindowDays = 90
+	auditExportServerRowCap     = 10000
+)
+
+var auditExportWindowNote = fmt.Sprintf(
+	"the server returns at most %d rows per source and only the last %d days, "+
+		"so an export cannot cover a longer range than that",
+	auditExportServerRowCap, auditExportServerWindowDays)
 
 // resolveExportWindow returns the [start, end) filter window, applying --since
 // (a relative duration) on top of --start/--end. --since wins when both are
@@ -135,20 +163,25 @@ func resolveExportWindow(cmd *cobra.Command) (time.Time, time.Time, error) {
 	var startTime, endTime time.Time
 
 	if startStr := mustString(cmd, "start"); startStr != "" {
-		t, err := parseDate(startStr)
+		t, _, err := parseDate(startStr)
 		if err != nil {
 			return time.Time{}, time.Time{}, fmt.Errorf("--start: %w", err)
 		}
 		startTime = t
 	}
 	if endStr := mustString(cmd, "end"); endStr != "" {
-		t, err := parseDate(endStr)
+		t, dateOnly, err := parseDate(endStr)
 		if err != nil {
 			return time.Time{}, time.Time{}, fmt.Errorf("--end: %w", err)
 		}
-		// Match `audit view`: include the full end-of-day when only a date
-		// is supplied.
-		endTime = t.Add(24*time.Hour - time.Second)
+		// Match `audit view`: include the full end-of-day when ONLY A DATE is
+		// supplied. An explicit RFC3339 stamp is honoured verbatim — extending
+		// it added an undisclosed extra day of records to a compliance handoff
+		// (C6).
+		if dateOnly {
+			t = t.Add(24*time.Hour - time.Second)
+		}
+		endTime = t
 	}
 	if since := mustString(cmd, "since"); since != "" {
 		d, err := parseSinceDuration(since)
@@ -186,19 +219,64 @@ func parseSinceDuration(s string) (time.Duration, error) {
 	return d, nil
 }
 
-// openExportSink returns the writer to use for export output. Empty path or
-// "-" means stdout; for stdout we return a nil closer so the caller's defer
-// is a safe no-op (and so we never close os.Stdout out from under the
-// process).
-func openExportSink(path string) (io.Writer, io.Closer, error) {
+// exportSink is the destination for an export, written through a temp file so a
+// failure part-way cannot destroy a previous good export.
+//
+// C15: this used to be a plain os.Create(path), which TRUNCATES immediately. An
+// ENOSPC (or any writer error) half-way through left a partial file where the
+// last good audit.csv had been, and the returned error said nothing about the
+// file's state. Now the bytes land in <path>.tmp and are renamed into place only
+// after the last write succeeds; on any failure the temp file is removed and the
+// previous export is still there.
+type exportSink struct {
+	w       io.Writer
+	file    *os.File
+	tmpPath string
+	dstPath string
+}
+
+// openExportSink returns the sink to use for export output. An empty path or "-"
+// means stdout, which is written directly (never renamed, and never closed out
+// from under the process).
+func openExportSink(path string) (*exportSink, error) {
 	if path == "" || path == "-" {
-		return os.Stdout, nil, nil
+		return &exportSink{w: os.Stdout}, nil
 	}
-	f, err := os.Create(path)
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create %s: %w", path, err)
+		return nil, fmt.Errorf("create %s: %w", tmp, err)
 	}
-	return f, f, nil
+	return &exportSink{w: f, file: f, tmpPath: tmp, dstPath: path}, nil
+}
+
+// commit flushes the temp file and moves it onto the destination path. A no-op
+// for the stdout sink.
+func (s *exportSink) commit() error {
+	if s.file == nil {
+		return nil
+	}
+	if err := s.file.Close(); err != nil {
+		os.Remove(s.tmpPath)
+		return fmt.Errorf("close %s: %w", s.tmpPath, err)
+	}
+	if err := os.Rename(s.tmpPath, s.dstPath); err != nil {
+		os.Remove(s.tmpPath)
+		return fmt.Errorf("rename %s to %s: %w", s.tmpPath, s.dstPath, err)
+	}
+	s.file = nil
+	return nil
+}
+
+// abort discards a partial write. Safe to call after commit (the file handle is
+// cleared), so callers can defer it unconditionally.
+func (s *exportSink) abort() {
+	if s.file == nil {
+		return
+	}
+	s.file.Close()
+	os.Remove(s.tmpPath)
+	s.file = nil
 }
 
 // auditCSVHeaders is the canonical column order for CSV export. Pinned here

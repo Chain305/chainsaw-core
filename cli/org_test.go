@@ -67,6 +67,10 @@ func configureCLIForServer(t *testing.T, baseURL string) {
 	viper.Reset()
 	viper.Set("server_url", baseURL)
 	viper.Set("org_id", "org-x")
+	// A token is part of "a working APIClient": newClient() refuses before
+	// the network call when none is configured (X4). The stub server does
+	// not check Authorization; this only clears the preflight.
+	viper.Set("token", "test-token")
 	t.Cleanup(viper.Reset)
 
 	// Cobra retains flag values across SetArgs invocations; reset

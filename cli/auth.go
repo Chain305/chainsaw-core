@@ -58,6 +58,14 @@ var authLogoutCmd = &cobra.Command{
 			return fmt.Errorf("clearing credentials: %w", err)
 		}
 		emit("cli.auth.logout", nil)
+		// X8: `auth logout --json` printed "OK: Logged out" — human prose on
+		// stdout at rc=0, straight into whatever was parsing it.
+		if useJSON(cmd) {
+			return PrintJSONTo(cmd, map[string]any{
+				"logged_out": true,
+				"server":     server,
+			})
+		}
 		printSuccess(cmd.OutOrStdout(), cmd, "Logged out")
 		return nil
 	},
@@ -326,6 +334,12 @@ func errHeadlessAuth(server, mintURL string) error {
 	if mintURL == "" {
 		mintURL = "your Chainsaw dashboard → Settings → API Keys → New"
 	}
+	// A2: the closing line used to read "If your org uses SSO, chainsaw auth
+	// sso remains available." — actively routing a stuck user into a browser
+	// flow that could never complete and hung for five silent minutes first.
+	// `auth login` handles SSO orgs itself (the web UI finishes the CLI
+	// session after the IdP redirect), so all three options below already
+	// cover them and there is no fourth path to advertise.
 	return fmt.Errorf(`cannot sign in: no browser available and stdin is not a terminal
 
 Pick one:
@@ -334,7 +348,8 @@ Pick one:
   • Paste a pre-minted API token (CI/automation):   chainsaw auth login --token <pat>
       (generate one at %s)
 
-If your org uses SSO, chainsaw auth sso remains available.`, mintURL)
+SSO orgs use the same three paths — the browser and device flows both
+complete an SSO sign-in.`, mintURL)
 }
 
 func authStatusCmd() *cobra.Command {
@@ -442,22 +457,31 @@ func authStatusCmd() *cobra.Command {
 
 // isUnauthorizedErr reports whether err is the server's 401 envelope —
 // i.e. the token was rejected (expired/revoked), as opposed to a
-// transport failure (DNS, TLS, connection refused, raw 5xx). The client
-// sets apiError.Code to "HTTP 401" for a bare 401 (client.go:138) or a
-// CHW-* code carrying a 401, and appends the login hint to Message. We
-// match on the "401" substring across both the code and the message so
-// either shape is recognised.
+// transport failure (DNS, TLS, connection refused, raw 5xx).
+//
+// A1′: this now keys on the TRANSPORT STATUS, not on substrings. The old
+// "does 401 appear anywhere in Code or Message" test was a false-positive
+// machine once the raw JSON body started landing in Message — a 500 whose
+// body mentions CHW-5401 is not an expired token, and telling the user to
+// re-authenticate against a server outage is a wrong diagnosis.
+//
+// The substring test survives only as a fallback for an apiError with NO
+// status (Status == 0): hand-constructed values in tests, or any future
+// construction path that forgets to stamp it. Every real transport path
+// stamps Status, so the fallback can never re-open the false positive —
+// a real 500 has Status 500, not 0.
 func isUnauthorizedErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	var ae *apiError
-	if errors.As(err, &ae) {
-		if strings.Contains(ae.Code, "401") || strings.Contains(ae.Message, "401") {
-			return true
-		}
+	if !errors.As(err, &ae) {
+		return false
 	}
-	return false
+	if ae.Status != 0 {
+		return ae.Status == http.StatusUnauthorized
+	}
+	return strings.Contains(ae.Code, "401") || strings.Contains(ae.Message, "401")
 }
 
 // requireTTY fails fast with errNoTTY when stdin isn't a terminal. Callers use

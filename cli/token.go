@@ -16,6 +16,7 @@ package cli
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -81,7 +82,11 @@ func runTokenList(cmd *cobra.Command, _ []string) error {
 
 	path := "/api/api-keys"
 	if kt, _ := cmd.Flags().GetString("key-type"); strings.TrimSpace(kt) != "" {
-		path = path + "?key_type=" + strings.TrimSpace(kt)
+		// A8: --key-type is user input concatenated straight into the query
+		// string. Build it with url.Values like team.go does, so a value
+		// carrying &, +, or a space can't corrupt the request.
+		q := url.Values{"key_type": []string{strings.TrimSpace(kt)}}
+		path = path + "?" + q.Encode()
 	}
 
 	var resp struct {
@@ -96,7 +101,8 @@ func runTokenList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if len(resp.APIKeys) == 0 {
-		fmt.Println("No API tokens found.")
+		// A10: was a bare fmt.Println straight to os.Stdout.
+		fmt.Fprintln(cmd.OutOrStdout(), "No API tokens found.")
 		return nil
 	}
 	rows := make([][]string, len(resp.APIKeys))
@@ -214,7 +220,11 @@ func runTokenCreate(cmd *cobra.Command, _ []string) error {
 	// Human-readable output: emphasize the one-time nature of the cleartext.
 	fmt.Fprintln(os.Stderr, "Created token "+resp.APIKey.ID+" ("+resp.APIKey.Name+").")
 	fmt.Fprintln(os.Stderr, "Save this token NOW — it will not be shown again:")
-	fmt.Println(resp.Token)
+	// A10: cmd.OutOrStdout(), deliberately NOT outWriter(cmd). outWriterOr
+	// creates the --output file with os.Create at the default umask — an
+	// 0644 file holding a live secret. Capturing a one-time secret to a file
+	// needs secureio first; until then the caller redirects stdout itself.
+	fmt.Fprintln(cmd.OutOrStdout(), resp.Token)
 	return nil
 }
 
@@ -260,7 +270,8 @@ func runTokenRotate(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintln(os.Stderr, "Rotated token "+resp.APIKey.ID+" ("+resp.APIKey.Name+").")
 	fmt.Fprintln(os.Stderr, "Save this NEW token NOW — it will not be shown again. The old secret has been invalidated.")
-	fmt.Println(resp.Token)
+	// See runTokenCreate: the one-time secret never goes through outWriter.
+	fmt.Fprintln(cmd.OutOrStdout(), resp.Token)
 	return nil
 }
 
@@ -313,8 +324,18 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
+		// A5: non-TTY callers (CI, piped scripts) never see the prompt —
+		// PromptConfirm returns false and we'd silently print "Aborted."
+		// and exit 0, masking that the revoke never happened. A CI job
+		// running `chainsaw token revoke $ID` without --yes reported
+		// success while the token stayed live. Require --yes explicitly
+		// here and exit with a clear error instead. (Same guard, same
+		// rationale, as policy delete / exception delete / undo.)
+		if !stdinIsTerminal() {
+			return fmt.Errorf("refusing to revoke token %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
+		}
 		if !PromptConfirm(fmt.Sprintf("Revoke token %q? This cannot be undone.", id)) {
-			fmt.Println("Aborted.")
+			fmt.Fprintln(out, "Aborted.")
 			return nil
 		}
 	}
@@ -324,6 +345,6 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	if err := client.Delete("/api/api-keys/" + id); err != nil {
 		return err
 	}
-	fmt.Println("Revoked token " + id)
+	fmt.Fprintln(out, "Revoked token "+id)
 	return nil
 }

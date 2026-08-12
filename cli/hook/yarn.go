@@ -60,7 +60,7 @@ func (m yarnManager) Wire(opts WireOpts) error {
 	if err != nil {
 		return err
 	}
-	return writeWithBackup(path, body)
+	return writeWithBackup(m.Name(), path, body, opts)
 }
 
 func (m yarnManager) Unwire(scope Scope) error {
@@ -90,12 +90,16 @@ func yarnBlockBody(opts WireOpts) (string, error) {
 	}
 	token := "${CHAINSAW_TOKEN}"
 	if creds := strings.TrimSpace(opts.Credentials); creds != "" {
-		if _, _, ok := splitCreds(creds); !ok {
-			return "", fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+		if _, _, err := parseCreds(creds); err != nil {
+			return "", err
 		}
 		token = creds
 	}
 	// BUG-A6: org-scoped path required.
+	yarnPath, err := orgScopedRepoPath(opts.OrgSlug, "yarnpkg")
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`npmRegistryServer: %q
-npmAuthToken: %q`, base+"/"+OrgScopedRepoPath(opts.OrgSlug, "yarnpkg")+"/", token), nil
+npmAuthToken: %q`, base+"/"+yarnPath+"/", token), nil
 }

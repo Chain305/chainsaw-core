@@ -23,6 +23,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -157,7 +158,7 @@ func runOrgDelete(cmd *cobra.Command, _ []string) error {
 // next-step command for copy-paste.
 func runOrgDeletePreview(cmd *cobra.Command, client *APIClient, orgID string, asJSON bool) error {
 	var resp orgDeletePreviewResponse
-	if err := client.Post(fmt.Sprintf("/api/orgs/%s/delete/preview", orgID), nil, &resp); err != nil {
+	if err := client.Post("/api/orgs/"+url.PathEscape(orgID)+"/delete/preview", nil, &resp); err != nil {
 		return err
 	}
 	if asJSON {
@@ -218,7 +219,7 @@ func runOrgDeleteCommit(cmd *cobra.Command, client *APIClient, orgID, simulateID
 		// transaction. This path is a courtesy preview-of-preview so
 		// an operator can sanity-check before --confirm.)
 		var resp orgDeletePreviewResponse
-		if err := client.Post(fmt.Sprintf("/api/orgs/%s/delete/preview", orgID), nil, &resp); err != nil {
+		if err := client.Post("/api/orgs/"+url.PathEscape(orgID)+"/delete/preview", nil, &resp); err != nil {
 			return err
 		}
 		if asJSON {
@@ -233,6 +234,14 @@ func runOrgDeleteCommit(cmd *cobra.Command, client *APIClient, orgID, simulateID
 
 	// Commit. Confirmation prompt unless --yes was passed.
 	if !yes {
+		// A5: --yes is already documented as "Required for non-TTY runs"
+		// (see the flag registration) but nothing enforced it — PromptConfirm
+		// returns false off a TTY, so the org delete printed "Aborted." and
+		// exited 0. Enforce the documented contract. Same guard, same
+		// rationale, as policy delete.
+		if !stdinIsTerminal() {
+			return fmt.Errorf("refusing to delete org %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", orgID)
+		}
 		if !PromptConfirm(fmt.Sprintf("PERMANENTLY delete org %q? This cannot be undone.", orgID)) {
 			fmt.Fprintln(out, "Aborted.")
 			return nil
@@ -244,7 +253,13 @@ func runOrgDeleteCommit(cmd *cobra.Command, client *APIClient, orgID, simulateID
 	// client.Delete helper takes no body argument and the server's
 	// readOrgDeleteRequestBody prefers the query param when both are
 	// supplied — keeps the request shape minimal.
-	if err := client.Delete(fmt.Sprintf("/api/orgs/%s?simulate_id=%s", orgID, simulateID)); err != nil {
+	//
+	// A8: orgID is a path SEGMENT and simulateID a query VALUE — both came
+	// from user flags and were concatenated raw. Escape each with the right
+	// escaper (PathEscape vs url.Values) so a slug or id carrying /, &, or a
+	// space cannot re-target the request.
+	delPath := "/api/orgs/" + url.PathEscape(orgID) + "?" + url.Values{"simulate_id": []string{simulateID}}.Encode()
+	if err := client.Delete(delPath); err != nil {
 		// Surface the CHW-4928 / 4929 codes verbatim so operators can
 		// grep server logs by the same identifier they see in the
 		// terminal. apiError.Error() already formats "CHW-XXXX: <msg>".

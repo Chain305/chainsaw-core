@@ -19,6 +19,7 @@ package cli
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -44,8 +45,11 @@ var undoCmd = &cobra.Command{
 	GroupID: GrpConfig,
 	Short:   "Roll back the most recent agent action (or a specific action by id)",
 	Long: "Undoes the inverse of a previously recorded agent action in the " +
-		"current org. By default, targets the caller's most recent " +
-		"undoable action; pass --action-id to target a specific entry. " +
+		"current org. By default, targets the ORG's most recent undoable " +
+		"action — not the caller's own: the server resolves the target with " +
+		"GetLastUndoable(orgID), so a teammate's or an agent's action can be " +
+		"the one that gets reversed. Pass --action-id to target a specific " +
+		"entry. " +
 		"Use --dry-run to preview what would be undone without applying. " +
 		"Permission is checked dynamically per action type: undoing a " +
 		"policy mutation requires policies:manage, an exception mutation " +
@@ -56,7 +60,7 @@ var undoCmd = &cobra.Command{
 }
 
 func init() {
-	undoCmd.Flags().String("action-id", "", "Action id to undo (default: caller's most recent undoable action)")
+	undoCmd.Flags().String("action-id", "", "Action id to undo (default: the org's most recent undoable action)")
 	undoCmd.Flags().Bool("dry-run", false, "Preview what would be undone without applying")
 	undoCmd.Flags().Bool("yes", false, "Skip confirmation prompt (required on non-TTY)")
 	undoCmd.Flags().Bool("json", false, "Output the server response as JSON")
@@ -77,9 +81,12 @@ func runUndo(cmd *cobra.Command, _ []string) error {
 	//   --action-id set   → POST /api/actions/{id}/undo
 	//   default           → POST /api/actions/undo-last
 	// Both accept ?dry_run=true; we build the query suffix once.
+	// C13: the id lands in a URL PATH segment, so escape it. Today's ids are
+	// server-minted UUIDs, but --action-id is a user flag and the sibling call
+	// sites in this package already build their paths safely.
 	path := "/api/actions/undo-last"
 	if actionID != "" {
-		path = "/api/actions/" + actionID + "/undo"
+		path = "/api/actions/" + url.PathEscape(actionID) + "/undo"
 	}
 	if dryRun {
 		path = path + "?dry_run=true"
@@ -110,6 +117,20 @@ func runUndo(cmd *cobra.Command, _ []string) error {
 					if preview.ActionID != "" {
 						targetDesc = preview.ActionType + " (" + preview.ActionID + ")"
 					}
+				}
+				// C7 (preview/confirm TOCTOU): the preview parsed ActionID and
+				// then threw it away, and the confirmed POST re-hit the UNPINNED
+				// /undo-last. The server resolves that with GetLastUndoable(orgID)
+				// — ORG-scoped — so any teammate, MCP tool, or Billy agent that
+				// records an action while the prompt sits open silently moves the
+				// target: the operator reads "Would revert policy.update on pol-1"
+				// and confirms a revert of policy.delete on pol-9. Pin the real
+				// call to the id we actually showed. /api/actions/{id}/undo
+				// already exists (internal/server/undo_api.go), so this is
+				// CLI-only. If the server declined to name an id there is nothing
+				// to pin to, and we leave the original path alone.
+				if actionID == "" && preview.ActionID != "" {
+					path = "/api/actions/" + url.PathEscape(preview.ActionID) + "/undo"
 				}
 			}
 

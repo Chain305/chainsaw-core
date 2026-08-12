@@ -166,3 +166,104 @@ func TestPolicyLint_DirectoryWalk(t *testing.T) {
 		t.Fatalf("expected 1 policy file, got %v", files)
 	}
 }
+
+// TestPolicyLint_WildcardIdentifierIsNotAPairing is P11. The save-time
+// validator's hasMeaningfulValue rejects "", "*" and "all" alike, but
+// lint carried its own hasIdentifier that accepted any non-empty string.
+// So this policy linted "No findings — policies are clean" and was then
+// rejected by rejectStandaloneContextOnlyConditions on POST — the exact
+// rejection lint exists to surface first.
+func TestPolicyLint_WildcardIdentifierIsNotAPairing(t *testing.T) {
+	cases := []struct {
+		name       string
+		identifier string
+		scope      string
+		wantErrors int
+	}{
+		{"wildcard name is not a pairing", `{"targetPackageName": "*"}`, "", 1},
+		{`"all" is not a pairing`, `{"targetPackageRepo": "all"}`, "", 1},
+		{"whitespace-only is not a pairing", `{"targetPackageName": "   "}`, "", 1},
+		{"real name IS a pairing", `{"targetPackageName": "evil-pkg"}`, "", 0},
+		{"wildcard scope is not a pairing", "", `{"targetClient": ["*"]}`, 1},
+		{"real scope IS a pairing", "", `{"targetClient": ["ci-runner"]}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"id":"p","name":"p","mode":"block","status":"enabled","precedence":100,` +
+				`"conditions":{"usesEval":true}`
+			if tc.identifier != "" {
+				body += `,"identifier":` + tc.identifier
+			}
+			if tc.scope != "" {
+				body += `,"scope":` + tc.scope
+			}
+			body += `}`
+
+			fp := filepath.Join(t.TempDir(), "policy.json")
+			if err := os.WriteFile(fp, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			findings, _, err := lintPolicyFile(fp)
+			if err != nil {
+				t.Fatalf("lintPolicyFile: %v", err)
+			}
+			var errs int
+			for _, f := range findings {
+				if f.Severity == lintFindingError {
+					errs++
+				}
+			}
+			if errs != tc.wantErrors {
+				t.Errorf("errors: got %d, want %d — lint must agree with the server's save-time validator (findings=%+v)",
+					errs, tc.wantErrors, findings)
+			}
+		})
+	}
+}
+
+// TestPolicyLint_RepoArchivedCheckFires is P12. rawHasField re-marshalled
+// the TYPED policy.Policy, and policy.Conditions has no repoArchived
+// field — encoding/json had already dropped the key on the way IN, so the
+// check could never fire and the warning advertised in the command's Long
+// help was dead code from the day it was written.
+func TestPolicyLint_RepoArchivedCheckFires(t *testing.T) {
+	body := `{
+		"id": "p", "name": "archived-repo", "mode": "block", "status": "enabled", "precedence": 100,
+		"identifier": {"targetPackageName": "evil-pkg"},
+		"conditions": {"repoArchived": false, "hasInstallScript": true}
+	}`
+	fp := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(fp, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	findings, _, err := lintPolicyFile(fp)
+	if err != nil {
+		t.Fatalf("lintPolicyFile: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Type == "three-state-nil-as-false" && strings.Contains(f.Message, "repoArchived") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a policy referencing repoArchived must produce the three-state warning; got %+v", findings)
+	}
+
+	// Negative control: a policy that does NOT mention repoArchived must
+	// not produce it — the raw-bytes search must stay keyed to the file.
+	fp2 := filepath.Join(t.TempDir(), "clean.json")
+	if err := os.WriteFile(fp2, []byte(`{"id":"q","name":"q","mode":"block","status":"enabled","precedence":100,
+		"identifier":{"targetPackageName":"evil-pkg"},"conditions":{"hasInstallScript":true}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	findings2, _, err := lintPolicyFile(fp2)
+	if err != nil {
+		t.Fatalf("lintPolicyFile: %v", err)
+	}
+	for _, f := range findings2 {
+		if strings.Contains(f.Message, "repoArchived") {
+			t.Errorf("false positive: %+v", f)
+		}
+	}
+}

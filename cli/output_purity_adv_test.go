@@ -565,17 +565,15 @@ func TestQuietAllowed_SubprocessSuppressesChatter(t *testing.T) {
 // stdout EXACTLY empty. `doctor` routes its JSON through writeJSON → outWriterOr,
 // which is the reference-correct --output path.
 //
-// NOTE: `version --json --output` currently LEAKS its JSON to stdout instead of
-// the file (version.go writes straight to cmd.OutOrStdout(), bypassing
-// outWriterOr) — a genuine invariant-C gap. That regression is pinned separately
-// in TestOutputFlag_Subprocess_VersionOutputGap so the whole-command sweep here
-// stays GREEN on the commands that already honor --output. When version.go is
-// fixed to use outWriterOr, fold `version` back into this sweep and delete the
-// gap test.
+// `version` was folded in here (X9): version.go used to write its JSON straight
+// to cmd.OutOrStdout(), bypassing outWriterOr, so `version --json --output f`
+// left f uncreated and printed to stdout. It now routes through outWriterOr like
+// doctor does, and the self-deleting shim that documented the gap
+// (TestOutputFlag_Subprocess_VersionOutputGap) has been removed as it instructed.
 func TestOutputFlag_Subprocess_RedirectsResultStdoutEmpty(t *testing.T) {
 	bin := purityChainsawBinary(t)
 
-	for _, sub := range []string{"doctor"} {
+	for _, sub := range []string{"doctor", "version"} {
 		t.Run(sub, func(t *testing.T) {
 			work := t.TempDir()
 			outFile := filepath.Join(work, "o.json")
@@ -603,45 +601,6 @@ func TestOutputFlag_Subprocess_RedirectsResultStdoutEmpty(t *testing.T) {
 				t.Fatalf("%s: --output file is not one clean JSON value: %q", sub, data)
 			}
 		})
-	}
-}
-
-// TestOutputFlag_Subprocess_VersionOutputGap documents (does NOT enforce) the
-// current invariant-C gap in `version --json --output`: the JSON result is
-// written to STDOUT rather than the --output file. Keeping this observation in a
-// non-failing test means the suite stays GREEN today while the gap is explicit
-// and greppable; when version.go is fixed to route through outWriterOr, this
-// test's condition flips and it will loudly remind us to promote `version` into
-// the RedirectsResultStdoutEmpty sweep above and remove this shim.
-func TestOutputFlag_Subprocess_VersionOutputGap(t *testing.T) {
-	bin := purityChainsawBinary(t)
-
-	work := t.TempDir()
-	outFile := filepath.Join(work, "o.json")
-	stdout, _, code := purityRun(t, bin, work,
-		[]string{
-			"PATH=/usr/bin:/bin",
-			"HOME=" + work,
-			"CHAINSAW_OFFLINE=1",
-			"CHAINSAW_TELEMETRY_DISABLED=1",
-			"NO_COLOR=1",
-		},
-		"version", "--json", "--output", outFile,
-	)
-	if code != ExitOK {
-		t.Skipf("version --json exit = %d (unexpected); skipping gap doc", code)
-	}
-	fileWritten := false
-	if data, err := os.ReadFile(outFile); err == nil && isSingleJSONValue(data) {
-		fileWritten = true
-	}
-	if stdout == "" && fileWritten {
-		// The gap has been FIXED — surface it so we promote version into the
-		// strict sweep and delete this shim (kept as a t.Error, not Fatal, so an
-		// unrelated failure elsewhere doesn't mask it).
-		t.Errorf("version --json --output now honors --output correctly: " +
-			"fold `version` into TestOutputFlag_Subprocess_RedirectsResultStdoutEmpty " +
-			"and delete TestOutputFlag_Subprocess_VersionOutputGap")
 	}
 }
 

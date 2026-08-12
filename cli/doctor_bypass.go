@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,6 +21,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/chain305/chainsaw-core/redact"
 )
 
 // bypassFinding is one row in the bypass-check report.
@@ -97,6 +100,22 @@ func printBypassReport(w io.Writer, rep bypassReport) {
 // "Same" means same scheme + host + port. Path differences are ignored
 // — chainsaw's npm proxy lives at /<repo>/, but the registry root is
 // what npm cares about for routing.
+//
+// The comparison is on PARSED authorities, not on string prefixes. The
+// previous `HasPrefix(c,e) || HasPrefix(e,c)` had no host boundary, so
+// the one check whose entire job is "is my registry pointing away from
+// chainsaw" answered "ok" for a lookalike host that merely EXTENDS the
+// expected one:
+//
+//	expected   https://chainsaw.example.com
+//	configured https://chainsaw.example.com.attacker.net/repository/npm/
+//
+// and the reverse arm accepted a truncated host (https://chainsaw.example)
+// just as happily.
+//
+// Only when a side cannot be parsed as an authority do we fall back — and
+// then to EXACT equality, never to a prefix, because a prefix rule on
+// unparseable input is exactly the hole being closed.
 func driftCompare(configured, expected string) string {
 	if configured == "" {
 		return "missing"
@@ -105,12 +124,49 @@ func driftCompare(configured, expected string) string {
 		// No reference URL; can't decide. Report informational only.
 		return "ok"
 	}
-	c := normalizeURL(configured)
-	e := normalizeURL(expected)
-	if strings.HasPrefix(c, e) || strings.HasPrefix(e, c) {
+	cScheme, cHost, cOK := parseCompareTarget(configured)
+	eScheme, eHost, eOK := parseCompareTarget(expected)
+	if !cOK || !eOK {
+		if normalizeURL(configured) == normalizeURL(expected) {
+			return "ok"
+		}
+		return "drift"
+	}
+	if cScheme == eScheme && cHost == eHost {
 		return "ok"
 	}
 	return "drift"
+}
+
+// parseCompareTarget splits a config value into its scheme and normalised
+// host:port, reporting false when the value carries no authority to compare.
+//
+// The transport-prefix strip is load-bearing for cargo: parseCargoIndex
+// returns `sparse+https://host/…` (and git dependencies use `git+https://`),
+// which url.Parse reads as the scheme "sparse+https". A naive parse would
+// therefore make EVERY correctly-wired cargo config report drift — a fresh
+// false alarm introduced by the fix for a different one.
+func parseCompareTarget(raw string) (scheme, host string, ok bool) {
+	s := strings.TrimSpace(raw)
+	for _, prefix := range []string{"sparse+", "git+", "registry+"} {
+		s = strings.TrimPrefix(s, prefix)
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", "", false
+	}
+	scheme = strings.ToLower(u.Scheme)
+	host = strings.ToLower(u.Host)
+	// An explicitly-written default port names the same endpoint as an
+	// omitted one; treating them as different hosts would be a new false
+	// "drift" for anyone who spells out :443.
+	switch {
+	case scheme == "https" && strings.HasSuffix(host, ":443"):
+		host = strings.TrimSuffix(host, ":443")
+	case scheme == "http" && strings.HasSuffix(host, ":80"):
+		host = strings.TrimSuffix(host, ":80")
+	}
+	return scheme, host, true
 }
 
 func normalizeURL(s string) string {
@@ -153,7 +209,32 @@ func checkNpmrc(expected string) bypassFinding {
 	}
 	f.Expected = expected
 	f.Status = driftCompare(f.Configured, expected)
+	f.Configured = redactConfigured(f.Configured)
 	return f
+}
+
+// redactConfigured strips the password out of a registry URL lifted from a
+// user's config file, and is the LAST thing every check does to
+// bypassFinding.Configured.
+//
+// `install-hook pip` writes
+//
+//	index-url = https://<client_id>:<client_secret>@host/repository/@org/pypi/simple/
+//
+// and npm/cargo/gemrc have the same shape. That string was printed in the
+// CONFIGURED column, printed again in the drift block, and emitted verbatim
+// by `--bypass-check --json` — the exact artefact users attach to support
+// tickets and paste into terminal recordings.
+//
+// Two properties matter. It runs AFTER driftCompare, so no verdict can
+// change: the comparison still sees the real value. And it is applied at
+// ASSIGNMENT rather than at each renderer, so the table, the drift block,
+// and the JSON encoder are covered by construction — a future fourth sink
+// cannot reintroduce the leak. The username survives (see redact.URL): the
+// operator's question here is "which client_id is wired to this host", and
+// answering it is the point of the diagnostic.
+func redactConfigured(s string) string {
+	return redact.URL(s)
 }
 
 // checkPipConf reads the user's pip.conf. Path varies by OS:
@@ -190,6 +271,7 @@ func checkPipConf(expected string) bypassFinding {
 			f.Configured = parsePipIndexURL(string(data))
 			f.Expected = expected
 			f.Status = driftCompare(f.Configured, expected)
+			f.Configured = redactConfigured(f.Configured)
 			return f
 		}
 	}
@@ -250,6 +332,7 @@ func checkGemrc(expected string) bypassFinding {
 	}
 	f.Expected = expected
 	f.Status = driftCompare(f.Configured, expected)
+	f.Configured = redactConfigured(f.Configured)
 	return f
 }
 
@@ -277,6 +360,7 @@ func checkCargoConfig(expected string) bypassFinding {
 			f.Configured = parseCargoIndex(body)
 			f.Expected = expected
 			f.Status = driftCompare(f.Configured, expected)
+			f.Configured = redactConfigured(f.Configured)
 			return f
 		}
 	}

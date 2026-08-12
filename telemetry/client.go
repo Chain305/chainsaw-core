@@ -61,14 +61,20 @@ type Config struct {
 	// through on every event so dashboards can slice by version.
 	ChainsawVersion string
 
-	// APIKey is sent as Authorization: Bearer <key>. The hosted ingest
-	// REQUIRES it: an unauthenticated POST to /api/telemetry/ingest is 401'd
-	// at the auth gate (the route is NOT on allowAnonymousPath — verified
-	// empirically). Free/local clients with no configured server+token disable
-	// telemetry client-side (ModeDisabled, see core/cli/telemetry_runtime.go)
-	// and emit nothing — so there is no anonymous-tier ingest today.
-	// Authenticated events are enriched server-side with the owning user+org
-	// for funnel correlation.
+	// APIKey is sent as Authorization: Bearer <key> when non-empty.
+	//
+	// CORRECTION (was stale): this used to claim "free/local clients …
+	// emit nothing — so there is no anonymous-tier ingest today". That has
+	// not been true since DefaultTelemetryEndpoint shipped: a cloud build
+	// with no configured server posts to chain305.com's ingest route with
+	// NO Authorization header, and the route accepts install:<id> events
+	// anonymously (per-IP rate-limited server-side). Authenticated events
+	// are additionally enriched server-side with the owning user+org for
+	// funnel correlation.
+	//
+	// What actually gates the anonymous tier is CLIENT-SIDE consent: emit()
+	// refuses to send anything until the operator has explicitly granted
+	// it (see cliTelemetryConsented in core/cli/telemetry_runtime.go).
 	APIKey string
 
 	// Env is "prod", "staging", "local", "test"; stamped on every event.
@@ -133,9 +139,24 @@ func New(cfg Config) *Client {
 	return c
 }
 
-// Capture records an event. Missing or invalid events are dropped
-// silently — telemetry is never allowed to affect caller behavior.
+// Capture records an event stamped with the current wall clock. Missing
+// or invalid events are dropped silently — telemetry is never allowed to
+// affect caller behavior.
 func (c *Client) Capture(name string, distinctID string, props map[string]any) {
+	c.CaptureAt(name, distinctID, time.Now().UTC(), props)
+}
+
+// CaptureAt is Capture with an explicit event timestamp, for callers that
+// must record WHEN something happened separately from when they were able
+// to hand it over. The CLI needs this: cli.session.started is observed
+// before the config file has been read, so the event is stashed and only
+// emitted once the endpoint / auth / org_id can be resolved correctly —
+// see markSessionStart in core/cli/telemetry_runtime.go. Without an
+// explicit timestamp the started event would carry the session's END time
+// and the duration between started/completed would collapse to zero.
+//
+// A zero ts falls back to the current wall clock.
+func (c *Client) CaptureAt(name string, distinctID string, ts time.Time, props map[string]any) {
 	if c == nil || c.cfg.Mode == ModeDisabled {
 		return
 	}
@@ -167,10 +188,13 @@ func (c *Client) Capture(name string, distinctID string, props map[string]any) {
 	enriched["runtime_arch"] = runtime.GOARCH
 	enriched = Scrub(enriched)
 
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
 	evt := Event{
 		Name:       name,
 		DistinctID: distinctID,
-		Timestamp:  time.Now().UTC(),
+		Timestamp:  ts.UTC(),
 		Properties: enriched,
 	}
 

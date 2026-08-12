@@ -72,8 +72,14 @@ const BundleEnvVar = "CHAINSAW_INTEL_BUNDLE_PATH"
 const BundleIdentityEnvVar = "CHAINSAW_INTEL_BUNDLE_IDENTITY"
 
 // BundleSkipVerifyEnvVar is a dev-only escape hatch that disables
-// signature verification — strictly for local builds and tests. Logged
-// loudly in the proxy startup banner when enabled.
+// signature verification — strictly for local builds and tests.
+//
+// NOTE: this used to claim the proxy logs its use loudly in the startup
+// banner. Nothing in the tree does; the claim was aspirational and made
+// the escape hatch look better supervised than it is. The surfaces that
+// DO report it are per-invocation: `chainsaw bundle verify` prints
+// "Signature: skipped …" and exits non-zero unless --allow-unverified,
+// and `doctor --offline` renders the same posture line.
 const BundleSkipVerifyEnvVar = "CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY"
 
 // BundleStrictVerifyEnvVar opts the loader into FULL Sigstore
@@ -359,7 +365,8 @@ func envTruthy(name string) bool {
 // Note the digest-only sidecars shipped today are NOT parseable as a
 // unified Sigstore bundle, so strict mode correctly rejects them: that
 // is the point — they are not authenticated yet. Dev/test bypass: set
-// CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY=1 (logged loudly on the proxy banner).
+// CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY=1 (reported per-invocation by
+// `chainsaw bundle verify` / `doctor --offline`; there is no proxy banner).
 func verifyBundleSignature(ctx context.Context, bundlePath string, digest []byte, identityRegexp, issuerURL string, strict bool) error {
 	sigPath := bundlePath + ".sigstore"
 	data, err := os.ReadFile(sigPath)
@@ -540,8 +547,26 @@ func (b *Bundle) Age() time.Duration {
 
 // Stale reports whether the bundle is older than BundleStaleAfter.
 // Doctor uses this to decide between green and amber.
+//
+// A manifest with no build_time is STALE, not fresh. Age() returns 0 for
+// a zero BuildTime (it has no honest answer to give), and 0 is the
+// FRESHEST possible duration — so dropping one optional field from the
+// manifest used to defeat the whole 180-day freshness gate for `bundle
+// verify` and `doctor --offline` alike, permanently and silently.
+// "Unknown age" is not "brand new"; the only safe reading of an
+// unanswerable freshness question is the one that prompts a refresh.
+//
+// Deliberately fixed HERE and not in LoadBundle: rejecting a zero
+// BuildTime at load time would be fail-closed in the wrong place —
+// cmd/chainsaw-proxy/offline.go treats any LoadBundle error as FATAL, so
+// it would turn a wrong readout into a proxy that refuses to boot for
+// every bundle already on disk without the field, including air-gapped
+// installs that cannot simply fetch a replacement.
 func (b *Bundle) Stale() bool {
 	if b == nil {
+		return true
+	}
+	if b.manifest.BuildTime.IsZero() {
 		return true
 	}
 	return b.Age() > BundleStaleAfter

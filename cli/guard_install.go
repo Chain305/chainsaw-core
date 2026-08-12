@@ -28,9 +28,66 @@ import (
 
 var npmInstallActions = map[string]bool{"install": true, "i": true, "add": true, "ci": true}
 
+// guardWrapperLong builds the help body shared by the five guard wrappers.
+// They are the free tier's front door — for most users `chainsaw npm install`
+// is the first Chainsaw command they ever run — so the help has to answer the
+// three questions that arrive with it: what does this actually check, does it
+// send anything anywhere, and what happens when it is wrong.
+//
+// tool is the wrapped binary ("npm"), verbs describes the guarded
+// subcommands in prose, and lockfile describes the no-named-package form
+// ("" when the tool has no lockfile sweep).
+func guardWrapperLong(tool, verbs, lockfile string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `Run %s with an install-time supply-chain check in front of it.
+
+Chainsaw evaluates the packages %s would install, refuses on a hit, and
+otherwise hands off to the real %s with your arguments untouched. Anything
+that is not an install verb (`, tool, tool, tool)
+	fmt.Fprintf(&b, "`%s build`, `%s run`, …) delegates immediately.\n\n", tool, tool)
+
+	fmt.Fprintf(&b, "Guarded: %s.\n", verbs)
+	if lockfile != "" {
+		fmt.Fprintf(&b, "%s\n", lockfile)
+	}
+
+	b.WriteString(`
+Offline by default. The bundled checks — typosquat detection and a
+known-malicious floor — run entirely on your machine and send nothing. For the
+full OpenSSF malicious-packages feed, run the opt-in ` + "`chainsaw guard update`" + `,
+which is the only networked step. Set CHAINSAW_OFFLINE=1 to refuse network
+access outright.
+
+Fails open by default: when a signal cannot be evaluated, Chainsaw prints a
+visible notice and lets the install proceed, so a thin feed never breaks your
+build. See ` + "`chainsaw guard coverage`" + ` to make that fail closed instead.
+
+Exit codes: 0 when the install proceeds (Chainsaw then returns the real tool's
+own exit code), 1 when Chainsaw refuses.
+
+` + "`--help` and every other flag are forwarded to " + tool + " untouched" + `, so
+` + "`chainsaw " + tool + " --help`" + ` shows ` + tool + `'s help, not this text. Use
+` + "`chainsaw help " + tool + "`" + ` to see this page.
+
+To make the check automatic, add the shell shims: ` + "`eval \"$(chainsaw guard init)\"`" + `.`)
+	return b.String()
+}
+
 var npmGuardCmd = &cobra.Command{
-	Use:                "npm [args...]",
-	Short:              "Run npm through Chainsaw — refuse malicious/typosquatted packages at install time",
+	Use:   "npm [args...]",
+	Short: "Run npm through Chainsaw — refuse malicious/typosquatted packages at install time",
+	Long:  guardWrapperLong("npm", "`npm install`, `npm i`, `npm add`, `npm ci`", "A bare `npm install` or `npm ci` (no named package) scans the whole\nresolved lockfile."),
+	Example: `  # check one package, then install it
+  chainsaw npm install lodash
+
+  # refuses: typosquat of "lodash"
+  chainsaw npm install lodahs
+
+  # scans every entry in package-lock.json
+  chainsaw npm ci
+
+  # not an install verb — delegates straight to npm
+  chainsaw npm run build`,
 	GroupID:            GrpGuard,
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
@@ -42,8 +99,16 @@ var npmGuardCmd = &cobra.Command{
 }
 
 var goGuardCmd = &cobra.Command{
-	Use:                "go [args...]",
-	Short:              "Run go through Chainsaw — refuse malicious/typosquatted modules at `go get`",
+	Use:   "go [args...]",
+	Short: "Run go through Chainsaw — refuse malicious/typosquatted modules at `go get`",
+	Long:  guardWrapperLong("go", "`go get`, `go install pkg@version`, `go run pkg@version`, `go mod download`", "`go mod download` with no named module scans go.sum. A local build\n(`go install ./...`, `go run .`) is not an install and delegates."),
+	Example: `  chainsaw go get github.com/sirupsen/logrus@v1.9.3
+
+  # Go 1.17+ binary install — also guarded
+  chainsaw go install github.com/x/tool@latest
+
+  # scans go.sum
+  chainsaw go mod download`,
 	GroupID:            GrpGuard,
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
@@ -55,8 +120,16 @@ var goGuardCmd = &cobra.Command{
 }
 
 var pipGuardCmd = &cobra.Command{
-	Use:                "pip [args...]",
-	Short:              "Run pip through Chainsaw — refuse malicious/typosquatted packages at install time",
+	Use:   "pip [args...]",
+	Short: "Run pip through Chainsaw — refuse malicious/typosquatted packages at install time",
+	Long:  guardWrapperLong("pip", "`pip install`", "`pip install -r requirements.txt` scans every pinned requirement."),
+	Example: `  chainsaw pip install requests
+
+  # refuses: typosquat of "requests"
+  chainsaw pip install reqeusts
+
+  # scans every entry in the requirements file
+  chainsaw pip install -r requirements.txt`,
 	GroupID:            GrpGuard,
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
@@ -68,8 +141,13 @@ var pipGuardCmd = &cobra.Command{
 }
 
 var cargoGuardCmd = &cobra.Command{
-	Use:                "cargo [args...]",
-	Short:              "Run cargo through Chainsaw — refuse malicious/typosquatted crates at install time",
+	Use:   "cargo [args...]",
+	Short: "Run cargo through Chainsaw — refuse malicious/typosquatted crates at install time",
+	Long:  guardWrapperLong("cargo", "`cargo install`", "`cargo install` with no named crate scans Cargo.lock."),
+	Example: `  chainsaw cargo install ripgrep
+
+  # not an install verb — delegates straight to cargo
+  chainsaw cargo build`,
 	GroupID:            GrpGuard,
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
@@ -83,6 +161,8 @@ var cargoGuardCmd = &cobra.Command{
 var gemGuardCmd = &cobra.Command{
 	Use:                "gem [args...]",
 	Short:              "Run gem through Chainsaw — refuse malicious/typosquatted gems at install time",
+	Long:               guardWrapperLong("gem", "`gem install`", ""),
+	Example:            `  chainsaw gem install rails`,
 	GroupID:            GrpGuard,
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
@@ -345,12 +425,10 @@ type specParser func(args []string) (specs []packageSpec, recognized bool)
 // runGuardedPassthrough is the wrapper core: parse → evaluate locally → block or
 // delegate to the real binary.
 func runGuardedPassthrough(bin string, args []string, parse specParser) error {
-	// Find the install verb even when flags precede it (chainsaw globals eaten
-	// off the front, or package-manager flags like `-q`); otherwise a leading
-	// flag would hide the install and let the package through unscanned. The
-	// real tool is still invoked with its own flags intact — only chainsaw's
-	// leading globals are stripped from the passthrough args.
-	parseArgs := stripLeadingFlagsForParse(args)
+	// Two different views of argv, and mixing them up is a guard bypass:
+	// guardSpecsFor evaluates the VERB-ANCHORED args (a leading flag must not
+	// hide the install verb), while the real tool is invoked with its own flags
+	// intact — only chainsaw's leading globals are stripped from passArgs.
 	passArgs := stripLeadingChainsawGlobals(args)
 
 	// Elegant, color-coded guard output. `tag` is a dim "chainsaw" brand prefix
@@ -377,16 +455,9 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	// otherwise swallows unparsed.
 	isQuiet := viper.GetBool("quiet") || envTruthy(os.Getenv("CHAINSAW_QUIET")) || quietFlagInArgs(os.Args)
 
-	specs, recognized := parse(parseArgs)
-	if recognized && len(specs) == 0 {
-		// No named packages (e.g. `npm install`/`npm ci` from a lockfile, or
-		// `pip install -r requirements.txt`) — scan the resolved tree.
-		if expanded := expandLockfile(bin, passArgs); len(expanded) > 0 {
-			specs = expanded
-			if !isQuiet {
-				fmt.Fprintf(os.Stderr, "%s  scanning %d packages from lockfile\n", tag, len(specs))
-			}
-		}
+	specs, recognized, fromLockfile := guardSpecsFor(bin, args, parse)
+	if fromLockfile && !isQuiet {
+		fmt.Fprintf(os.Stderr, "%s  scanning %d packages from lockfile\n", tag, len(specs))
 	}
 	if !recognized || len(specs) == 0 {
 		return execPassthrough(bin, passArgs)
@@ -438,6 +509,15 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 			// terminal control sequences before echoing — see sanitizeForTerminal.
 			fmt.Fprintf(os.Stderr, "%s  %s  %s — %s\n",
 				tag, c(ansiRed+ansiBold, "✗ blocked"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))), sanitizeForTerminal(v.Reason))
+		case strings.HasPrefix(v.Severity, serverSeverityPrefix):
+			// A server row below the block threshold (CHAINSAW_GUARD_SERVER_BLOCK_SEVERITY,
+			// default "high"). Still shown — the finding is true, it just doesn't
+			// earn a refusal — but it's an allow-line, so it's chatter under --quiet.
+			if !isQuiet {
+				fmt.Fprintf(os.Stderr, "%s  %s  %s — %s %s\n",
+					tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason),
+					c(ansiDim, "(server: "+strings.TrimPrefix(v.Severity, serverSeverityPrefix)+" — allowed)"))
+			}
 		case v.Severity == "typosquat-medium" || v.Severity == "behavioral-medium":
 			// Medium-confidence ALLOW warning is chatter — gated by --quiet.
 			if !isQuiet {
@@ -464,6 +544,32 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	}
 
 	return execPassthrough(bin, passArgs)
+}
+
+// guardSpecsFor resolves the set of packages one invocation is asking to
+// install: the named specs when the user typed some, otherwise the resolved
+// lockfile tree. fromLockfile reports which of the two produced the specs (the
+// caller prints a "scanning N packages from lockfile" notice for the latter).
+//
+// SECURITY: BOTH stages run on the VERB-ANCHORED args. Anchoring exists because
+// a guard subcommand runs with DisableFlagParsing, so any flag before the verb
+// (`npm -q ci`, `pip --disable-pip-version-check install -r req.txt`) shifts the
+// verb out of args[0]; the named-package parsers were fixed for this, the
+// lockfile expansion was not, and it was reading the PASSTHROUGH args — so one
+// leading tool flag silently disabled the entire lockfile scan while
+// `npm -q install evil@1.0.0` still blocked. Never hand this the passthrough
+// args; the real tool needs those (with its flags intact), the parsers do not.
+func guardSpecsFor(bin string, args []string, parse specParser) (specs []packageSpec, recognized, fromLockfile bool) {
+	parseArgs := stripLeadingFlagsForParse(args)
+	specs, recognized = parse(parseArgs)
+	if recognized && len(specs) == 0 {
+		// No named packages (e.g. `npm install`/`npm ci` from a lockfile, or
+		// `pip install -r requirements.txt`) — scan the resolved tree.
+		if expanded := expandLockfile(bin, parseArgs); len(expanded) > 0 {
+			return expanded, true, true
+		}
+	}
+	return specs, recognized, false
 }
 
 var runServerInstallPreflight = serverInstallPreflight
@@ -495,24 +601,77 @@ func serverInstallPreflight(ctx context.Context, specs []packageSpec) ([]guardVe
 		return nil, false, fmt.Sprintf("server vulnerability preflight unavailable (%v); continuing with offline guard", err)
 	}
 
+	threshold := serverBlockSeverity()
 	verdicts := make([]guardVerdict, 0, len(resp.Results))
 	var blocked bool
 	for i := range resp.Results {
 		r := resp.Results[i]
 		r.TriggeredConditions = deriveTriggeredConditions(r)
 		r.Severity = resolveHighestSeverity(r)
-		if r.Status != "vulnerable" && severityRank[r.Severity] < severityRank["high"] {
+		// Rank off the RESOLVED severity (an unrankable/blank one is rank 0, as
+		// before); firstNonEmpty is for the human-readable label only.
+		rank := severityRank[r.Severity]
+		severity := firstNonEmpty(r.Severity, "high")
+
+		// Block only on a row that is BOTH vulnerable AND at/above the
+		// threshold. The old predicate was `vulnerable OR >= high`, which
+		// (internal/server/scan.go sets Status="vulnerable" for ANY CVE, and
+		// resolveHighestSeverity defaults a blank severity to "low") hard-failed
+		// a signed-in user's install on a single LOW CVE anywhere in the tree —
+		// a false block on the paid path, and at odds with the local ladder
+		// ("BLOCK is reserved for coordinate-exact or corroborated evidence").
+		block := r.Status == "vulnerable" && rank >= severityRank[threshold]
+
+		// Exactly the set the OLD predicate blocked and the new one does not —
+		// surfaced as a NON-blocking warning rather than dropped, because going
+		// from "refuse" to "say nothing" would be its own regression: the row is
+		// a true statement about the package, it just no longer earns a refusal.
+		// Deliberately pinned to "high" rather than to the threshold, so nothing
+		// that was previously SILENT becomes noisy when an operator lowers it.
+		warn := !block && (r.Status == "vulnerable" || rank >= severityRank["high"])
+		if !block && !warn {
 			continue
 		}
-		blocked = true
+		if block {
+			blocked = true
+		}
 		verdicts = append(verdicts, guardVerdict{
 			Spec:     packageSpec{Ecosystem: "npm", Name: r.Name, Version: r.Version},
-			Block:    true,
-			Severity: "server-" + firstNonEmpty(r.Severity, "high"),
+			Block:    block,
+			Severity: serverSeverityPrefix + severity,
 			Reason:   serverPreflightReason(r),
 		})
 	}
 	return verdicts, blocked, ""
+}
+
+// serverSeverityPrefix marks a verdict as coming from the server preflight
+// rather than an offline signal; the install printer keys on it to render the
+// non-blocking rows as "! warning … (server: <sev> — allowed)".
+const serverSeverityPrefix = "server-"
+
+// serverBlockSeverityEnv lets an operator choose how aggressive the server
+// preflight is on the signed-in path. Default "high": block a vulnerable
+// package at high/critical, warn at medium/low. An operator who genuinely wants
+// "any CVE refuses the install" sets it to "low" — by choice, not by default.
+const serverBlockSeverityEnv = "CHAINSAW_GUARD_SERVER_BLOCK_SEVERITY"
+
+// serverBlockSeverity resolves the minimum severity a vulnerable package must
+// carry for the server preflight to BLOCK. Unrecognized values fall back to the
+// default and say so — silently treating a typo as "block everything" (or as
+// "block nothing") is the kind of surprise a security control cannot afford.
+func serverBlockSeverity() string {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(serverBlockSeverityEnv)))
+	if raw == "" {
+		return "high"
+	}
+	if _, ok := severityRank[raw]; !ok {
+		fmt.Fprintf(os.Stderr,
+			"chainsaw: %s=%q is not one of critical|high|medium|low|none — using \"high\"\n",
+			serverBlockSeverityEnv, raw)
+		return "high"
+	}
+	return raw
 }
 
 func serverPreflightReason(r scanResultItem) string {
@@ -558,7 +717,20 @@ func parseNpmInstall(args []string) ([]packageSpec, bool) {
 // parseNpmSpec turns "lodash", "lodash@4.17.21", or "@babel/core@7.24.0" into a
 // spec. The version is whatever follows the last "@" that isn't the leading
 // scope marker.
+//
+// Alias specs (`react@npm:electorn`, `react@npm:electorn@1.0.0`) resolve to the
+// package npm ACTUALLY installs, not the local alias. Evaluating the alias name
+// checks a name the registry never serves, and when the alias shadows a corpus
+// member (`react`) it also hands the install the typosquat exact-match
+// exemption — while npm writes electorn's code into node_modules/react. The
+// "@npm:" marker is located BEFORE the LastIndex("@") split precisely because
+// the pinned form carries two "@"s.
 func parseNpmSpec(arg string) packageSpec {
+	if i := strings.Index(arg, "@npm:"); i > 0 {
+		if target := arg[i+len("@npm:"):]; target != "" {
+			return parseNpmSpec(target)
+		}
+	}
 	name, version := arg, ""
 	if at := strings.LastIndex(arg, "@"); at > 0 {
 		name, version = arg[:at], arg[at+1:]
@@ -566,14 +738,39 @@ func parseNpmSpec(arg string) packageSpec {
 	return packageSpec{Ecosystem: "npm", Name: name, Version: version}
 }
 
-// parseGoGet recognizes `go get [flags] <module>...` (named modules) and
-// `go mod download` (no named modules → triggers go.sum lockfile scan).
+// parseGoGet recognizes `go get [flags] <module>...` (named modules),
+// `go install|run <module>@<version>` and `go mod download` (no named modules →
+// triggers the go.sum lockfile scan).
+//
+// Since Go 1.17, `go install pkg@version` is THE documented way to install a
+// binary (`go get` no longer installs one), so leaving it unrecognized meant the
+// most common Go install path ran entirely unguarded. `go run pkg@version`
+// fetches and EXECUTES a module, which is at least as dangerous.
+//
+// install/run are accepted ONLY when a bareword carries an @version: bare
+// `go install ./...` / `go run .` is a LOCAL build with nothing to fetch, and
+// must keep delegating with recognized=false so it never falls into the go.sum
+// expansion arm and scans the whole resolved tree for a local compile. For the
+// same reason only the @-carrying barewords become specs — `go run x@v1 foo bar`
+// passes program arguments after the module, and those are not package names.
 func parseGoGet(args []string) ([]packageSpec, bool) {
 	// `go mod download` — recognized with no specs so expandLockfile scans go.sum.
 	if len(args) >= 2 && args[0] == "mod" && args[1] == "download" {
 		return nil, true
 	}
-	if len(args) == 0 || args[0] != "get" {
+	if len(args) == 0 {
+		return nil, false
+	}
+	versionedOnly, firstOnly := false, false
+	switch args[0] {
+	case "get":
+	case "install", "run":
+		if !hasVersionedModuleArg(args[1:]) {
+			return nil, false // local build: delegate, don't expand a lockfile
+		}
+		versionedOnly = true
+		firstOnly = args[0] == "run" // everything after the module is program args
+	default:
 		return nil, false
 	}
 	var specs []packageSpec
@@ -585,9 +782,30 @@ func parseGoGet(args []string) ([]packageSpec, bool) {
 		if at := strings.LastIndex(a, "@"); at > 0 {
 			name, version = a[:at], a[at+1:]
 		}
+		if versionedOnly && version == "" {
+			continue
+		}
 		specs = append(specs, packageSpec{Ecosystem: "go", Name: name, Version: version})
+		if firstOnly {
+			break
+		}
 	}
 	return specs, true
+}
+
+// hasVersionedModuleArg reports whether any non-flag argument carries an
+// "@version" suffix — the signal that `go install` / `go run` is fetching a
+// remote module rather than building the local package.
+func hasVersionedModuleArg(args []string) bool {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		if at := strings.LastIndex(a, "@"); at > 0 && at+1 < len(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // cargoInstallActions are the cargo subcommands that fetch named crates.
@@ -691,6 +909,14 @@ func parseGemSpec(arg string) packageSpec {
 // expandLockfile resolves a no-named-package install into the full set of
 // pinned dependencies, reusing the pr-scan lockfile parsers. Offline (reads
 // files in the cwd / the requirements path).
+//
+// SECURITY: `args` MUST be the VERB-ANCHORED args (stripLeadingFlagsForParse's
+// output), never the passthrough args. Every arm below keys on args[0] being
+// the install verb, so a single package-manager flag in front of the verb
+// (`npm -q ci`) would make this return nil and skip the lockfile scan entirely
+// — a guard bypass, exactly the one stripLeadingFlagsForParse's docstring
+// describes for named packages. Anchoring is also strictly better for pip:
+// only the LEADING flag run is stripped, so a later `-r <file>` survives.
 //   - npm install | npm ci  → package-lock.json / npm-shrinkwrap.json / pnpm-lock.yaml / yarn.lock
 //   - pip install -r FILE    → the requirements file(s)
 //   - go get | go mod download → go.sum

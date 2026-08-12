@@ -1,10 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/chain305/chainsaw-core/provenance"
 )
@@ -103,5 +108,100 @@ func TestVerifyCmdHasRequiredArgs(t *testing.T) {
 	}
 	if err := cmd.Args(cmd, []string{"npm", "leftpad", "1.0.0"}); err != nil {
 		t.Errorf("expected success for 3 args, got %v", err)
+	}
+}
+
+// TestVerifyExitError pins the gate predicate: only a fully-VERIFIED
+// chain is exit 0. Everything else — MISSING (the common case; most
+// packages publish no attestation), UNVERIFIED, FAILED, UNAVAILABLE — is
+// ExitBlocked(1), which is what the command's help has always promised.
+//
+// Before the fix this contract held only on the human path: runVerify's
+// `if asJSON { return PrintJSONTo(...) }` returned BEFORE the status
+// switch, so `verify --json` (and any run under a global `--format json`)
+// exited 0 on every one of these statuses.
+func TestVerifyExitError(t *testing.T) {
+	cases := []struct {
+		status   provenance.Status
+		wantExit int // 0 == nil error
+	}{
+		{provenance.StatusVerified, 0},
+		{provenance.StatusMissing, ExitBlocked},
+		{provenance.StatusUnverified, ExitBlocked},
+		{provenance.StatusFailed, ExitBlocked},
+		{provenance.StatusUnavailable, ExitBlocked},
+		{provenance.Status("something-a-future-server-invents"), ExitBlocked},
+	}
+	for _, c := range cases {
+		t.Run(string(c.status), func(t *testing.T) {
+			err := verifyExitError(c.status)
+			if c.wantExit == 0 {
+				if err != nil {
+					t.Fatalf("status %q: want nil, got %v", c.status, err)
+				}
+				return
+			}
+			var coded *ExitCodeError
+			if !errors.As(err, &coded) {
+				t.Fatalf("status %q: want *ExitCodeError, got %T (%v)", c.status, err, err)
+			}
+			if coded.Code != c.wantExit {
+				t.Fatalf("status %q: exit code = %d, want %d", c.status, coded.Code, c.wantExit)
+			}
+		})
+	}
+}
+
+// TestVerifyJSONNeverWeakensExitCode is the structural regression test:
+// the SAME verification result must produce the SAME non-zero exit in
+// every rendering. Rendering is a display choice; it is not a verdict.
+//
+// runVerify itself needs a live Sigstore/registry call, so the test
+// drives renderAndGateVerify — literally the tail of runVerify, extracted
+// for exactly this reason — across bare / --json / --format json.
+func TestVerifyJSONNeverWeakensExitCode(t *testing.T) {
+	result := provenance.Result{Status: provenance.StatusMissing, Ecosystem: "npm"}
+
+	for _, mode := range []string{"bare", "--json", "--format json"} {
+		t.Run(mode, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "verify"}
+			cmd.Flags().Bool("json", false, "")
+			cmd.Flags().String("format", "table", "")
+			cmd.Flags().String("output", "", "")
+			switch mode {
+			case "--json":
+				_ = cmd.Flags().Set("json", "true")
+			case "--format json":
+				_ = cmd.Flags().Set("format", "json")
+			}
+			var buf bytes.Buffer
+			cmd.SetOut(&buf)
+			cmd.SetErr(&buf)
+			// PrintJSONTo writes through outWriter (os.Stdout, or the
+			// --output file), not cmd's writer, so route the envelope to
+			// a temp file via --output. That also exercises the reason
+			// the gate must not os.Exit: the file has to be flushed.
+			jsonPath := filepath.Join(t.TempDir(), "verify.json")
+			if mode != "bare" {
+				_ = cmd.Flags().Set("output", jsonPath)
+			}
+
+			err := renderAndGateVerify(cmd, "npm", "left-pad", "1.3.0", result)
+
+			var coded *ExitCodeError
+			if !errors.As(err, &coded) || coded.Code != ExitBlocked {
+				t.Fatalf("%s: MISSING provenance must exit %d regardless of format, got %v", mode, ExitBlocked, err)
+			}
+			if mode == "bare" {
+				return
+			}
+			body, rerr := os.ReadFile(jsonPath)
+			if rerr != nil {
+				t.Fatalf("%s: the JSON envelope must still be emitted alongside the failing gate: %v", mode, rerr)
+			}
+			if !strings.Contains(string(body), `"status": "missing"`) {
+				t.Errorf("%s: expected the JSON envelope, got:\n%s", mode, body)
+			}
+		})
 	}
 }

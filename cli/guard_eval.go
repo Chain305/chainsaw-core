@@ -94,7 +94,12 @@ func guardDBPath() string {
 //  2. the local cache file written by `chainsaw guard update` (opt-in, offline),
 //  3. the active signal bundle's "osv-malware" blob (if present).
 //
-// Returns (floor, extra) counts for the user-facing notice.
+// Returns (floor, extra) counts for the user-facing notice. `extra` is also the
+// evidence for the "full feed present" coverage claim, so it is counted more
+// strictly than the entries are loaded: every parseable source is MERGED into
+// the index (more known-malicious coordinates can only add blocks), but only a
+// source that could plausibly BE the full OpenSSF set, from a channel we trust,
+// counts toward `extra`. See guardMalwareFeedFloor.
 func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor, extra int) {
 	entries := malware.ParseOSVBlob(knownMaliciousSeed)
 	floor = len(entries)
@@ -103,14 +108,31 @@ func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor,
 		if data, err := os.ReadFile(path); err == nil {
 			more := malware.ParseOSVBlob(data)
 			entries = append(entries, more...)
-			extra += len(more)
+			if len(more) >= guardMalwareFeedFloor {
+				extra += len(more)
+			} else if len(more) > 0 {
+				// LOUD on purpose, and never suppressed by --quiet: this file is
+				// what an operator's `CHAINSAW_COVERAGE_REQUIRED=malware` gate
+				// hangs on. Silently accepting a 1-entry stub as "the full set"
+				// would flip a fail-closed gate from refuse to pass with no trace
+				// — the exact opposite of the loud break-glass path.
+				fmt.Fprintf(os.Stderr,
+					"chainsaw: WARNING — %s (%s) holds only %d known-malicious entries; the full OpenSSF set is ~200,000. "+
+						"Treating it as PARTIAL coverage (not the full feed); re-run `chainsaw guard update`.\n",
+					guardDBEnv, path, len(more))
+			}
 		}
 	}
 	if bundle != nil {
 		if data := bundle.File("osv-malware"); len(data) > 0 {
 			more := malware.ParseOSVBlob(data)
 			entries = append(entries, more...)
-			extra += len(more)
+			// Mirrors bundleCorpus: an UNVERIFIED bundle never underwrites a
+			// coverage claim. Its entries are still merged (they can only block
+			// more), but "the full feed is present" must ride a signature.
+			if bundle.Verified() && len(more) >= guardMalwareFeedFloor {
+				extra += len(more)
+			}
 		}
 	}
 
@@ -166,6 +188,16 @@ const guardTyposquatBlockRankCutoff = 2500
 // tiny corpus makes real popular packages look unpopular (and squattable),
 // so a suspiciously small blob is treated as absent, not authoritative.
 const guardBundleCorpusFloor = 500
+
+// guardMalwareFeedFloor is the minimum entry count for a known-malicious source
+// to count as "the full OpenSSF feed" for coverage purposes. Same reasoning as
+// guardBundleCorpusFloor, in the other direction: there, a tiny corpus makes
+// popular packages look squattable; here, a tiny feed file makes an operator's
+// fail-closed `CHAINSAW_COVERAGE_REQUIRED=malware` gate report satisfied when
+// almost nothing is actually indexed. The real dataset is ~230,000 entries, so
+// 1,000 is two orders of magnitude below any genuine copy and comfortably above
+// any hand-written fixture, truncated download, or stub.
+const guardMalwareFeedFloor = 1000
 
 // offlineTransport makes the typosquat fetcher fail any network call instantly
 // so corpus construction falls back to the embedded/static seed. The wrapper
@@ -379,25 +411,47 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	if d := g.detector(spec.Ecosystem); d != nil {
 		res := d.Check(ctx, spec.Ecosystem, spec.Name)
 		if res.IsSuspected {
-			reason := fmt.Sprintf("looks like a typosquat of %q (distance %d, %s)", res.SimilarTo, res.Distance, res.Method)
-			if res.TargetRank > 0 {
-				reason = fmt.Sprintf("looks like a typosquat of %q (distance %d, %s, target rank #%d)",
-					res.SimilarTo, res.Distance, res.Method, res.TargetRank)
-			}
 			// Verdict ladder, split by METHOD rather than the detector's flat
 			// confidence: the certainty gradient homoglyph > edit-d1-vs-top >
 			// edit-d1-vs-tail > d≥2/reorder is real, and only the first two
 			// earn a block. Corpus members never reach here (exact-match skip
 			// in the detector), so an edit-distance hit is by construction a
 			// name ABSENT from the popular corpus.
+			//
+			// DELIBERATE SILENCE at the bottom of the ladder. checkCombosquat
+			// returns IsSuspected with Confidence "low", which matches no arm
+			// below — no block, no warn, no telemetry — and that is CORRECT, not
+			// an oversight. Measured on this repo's own corpora (held-out real,
+			// popular packages: npm ranks 2501–5000, PyPI 1501–3000), a
+			// low-confidence combosquat fires on 274/2500 = 11.0% of npm and
+			// 184/1500 = 12.3% of PyPI names — @types/cacheable-request,
+			// @npmcli/node-gyp, lodash.mergewith, django-environ,
+			// tree-sitter-python. Warning on ~1 in 9 real packages would recreate
+			// the 2026-07 742-false-positive incident in warn form, and warn form
+			// is WORSE: warnings don't break builds, so they get tuned out —
+			// taking every real warning with them. Combosquat coverage is a
+			// priced-in gap in the bypass matrix, not a bug to "fix".
+			// TestGuardNeverWarnsOnLowConfidenceCombosquat pins this absence.
+			//
+			// The reason string is built INSIDE the arms that can emit it: at the
+			// low-confidence bottom of the ladder no verdict exists to carry it,
+			// and a string built for a verdict that can never be emitted reads to
+			// the next person as a dropped result.
+			reason := func() string {
+				if res.TargetRank > 0 {
+					return fmt.Sprintf("looks like a typosquat of %q (distance %d, %s, target rank #%d)",
+						res.SimilarTo, res.Distance, res.Method, res.TargetRank)
+				}
+				return fmt.Sprintf("looks like a typosquat of %q (distance %d, %s)", res.SimilarTo, res.Distance, res.Method)
+			}
 			switch {
 			case res.Method == "homoglyph" && res.Confidence == "high":
-				return guardVerdict{Spec: spec, Block: true, Severity: "typosquat-high", Reason: reason}
+				return guardVerdict{Spec: spec, Block: true, Severity: "typosquat-high", Reason: reason()}
 			case res.Method == "edit-distance" && res.Distance == 1 &&
 				res.TargetRank > 0 && res.TargetRank <= guardTyposquatBlockRankCutoff:
-				return guardVerdict{Spec: spec, Block: true, Severity: "typosquat-high", Reason: reason}
+				return guardVerdict{Spec: spec, Block: true, Severity: "typosquat-high", Reason: reason()}
 			case res.Confidence == "high" || res.Confidence == "medium":
-				pendingWarn = guardVerdict{Spec: spec, Block: false, Severity: "typosquat-medium", Reason: reason}
+				pendingWarn = guardVerdict{Spec: spec, Block: false, Severity: "typosquat-medium", Reason: reason()}
 			}
 		}
 	}

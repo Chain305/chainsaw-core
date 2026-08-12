@@ -35,6 +35,15 @@ func (p *iocscanProvider) Run(ctx context.Context, req Request, prior *Report) (
 	if !res.Detected {
 		return PartialReport{}, nil
 	}
+	// A Weak hit's only evidence is in the package's own tests, docs examples,
+	// or vendored third-party code. The field below is named MaliciousIOC and
+	// feeds risk scoring, and a URL inside an SSRF-protection test is not that
+	// — reporting it would propagate the same false positive the workstation
+	// guard now avoids. The workstation guard still surfaces it as a warning,
+	// so the indicator is not lost to the user who is actually installing.
+	if res.Weak {
+		return PartialReport{}, nil
+	}
 	return PartialReport{Scan: &ArtifactScanSection{
 		Performed:          true,
 		MaliciousIOC:       true,

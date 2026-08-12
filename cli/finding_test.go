@@ -180,15 +180,35 @@ func TestResolveSnoozeUntilValidation(t *testing.T) {
 		_ = cmd.Flags().Set("for", "0s")
 	})
 	t.Run("until_parses_rfc3339", func(t *testing.T) {
-		_ = cmd.Flags().Set("until", "2026-12-31T15:04:05Z")
+		// Computed rather than hard-coded: S13 added the future-timestamp
+		// check the doc comment always promised, so a literal calendar date
+		// would turn this into a time bomb the day it goes past.
+		want := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+		_ = cmd.Flags().Set("until", want.Format(time.RFC3339))
 		_ = cmd.Flags().Set("for", "0s")
 		ts, err := resolveSnoozeUntil(cmd)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		want := time.Date(2026, 12, 31, 15, 4, 5, 0, time.UTC)
 		if !ts.Equal(want) {
 			t.Errorf("want %v got %v", want, ts)
+		}
+		_ = cmd.Flags().Set("until", "")
+	})
+	// S13 — resolveSnoozeUntil's doc comment says "the server requires a
+	// future RFC3339 stamp so we surface that contract eagerly rather than
+	// waiting for the 400", but the --until branch only called time.Parse.
+	// `--until 2020-01-01T00:00:00Z` round-tripped to the server and came
+	// back as exactly the 400 the comment claimed was pre-empted.
+	t.Run("until_rejects_past_timestamp", func(t *testing.T) {
+		_ = cmd.Flags().Set("until", "2020-01-01T00:00:00Z")
+		_ = cmd.Flags().Set("for", "0s")
+		_, err := resolveSnoozeUntil(cmd)
+		if err == nil {
+			t.Fatal("expected an error for a past --until")
+		}
+		if !strings.Contains(err.Error(), "future") {
+			t.Errorf("error should say the timestamp must be in the future, got: %v", err)
 		}
 		_ = cmd.Flags().Set("until", "")
 	})

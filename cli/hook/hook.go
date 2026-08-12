@@ -73,6 +73,19 @@ type WireOpts struct {
 	// Scope selects the config file location. Empty string is treated as
 	// ScopeUser for backwards compatibility.
 	Scope Scope
+	// Notify, when non-nil, receives human-readable advisories the manager
+	// wants the user to see: a backup path, a file mode tightened because
+	// the block now carries a secret, a GOFLAGS token that was dropped.
+	// Nil discards them, so library callers and tests need not set it.
+	Notify func(msg string)
+}
+
+// notify sends a formatted advisory to opts.Notify when one is configured.
+func (o WireOpts) notify(format string, args ...any) {
+	if o.Notify == nil {
+		return
+	}
+	o.Notify(fmt.Sprintf(format, args...))
 }
 
 // Status describes a manager's configuration at a point in time.
@@ -80,6 +93,14 @@ type Status struct {
 	ConfigPath string
 	Wired      bool
 	Installed  bool
+	// Stale is only meaningful on a Status produced by StatusFor: it
+	// reports that a chainsaw block is present but its body no longer
+	// matches what the current settings would render (H11) — e.g. a
+	// decommissioned server, an old org slug, or a `go env -w` that
+	// rewrote a line inside our block.
+	Stale bool
+	// StaleReason explains a Stale=true result in one line.
+	StaleReason string
 }
 
 // Common errors returned by Manager implementations.
@@ -104,6 +125,25 @@ func All() []Manager {
 		goModManager{},
 		dockerManager{},
 	}
+}
+
+// ConfigPathsForScope returns EVERY file the manager writes for the given
+// scope. Managers write one file each, except sbt, which needs three
+// (repositories, credentials and the coursier env snippet).
+//
+// Callers that reason about the files on disk — for instance the .gitignore
+// guard for project-scope installs that embed a client secret — must use this
+// rather than ConfigPathForScope, or they will miss two of sbt's three.
+func ConfigPathsForScope(m Manager, scope Scope) ([]string, error) {
+	if r, ok := m.(repairable); ok {
+		paths, _, err := r.repairTargets(scope)
+		return paths, err
+	}
+	p, err := m.ConfigPathForScope(scope)
+	if err != nil {
+		return nil, err
+	}
+	return []string{p}, nil
 }
 
 // ByName looks up a manager by its short name. Returns an error if the name

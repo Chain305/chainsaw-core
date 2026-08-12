@@ -98,6 +98,47 @@ func encodeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+// emitAndGate renders v in the resolved result format, then ALWAYS applies
+// gate. Choosing a machine-readable format is a rendering decision; it must
+// never weaken a verdict.
+//
+// This exists because four commands (scan-remote, bundle verify, admission
+// soak clear, doctor) each grew the same bug independently: `if useJSON(cmd)
+// { return PrintJSONTo(cmd, v) }` returns BEFORE the exit-code gate, so
+// adding --json to a CI invocation silently turned a failing gate green.
+// Four structural properties make that class unreintroducible here:
+//
+//  1. gate is the LAST statement and is reached on every non-error path.
+//     There is no `return` between rendering and gating to re-introduce.
+//  2. gate returns an error — it never calls os.Exit. Three of the four
+//     original sites exited directly, which also skipped telemetry flush
+//     and the update notice in Execute().
+//  3. A RENDER error aborts before the gate. An unwritable --output file is
+//     an operational failure and must surface as one; emitting a verdict
+//     computed against a result nobody received would be worse than either
+//     outcome alone.
+//  4. The gate PREDICATE stays at the call site. Every command's verdict
+//     differs (critical/high counts, attestation presence, Cleared, check
+//     outcomes) — this centralizes the SHAPE, not the predicate.
+//
+// human may be nil (nothing to print outside JSON mode); gate may be nil
+// (the command has no verdict).
+func emitAndGate(cmd *cobra.Command, v any, human func() error, gate func() error) error {
+	if useJSON(cmd) {
+		if err := PrintJSONTo(cmd, v); err != nil {
+			return err
+		}
+	} else if human != nil {
+		if err := human(); err != nil {
+			return err
+		}
+	}
+	if gate == nil {
+		return nil
+	}
+	return gate()
+}
+
 // PrintTable writes a plain-text table with aligned columns to stdout.
 // headers and each row must have the same length.
 //
@@ -157,11 +198,22 @@ func PrintTable(headers []string, rows [][]string) {
 	}
 }
 
-// Fatalf prints msg to stderr and exits 1.
-func Fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
-	os.Exit(1)
-}
+// R13 — the exported Fatalf was DELETED here, deliberately.
+//
+// It printed "error: …" to stderr and called os.Exit(1). exitcodes.go
+// reserves 1 for ExitBlocked, "the EXPECTED enforcement outcome", so any
+// future caller would have made a CI block-gate (`if [ $? -eq 1 ]`) fire on
+// a plain operational error — the exact confusion the 0–4 contract exists to
+// prevent. It had zero callers repo-wide (verified before removal), so this
+// is an unused-API removal, not a behaviour change; it is noted as such in
+// the release notes because core/cli is a PUBLIC open-core module.
+//
+// Errors belong in a RunE return: Execute() classifies them and picks the
+// right code. A command that needs a specific one returns &ExitCodeError{}.
+//
+// NOT changed, and not a defect: doctorExitDrift = 10 (doctor_strict.go) and
+// the other >=10 constants. exitcodes.go explicitly reserves codes >=10 for
+// per-command outcomes, so those live outside the shared block by design.
 
 func noColor(cmd *cobra.Command) bool {
 	b, _ := cmd.Flags().GetBool("no-color")
@@ -234,9 +286,13 @@ func outWriterOr(cmd *cobra.Command, fallback io.Writer) io.Writer {
 	}
 	f, err := os.Create(path)
 	if err != nil {
-		if verbose(cmd) {
-			fmt.Fprintf(os.Stderr, "chainsaw: cannot open --output %q (%v); writing results to stdout\n", path, err)
-		}
+		// R4: this warning used to be gated on --verbose, so
+		// `chainsaw status --json -o /nonexistent-dir/x` exited 0 with NO
+		// indication at all that the file the user asked for was never
+		// created. "The path you named is unwritable" is not diagnostic
+		// chatter; it is the outcome of an explicit instruction. Always
+		// print it — on stderr, so a redirected result stays parseable.
+		fmt.Fprintf(os.Stderr, "chainsaw: cannot open --output %q (%v); writing results to stdout\n", path, err)
 		return fallback
 	}
 	return f
@@ -254,13 +310,78 @@ func quiet(cmd *cobra.Command) bool {
 }
 
 // verbose reports whether extra diagnostic detail should be emitted (to
-// stderr). Flag beats env: --verbose wins, then CHAINSAW_VERBOSE. Mirrors the
-// many existing os.Getenv("CHAINSAW_VERBOSE") gates so behaviour is consistent.
+// stderr). Flag beats env: --verbose wins, then CHAINSAW_VERBOSE.
 func verbose(cmd *cobra.Command) bool {
 	if b, _ := cmd.Flags().GetBool("verbose"); b {
 		return true
 	}
-	return viper.GetBool("verbose") || os.Getenv("CHAINSAW_VERBOSE") != ""
+	return verboseEnabled()
+}
+
+// verboseEnabled is the command-less form of verbose(), for the support
+// diagnostics that run outside a cobra RunE (initConfig, the keychain
+// migration, the legacy-config move).
+//
+// R7: those five sites tested `os.Getenv("CHAINSAW_VERBOSE") != ""`, which
+// had two consequences. (a) The --verbose FLAG could not reach them at all,
+// leaving the flag with exactly one observable behaviour in the whole CLI —
+// so `chainsaw --verbose --token X status` stayed silent while
+// `CHAINSAW_VERBOSE=1 chainsaw --token X status` printed the diagnostic.
+// (b) It is a PRESENCE test, so `CHAINSAW_VERBOSE=0` and
+// `CHAINSAW_VERBOSE=false` both ENABLED verbose — the opposite of what an
+// operator writing =0 means.
+//
+// viper.GetBool("verbose") covers the flag (BindPFlag), the config file,
+// and the CHAINSAW_QUIET-style BindEnv; envTruthy re-reads the env var with
+// the same 1/true/yes/on vocabulary the rest of the CLI uses, so =0 and
+// =false correctly mean OFF.
+func verboseEnabled() bool {
+	return viper.GetBool("verbose") || envTruthy(os.Getenv("CHAINSAW_VERBOSE"))
+}
+
+// chatter writes a progress/status line to stderr unless --quiet (or
+// CHAINSAW_QUIET) is in effect.
+//
+// R14: --quiet is documented as a global chatter switch but had two
+// consumers outside the guard, so `chainsaw --quiet audit export …` still
+// printed "Fetching audit events…". Route progress through here instead of
+// a bare Fprintln so the flag means what it says.
+//
+// INVARIANT (guard_quiet_invariant_test.go): --quiet suppresses CHATTER
+// only. A block verdict, the refusal summary, and the exit code are NEVER
+// routed through this helper — they must print under --quiet.
+func chatter(cmd *cobra.Command, format string, args ...any) {
+	if cmd == nil || quiet(cmd) {
+		return
+	}
+	if !strings.HasSuffix(format, "\n") {
+		format += "\n"
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), format, args...)
+}
+
+// noColorFlagInArgs reports whether chainsaw's own --no-color global
+// appears in argv before a guard subcommand.
+//
+// R6: the guard wrappers run with DisableFlagParsing, so cobra never parses
+// (and therefore never binds) --no-color on that path. Mirrors
+// quietFlagInArgs in guard_install.go, including its fail-safe scoping: the
+// scan stops at the guard subcommand name or `--`, so a wrapped tool's own
+// --no-color (`chainsaw npm install --no-color`) is NOT read as chainsaw's.
+// Only the long form is matched — there is no short alias for --no-color,
+// and claiming one from a wrapped tool's short bundle would be wrong.
+func noColorFlagInArgs(argv []string) bool {
+	guardSubcmds := map[string]bool{"npm": true, "pip": true, "go": true, "cargo": true, "gem": true}
+	for i := 1; i < len(argv); i++ {
+		tok := argv[i]
+		if tok == "--" || guardSubcmds[tok] {
+			return false
+		}
+		if tok == "--no-color" || tok == "--no-color=true" {
+			return true
+		}
+	}
+	return false
 }
 
 func printSuccess(w io.Writer, cmd *cobra.Command, msg string) {

@@ -439,7 +439,12 @@ func ensureFormatFlags(t *testing.T) {
 		scanCmd.Flags().String("format", "table", "")
 	}
 	if scanCmd.Flags().Lookup("output") == nil {
-		scanCmd.Flags().String("output", "", "")
+		// StringP with the `o` shorthand, matching root's persistent
+		// declaration exactly. A shorthand-less local `output` is the S10
+		// defect shape, and registering one here on the SHARED scanCmd made
+		// TestEveryCommandResolvesDashOToOutput trip on test pollution rather
+		// than on a real bug.
+		scanCmd.Flags().StringP("output", "o", "", "")
 	}
 	t.Cleanup(func() {
 		_ = scanCmd.Flags().Set("format", "table")

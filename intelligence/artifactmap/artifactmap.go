@@ -82,6 +82,20 @@ const (
 	// PerFileCap caps the bytes we read out of a single archive entry.
 	// Matches the historical maxManifestFileBytes.
 	PerFileCap = 2 * 1024 * 1024
+	// MaxRetainedBytes caps the total DECOMPRESSED bytes we retain across
+	// every entry. Without it the other three caps leave a decompression
+	// bomb wide open: MaxArtifactBytes bounds only the COMPRESSED input,
+	// so retention was bounded solely by MaxFiles × PerFileCap = 20 GiB.
+	// Measured: a 4,224,023-byte .tgz of 2,000 × 2 MiB entries drove
+	// 4,578,213,888 bytes of max RSS in 2.96s — an OOM kill, on the install
+	// hot path for the guard and on a shared multi-tenant proxy server-side.
+	//
+	// Deliberately generous, and deliberately equal to MaxArtifactBytes: we
+	// never retain more than we were willing to ingest. A tighter cap
+	// silently truncates real packages (large ML wheels, bundled binaries)
+	// and costs behavioral coverage, which is the worse failure for a
+	// detection tool.
+	MaxRetainedBytes = 256 * 1024 * 1024
 )
 
 // Options tunes a Build. Zero values fall back to the constants above.
@@ -89,6 +103,9 @@ type Options struct {
 	MaxArtifactBytes int64
 	MaxFiles         int
 	PerFileCap       int64
+	// MaxRetainedBytes caps the sum of retained file bytes (Result.TotalBytes).
+	// Once it is reached Build stops adding entries and sets Truncated.
+	MaxRetainedBytes int64
 }
 
 func (o Options) normalize() Options {
@@ -100,6 +117,9 @@ func (o Options) normalize() Options {
 	}
 	if o.PerFileCap <= 0 {
 		o.PerFileCap = PerFileCap
+	}
+	if o.MaxRetainedBytes <= 0 {
+		o.MaxRetainedBytes = MaxRetainedBytes
 	}
 	return o
 }
@@ -117,6 +137,10 @@ type Result struct {
 // Build consumes artifact bytes once and returns the populated map.
 // Unknown archive formats yield an empty map rather than an error so
 // callers can degrade gracefully to "nothing to say".
+//
+// Retention is bounded by MaxRetainedBytes: the walk stops (Truncated=true)
+// at the first entry that would start past the cap, so TotalBytes can
+// overshoot by at most one PerFileCap.
 func Build(payload []byte, opts Options) Result {
 	opts = opts.normalize()
 	res := Result{Files: ArtifactFileMap{}}
@@ -168,7 +192,7 @@ func buildFromTar(r io.Reader, opts Options, res *Result) {
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
 			continue
 		}
-		if len(res.Files) >= opts.MaxFiles {
+		if len(res.Files) >= opts.MaxFiles || res.TotalBytes >= opts.MaxRetainedBytes {
 			res.Truncated = true
 			return
 		}
@@ -193,7 +217,7 @@ func buildFromZip(payload []byte, opts Options, res *Result) {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		if len(res.Files) >= opts.MaxFiles {
+		if len(res.Files) >= opts.MaxFiles || res.TotalBytes >= opts.MaxRetainedBytes {
 			res.Truncated = true
 			return
 		}

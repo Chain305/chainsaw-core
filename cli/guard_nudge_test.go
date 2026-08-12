@@ -407,3 +407,27 @@ func TestEnsureGuardConsent_InteractiveDefaultsYes(t *testing.T) {
 		t.Fatalf("explicit n should decline, got %q", got)
 	}
 }
+
+// TestEnvTruthyMatchesTheRestOfTheCodebase pins G9. envTruthy is how the guard
+// reads the CHAINSAW_OFFLINE umbrella and the telemetry kill switch (seven call
+// sites), and it used to be an EXACT-match switch with no TrimSpace/ToLower —
+// stricter than intelligence.IsOffline and coverage.isTruthy, which both do
+// ToLower(TrimSpace(v)). So `CHAINSAW_OFFLINE=Yes`, `=On`, or a value with a
+// trailing space from a dotfile meant offline everywhere EXCEPT the guard: the
+// box would still offer a network feed fetch and prompt for telemetry consent.
+func TestEnvTruthyMatchesTheRestOfTheCodebase(t *testing.T) {
+	truthy := []string{
+		"1", "true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON", "On",
+		" 1", "1 ", " true ", "\tyes\n", "  On  ",
+	}
+	for _, v := range truthy {
+		if !envTruthy(v) {
+			t.Errorf("envTruthy(%q) = false, want true (must match intelligence.IsOffline / coverage.isTruthy)", v)
+		}
+	}
+	for _, v := range []string{"", "0", "false", "no", "off", "maybe", "onward", "yesterday"} {
+		if envTruthy(v) {
+			t.Errorf("envTruthy(%q) = true, want false", v)
+		}
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -65,11 +67,27 @@ func stringFromBody(m map[string]any, k string) string {
 	return ""
 }
 
+// setViperServer points the CLI at a stub server for the duration of a test.
+//
+// It sets a token as well as the URL. Every caller exercises an
+// authenticated subcommand, and newClient() now refuses before the network
+// call when no token is configured (X4 — a missing credential is
+// ExitConfigAuth(3), not an opaque 401 rendered as an operational failure).
+// A URL-only fixture modelled "server configured, no credentials", which is
+// a state these tests never meant to exercise: the stub server does not
+// check Authorization, so the token's only job is to get past the preflight
+// the real CLI performs. Tests that specifically want the unauthenticated
+// path should clear the token themselves rather than relying on this helper.
 func setViperServer(t *testing.T, url string) {
 	t.Helper()
-	prev := viper.GetString("server_url")
+	prevURL := viper.GetString("server_url")
+	prevToken := viper.GetString("token")
 	viper.Set("server_url", url)
-	t.Cleanup(func() { viper.Set("server_url", prev) })
+	viper.Set("token", "test-token")
+	t.Cleanup(func() {
+		viper.Set("server_url", prevURL)
+		viper.Set("token", prevToken)
+	})
 }
 
 // TestExceptionCreate_DaysFlagPopulatesExpiresAt verifies that
@@ -437,4 +455,145 @@ func newExceptionDeleteCmdForTest() *cobra.Command {
 	c.Flags().Bool("yes", false, "")
 	c.Flags().Bool("dry-run", false, "")
 	return c
+}
+
+// TestExceptionCreate_FromFileExpiryIsNotClobbered is P6.
+//
+// The --from-file branch documents "Empty flag values do not clobber
+// file-supplied keys", but the expiry was computed BEFORE the branch and
+// stamped unconditionally after it, and resolveExceptionExpiry's default
+// arm never returned the zero time. So a template declaring a one-day
+// exception was silently rewritten to thirty — the exception that most
+// needed a short fuse got the longest one, and a reviewed exception
+// template could never encode its own expiry.
+//
+// Direction of the fix is TIGHTENING: previously-30-day exceptions
+// created from a file now expire when the file says they do.
+func TestExceptionCreate_FromFileExpiryIsNotClobbered(t *testing.T) {
+	fileExpiry := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second).Format(time.RFC3339)
+
+	t.Run("file expiry survives when no expiry flag is passed", func(t *testing.T) {
+		srv, captured := captureCreateBody(t)
+		t.Cleanup(srv.Close)
+		setViperServer(t, srv.URL)
+
+		path := filepath.Join(t.TempDir(), "exc.json")
+		body := `{"repository":"npm-proxy","package":"left-pad","version":"1.3.0","expires_at":"` + fileExpiry + `"}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := newExceptionCreateCmdForTest()
+		cmd.SetArgs([]string{"--from-file", path})
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v\n%s", err, buf.String())
+		}
+
+		got := stringFromBody(*captured, "expires_at")
+		if got != fileExpiry {
+			t.Fatalf("file-supplied expires_at was overwritten: sent %q, file said %q", got, fileExpiry)
+		}
+	})
+
+	t.Run("an explicit flag still wins over the file", func(t *testing.T) {
+		srv, captured := captureCreateBody(t)
+		t.Cleanup(srv.Close)
+		setViperServer(t, srv.URL)
+
+		path := filepath.Join(t.TempDir(), "exc.json")
+		body := `{"repository":"npm-proxy","package":"left-pad","version":"1.3.0","expires_at":"` + fileExpiry + `"}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := newExceptionCreateCmdForTest()
+		cmd.SetArgs([]string{"--from-file", path, "--days", "3"})
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v\n%s", err, buf.String())
+		}
+
+		raw := stringFromBody(*captured, "expires_at")
+		if raw == fileExpiry {
+			t.Fatal("--days 3 on this invocation must override the file's expiry")
+		}
+		parsed, perr := time.Parse(time.RFC3339, raw)
+		if perr != nil {
+			t.Fatalf("expires_at not RFC3339 (%q): %v", raw, perr)
+		}
+		if d := time.Until(parsed); d < 3*24*time.Hour-time.Minute || d > 3*24*time.Hour+time.Minute {
+			t.Fatalf("--days 3 expected ~3 days out, got %v", d)
+		}
+	})
+
+	t.Run("a file with no expiry still gets the 30-day default", func(t *testing.T) {
+		srv, captured := captureCreateBody(t)
+		t.Cleanup(srv.Close)
+		setViperServer(t, srv.URL)
+
+		path := filepath.Join(t.TempDir(), "exc.json")
+		if err := os.WriteFile(path, []byte(`{"repository":"npm-proxy","package":"left-pad","version":"1.3.0"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := newExceptionCreateCmdForTest()
+		cmd.SetArgs([]string{"--from-file", path})
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v\n%s", err, buf.String())
+		}
+
+		raw := stringFromBody(*captured, "expires_at")
+		parsed, perr := time.Parse(time.RFC3339, raw)
+		if perr != nil {
+			t.Fatalf("the default must still fill a genuine gap; expires_at=%q err=%v", raw, perr)
+		}
+		if d := time.Until(parsed); d < defaultExceptionDays*24*time.Hour-time.Minute {
+			t.Fatalf("expected the ~%d-day default, got %v", defaultExceptionDays, d)
+		}
+	})
+}
+
+// TestResolveExceptionExpiryReportsExplicitRequest pins the distinction
+// the timestamp alone cannot carry: "the operator asked for 30 days" vs
+// "nobody said anything, so here is 30 days". Only the former may
+// overwrite a --from-file value.
+func TestResolveExceptionExpiryReportsExplicitRequest(t *testing.T) {
+	cases := []struct {
+		name        string
+		args        []string
+		wantRequest bool
+		wantZero    bool
+	}{
+		{"no flags", nil, false, false},
+		{"--days 7", []string{"--days", "7"}, true, false},
+		{"--days 0 (explicit opt-out)", []string{"--days", "0"}, true, true},
+		{"--expires 48h", []string{"--expires", "48h"}, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := newExceptionCreateCmdForTest()
+			cmd.SetArgs(c.args)
+			if err := cmd.ParseFlags(c.args); err != nil {
+				t.Fatalf("parse flags: %v", err)
+			}
+			got, requested, err := resolveExceptionExpiry(cmd)
+			if err != nil {
+				t.Fatalf("resolveExceptionExpiry: %v", err)
+			}
+			if requested != c.wantRequest {
+				t.Errorf("explicitly-requested = %v, want %v", requested, c.wantRequest)
+			}
+			if got.IsZero() != c.wantZero {
+				t.Errorf("zero time = %v, want %v", got.IsZero(), c.wantZero)
+			}
+		})
+	}
 }

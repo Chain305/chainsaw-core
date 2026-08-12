@@ -116,7 +116,7 @@ Exit codes:
 	cmd.Flags().String("head", "HEAD", "Head git ref or SHA to diff to (default: HEAD)")
 	cmd.Flags().String("repo-path", ".", "Path to the git repository")
 	cmd.Flags().Bool("json", false, "Emit JSON output")
-	cmd.Flags().String("output-file", "", "Write the JSON report to this path (implies --json)")
+	cmd.Flags().String("output-file", "", "Write the report to this path (JSON by default; SARIF with --format=sarif)")
 	cmd.Flags().Bool("strict", false, "Escalate warnings to blocking (exit 20 instead of 10)")
 	_ = cmd.MarkFlagRequired("base")
 	rootCmd.AddCommand(cmd)
@@ -153,7 +153,23 @@ func runPRScan(cmd *cobra.Command, _ []string) error {
 	// only by --format=sarif; it is mutually exclusive with the legacy JSON
 	// (--json / --output-file) and text paths, which stay byte-compatible.
 	if resolveFormat(cmd) == "sarif" {
-		if err := writePRScanSARIF(outWriter(cmd), report); err != nil {
+		// C10: --output-file is pr-scan's OWN flag; the persistent --output that
+		// outWriter honours is a different one. Before this, `--format=sarif
+		// --output-file results.sarif` wrote the document to stdout, created no
+		// file, and reported success — the following upload-sarif step then
+		// failed on a missing file or uploaded a stale artifact. Render into a
+		// buffer and write the file explicitly: runPRScan ends in os.Exit for a
+		// non-zero verdict, which skips deferred Close, so a deferred file
+		// handle here would truncate the very document CI consumes.
+		if outputFile != "" {
+			var buf bytes.Buffer
+			if err := writePRScanSARIF(&buf, report); err != nil {
+				return fmt.Errorf("write sarif: %w", err)
+			}
+			if err := os.WriteFile(outputFile, buf.Bytes(), 0o644); err != nil {
+				return fmt.Errorf("write output file: %w", err)
+			}
+		} else if err := writePRScanSARIF(outWriter(cmd), report); err != nil {
 			return fmt.Errorf("write sarif: %w", err)
 		}
 	} else {
@@ -201,8 +217,14 @@ func buildPRScanReport(baseSHA, headSHA, absRepo string) (prScanReport, int, err
 		Upgraded: []prScanEntry{},
 	}
 
+	// C5: compare against the MERGE BASE, not the base tip, so the report
+	// describes what this PR changed rather than what base changed underneath
+	// it. report.Base keeps the caller's --base for identity; diffBase is the
+	// commit both the file list and the base CONTENT reads are taken from.
+	diffBase := prScanDiffBase(absRepo, baseSHA, headSHA)
+
 	// Find changed manifest/lockfile paths.
-	changedFiles, err := gitDiffFiles(absRepo, baseSHA, headSHA)
+	changedFiles, err := gitDiffFiles(absRepo, diffBase, headSHA)
 	if err != nil {
 		return report, prScanExitOK, fmt.Errorf("git diff: %w", err)
 	}
@@ -217,12 +239,22 @@ func buildPRScanReport(baseSHA, headSHA, absRepo string) (prScanReport, int, err
 			continue
 		}
 
-		baseContent, _ := gitFileAtRef(absRepo, baseSHA, rel)
+		baseContent, _ := gitFileAtRef(absRepo, diffBase, rel)
 		// baseContent may be nil — file newly created at head.
 
 		headContent, err := gitFileAtRef(absRepo, headSHA, rel)
-		if err != nil || headContent == nil {
-			// File removed or unreadable — skip (removals are risk-reduction).
+		if err != nil {
+			// C1: a REAL git failure on a monitored path that the diff says
+			// changed is not the same thing as a removal. We cannot know what
+			// the PR did to this manifest, so it must count against the exit
+			// code exactly like a parse failure — never a silent exit 0.
+			fmt.Fprintf(os.Stderr, "pr-scan: read %s at head: %v\n", rel, err)
+			parseFailures++
+			continue
+		}
+		if headContent == nil {
+			// File genuinely absent at head — removed by this PR. Removals are
+			// risk-reduction, so there is nothing to evaluate.
 			continue
 		}
 
@@ -282,9 +314,17 @@ func buildPRScanReport(baseSHA, headSHA, absRepo string) (prScanReport, int, err
 }
 
 // resolveRef converts any git ref (branch name, tag, HEAD~N, full SHA, etc.)
-// to a canonical full-length SHA by running `git rev-parse`.
+// to a canonical full-length commit SHA by running `git rev-parse`.
+//
+// C14: --end-of-options stops a user-supplied --base/--head that starts with
+// "-" from being parsed as a rev-parse OPTION. Without it, `--base
+// --show-toplevel` printed a path, resolveRef's only check ("non-empty") passed,
+// and that path flowed into the diff as if it were a SHA. --verify + ^{commit}
+// tightens the contract further: the ref must resolve to exactly one commit, so
+// the Action's silent shallow-checkout failure (base.sha absent from a
+// fetch-depth:1 clone) becomes a clear error instead of a confusing diff.
 func resolveRef(repoPath, ref string) (string, error) {
-	out, err := runGit(repoPath, "rev-parse", ref)
+	out, err := runGit(repoPath, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
 	if err != nil {
 		return "", err
 	}
@@ -295,18 +335,60 @@ func resolveRef(repoPath, ref string) (string, error) {
 	return sha, nil
 }
 
-// gitDiffFiles returns the list of files that differ between base and head
-// (using `git diff --name-only`). Both args must be resolved SHAs or valid refs.
+// prScanDiffBase resolves the commit a PR should be compared AGAINST: the merge
+// base of base and head.
+//
+// C5: pr-scan used to diff base's TIP against head (two-dot). That reports every
+// change made on base since the branch forked as though the PR made it —
+// verified in the wild as "lodash upgraded 4.17.21 → 4.17.20", a downgrade the
+// PR never touched, and symmetrically it hides a dependency added to base after
+// the fork point. GitHub's "Files changed" (and every other PR review surface)
+// is three-dot / merge-base.
+//
+// This returns the base COMMIT rather than composing a `base...head` diff
+// expression on purpose: buildPRScanReport also reads each manifest's base
+// CONTENT with `git show <base>:<path>`, and that read has to move to the merge
+// base too. Fixing only the file list would leave the version numbers wrong.
+//
+// A shallow clone (actions/checkout's default fetch-depth: 1) may not have the
+// merge base in its object store. Rather than hard-fail the gate, fall back to
+// the caller's base and say so — a noisier report beats no report — with the
+// one-line fix named.
+func prScanDiffBase(repoPath, base, head string) string {
+	out, err := runGit(repoPath, "merge-base", base, head)
+	if err == nil {
+		if sha := strings.TrimSpace(out); sha != "" {
+			return sha
+		}
+	}
+	fmt.Fprintf(os.Stderr, "pr-scan: could not compute the merge base of %s and %s (%v); "+
+		"comparing against the base tip instead — the report may list changes this PR "+
+		"did not make. Add `fetch-depth: 0` to the checkout step to fix.\n",
+		base, head, err)
+	return base
+}
+
+// gitDiffFiles returns the list of files that differ between base and head.
+//
+// C1: -z is mandatory. git's default core.quotePath=true wraps any path with a
+// non-ASCII, control, or quote byte in literal double quotes with octal escapes,
+// so `日本/package.json` arrived as `"\346\227\245\346\234\254/package.json"`;
+// filepath.Base then yielded `package.json"`, classifyManifest missed, and the
+// manifest was dropped with no counter and no stderr line — exit 0 on a PR that
+// added malware. -z is preferred over -c core.quotePath=false because only -z
+// also survives a literal newline inside a filename.
 func gitDiffFiles(repoPath, base, head string) ([]string, error) {
-	out, err := runGit(repoPath, "diff", "--name-only", base, head)
+	out, err := runGit(repoPath, "diff", "-z", "--name-only", base, head)
 	if err != nil {
 		return nil, err
 	}
 	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			files = append(files, line)
+	// -z emits NUL-terminated, UNQUOTED paths. Do not TrimSpace an entry: a
+	// leading or trailing space is a legal part of a filename, and trimming it
+	// would reintroduce the drop this flag exists to prevent.
+	for _, entry := range strings.Split(out, "\x00") {
+		if entry != "" {
+			files = append(files, entry)
 		}
 	}
 	return files, nil
@@ -431,8 +513,14 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
 		}
 	case kindNPMPackageJSON:
-		baseCoords = parsePackageJSONDeps(baseContent)
-		headCoords = parsePackageJSONDeps(headContent)
+		baseCoords, err = parsePackageJSONDeps(baseContent)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s base: %w", relPath, err)
+		}
+		headCoords, err = parsePackageJSONDeps(headContent)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
+		}
 	case kindPNPMLock:
 		baseCoords = parsePNPMLock(baseContent)
 		headCoords = parsePNPMLock(headContent)
@@ -490,6 +578,74 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 // Manifest parsers
 // ---------------------------------------------------------------------------
 
+// utf8BOM is the UTF-8 byte-order mark.
+//
+// C3: npm 10.9.8 parses a BOM-prefixed package.json without complaint; Go's
+// encoding/json rejects it ("invalid character 'ï'"). Three bytes at the head of
+// the file — invisible in a GitHub diff view — were therefore enough to make
+// pr-scan drop the whole manifest. Stripping it is not cosmetic: it closes a
+// working, attacker-usable gate bypass. Applied to every JSON manifest parser so
+// the class cannot come back through a sibling.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+func stripUTF8BOM(data []byte) []byte { return bytes.TrimPrefix(data, utf8BOM) }
+
+// prScanNestedLockNames enables G5b part B: deriving a package-lock entry's name
+// from the LAST "node_modules/" segment of its path rather than the first, so a
+// transitively-deduped entry like "node_modules/foo/node_modules/electorn" is
+// scanned as "electorn" instead of the un-matchable "foo/node_modules/electorn".
+//
+// DEFAULT OFF — this is a measurement gate, not an oversight.
+//
+// Part B newly exposes every TRANSITIVE dependency to the offline typosquat
+// ladder, a surface that had never been measured. The measurement was run
+// (TestParsePackageLockJSON_NestedNamesTyposquatFPRate, which executes whether or
+// not this constant is set) over 1,200 real popular npm names from
+// seeds/npm_popular.txt laid out in create-react-app- and Next.js-shaped nested
+// trees:
+//
+//	22 sc.typosquat_low signals / 1,200 real packages = 1.83%
+//	0 blocking verdicts (pr-scan has no "block" severity at all — see C4)
+//
+// The hits are dominated by the curated seed's very short names once the npm
+// scope is stripped: @babel/core, @eslint/core, @aws-sdk/core → "core", distance
+// 1 from "cors"; ms, qs, jws, @types/qs → distance 1 from "ws"; gaxios → axios.
+//
+// Two facts matter for whoever makes the call:
+//   - This rate is NOT new. The same ladder already runs at the same rate on
+//     direct dependencies, which ship today.
+//   - Part B does not add report ROWS. A nested entry already produced a row
+//     (with a garbled name) and already drew sc.new_dep. Part B fixes the name
+//     and adds a typosquat check to a row that was there either way.
+//
+// So the delta is ~1.8% of newly-added transitive deps gaining one extra warn
+// line. That is a product decision about pr-scan's noise floor on a MERGE GATE,
+// which is exactly the shape of the 742-FP incident, so it is not being made
+// inside a bug-fix change. Flip this to true to enable; the measurement test is
+// the live signal either way.
+const prScanNestedLockNames = false
+
+// lockEntryNameNested resolves a package-lock path to the name npm actually
+// installs there: whatever follows the LAST node_modules/ boundary. Everything
+// before it is the dedup location, not the identity.
+//
+// Split out from lockEntryName so the FP measurement can exercise part B's
+// behaviour regardless of prScanNestedLockNames.
+func lockEntryNameNested(path string) string {
+	if idx := strings.LastIndex(path, "node_modules/"); idx >= 0 {
+		return path[idx+len("node_modules/"):]
+	}
+	return ""
+}
+
+// lockEntryName resolves a package-lock "packages" key to a package name.
+func lockEntryName(path string) string {
+	if prScanNestedLockNames {
+		return lockEntryNameNested(path)
+	}
+	return strings.TrimPrefix(path, "node_modules/")
+}
+
 // parsePackageLockJSON extracts the flat packages map from package-lock.json v2/v3.
 // Falls back to a best-effort v1 parse (dependencies key).
 func parsePackageLockJSON(data []byte) (map[string]string, error) {
@@ -499,14 +655,20 @@ func parsePackageLockJSON(data []byte) (map[string]string, error) {
 	var root struct {
 		LockfileVersion int `json:"lockfileVersion"`
 		Packages        map[string]struct {
+			// G5b part A: an aliased dependency records the REAL package in
+			// "name" while the map key holds the alias
+			// ("node_modules/react": {"name": "electorn"}). Reading only the key
+			// scans the innocent alias and never the package npm installs.
+			Name     string `json:"name"`
 			Version  string `json:"version"`
 			Resolved string `json:"resolved"`
 		} `json:"packages"`
 		Dependencies map[string]struct {
+			Name    string `json:"name"`
 			Version string `json:"version"`
 		} `json:"dependencies"`
 	}
-	if err := json.Unmarshal(data, &root); err != nil {
+	if err := json.Unmarshal(stripUTF8BOM(data), &root); err != nil {
 		return nil, err
 	}
 	out := make(map[string]string)
@@ -515,18 +677,25 @@ func parsePackageLockJSON(data []byte) (map[string]string, error) {
 			if pkg.Version == "" || path == "" {
 				continue
 			}
-			// Strip "node_modules/" prefix to get the package name.
-			name := strings.TrimPrefix(path, "node_modules/")
+			name := pkg.Name
+			if name == "" {
+				name = lockEntryName(path)
+			}
 			if name == "" {
 				continue
 			}
 			out[name] = pkg.Version
 		}
 	} else {
-		for name, dep := range root.Dependencies {
-			if dep.Version != "" {
-				out[name] = dep.Version
+		for key, dep := range root.Dependencies {
+			if dep.Version == "" {
+				continue
 			}
+			name := dep.Name
+			if name == "" {
+				name = key
+			}
+			out[name] = dep.Version
 		}
 	}
 	return out, nil
@@ -535,16 +704,23 @@ func parsePackageLockJSON(data []byte) (map[string]string, error) {
 // parsePackageJSONDeps extracts declared dependencies from package.json
 // (dependencies + devDependencies). Versions may be semver ranges here, not
 // resolved; useful for detecting new entries.
-func parsePackageJSONDeps(data []byte) map[string]string {
+//
+// C3: this used to return a bare nil on an unmarshal error while every sibling
+// returned a counted error, so one malformed package.json (e.g. `"devDependencies":
+// []`, an array where an object belongs) dropped the ENTIRE file — real
+// dependencies block included — and the report said added: 0, parse_errors: 0,
+// exit 0. Returning the error routes it through buildPRScanReport's parseFailures
+// counter and the exit-30 escalation.
+func parsePackageJSONDeps(data []byte) (map[string]string, error) {
 	if data == nil {
-		return nil
+		return nil, nil
 	}
 	var root struct {
 		Dependencies    map[string]string `json:"dependencies"`
 		DevDependencies map[string]string `json:"devDependencies"`
 	}
-	if err := json.Unmarshal(data, &root); err != nil {
-		return nil
+	if err := json.Unmarshal(stripUTF8BOM(data), &root); err != nil {
+		return nil, err
 	}
 	out := make(map[string]string)
 	for k, v := range root.Dependencies {
@@ -553,7 +729,7 @@ func parsePackageJSONDeps(data []byte) map[string]string {
 	for k, v := range root.DevDependencies {
 		out[k] = v
 	}
-	return out
+	return out, nil
 }
 
 // parsePNPMLock is a best-effort line-oriented parser for pnpm-lock.yaml.
@@ -680,7 +856,7 @@ func parsePipfileLock(data []byte) (map[string]string, error) {
 	var root map[string]map[string]struct {
 		Version string `json:"version"`
 	}
-	if err := json.Unmarshal(data, &root); err != nil {
+	if err := json.Unmarshal(stripUTF8BOM(data), &root); err != nil {
 		return nil, err
 	}
 	out := make(map[string]string)

@@ -16,23 +16,41 @@ package cli
 // (TestSupportMatrixMatchesMarkdown) keeps everyone honest.
 //
 // Exit codes follow the policy-simulate convention so this is CI-safe:
-//   0 — every (ecosystem, condition) cell printed is supported (full/partial)
-//   1 — at least one "none" cell appears in the printed slice (CI signal)
-//   2 — usage / network / other errors (cobra/RunE default)
+//
+//	0 — nothing YOUR policies depend on is unsupported on the printed
+//	    ecosystems (and, with no --policy, always: the bare matrix dump
+//	    is informational)
+//	1 — a condition one of your --policy rules USES is "none" on a
+//	    printed ecosystem (CI signal)
+//	2 — usage / network / other errors (cobra/RunE default)
 //
 // The "none" gate matters because the UI treats partial as supported (the
 // signal is wired, it just may be empty in practice) — preflight does the
 // same so operator expectations match the UI.
+//
+// The gate used to be "does ANY printed cell say none", which read as a
+// policy check but was really a property of the product's coverage
+// matrix. Measured: 16 ecosystems × 46 conditions = 736 cells, 281 of
+// them none, and all 16 rows contain at least one — so preflight exited 1
+// for every org, every ecosystem filter and every policy set, forever. A
+// CI job wired exactly as this file's help text documents failed 100% of
+// the time, which means anybody actually running it has already muted it.
+// Gating on the conditions a supplied --policy USES (policy.ConditionsUsedBy)
+// is what the help text always claimed; the bare dump goes back to being a
+// dump, and exits 0.
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/chain305/chainsaw-core/policy"
 )
 
 // supportMatrixRowDTO mirrors the JSON returned by /api/policies/support-matrix
@@ -68,14 +86,21 @@ here is byte-identical to the inline warnings rendered next to policy
 condition inputs in the dashboard.
 
 Use this in CI to catch policies that reference conditions silently inert
-on the target ecosystem before applying them — the command exits non-zero
-when at least one "none" cell appears in the printed matrix.
+on the target ecosystem before applying them. Pass --policy <file-or-dir>
+and the command exits 1 when a condition YOUR rules use is unsupported on
+a printed ecosystem — and names the rule, the condition and the ecosystem.
+
+Without --policy it is a pure informational dump of the compatibility
+matrix and exits 0. (Every ecosystem has at least one unsupported
+condition, so gating on the raw matrix would fail every run for every
+org — which is what it used to do.)
 
 Examples:
   chainsaw policy preflight
   chainsaw policy preflight --ecosystem npm
   chainsaw policy preflight --ecosystem npm --json
-  chainsaw policy preflight --unsupported-only`,
+  chainsaw policy preflight --unsupported-only
+  chainsaw policy preflight --policy ./policies --ecosystem npm`,
 	SilenceUsage: true,
 	RunE:         runPolicyPreflight,
 }
@@ -86,6 +111,8 @@ func init() {
 	policyPreflightCmd.Flags().Bool("unsupported-only", false,
 		"Only print rows containing at least one unsupported (none) cell.")
 	policyPreflightCmd.Flags().Bool("json", false, "Output the raw matrix response as JSON.")
+	policyPreflightCmd.Flags().String("policy", "",
+		"Policy file or directory to gate on. Only conditions these rules actually use drive the exit code. Without it the command is an informational dump and exits 0.")
 	policyCmd.AddCommand(policyPreflightCmd)
 }
 
@@ -104,11 +131,24 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 	ecoFilter, _ := cmd.Flags().GetString("ecosystem")
 	ecoFilter = strings.ToLower(strings.TrimSpace(ecoFilter))
 	unsupportedOnly, _ := cmd.Flags().GetBool("unsupported-only")
+	policyPath := strings.TrimSpace(mustString(cmd, "policy"))
 	asJSON := useJSON(cmd)
 
 	rows, err := filterPreflightRows(resp, ecoFilter, unsupportedOnly)
 	if err != nil {
 		return err
+	}
+
+	// Load --policy BEFORE rendering: an unreadable or malformed policy
+	// file is an operational error, and emitting a matrix followed by a
+	// parse failure would read as "the gate passed, then something else
+	// broke".
+	var usage []preflightConditionUse
+	if policyPath != "" {
+		usage, err = collectPreflightConditionUsage(policyPath)
+		if err != nil {
+			return err
+		}
 	}
 
 	if asJSON {
@@ -132,13 +172,125 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 		printPreflightTable(cmd, rows, resp.Conditions)
 	}
 
-	if anyUnsupported(rows) {
-		return &ExitCodeError{
-			Code: preflightUnsupportedExitCode,
-			Err:  fmt.Errorf("policy preflight: at least one condition is unsupported on the printed ecosystems"),
+	// No --policy: informational dump, exit 0. See the file header for
+	// why the old unconditional gate was worse than no gate.
+	if policyPath == "" {
+		return nil
+	}
+
+	// Under --json stdout is a machine-readable envelope, so the
+	// gate's human report goes to stderr and the parser is unaffected.
+	// The EXIT CODE is identical in both renderings — that is the
+	// property this whole change exists to protect.
+	out := cmd.OutOrStdout()
+	if asJSON {
+		out = cmd.ErrOrStderr()
+	}
+
+	inert := inertPolicyConditions(rows, usage)
+	if len(inert) == 0 {
+		fmt.Fprintf(out, "\n✓ every condition used by %s is supported on the printed ecosystem(s).\n", policyPath)
+		return nil
+	}
+	fmt.Fprintf(out, "\n✗ conditions your policies use that are inert on the printed ecosystem(s):\n")
+	for _, i := range inert {
+		fmt.Fprintf(out, "  - %s: condition %s is unsupported on %s (%s:%d)\n",
+			i.Rule, i.Condition, i.Ecosystem, i.File, i.Line)
+	}
+	return &ExitCodeError{
+		Code: preflightUnsupportedExitCode,
+		Err: fmt.Errorf("policy preflight: %d rule/ecosystem pair(s) reference a condition the proxy cannot populate",
+			len(inert)),
+	}
+}
+
+// preflightConditionUse records that a named rule (at file:line) depends
+// on a condition. One entry per (rule, condition) pair so the report can
+// name the rule that will silently never fire, not just the condition.
+type preflightConditionUse struct {
+	File      string
+	Line      int
+	Rule      string
+	Condition policy.ConditionType
+}
+
+// preflightInertCondition is one (rule, condition, ecosystem) triple that
+// will never fire.
+type preflightInertCondition struct {
+	File      string
+	Line      int
+	Rule      string
+	Condition policy.ConditionType
+	Ecosystem string
+}
+
+// collectPreflightConditionUsage parses the policies under path and
+// returns every condition they use. It reuses `policy lint`'s file
+// collection and parser so both commands accept exactly the same inputs —
+// an operator who can lint a directory can preflight it.
+//
+// A parse error is fatal here (unlike in lint, which reports it as a
+// finding and continues): preflight's answer is a GATE, and gating on a
+// partially-parsed policy set would silently under-report.
+func collectPreflightConditionUsage(path string) ([]preflightConditionUse, error) {
+	files, err := collectPolicyFiles(path)
+	if err != nil {
+		return nil, fmt.Errorf("--policy %s: %w", path, err)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("--policy %s: no .json/.yaml/.yml policy files found", path)
+	}
+	var out []preflightConditionUse
+	for _, f := range files {
+		data, rerr := os.ReadFile(f)
+		if rerr != nil {
+			return nil, fmt.Errorf("--policy: read %s: %w", f, rerr)
+		}
+		doc, perr := parsePolicyDoc(data, f)
+		if perr != nil {
+			return nil, fmt.Errorf("--policy: %w", perr)
+		}
+		for _, e := range doc.policies {
+			for _, c := range policy.ConditionsUsedBy(e.policy.Conditions) {
+				out = append(out, preflightConditionUse{File: f, Line: e.line, Rule: e.name, Condition: c})
+			}
 		}
 	}
-	return nil
+	return out, nil
+}
+
+// inertPolicyConditions intersects "conditions your rules use" with
+// "cells the server reports as none", over the rows actually printed. A
+// run scoped to --ecosystem npm must not fail because some other
+// ecosystem has a hole — same scoping rule the old anyUnsupported used.
+//
+// A condition the server does not list at all is NOT reported: absence
+// from the matrix means version skew between CLI and server, which is a
+// different problem from a known-inert cell and must not turn into a
+// fleet-wide CI failure.
+func inertPolicyConditions(rows []supportMatrixRowDTO, usage []preflightConditionUse) []preflightInertCondition {
+	var out []preflightInertCondition
+	for _, row := range rows {
+		for _, u := range usage {
+			if row.Conditions[string(u.Condition)] != "none" {
+				continue
+			}
+			out = append(out, preflightInertCondition{
+				File: u.File, Line: u.Line, Rule: u.Rule,
+				Condition: u.Condition, Ecosystem: row.Ecosystem,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Ecosystem != out[j].Ecosystem {
+			return out[i].Ecosystem < out[j].Ecosystem
+		}
+		if out[i].Rule != out[j].Rule {
+			return out[i].Rule < out[j].Rule
+		}
+		return out[i].Condition < out[j].Condition
+	})
+	return out
 }
 
 // filterPreflightRows applies the --ecosystem and --unsupported-only flags to
@@ -187,9 +339,10 @@ func rowHasUnsupported(row supportMatrixRowDTO) bool {
 	return false
 }
 
-// anyUnsupported drives the non-zero exit code. We only count the rows we
-// actually printed: a CI run scoped to --ecosystem npm shouldn't fail because
-// some other ecosystem has a hole.
+// anyUnsupported reports whether any PRINTED row has a hole. It no
+// longer drives the exit code — gating on it failed every run for every
+// org (see the file header) — but it is the honest summary predicate for
+// the informational dump, so it stays as the renderer's helper.
 func anyUnsupported(rows []supportMatrixRowDTO) bool {
 	for _, row := range rows {
 		if rowHasUnsupported(row) {

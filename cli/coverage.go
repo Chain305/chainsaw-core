@@ -17,6 +17,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -153,12 +154,12 @@ func runCoverageSummary(cmd *cobra.Command, _ []string) error {
 	window, _ := cmd.Flags().GetString("window")
 	asJSON := useJSON(cmd)
 	var resp coverageSummary
-	path := "/api/coverage/summary"
-	if window != "" {
-		path += "?window=" + window
-	}
+	// C13: --window is a user flag; encode it instead of concatenating, or
+	// `--window '7d&export=true'` silently sends a second parameter the flag
+	// never named.
+	path := "/api/coverage/summary" + coverageWindowQuery(window)
 	if err := client.Get(path, &resp); err != nil {
-		return translateCoverageErr(err)
+		return translateCoverageCollectionErr(err)
 	}
 	out := cmd.OutOrStdout()
 	if asJSON {
@@ -198,12 +199,9 @@ func runCoverageSilent(cmd *cobra.Command, _ []string) error {
 		Window string                `json:"window"`
 		Silent []coverageSilentEntry `json:"silent"`
 	}
-	path := "/api/coverage/silent"
-	if window != "" {
-		path += "?window=" + window
-	}
+	path := "/api/coverage/silent" + coverageWindowQuery(window)
 	if err := client.Get(path, &resp); err != nil {
-		return translateCoverageErr(err)
+		return translateCoverageCollectionErr(err)
 	}
 	out := cmd.OutOrStdout()
 	if asJSON {
@@ -238,7 +236,7 @@ func runCoverageExpectedList(cmd *cobra.Command, _ []string) error {
 		Expected []coverageExpected `json:"expected"`
 	}
 	if err := client.Get("/api/coverage/expected", &resp); err != nil {
-		return translateCoverageErr(err)
+		return translateCoverageCollectionErr(err)
 	}
 	out := cmd.OutOrStdout()
 	if asJSON {
@@ -273,8 +271,9 @@ func runCoverageExpectedAdd(cmd *cobra.Command, args []string) error {
 		"expected_active_within_days": days,
 	}
 	var resp coverageExpected
+	// Collection path: a 404 here really does mean the feature is off.
 	if err := client.Post("/api/coverage/expected", body, &resp); err != nil {
-		return translateCoverageErr(err)
+		return translateCoverageCollectionErr(err)
 	}
 	printSuccess(cmd.OutOrStdout(), cmd, fmt.Sprintf("Declared %q (id=%d)", resp.ClientPattern, resp.ID))
 	return nil
@@ -289,8 +288,10 @@ func runCoverageExpectedRemove(cmd *cobra.Command, args []string) error {
 	if err != nil || id <= 0 {
 		return fmt.Errorf("invalid id %q", args[0])
 	}
+	// C11: per-id endpoint — a 404 here means THIS id does not exist, not that
+	// the feature is disabled. Pass it through untranslated.
 	if err := client.Delete(fmt.Sprintf("/api/coverage/expected/%d", id)); err != nil {
-		return translateCoverageErr(err)
+		return err
 	}
 	printSuccess(cmd.OutOrStdout(), cmd, fmt.Sprintf("Removed expected source id=%d", id))
 	return nil
@@ -330,7 +331,7 @@ func runCoverageBypassList(cmd *cobra.Command, _ []string) error {
 	}
 	var resp coverageBypassListResponse
 	if err := client.Get(path, &resp); err != nil {
-		return translateCoverageErr(err)
+		return translateCoverageCollectionErr(err)
 	}
 	out := cmd.OutOrStdout()
 	if asJSON {
@@ -368,8 +369,11 @@ func runCoverageBypassConfirm(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid id %q", args[0])
 	}
 	var resp coverageBypassReport
+	// C11: per-id — `bypass confirm 999` on a coverage-ENABLED server used to
+	// print "coverage is not enabled on this server", sending the operator off
+	// to fix a config problem that does not exist.
 	if err := client.Post(fmt.Sprintf("/api/bypass/reports/%d/confirm", id), map[string]any{}, &resp); err != nil {
-		return translateCoverageErr(err)
+		return err
 	}
 	printSuccess(cmd.OutOrStdout(), cmd, fmt.Sprintf("Confirmed bypass report id=%d (client=%q, status=%s)", resp.ID, resp.ClientHint, resp.Status))
 	return nil
@@ -385,18 +389,40 @@ func runCoverageBypassDismiss(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid id %q", args[0])
 	}
 	var resp coverageBypassReport
+	// C11: per-id — see runCoverageBypassConfirm.
 	if err := client.Post(fmt.Sprintf("/api/bypass/reports/%d/dismiss", id), map[string]any{}, &resp); err != nil {
-		return translateCoverageErr(err)
+		return err
 	}
 	printSuccess(cmd.OutOrStdout(), cmd, fmt.Sprintf("Dismissed bypass report id=%d (30d suppression)", resp.ID))
 	return nil
 }
 
-// translateCoverageErr surfaces "feature off" to the operator with a
-// neutral message instead of letting the bare 404 pass through. We
-// detect by the literal "404" / "not found" the APIClient emits — the
-// shape mirrors the existing classifyCLIError heuristics in root.go.
-func translateCoverageErr(err error) error {
+// coverageWindowQuery renders the optional --window flag as an escaped query
+// string (or "" when unset), so a value carrying & or = cannot smuggle extra
+// parameters into the request (C13).
+func coverageWindowQuery(window string) string {
+	if window == "" {
+		return ""
+	}
+	q := url.Values{}
+	q.Set("window", window)
+	return "?" + q.Encode()
+}
+
+// translateCoverageCollectionErr surfaces "feature off" to the operator with a
+// neutral message instead of letting the bare 404 pass through. We detect by the
+// literal "404" / "not found" the APIClient emits — the shape mirrors the
+// existing classifyCLIError heuristics in root.go.
+//
+// C11: this is deliberately restricted to COLLECTION endpoints
+// (/api/coverage/summary, /silent, /expected, /api/bypass/reports). Those return
+// 404 for the whole route when coverage.enabled is false, so the translation is
+// sound there. Per-ID routes — DELETE /api/coverage/expected/{id},
+// POST /api/bypass/reports/{id}/{confirm,dismiss} — return 404 for a MISSING
+// ROW, and running the same substring heuristic over those told operators of a
+// perfectly-enabled server to go change server config. Those call sites now
+// return the error untouched; do not re-point them here.
+func translateCoverageCollectionErr(err error) error {
 	if err == nil {
 		return nil
 	}

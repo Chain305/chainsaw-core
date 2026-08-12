@@ -100,7 +100,60 @@ func TestBenignFalseBlockRate(t *testing.T) {
 	if len(warnedSet) > 0 {
 		t.Logf("WARNED (soft, does not break install):\n  %s", strings.Join(warnedSet, "\n  "))
 	}
+
+	// BUDGETS — the reason this test exists rather than just logging.
+	//
+	// Until 2026-08 this function only ever logged, so the published
+	// false-block rate could drift with no build ever going red. It did: a
+	// rebuild of the corpus from the shipped popularity seeds measured 2.09%
+	// against a published 0.00%, caused by `iocscan` matching the English
+	// phrase "local state" in ordinary source comments.
+	//
+	// The budgets below are deliberately set just above the CURRENT measured
+	// rate, not at zero. Zero would be aspirational and would leave the test
+	// red — which is how a gate gets muted, and a muted gate is worse than no
+	// gate. Lower them as the rate improves; never raise one to make a build
+	// pass without recording why here.
+	if total < minBenignCorpusForBudget {
+		t.Logf("corpus of %d is below the %d-package floor — reporting only, budgets not enforced",
+			total, minBenignCorpusForBudget)
+		return
+	}
+	if got := rate(blocked); got > maxBenignFalseBlockPct {
+		t.Errorf("false-block rate %.2f%% exceeds the %.2f%% budget (%d/%d). "+
+			"A detector change made the guard refuse MORE real top packages. "+
+			"Every entry in the BLOCKED list above is a package a developer "+
+			"cannot install.", got, maxBenignFalseBlockPct, blocked, total)
+	}
+	// npm is held to zero separately: it is the largest ecosystem in the
+	// corpus and has never produced a false block, so any npm entry is a
+	// genuine regression rather than a known-open tuning question.
+	if n := blockedEco["npm"]; n > 0 {
+		t.Errorf("%d npm false block(s) — npm has been clean at 0; this is a regression, not a budget question", n)
+	}
 }
+
+const (
+	// maxBenignFalseBlockPct is the ceiling for the guard's false-block rate on
+	// real top packages. Measured 0.81% on 2026-08-12 over 860 packages (600
+	// npm + 260 pypi), down from 2.09% at the start of the wave:
+	//   2.09% -> 1.05%  narrowed iocscan's credential-store pattern, which was
+	//                   matching the English phrase "local state" in comments
+	//   1.05% -> 0.81%  downgraded an exfil_host hit to a warning when its only
+	//                   evidence is in tests/, docs examples, or vendored code
+	//
+	// The residual 7 are exfil_host and stealer_string hits inside genuine
+	// shipping code — tqdm's documented Telegram progress bar, litellm's Slack
+	// alerting, ipython's dpaste magic. Blocking those is arguably correct
+	// behaviour for a supply-chain guard; narrowing further would need a
+	// per-package allowlist, which is exactly what an attacker targets.
+	maxBenignFalseBlockPct = 1.00
+
+	// minBenignCorpusForBudget keeps a 10-package smoke corpus from asserting a
+	// percentage. Rebuild the real one with
+	// scripts/detection-eval/build-benign-corpus.sh.
+	minBenignCorpusForBudget = 300
+)
 
 // TestBlockCatchRate is the paired half of TestBenignFalseBlockRate: over a
 // combined corpus (benign + real malicious, e.g. the DataDog dataset) it reports

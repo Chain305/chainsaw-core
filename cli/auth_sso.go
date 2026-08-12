@@ -1,226 +1,88 @@
 package cli
 
+// auth_sso.go — `chainsaw auth sso`.
+//
+// A2/A3 — THE BROWSER SSO FLOW WAS REMOVED, NOT REPAIRED.
+//
+// `trySSOBrowserFlow` could never complete, on two independent counts:
+//
+//  1. The CLI minted a loopback redirect (http://127.0.0.1:<port>/callback/
+//     <nonce>) and POSTed it to /api/auth/sso/init. The server DISCARDS it —
+//     authapi/sso.go runs it through sanitizeNext, which returns "" for
+//     anything not starting with a single "/". The IdP redirect target is
+//     the server's own SsoCallbackURL, and on success the server 302s the
+//     browser to /login/sso/complete. The loopback listener is never
+//     contacted.
+//  2. POST /api/auth/sso/init sets the session-binding cookie on THE CLI's
+//     HTTP response. core/httpclient builds its client with NO COOKIE JAR,
+//     so the cookie is dropped and the browser arrives at the callback
+//     without it; the server then hard-fails with "SSO session expired".
+//
+// The observable behaviour was: browser opens, user signs in, browser lands
+// on an SSO error page, and the CLI blocks on a 5-minute context with ZERO
+// output before falling back to a manual token prompt — whose dashboard URL
+// (server + "/dashboard?tab=tokens") was itself wrong on two counts: it used
+// the API base rather than the console base, and /dashboard is a Next.js
+// ROUTE GROUP that contributes nothing to the URL (the real page is
+// /settings/api-keys). That was A3, and removing this path disposes of it.
+//
+// This was never a regression. The authoring commit (664ef055) says
+// verbatim that it "falls back to manual token paste if OIDC exchange
+// cannot complete due to server-side session binding" — it shipped knowing
+// the browser leg could not complete, with zero test coverage.
+//
+// `chainsaw auth login` ALREADY completes SSO: its nonce/port +
+// /api/auth/cli/init flow is finished by the web UI via finishCLIFromSSO,
+// and the one-time-code exchange keeps the PAT out of the browser URL. So
+// `auth sso` now delegates to that runner rather than maintaining a second,
+// broken implementation of the same thing. The command is kept (not
+// deleted) because errHeadlessAuth and existing docs point at it, and
+// because "chainsaw auth sso" is what an SSO user types.
+
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/spf13/cobra"
 )
 
-const ssoTimeout = 5 * time.Minute
-
 var authSSOCmd = &cobra.Command{
-	Use:          "sso",
-	Short:        "Log in via SSO (browser-based)",
+	Use:   "sso",
+	Short: "Log in via SSO (delegates to `chainsaw auth login`)",
+	Long: `Log in to a Chainsaw server whose org uses SSO.
+
+This is an alias for ` + "`chainsaw auth login`" + `: the browser flow that
+command drives completes SSO end-to-end (the web UI finishes the CLI
+session after your IdP redirect), so there is one code path rather than
+two. Every ` + "`auth login`" + ` flag works here, including --device for
+headless / CI hosts and --token to paste a pre-minted API key.
+
+Your org is resolved from your identity at the IdP; there is nothing to
+pass on the command line.`,
 	SilenceUsage: true,
-	RunE:         runAuthSSO,
+	RunE:         runAuthLogin,
 }
 
 func init() {
-	authSSOCmd.Flags().String("org", "", "Org slug for SSO discovery")
+	// Same flag set as `auth login`, because that is the runner. A local
+	// --server/--token deliberately shadows the root persistent flags, which
+	// is what keeps cfgToken() unpolluted (see auth.go's init).
+	authSSOCmd.Flags().String("server", "", "Server URL")
+	authSSOCmd.Flags().String("token", "", "Paste an existing API token instead of opening a browser")
+	authSSOCmd.Flags().Bool("device", false, "Use the device-code flow (for headless / CI / no-browser environments)")
+	authSSOCmd.Flags().Bool("force", false, "Re-authenticate even if a valid session already exists")
+
+	// --org survives as a deprecated no-op so the documented invocation
+	// (`chainsaw auth sso --org acme`) does not start failing at rc=4. The
+	// server resolves the org from the authenticated identity; it never
+	// accepted a client-supplied org for this purpose.
+	authSSOCmd.Flags().String("org", "", "Deprecated: unused. The org is resolved from your SSO identity.")
+	_ = authSSOCmd.Flags().MarkDeprecated("org", "the org is resolved from your SSO identity; the flag is ignored")
+
 	authCmd.AddCommand(authSSOCmd)
-}
-
-func runAuthSSO(cmd *cobra.Command, _ []string) error {
-	server := cfgServerURL()
-	if server == "" {
-		if err := requireTTY(); err != nil {
-			return err
-		}
-		server = PromptString("Server URL", "")
-	}
-	server = strings.TrimRight(server, "/")
-	if server == "" {
-		return fmt.Errorf("server URL is required")
-	}
-
-	orgSlug, _ := cmd.Flags().GetString("org")
-	if orgSlug == "" {
-		if err := requireTTY(); err != nil {
-			return err
-		}
-		orgSlug = PromptString("Org slug", "")
-	}
-	if orgSlug == "" {
-		return fmt.Errorf("org slug is required")
-	}
-
-	unauthClient := NewAPIClient(server, "")
-
-	var discoverResp struct {
-		SSOEnabled bool   `json:"sso_enabled"`
-		Protocol   string `json:"protocol"`
-	}
-	if err := unauthClient.Get("/api/auth/sso/discover?slug="+orgSlug, &discoverResp); err != nil {
-		return fmt.Errorf("SSO discovery: %w", err)
-	}
-	if !discoverResp.SSOEnabled {
-		return fmt.Errorf("SSO is not enabled for org %q", orgSlug)
-	}
-
-	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "SSO protocol: %s\n", discoverResp.Protocol)
-
-	token, err := trySSOBrowserFlow(out, server, orgSlug, unauthClient)
-	if err != nil {
-		fmt.Fprintf(out, "Browser SSO flow unavailable (%s); switching to manual token entry.\n\n", err)
-		token, err = ssoManualTokenFlow(out, server)
-		if err != nil {
-			return err
-		}
-	}
-	if token == "" {
-		return fmt.Errorf("no token received")
-	}
-
-	authClient := NewAPIClient(server, token)
-	var me map[string]any
-	if err := authClient.Get("/api/auth/me", &me); err != nil {
-		return fmt.Errorf("token validation: %w", err)
-	}
-	orgID, _ := me["org_id"].(string)
-	email, _ := me["email"].(string)
-
-	if err := saveConfig(server, token, orgID); err != nil {
-		return fmt.Errorf("save config: %w", err)
-	}
-
-	if useJSON(cmd) {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		return enc.Encode(map[string]string{"server": server, "org_id": orgID, "email": email})
-	}
-	printSuccess(out, cmd, fmt.Sprintf("Logged in as %s (org: %s)", email, orgID))
-	return nil
-}
-
-// trySSOBrowserFlow starts a local HTTP callback server, calls POST /api/auth/sso/init
-// to get the IdP authorize URL, opens the browser, and waits for the callback token.
-// Returns the bearer token on success, or an error to trigger the manual fallback.
-func trySSOBrowserFlow(out io.Writer, server, orgSlug string, client *APIClient) (string, error) {
-	// Generate a cryptographically random nonce and embed it in the callback path.
-	// This prevents a race-condition where a local process hits the callback server
-	// before the real IdP redirect arrives (the attacker would need to know both
-	// the ephemeral port and the 32-character hex nonce).
-	nonceBytes := make([]byte, 16)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return "", fmt.Errorf("generate nonce: %w", err)
-	}
-	nonce := hex.EncodeToString(nonceBytes)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", fmt.Errorf("start callback listener: %w", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback/%s", port, nonce)
-
-	tokenCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-
-	mux := http.NewServeMux()
-	// ReadHeaderTimeout matches the browser-auth listener (auth_browser.go) so a
-	// stalled client can't pin the loopback callback server open (Slowloris).
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-
-	mux.HandleFunc("/callback/"+nonce, func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-
-		// Server may redirect here with a token parameter directly.
-		if t := q.Get("token"); t != "" {
-			fmt.Fprint(w, "<html><body><h2>Login successful — you can close this tab.</h2></body></html>")
-			tokenCh <- t
-			return
-		}
-
-		// IdP redirected with code+state; forward to the server's SSO callback.
-		code := q.Get("code")
-		state := q.Get("state")
-		if code == "" || state == "" {
-			msg := q.Get("error")
-			if msg == "" {
-				msg = "missing code or state in callback"
-			}
-			fmt.Fprintf(w, "<html><body><h2>SSO error: %s</h2></body></html>", msg)
-			errCh <- fmt.Errorf("SSO callback: %s", msg)
-			return
-		}
-
-		cbPath := fmt.Sprintf("/api/auth/sso/callback?code=%s&state=%s", code, state)
-		var cbResp struct {
-			Token string `json:"token"`
-		}
-		if ferr := client.Get(cbPath, &cbResp); ferr != nil {
-			fmt.Fprint(w, "<html><body><h2>Token exchange failed — paste your token manually.</h2></body></html>")
-			errCh <- fmt.Errorf("token exchange: %w", ferr)
-			return
-		}
-		if cbResp.Token == "" {
-			fmt.Fprint(w, "<html><body><h2>Server returned no token — paste your token manually.</h2></body></html>")
-			errCh <- fmt.Errorf("server returned no token after SSO")
-			return
-		}
-		fmt.Fprint(w, "<html><body><h2>Login successful — you can close this tab.</h2></body></html>")
-		tokenCh <- cbResp.Token
-	})
-
-	go func() { _ = srv.Serve(ln) }()
-	defer srv.Close()
-
-	var initResp struct {
-		AuthorizeURL string `json:"authorize_url"`
-	}
-	if err := client.Post("/api/auth/sso/init", map[string]string{
-		"org_slug":     orgSlug,
-		"redirect_uri": redirectURI,
-	}, &initResp); err != nil {
-		return "", fmt.Errorf("sso/init: %w", err)
-	}
-	if initResp.AuthorizeURL == "" {
-		return "", fmt.Errorf("server returned empty authorize_url")
-	}
-
-	fmt.Fprintf(out, "Opening browser for SSO login...\nIf your browser doesn't open automatically, visit:\n  %s\n\n", initResp.AuthorizeURL)
-	_ = openBrowser(initResp.AuthorizeURL)
-
-	ctx, cancel := context.WithTimeout(context.Background(), ssoTimeout)
-	defer cancel()
-
-	select {
-	case tok := <-tokenCh:
-		return tok, nil
-	case e := <-errCh:
-		return "", e
-	case <-ctx.Done():
-		return "", fmt.Errorf("timed out after %s", ssoTimeout)
-	}
-}
-
-// ssoManualTokenFlow opens the dashboard token page and prompts the user to paste a token.
-func ssoManualTokenFlow(out io.Writer, server string) (string, error) {
-	if err := requireTTY(); err != nil {
-		return "", err
-	}
-	page := server + "/dashboard?tab=tokens"
-	fmt.Fprintf(out, "Opening dashboard token page:\n  %s\n\n", page)
-	_ = openBrowser(page)
-	tok := PromptString("Paste API token", "")
-	if tok == "" {
-		return "", fmt.Errorf("no token provided")
-	}
-	return tok, nil
 }
 
 // openBrowser opens url in the system default browser. It is a package var

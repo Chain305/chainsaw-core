@@ -31,7 +31,7 @@ func init() {
 }
 
 func runIntelHealth(cmd *cobra.Command, _ []string) error {
-	client, err := newV1Client()
+	client, err := newV1Client(cmd)
 	if err != nil {
 		// Return so Execute()/classifyCLIError picks the code: auth (401/403) →
 		// ExitConfigAuth(3), network/IO → ExitOpError(2). A bare os.Exit(2)

@@ -29,14 +29,19 @@ var (
 	// `chainsaw features`.
 	Edition = "community"
 
-	// DefaultTelemetryEndpoint is where the free/local CLI guard sends opt-out
+	// DefaultTelemetryEndpoint is where the free/local CLI guard sends OPT-IN
 	// usage events when NO proxy server is configured — so free-tier adoption
-	// is measurable. Used only for CLOUD builds (telemetry.IsSelfHosted()==false)
-	// and only when telemetry resolves to enabled (DNT / CHAINSAW_OFFLINE /
-	// CHAINSAW_TELEMETRY_DISABLED all still suppress it; package-identifying
-	// data stays behind the separate first-run consent). Overridable at build
-	// via `-X .../core/cli.DefaultTelemetryEndpoint=<url>` or at runtime via
-	// CHAINSAW_TELEMETRY_ENDPOINT.
+	// is measurable for users who have said yes. Used only for CLOUD builds
+	// (telemetry.IsSelfHosted()==false) and only when (a) the operator has
+	// explicitly granted consent (cliTelemetryConsented) and (b) telemetry
+	// resolves to enabled (DO_NOT_TRACK / CHAINSAW_OFFLINE /
+	// CHAINSAW_TELEMETRY_DISABLED each still suppress it). Overridable at
+	// build via `-X .../core/cli.DefaultTelemetryEndpoint=<url>` or at
+	// runtime via CHAINSAW_TELEMETRY_ENDPOINT.
+	//
+	// CORRECTIONS (were stale): this said "opt-out", which stopped being
+	// true when the consent gate landed; and it credited "DNT", which was
+	// never implemented — the honored variable is DO_NOT_TRACK.
 	DefaultTelemetryEndpoint = "https://chain305.com/api/telemetry/ingest"
 )
 
@@ -116,7 +121,10 @@ func init() {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			v := resolveVersion()
 			if useJSON(cmd) {
-				enc := json.NewEncoder(cmd.OutOrStdout())
+				// X9: the result sink honors --output. Previously
+				// `chainsaw version --json -o v.json` wrote to stdout and
+				// never created the file, while `status --json -o` did.
+				enc := json.NewEncoder(outWriterOr(cmd, cmd.OutOrStdout()))
 				enc.SetIndent("", "  ")
 				return enc.Encode(map[string]any{
 					"version":    v.Version,

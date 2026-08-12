@@ -22,7 +22,6 @@ package cli
 //     token revoke).
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -407,6 +406,14 @@ func resolveSnoozeUntil(cmd *cobra.Command) (time.Time, error) {
 		if err != nil {
 			return time.Time{}, fmt.Errorf("parse --until as RFC3339: %w", err)
 		}
+		// S13 — the doc comment above promised this check ("we surface that
+		// contract eagerly rather than waiting for the 400") but only the
+		// --for branch performed one, so `--until 2020-01-01T00:00:00Z`
+		// round-tripped to the server and came back as the 400 the comment
+		// claimed was pre-empted.
+		if !t.After(time.Now()) {
+			return time.Time{}, fmt.Errorf("--until must be in the future (got %s)", t.UTC().Format(time.RFC3339))
+		}
 		return t, nil
 	}
 	if dur <= 0 {
@@ -452,6 +459,14 @@ func runFindingSuppress(cmd *cobra.Command, args []string) error {
 	}
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
+		// Non-TTY callers (CI, piped scripts) never see the prompt —
+		// PromptConfirm returns false and we'd silently print "Aborted."
+		// and exit 0, masking that the suppression never happened. Fail
+		// loudly instead, matching policy delete / exception delete /
+		// token revoke.
+		if !stdinIsTerminal() {
+			return fmt.Errorf("refusing to suppress finding %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
+		}
 		if !PromptConfirm(fmt.Sprintf("Suppress finding %q? This only hides it from triage — the package stays blocked. To allow installs, create an exception (chainsaw exception create).", id)) {
 			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 			return nil
@@ -594,11 +609,16 @@ func runFindingFeedback(cmd *cobra.Command, args []string) error {
 	}
 	asJSON := useJSON(cmd)
 	if asJSON {
-		// Encode through the shared helper so we get the canonical
-		// indented form the rest of the CLI uses.
-		out, _ := json.Marshal(resp)
-		fmt.Println(string(out))
-		return nil
+		// S9 — this claimed to "encode through the shared helper ... canonical
+		// indented form" while actually calling json.Marshal (COMPACT) and
+		// fmt.Println (stdout, ignoring --output). Both are now true:
+		// encodeJSON is the shared two-space-indent encoder, and outWriterOr
+		// routes to the --output file when set.
+		//
+		// WIRE-SHAPE CHANGE: `finding feedback --json` output goes from compact
+		// to indented. Anything piping it to jq is unaffected; a consumer
+		// diffing raw bytes is not.
+		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), resp)
 	}
 	printSuccess(cmd.OutOrStdout(), cmd, fmt.Sprintf("Feedback recorded for finding %s: %s", id, action))
 	return nil

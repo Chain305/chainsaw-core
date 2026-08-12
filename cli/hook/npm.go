@@ -65,17 +65,7 @@ func (m npmManager) Wire(opts WireOpts) error {
 	if err != nil {
 		return err
 	}
-	data, err := readOrEmpty(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	if len(data) > 0 {
-		if _, err := backup(path); err != nil {
-			return fmt.Errorf("backup: %w", err)
-		}
-	}
-	block := buildBlock(body)
-	return writeAtomic(path, replaceOrAppend(data, block))
+	return writeWithBackup(m.Name(), path, body, opts)
 }
 
 func (m npmManager) Unwire(scope Scope) error {
@@ -160,14 +150,17 @@ func npmBlockBody(opts WireOpts) (string, error) {
 	token := "${CHAINSAW_TOKEN}"
 	header := ""
 	if creds := strings.TrimSpace(opts.Credentials); creds != "" {
-		if _, _, ok := splitCreds(creds); !ok {
-			return "", fmt.Errorf("credentials: expected \"client_id:client_secret\"")
+		if _, _, err := parseCreds(creds); err != nil {
+			return "", err
 		}
 		token = creds
-		header = "# chainsaw: credentials embedded in _authToken below; tighten this\n# file's permissions (chmod 600) if your home directory is shared.\n"
+		header = "# chainsaw: credentials embedded in _authToken below; chainsaw keeps\n# this file at mode 0600 (except machine-wide /etc configs, which every\n# user must be able to read).\n"
 	}
 	// BUG-A6: org-scoped path required (/repository/@<org>/npmjs/).
-	npmPath := OrgScopedRepoPath(opts.OrgSlug, "npmjs")
+	npmPath, err := orgScopedRepoPath(opts.OrgSlug, "npmjs")
+	if err != nil {
+		return "", err
+	}
 	// hostPath already carries the leading `//` (npm _authToken line
 	// format); don't prepend another one here.
 	return fmt.Sprintf(`%sregistry=%s/%s/

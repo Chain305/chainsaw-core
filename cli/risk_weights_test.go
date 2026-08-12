@@ -10,7 +10,9 @@ package cli
 //      grep-the-help-text tests stay green.
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -122,5 +124,77 @@ func TestRiskWeightsPreviewRequiresSet(t *testing.T) {
 	err := runRiskWeightsPreview(riskWeightsPreviewCmd, nil)
 	if err == nil {
 		t.Fatal("expected error when no --set flags provided")
+	}
+}
+
+// TestRiskWeightsApplyFailsLoudly is P3. `apply` PUT its --set values to
+// /api/v1/intel/weights, which reads proposed_signal_weights only to
+// re-derive the simulate inputs hash and then writes an
+// orgweights.Overrides row — a struct with no signal-weight field. Every
+// per-signal value was discarded, while the command printed
+// "Weights applied." and exited 0, so the whole preview-then-confirm gate
+// guarded a write that never happened.
+//
+// It now fails instead, BEFORE any network call. The CLI-only workaround
+// (looping PUT /api/risk/overrides/{signal}) is deliberately not taken:
+// that is a non-atomic multi-request write which can strand the org on a
+// weight set nobody previewed, and it performs the real write outside the
+// simulate_id guard — worse than the no-op. The real fix is server-side.
+func TestRiskWeightsApplyFailsLoudly(t *testing.T) {
+	origID := riskWeightsSimulateID
+	origSet := riskWeightsApplySet
+	t.Cleanup(func() {
+		riskWeightsSimulateID = origID
+		riskWeightsApplySet = origSet
+	})
+
+	riskWeightsSimulateID = "sim-abc123"
+	riskWeightsApplySet = []string{"isVulnerable=70"}
+
+	err := runRiskWeightsApply(riskWeightsApplyCmd, nil)
+	if err == nil {
+		t.Fatal("`risk-weights apply` must not report success for a write the server discards")
+	}
+	if !errors.Is(err, errRiskWeightsApplyNotPersisted) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The command must not print a success line at all. Belt and braces:
+	// the only place "Weights applied." may still appear in the binary is
+	// inside this error's own explanation of what used to happen.
+	if strings.Contains(riskWeightsApplyCmd.Long, "Re-run preview if apply returns") {
+		t.Error("the help text still describes apply as a working write path")
+	}
+	msg := err.Error()
+	for _, want := range []string{"proposed_signal_weights", "risk-weights show"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the error must explain the gap and give a next step (missing %q): %s", want, msg)
+		}
+	}
+}
+
+// TestRiskWeightsApplyStillValidatesFlagsFirst keeps the flag guards
+// ahead of the refusal, so an operator who forgot --simulate-id sees that
+// rather than a confusing "not persisted" message about a request they
+// never fully formed.
+func TestRiskWeightsApplyStillValidatesFlagsFirst(t *testing.T) {
+	origID := riskWeightsSimulateID
+	origSet := riskWeightsApplySet
+	t.Cleanup(func() {
+		riskWeightsSimulateID = origID
+		riskWeightsApplySet = origSet
+	})
+
+	riskWeightsSimulateID = ""
+	riskWeightsApplySet = []string{"isVulnerable=70"}
+	err := runRiskWeightsApply(riskWeightsApplyCmd, nil)
+	if err == nil || errors.Is(err, errRiskWeightsApplyNotPersisted) {
+		t.Fatalf("missing --simulate-id must surface as its own usage error, got %v", err)
+	}
+
+	riskWeightsSimulateID = "sim-abc123"
+	riskWeightsApplySet = []string{"not-a-pair"}
+	err = runRiskWeightsApply(riskWeightsApplyCmd, nil)
+	if err == nil || errors.Is(err, errRiskWeightsApplyNotPersisted) {
+		t.Fatalf("a malformed --set must surface as its own parse error, got %v", err)
 	}
 }

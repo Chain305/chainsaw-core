@@ -150,12 +150,19 @@ func runPolicyGate(cmd *cobra.Command, args []string) error {
 	in.Surface = surface
 
 	facade := policyengine.New(policyengine.Config{DSL: eng})
-	// Translate Input back into EvaluationContext: only the fields
-	// the facade reads via ContextToInput need to be populated, but
-	// for `gate` we treat the JSON input as the source of truth and
-	// hand it straight to the dsl engine. Re-marshal once through
-	// the facade's path so audit logging still names the bundle.
-	dec, err := facade.Decide(context.Background(), surface, inputToContext(in))
+	// The fixture IS the input. DecideInput hands `in` to OPA
+	// unchanged, so `gate` and `eval` evaluate byte-identical
+	// documents; the facade still stamps the bundle digest for audit.
+	//
+	// This used to detour through an inputToContext() copy that
+	// rebuilt an EvaluationContext only for the facade to project it
+	// straight back into an Input. The copy fell three fields behind
+	// policy.Input — signalsUnavailable, releaseDate, buildRsExecutes —
+	// so a fail-closed rule keyed on `input.signalsUnavailable` blocked
+	// under `eval` and allowed under `gate`. Do not reintroduce a
+	// translation layer here: TestPolicyGateInputFidelity fails if the
+	// input OPA sees is not the input the fixture declared.
+	dec, err := facade.DecideInput(context.Background(), in)
 	if err != nil {
 		return cliExitErr(2, "decide: %v", err)
 	}
@@ -189,81 +196,6 @@ func readInputFixture(path string) (policy.Input, error) {
 		return in, fmt.Errorf("decode input: %w", err)
 	}
 	return in, nil
-}
-
-// inputToContext is the inverse of policy.ContextToInput, used by the
-// CLI gate command to bridge the on-disk JSON shape back into the
-// EvaluationContext the facade expects. Only the fields the facade
-// actually projects need to round-trip; the rest are zero-valued.
-func inputToContext(in policy.Input) policy.EvaluationContext {
-	return policy.EvaluationContext{
-		Repository:                   in.Repository,
-		RepositoryFormat:             in.RepositoryFormat,
-		PackageName:                  in.PackageName,
-		PackageVersion:               in.PackageVersion,
-		ClientID:                     in.ClientID,
-		ClientGroups:                 in.ClientGroups,
-		RequestingIP:                 in.RequestingIP,
-		RequestingCountry:            in.RequestingCountry,
-		IsInternalPackage:            in.IsInternal,
-		LicenseSPDX:                  in.LicenseSPDX,
-		LicenseTags:                  in.LicenseTags,
-		IsVulnerable:                 in.IsVulnerable,
-		CVSSScore:                    in.CVSSScore,
-		EPSSScore:                    in.EPSSScore,
-		CVEs:                         in.CVEs,
-		HasProvenance:                in.HasProvenance,
-		ProvenanceStatus:             in.ProvenanceStatus,
-		IsSuspectedTyposquat:         in.IsSuspectedTyposquat,
-		IsKnownMalicious:             in.IsKnownMalicious,
-		TrustScore:                   in.TrustScore,
-		PublisherChanged:             in.PublisherChanged,
-		SLSALevel:                    in.SLSALevel,
-		AttestationBuilderID:         in.AttestationBuilderID,
-		AttestationIssuer:            in.AttestationIssuer,
-		AttestationSourceRepo:        in.AttestationSourceRepo,
-		AttestationTransparencyLog:   in.AttestationTransparencyLog,
-		AttestationCacheStale:        in.AttestationCacheStale,
-		HasInstallScript:             in.HasInstallScript,
-		InstallScriptFetchesRemote:   in.InstallScriptFetchesRemote,
-		ImportTimeExecution:          in.ImportTimeExecution,
-		MaliciousIOC:                 in.MaliciousIOC,
-		VersionAnomaly:               in.VersionAnomaly,
-		VersionAnomalyFlags:          in.VersionAnomalyFlags,
-		HasHiddenUnicode:             in.HasHiddenUnicode,
-		HiddenUnicodeKinds:           in.HiddenUnicodeKinds,
-		PublishVelocity24h:           in.PublishVelocity24h,
-		DeprecatedByMaintainer:       in.DeprecatedByMaintainer,
-		ShrinkwrapPresent:            in.ShrinkwrapPresent,
-		ManifestConfusion:            in.ManifestConfusion,
-		GitDependency:                in.GitDependency,
-		HTTPTarballDependency:        in.HTTPTarballDependency,
-		WildcardDependencyRange:      in.WildcardDependencyRange,
-		BadDependencySemver:          in.BadDependencySemver,
-		UsesEval:                     in.UsesEval,
-		NetworkAccess:                in.NetworkAccess,
-		ShellAccess:                  in.ShellAccess,
-		FilesystemAccess:             in.FilesystemAccess,
-		EnvVarAccess:                 in.EnvVarAccess,
-		NativeBinaryPresent:          in.NativeBinaryPresent,
-		HighEntropyStrings:           in.HighEntropyStrings,
-		URLStrings:                   in.URLStrings,
-		MinifiedCode:                 in.MinifiedCode,
-		TrivialPackage:               in.TrivialPackage,
-		TooManyFiles:                 in.TooManyFiles,
-		NonExistentAuthor:            in.NonExistentAuthor,
-		FirstTimeCollaborator:        in.FirstTimeCollaborator,
-		SuspiciousRepoStars:          in.SuspiciousRepoStars,
-		MaintainerAccountAgeDays:     in.MaintainerAccountAgeDays,
-		ArtifactSubtype:              in.ArtifactSubtype,
-		DangerousPickle:              in.DangerousPickle,
-		UnsafeSerializationFormat:    in.UnsafeSerializationFormat,
-		ModelCardInjection:           in.ModelCardInjection,
-		AgentToolDangerousCapability: in.AgentToolDangerousCapability,
-		MCPServerDeclared:            in.MCPServerDeclared,
-		PromptTemplateInjection:      in.PromptTemplateInjection,
-		ChecksumUnavailable:          in.ChecksumUnavailable,
-	}
 }
 
 func cliExitErr(code int, format string, args ...any) error {

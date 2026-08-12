@@ -9,12 +9,15 @@ package hook
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/chain305/chainsaw-core/cli/secureio"
 )
 
 type dockerManager struct{}
@@ -109,7 +112,96 @@ func (m dockerManager) Wire(opts WireOpts) error {
 	if err != nil {
 		return fmt.Errorf("marshal daemon.json: %w", err)
 	}
-	return writeAtomic(path, append(out, '\n'))
+	if err := writeConfigFile(path, append(out, '\n'), opts); err != nil {
+		return err
+	}
+	// Record exactly what we inserted so Unwire/Status can match on equality
+	// (H3). The record lives OUT OF BAND: dockerd validates daemon.json keys
+	// and refuses to start on an unknown directive, so a "chainsaw-managed-
+	// mirror" key inside the file would turn an unremovable mirror into a
+	// dead Docker daemon.
+	return recordDockerMirror(path, chainsawMirror)
+}
+
+// dockerSidecarPath is the out-of-band record of the mirrors chainsaw added
+// to a given daemon.json. dockerd never reads it.
+func dockerSidecarPath(daemonPath string) string { return daemonPath + ".chainsaw" }
+
+type dockerSidecar struct {
+	Mirrors []string `json:"mirrors"`
+}
+
+func readDockerSidecar(daemonPath string) dockerSidecar {
+	var rec dockerSidecar
+	data, err := readOrEmpty(dockerSidecarPath(daemonPath))
+	if err != nil || len(data) == 0 {
+		return rec
+	}
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return dockerSidecar{}
+	}
+	return rec
+}
+
+func recordDockerMirror(daemonPath, mirror string) error {
+	rec := readDockerSidecar(daemonPath)
+	for _, m := range rec.Mirrors {
+		if m == mirror {
+			return nil
+		}
+	}
+	rec.Mirrors = append(rec.Mirrors, mirror)
+	out, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal chainsaw mirror record: %w", err)
+	}
+	if err := secureio.WriteFile(dockerSidecarPath(daemonPath), append(out, '\n')); err != nil {
+		return fmt.Errorf("write chainsaw mirror record: %w", err)
+	}
+	return nil
+}
+
+// dockerMirrorMatcher returns a predicate that reports whether a mirror entry
+// was inserted by chainsaw, plus whether the answer is authoritative.
+//
+// H3: the old test was `strings.Contains(s, "chainsaw")`. The production host
+// is chain305.com, which contains no "chainsaw" — so the mirror could never
+// be removed and Status permanently reported not-wired. Conversely an
+// unrelated user mirror like https://mirror.internal/chainsaw-cache DID match
+// and was deleted.
+//
+// With a sidecar we match on exact equality. Without one (an install from
+// before this fix) we fall back to the one unambiguous marker: the visible
+// placeholder host chainsaw writes when no server is configured. Anything
+// else is genuinely undecidable from the file alone, which is what
+// UnwireDockerMirror is for.
+func dockerMirrorMatcher(daemonPath string) (match func(string) bool, authoritative bool) {
+	rec := readDockerSidecar(daemonPath)
+	if len(rec.Mirrors) > 0 {
+		set := make(map[string]bool, len(rec.Mirrors))
+		for _, m := range rec.Mirrors {
+			set[m] = true
+		}
+		return func(s string) bool { return set[s] }, true
+	}
+	return func(s string) bool { return strings.Contains(s, "your-chainsaw-server") }, false
+}
+
+// UnwireDockerMirror removes one exact registry-mirror entry from the docker
+// daemon config. It is the escape hatch for hosts wired before the sidecar
+// existed, where the mirror URL cannot be recovered from the file:
+//
+//	chainsaw uninstall-hook docker --mirror https://chain305.com
+func UnwireDockerMirror(scope Scope, mirror string) error {
+	mirror = strings.TrimSpace(mirror)
+	if mirror == "" {
+		return fmt.Errorf("mirror URL is required")
+	}
+	path, err := dockerManager{}.ConfigPathForScope(scope)
+	if err != nil {
+		return err
+	}
+	return removeDockerMirrors(path, func(s string) bool { return s == mirror })
 }
 
 func (m dockerManager) Unwire(scope Scope) error {
@@ -117,6 +209,13 @@ func (m dockerManager) Unwire(scope Scope) error {
 	if err != nil {
 		return err
 	}
+	match, _ := dockerMirrorMatcher(path)
+	return removeDockerMirrors(path, match)
+}
+
+// removeDockerMirrors drops every registry-mirror entry satisfying match,
+// backs the file up, and clears the sidecar record on success.
+func removeDockerMirrors(path string, match func(string) bool) error {
 	data, err := readOrEmpty(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
@@ -129,15 +228,11 @@ func (m dockerManager) Unwire(scope Scope) error {
 		return fmt.Errorf("parse daemon.json: %w", err)
 	}
 	mirrors, _ := existing["registry-mirrors"].([]any)
-	filtered := mirrors[:0]
+	filtered := make([]any, 0, len(mirrors))
 	removed := false
 	for _, entry := range mirrors {
 		s, ok := entry.(string)
-		if !ok {
-			filtered = append(filtered, entry)
-			continue
-		}
-		if strings.Contains(s, "your-chainsaw-server") || strings.Contains(s, "chainsaw") {
+		if ok && match(s) {
 			removed = true
 			continue
 		}
@@ -158,7 +253,13 @@ func (m dockerManager) Unwire(scope Scope) error {
 	if err != nil {
 		return fmt.Errorf("marshal daemon.json: %w", err)
 	}
-	return writeAtomic(path, append(out, '\n'))
+	if err := writeAtomic(path, append(out, '\n')); err != nil {
+		return err
+	}
+	if err := os.Remove(dockerSidecarPath(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove chainsaw mirror record: %w", err)
+	}
+	return nil
 }
 
 func (m dockerManager) Status() (Status, error) {
@@ -170,17 +271,16 @@ func (m dockerManager) Status() (Status, error) {
 	if readErr != nil {
 		return Status{ConfigPath: path, Installed: m.IsInstalled()}, readErr
 	}
+	match, _ := dockerMirrorMatcher(path)
 	wired := false
 	if len(data) > 0 {
 		existing := map[string]any{}
 		if err := json.Unmarshal(data, &existing); err == nil {
 			if mirrors, ok := existing["registry-mirrors"].([]any); ok {
 				for _, entry := range mirrors {
-					if s, ok := entry.(string); ok {
-						if strings.Contains(s, "chainsaw") {
-							wired = true
-							break
-						}
+					if s, ok := entry.(string); ok && match(s) {
+						wired = true
+						break
 					}
 				}
 			}

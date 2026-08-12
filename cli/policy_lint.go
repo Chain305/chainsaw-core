@@ -230,8 +230,12 @@ type rawPolicyDoc struct {
 
 type rawPolicyEntry struct {
 	policy policy.Policy
-	line   int
-	name   string
+	// raw is the entry's JSON bytes as authored, BEFORE typing. Kept so
+	// checks can see keys the typed struct does not model — see
+	// rawHasField.
+	raw  []byte
+	line int
+	name string
 }
 
 func lintPolicyFile(path string) ([]lintFinding, int, error) {
@@ -304,7 +308,7 @@ func parsePolicyDoc(data []byte, path string) (*rawPolicyDoc, error) {
 		if name == "" {
 			name = "<unnamed>"
 		}
-		out.policies = append(out.policies, rawPolicyEntry{policy: p, line: n.Line, name: name})
+		out.policies = append(out.policies, rawPolicyEntry{policy: p, raw: jb, line: n.Line, name: name})
 	}
 	return out, nil
 }
@@ -341,7 +345,7 @@ func checkStandaloneCodesmell(file string, e rawPolicyEntry) *lintFinding {
 	if len(contextOnly) == 0 || hasOther {
 		return nil
 	}
-	if hasIdentifier(e.policy.Identifier) || hasScope(e.policy.Scope) {
+	if policy.HasMeaningfulIdentifier(e.policy.Identifier) || policy.HasMeaningfulScope(e.policy.Scope) {
 		return nil
 	}
 	names := make([]string, len(contextOnly))
@@ -398,27 +402,32 @@ func checkThreeStateNilAsFalse(file string, e rawPolicyEntry) []lintFinding {
 	return out
 }
 
-// rawHasField re-marshals the policy to JSON and looks for the named
-// key. Cheap, since policies are tiny, and avoids a second parse pass.
+// rawHasField searches the entry's ORIGINAL JSON bytes for the named
+// key — the bytes parsePolicyDoc produced from the user's YAML/JSON
+// before typing them.
+//
+// It used to re-marshal e.policy, the TYPED struct. That could never
+// find repoArchived: encoding/json drops unknown keys on the way in, and
+// policy.Conditions has no repoArchived field (it lives on the
+// intelligence/risk side), so the round trip deleted exactly the key the
+// check was looking for. The check advertised in the command's Long help
+// was dead code from the day it was written.
+//
+// Substring search is fine — the condition key names are namespaced
+// enough that the false-positive risk is negligible at our scale.
 func rawHasField(e rawPolicyEntry, key string) bool {
-	jb, err := json.Marshal(e.policy)
-	if err != nil {
+	if len(e.raw) == 0 {
 		return false
 	}
-	// Substring search is fine — the Conditions struct field names
-	// are namespaced enough that the false-positive risk is
-	// negligible at our scale.
-	return strings.Contains(string(jb), `"`+key+`":`)
+	return strings.Contains(string(e.raw), `"`+key+`":`)
 }
 
-func hasIdentifier(id policy.Identifier) bool {
-	return strings.TrimSpace(id.TargetPackageName) != "" ||
-		strings.TrimSpace(id.TargetPackageRepo) != "" ||
-		strings.TrimSpace(id.TargetPackageVersion) != ""
-}
-
-func hasScope(s policy.Scope) bool {
-	return len(s.TargetClient) > 0 || len(s.TargetGroup) > 0 ||
-		len(s.TargetRepos) > 0 || len(s.TargetRequestingCountry) > 0 ||
-		len(s.TargetRequestingIP) > 0
-}
+// The local hasIdentifier / hasScope look-alikes that used to live here
+// are gone. They accepted "*" as a pairing while the save-time validator
+// (policy.HasMeaningfulIdentifier / HasMeaningfulScope, over
+// hasMeaningfulValue) rejects "", "*" and "all" alike — so a policy
+// whose only pairing was a wildcard identifier linted "clean" and was
+// then rejected by rejectStandaloneContextOnlyConditions on POST. This
+// file's whole reason to exist is catching that rejection first, so it
+// now calls the validator's own predicates. One implementation, no
+// drift.

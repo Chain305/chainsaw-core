@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,12 +28,80 @@ const scanSchemaVersion = "chainsaw.scan/v1"
 var scanStdin io.Reader = os.Stdin
 
 // severityRank maps severity strings to ordinal values for comparison.
+//
+// Lookups MUST go through rankSeverity, never through this map directly: a bare
+// map index is case-sensitive and silently yields rank 0 for any value it does
+// not know, which made `--fail-on high` fail OPEN on the exact row SARIF calls
+// "error" (S2).
 var severityRank = map[string]int{
 	"critical": 4,
 	"high":     3,
 	"medium":   2,
 	"low":      1,
 	"none":     0,
+}
+
+// severityAliases maps foreign severity vocabularies onto chainsaw's ladder.
+// The keys are the words other advisory sources use for the same band:
+//
+//	moderate                     GitHub Advisory's word for medium
+//	important                    Red Hat / Microsoft's word for high
+//	informational | info         "worth recording, not worth gating"
+//	negligible                   Debian/Alpine's floor band
+//
+// Aliasing is deliberately conservative — it only covers vocabularies that map
+// UNAMBIGUOUSLY onto an existing band. Anything else stays "unrecognized" and
+// is reported rather than guessed at (see rankSeverity).
+var severityAliases = map[string]string{
+	"moderate":      "medium",
+	"important":     "high",
+	"informational": "none",
+	"info":          "none",
+	"negligible":    "none",
+}
+
+// scanSeverityFlagValues is the explicit set `--severity` / `--fail-on` accept.
+//
+// S11: validation used to be `_, ok := severityRank[flag]`, which silently
+// admitted the map's fifth key "none" — a value the error message never
+// advertised and whose threshold (0) makes `severityRank[r.Severity] >= 0` true
+// for EVERY row, so `--fail-on none` (which reads as "never fail") blocked on
+// any result at all. Validate against the four documented values instead.
+var scanSeverityFlagValues = map[string]bool{
+	"critical": true,
+	"high":     true,
+	"medium":   true,
+	"low":      true,
+}
+
+// rankSeverity normalizes a severity string and returns its ordinal rank plus
+// whether the value was recognized at all.
+//
+// Normalization is ToLower+TrimSpace followed by the alias table, so "HIGH",
+// " high " and "moderate" all resolve. An EMPTY severity is recognized at rank
+// 0 (it is the server's "no CVE severity" encoding, not a protocol error).
+//
+// The (rank, ok) split matters: callers must not conflate "rank 0" with
+// "unknown". Rank 0 is a real band ("none"); unknown means the CLI and the
+// server disagree about the vocabulary, which is a version-skew signal the
+// caller decides what to do with. We deliberately do NOT resolve unknown values
+// upward to "at or above the threshold" — the SARIF emitter in this same repo
+// resolves unknown DOWNWARD to "note"/0.0, so that would trade one silent
+// disagreement for a louder one in the opposite direction and turn protocol
+// skew into a fleet-wide CI outage. Instead: warn once per distinct value,
+// echo them in the JSON envelope, and apply one surgical fail-closed rule at
+// the gate (a `status=="vulnerable"` row whose severity is unrankable breaches
+// any --fail-on).
+func rankSeverity(s string) (int, bool) {
+	n := strings.ToLower(strings.TrimSpace(s))
+	if n == "" {
+		return 0, true
+	}
+	if alias, ok := severityAliases[n]; ok {
+		n = alias
+	}
+	rank, ok := severityRank[n]
+	return rank, ok
 }
 
 // supplyChainConditionSeverity maps a triggered supply-chain condition
@@ -148,8 +217,18 @@ func init() {
 	scanCmd.Flags().String("severity", "", "Minimum severity to display: critical, high, medium, low")
 	scanCmd.Flags().String("fail-on", "", "Exit 1 only when vulnerabilities at or above this severity are found")
 	scanCmd.Flags().Bool("stdin", false, "Read newline-delimited package specs / lockfile paths from stdin (opt-in; same as the `-` arg)")
+	// S6 — the shared 30s client timeout hard-caps a scan this command
+	// advertises as accepting 10,000 packages, with no way to raise it. The
+	// default here is deliberately well above 30s; NewAPIClient's 30s stays put
+	// for the ~40 other commands that make one small request.
+	scanCmd.Flags().Duration("timeout", scanDefaultTimeout, "Maximum time to wait for the server to evaluate the submitted packages")
 	rootCmd.AddCommand(scanCmd)
 }
+
+// scanDefaultTimeout is the overall HTTP budget for the /api/scan POST. Ten
+// minutes is chosen to comfortably cover the documented 10,000-package ceiling;
+// the shared 30s default could not.
+const scanDefaultTimeout = 10 * time.Minute
 
 func runScan(cmd *cobra.Command, args []string) error {
 	scanStart := time.Now()
@@ -175,21 +254,33 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("specify a package (e.g. lodash@4.17.11), --path <dir>, or - / --stdin to read from stdin")}
 	}
 
+	// S11 — validate against the explicit four-value set the error text
+	// advertises, NOT against severityRank (whose "none" key passed validation
+	// and then made --fail-on block on every row). Case/whitespace are
+	// normalized first so `--fail-on HIGH` behaves like `--fail-on high`,
+	// matching rankSeverity's treatment of the server's values.
 	if severityFlag != "" {
-		if _, ok := severityRank[severityFlag]; !ok {
+		severityFlag = strings.ToLower(strings.TrimSpace(severityFlag))
+		if !scanSeverityFlagValues[severityFlag] {
 			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("unknown --severity %q; use critical, high, medium, or low", severityFlag)}
 		}
 	}
 	if failOnFlag != "" {
-		if _, ok := severityRank[failOnFlag]; !ok {
+		failOnFlag = strings.ToLower(strings.TrimSpace(failOnFlag))
+		if !scanSeverityFlagValues[failOnFlag] {
 			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("unknown --fail-on %q; use critical, high, medium, or low", failOnFlag)}
 		}
 	}
 
-	client := newClient()
+	// S6 — build the client with the command's own timeout budget rather than
+	// the shared 30s default. A non-positive value falls back to that default
+	// inside newAPIClientWithTimeout.
+	scanTimeout, _ := cmd.Flags().GetDuration("timeout")
+	client := newClientWithTimeout(scanTimeout)
 	if client.baseURL == "" {
-		// Missing server config → ExitConfigAuth(3).
-		return &ExitCodeError{Code: ExitConfigAuth, Err: errServerNotConfigured(cmd)}
+		// Missing server config → ExitConfigAuth(3), carried by
+		// errServerNotConfigured itself (X3) rather than re-wrapped here.
+		return errServerNotConfigured(cmd)
 	}
 	if cfgToken() == "" {
 		// Not authenticated → ExitConfigAuth(3).
@@ -274,9 +365,37 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// them back into the result so downstream text/JSON/--fail-on
 	// paths can treat supply-chain conditions as first-class
 	// citizens alongside CVE-based severity.
+	//
+	// S2 — the RAW server severity is inspected here, before
+	// resolveHighestSeverity can overwrite it with a higher supply-chain band.
+	// unrankable[i] records "this row arrived with a severity this CLI does not
+	// understand", which the --fail-on gate below turns into a fail-CLOSED
+	// decision for vulnerable rows.
+	unrankable := make([]bool, len(resp.Results))
+	unknownSeen := map[string]bool{}
 	for i := range resp.Results {
+		if _, ok := rankSeverity(resp.Results[i].Severity); !ok {
+			unrankable[i] = true
+			unknownSeen[strings.TrimSpace(resp.Results[i].Severity)] = true
+		}
 		resp.Results[i].TriggeredConditions = deriveTriggeredConditions(resp.Results[i])
 		resp.Results[i].Severity = resolveHighestSeverity(resp.Results[i])
+	}
+	unknownSeverities := make([]string, 0, len(unknownSeen))
+	for s := range unknownSeen {
+		unknownSeverities = append(unknownSeverities, s)
+	}
+	sort.Strings(unknownSeverities)
+	// One warning per DISTINCT unrecognized value, not one per row — a fleet
+	// running a newer server would otherwise emit a line per package. quiet()
+	// suppresses it: this is a diagnostic about protocol skew, and the gate
+	// below (not this line) is what enforces.
+	if len(unknownSeverities) > 0 && !quiet(cmd) {
+		fmt.Fprintf(os.Stderr,
+			"warning: server returned severity value(s) this CLI does not recognize: %s\n"+
+				"         they are ranked as 'none' for display; vulnerable rows carrying them still breach --fail-on.\n"+
+				"         upgrade the CLI if your server is newer.\n",
+			strings.Join(unknownSeverities, ", "))
 	}
 
 	// Apply severity display filter. A result is shown when its
@@ -287,19 +406,23 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// which is the whole point of wiring the new conditions in.
 	displayed := resp.Results
 	if severityFlag != "" {
-		minRank := severityRank[severityFlag]
+		minRank, _ := rankSeverity(severityFlag)
 		// Allocate a fresh slice rather than filtering in place
 		// (displayed[:0]) — the exit-code gate below iterates the
 		// unfiltered resp.Results, and an in-place filter would alias and
 		// overwrite that backing array, silently defeating the gate.
 		filtered := make([]scanResultItem, 0, len(resp.Results))
 		for _, r := range resp.Results {
-			if severityRank[r.Severity] >= minRank {
+			if rank, _ := rankSeverity(r.Severity); rank >= minRank {
 				filtered = append(filtered, r)
 			}
 		}
 		displayed = filtered
 	}
+	// S4 — how many findings the display filter removed. printScanTable cannot
+	// otherwise tell "the scan was clean" apart from "the filter hid
+	// everything", and it printed the clean message for both.
+	hiddenBySeverity := len(resp.Results) - len(displayed)
 
 	switch format {
 	case "json":
@@ -309,13 +432,28 @@ func runScan(cmd *cobra.Command, args []string) error {
 		// field. Results go to the --output sink (a file when set, else stdout)
 		// so JSON purity holds: stdout carries only the envelope, logs stay on
 		// stderr.
-		_ = PrintJSONTo(cmd, map[string]any{
+		//
+		// S12/S2 — three fields are CONDITIONALLY added: severityFilter and
+		// filteredOut only when --severity is set, unknownSeverities only when
+		// the server sent a value this CLI could not rank. An unfiltered scan
+		// against a matching server therefore emits the exact same bytes as
+		// before, while a filtered one stops advertising a pre-filter
+		// total/vulnerable next to a post-filter results[] with no marker.
+		env := map[string]any{
 			"schemaVersion": scanSchemaVersion,
 			"results":       displayed,
 			"total":         resp.Total,
 			"vulnerable":    resp.Vulnerable,
 			"unscanned":     resp.Unscanned,
-		})
+		}
+		if severityFlag != "" {
+			env["severityFilter"] = severityFlag
+			env["filteredOut"] = hiddenBySeverity
+		}
+		if len(unknownSeverities) > 0 {
+			env["unknownSeverities"] = unknownSeverities
+		}
+		_ = PrintJSONTo(cmd, env)
 	case "sarif":
 		// SARIF is normally redirected to a file via --output; outWriter honors
 		// that and falls back to stdout otherwise. We emit the FULL result set
@@ -335,7 +473,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 		if resp.Unscanned > 0 && !quiet(cmd) {
 			fmt.Fprintf(os.Stderr, "note: %d package(s) could not be scanned\n", resp.Unscanned)
 		}
-		printScanTable(displayed)
+		printScanTable(displayed, hiddenBySeverity, severityFlag)
 	}
 
 	emit("cli.scan.completed", map[string]any{
@@ -359,9 +497,19 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// carries no message so renderError stays silent — the findings already
 	// printed above are the user-facing block reason.
 	if failOnFlag != "" {
-		threshold := severityRank[failOnFlag]
-		for _, r := range resp.Results {
-			if severityRank[r.Severity] >= threshold {
+		threshold, _ := rankSeverity(failOnFlag)
+		for i, r := range resp.Results {
+			// S2 fail-closed rule, deliberately narrow: a row the server calls
+			// "vulnerable" whose severity this CLI cannot rank breaches ANY
+			// --fail-on threshold. Ranking it 0 would fail OPEN on exactly the
+			// row SARIF renders as level "error". The rule is scoped to
+			// status=="vulnerable" so it carries zero false-positive surface —
+			// a non-vulnerable row with an unknown severity is still just
+			// informational.
+			if unrankable[i] && r.Status == "vulnerable" {
+				return &ExitCodeError{Code: ExitBlocked}
+			}
+			if rank, _ := rankSeverity(r.Severity); rank >= threshold {
 				return &ExitCodeError{Code: ExitBlocked}
 			}
 		}
@@ -377,7 +525,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 			if r.Status == "vulnerable" {
 				return &ExitCodeError{Code: ExitBlocked}
 			}
-			if severityRank[r.Severity] >= severityRank["high"] {
+			if rank, _ := rankSeverity(r.Severity); rank >= severityRank["high"] {
 				return &ExitCodeError{Code: ExitBlocked}
 			}
 		}
@@ -450,25 +598,49 @@ func resolveHighestSeverity(r scanResultItem) string {
 	if best == "" && r.Status == "vulnerable" {
 		best = "low"
 	}
-	bestRank := severityRank[best]
+	// S2 — normalize through rankSeverity so "HIGH"/"moderate" from the server
+	// are compared on the same ladder as our own condition severities. An
+	// unrankable value ranks 0 here, so any triggered condition outranks it and
+	// the row is upgraded; if no condition fires, the original (unknown) string
+	// is returned verbatim rather than being invented away.
+	bestRank, _ := rankSeverity(best)
 	for _, cond := range r.TriggeredConditions {
 		sev, ok := supplyChainConditionSeverity[cond]
 		if !ok {
 			continue
 		}
-		if severityRank[sev] > bestRank {
-			bestRank = severityRank[sev]
+		if rank, _ := rankSeverity(sev); rank > bestRank {
+			bestRank = rank
 			best = sev
 		}
 	}
 	return best
 }
 
-func printScanTable(results []scanResultItem) {
+// printScanTable renders the (already --severity-filtered) result rows.
+//
+// hiddenBySeverity/severityFilter exist because the filtered slice alone cannot
+// distinguish "the scan was clean" from "the display filter hid everything" —
+// the function printed the same all-clear message for both, and an operator
+// read it as a clean tree (S4). The exit gate is unaffected: it iterates the
+// UNFILTERED results (see runScan), which is deliberate and stays that way.
+func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilter string) {
 	if len(results) == 0 {
+		if hiddenBySeverity > 0 {
+			// Keep the leading clause identical to the clean message so the
+			// two read alike, but qualify it and state the count.
+			fmt.Printf("No vulnerabilities or supply-chain signals found at or above --severity %s.\n", severityFilter)
+			fmt.Printf("%d finding(s) hidden by --severity %s.\n", hiddenBySeverity, severityFilter)
+			return
+		}
 		fmt.Println("No vulnerabilities or supply-chain signals found.")
 		return
 	}
+	defer func() {
+		if hiddenBySeverity > 0 {
+			fmt.Printf("\n%d finding(s) hidden by --severity %s.\n", hiddenBySeverity, severityFilter)
+		}
+	}()
 	rows := make([][]string, len(results))
 	anySignals := false
 	for i, r := range results {
