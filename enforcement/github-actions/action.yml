@@ -7,7 +7,11 @@
 #   Supported runner types: ubuntu-latest, macos-latest, windows-latest.
 #   jq must be available on the runner (present on all GitHub-hosted runners).
 #   gh CLI must be available for PR comments (present on GitHub-hosted runners).
-# Install-script host: https://chain305.com/install.sh — confirmed final value
+# Install-script host: https://chain305.com/install.sh
+# VERIFIED by fetching it (HTTP 200) on 2026-08-12, not asserted. This line
+# previously read "get.chain305.com — confirmed final value"; that subdomain was
+# never provisioned and returned 404, so this step failed for every consumer of
+# the action. scripts/check-cli-download-urls.sh now enforces the host.
 #   (same server as chain305.com; anonymous download, no auth required).
 #
 # CHECKOUT REQUIREMENT: give `actions/checkout` `fetch-depth: 0`. At the
