@@ -1,0 +1,576 @@
+# Chainsaw Guard — GitHub Action
+#
+# Marketplace listing publishes from this monorepo (Chain305/chainsaw-core);
+# the release-action.yml workflow tags `action-v*.*.*` releases here.
+#
+# Platform support: runs.using: composite; all steps are bash.
+#   Supported runner types: ubuntu-latest, macos-latest, windows-latest.
+#   jq must be available on the runner (present on all GitHub-hosted runners).
+#   gh CLI must be available for PR comments (present on GitHub-hosted runners).
+# Install-script host: https://chain305.com/install.sh — confirmed final value
+#   (same server as chain305.com; anonymous download, no auth required).
+#
+# CHECKOUT REQUIREMENT: give `actions/checkout` `fetch-depth: 0`. At the
+#   default depth of 1 the PR base commit is not in the local object store,
+#   so `chainsaw pr-scan` has nothing to diff against. The pr-scan step tries
+#   to fetch the base commit and then falls back to the base-branch tip, but
+#   both degrade the diff; if neither resolves, the step reports that the PR
+#   was NOT inspected and `mode: block` fails the job rather than passing it.
+#
+name: "Chainsaw Guard"
+description: "Block vulnerable, typosquatted, malicious, or unlicensed packages in pull requests before they ever reach main."
+author: "Chainsaw Security"
+
+branding:
+  icon: "shield"
+  color: "green"
+
+inputs:
+  mode:
+    description: >
+      Enforcement mode. "warn" posts findings as a PR comment but never
+      fails the job. "block" fails the job when `scan-repo` finds a bypass
+      file, when `doctor --strict` exits non-zero, when `pr-scan` exits at
+      or above the `pr-scan-fail-on` threshold, or when any of those
+      commands could not complete (a crashed or skipped check is never
+      reported as clean). Suitable for a required status check.
+    required: false
+    default: "warn"
+  server:
+    description: >
+      Chainsaw control-plane URL (e.g. https://chainsaw.your-company.com).
+      Leave empty to run in offline mode against the bundled policy
+      bundle — ideal for the 60-second solo-dev quickstart.
+    required: false
+    default: ""
+  token:
+    description: >
+      CHAINSAW_TOKEN — base64 of `client_id:client_secret` or a signed
+      short-lived token. Store as an Actions secret; never commit.
+      Only required when `server` is set.
+    required: false
+    default: ""
+  attest:
+    description: >
+      POST the doctor report to `/api/attestations` so the compliance
+      dashboard records this runner. Ignored when `server` is empty.
+    required: false
+    default: "true"
+  scan-repo:
+    description: >
+      Run `chainsaw scan-repo` alongside `doctor` to detect committed
+      bypass files (`.npmrc`, public `--index-url`, raw `FROM` image
+      refs, etc.). Disable only when the repo has accepted long-term
+      exceptions and you want an audit trail without blocking.
+    required: false
+    default: "true"
+  version:
+    description: >
+      Chainsaw CLI version to install. Use "latest" or pin to a release
+      tag (e.g. "v0.16.0"). The binary is fetched from the public
+      release host; no private-registry auth required.
+    required: false
+    default: "latest"
+  comment-on-pr:
+    description: >
+      Post a summary comment on the pull request with findings and a
+      remediation hint. Requires `pull-requests: write` permission on
+      the job. No-op on push events.
+    required: false
+    default: "true"
+  pr-scan-fail-on:
+    description: >
+      Which `chainsaw pr-scan` exit code fails the job in `mode: block`.
+      "block" (the default) fails at exit 20 — a blocking finding — and at
+      exit 30, where a monitored manifest failed to parse and dependencies
+      were dropped from the scan. "warn" lowers the threshold to exit 10,
+      which also fails on warning-level findings; this is the same gate
+      `pr-scan --strict` produces. Choose "warn" deliberately: the offline
+      signal `sc.new_dep` fires on EVERY newly added dependency, so "warn"
+      fails essentially every PR that adds a dependency. Has no effect in
+      `mode: warn`.
+    required: false
+    default: "block"
+  attribution:
+    description: >
+      Append an opt-in "Protected by Chainsaw" footer (with an install
+      link) to the PR comment. OFF by default — enable it only if you
+      want the attribution line to appear on every scanned PR. Has no
+      effect unless `comment-on-pr` is also true.
+    required: false
+    default: "false"
+
+outputs:
+  findings:
+    description: >
+      Total number of findings discovered by `chainsaw scan-repo`
+      (bypass files, policy hits, lockfile drifts). `0` means clean.
+    value: ${{ steps.scan.outputs.findings }}
+  policy-hits:
+    description: >
+      DEPRECATED — mirrors `findings`, kept only so existing workflows that
+      reference it keep resolving. `scan-repo` findings carry no severity
+      dimension (a finding is `file`/`category`/`rule`/`detail` and nothing
+      else), so there is no "blocking subset" to report; in `mode: block`
+      every finding gates. Read `findings` instead.
+    value: ${{ steps.scan.outputs.policy_hits }}
+  scan-exit-code:
+    description: >
+      Raw exit code from `chainsaw scan-repo`. 0 = clean tree,
+      10 = bypass findings. Any other value means the scan did not
+      complete — treat it as unknown, never as clean.
+    value: ${{ steps.scan.outputs.scan_rc }}
+  report-path:
+    description: >
+      Filesystem path to the JSON report written by the action. Upload
+      it as a build artifact for triage or SARIF conversion.
+    value: ${{ steps.scan.outputs.report_path }}
+  exit-code:
+    description: >
+      Raw exit code from `chainsaw doctor --strict`. 0 = clean,
+      10 = bypass/drift, 30 = runner can reach public registries,
+      40 = unsupported package manager.
+    value: ${{ steps.doctor.outputs.exit_code }}
+  pr-scan-report:
+    description: >
+      Filesystem path to the JSON report written by `chainsaw pr-scan`.
+      Contains every added/upgraded dependency with per-package signals.
+      Upload as a build artifact for triage.
+    value: ${{ steps.pr_scan.outputs.pr_scan_report }}
+  pr-scan-exit-code:
+    description: >
+      Raw exit code from `chainsaw pr-scan`. 0 = clean, 10 = warning-level
+      findings, 20 = blocking findings, 30 = a monitored manifest failed to
+      parse (dependencies were dropped). Empty when the event is not a
+      pull request. Any other value means pr-scan did not complete.
+    value: ${{ steps.pr_scan.outputs.pr_scan_rc }}
+  pr-scan-ran:
+    description: >
+      "true" when `chainsaw pr-scan` executed, "false" when it was skipped
+      because the PR base commit could not be resolved (usually a shallow
+      checkout — set `fetch-depth: 0`). Empty on non-PR events.
+    value: ${{ steps.pr_scan.outputs.pr_scan_ran }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Chainsaw CLI
+      shell: bash
+      # SECURITY (E4 — Eng review; updated 2026-07-02): this step pipes a remote
+      # shell script into bash. scripts/install.sh verifies the SHA-256 checksum
+      # manifest over TLS by default and does NOT require or run cosign on the
+      # client — cosign-based Sigstore verification is OPT-IN only
+      # (CHAINSAW_REQUIRE_SIGNATURE=1), by design: a verifier binary on every CI
+      # runner is license + attack-surface liability, and for a curl|sh install
+      # the serving host already delivers this script (see TODO_X1_SIGNING.md,
+      # decision 2026-07-02). We set the opt-out explicitly for clarity; it is
+      # also the script default. If you DO opt in on a runner that has cosign, a
+      # present-but-invalid signature is always fatal.
+      env:
+        CHAINSAW_VERSION: ${{ inputs.version }}
+        CHAINSAW_REQUIRE_SIGNATURE: "0"
+      run: |
+        set -euo pipefail
+        if command -v chainsaw >/dev/null; then
+          echo "chainsaw already installed: $(chainsaw version)"
+          exit 0
+        fi
+        # Install into an explicit, known dir and add it to the job PATH.
+        # install.sh honours --version (and CHAINSAW_VERSION) — a pinned
+        # `version:` input actually installs that tag; "latest" tracks the
+        # latest served set. Skip shell-rc edits: on a CI runner PATH is set
+        # via $GITHUB_PATH, not ~/.bashrc.
+        install_dir="$HOME/.chainsaw/bin"
+        curl -fsSL https://chain305.com/install.sh \
+          | CHAINSAW_INSTALL_DIR="$install_dir" CHAINSAW_NO_MODIFY_PATH=1 \
+            bash -s -- --version "$CHAINSAW_VERSION"
+        echo "$install_dir" >> "$GITHUB_PATH"
+
+    - name: Configure Chainsaw server
+      shell: bash
+      env:
+        CHAINSAW_SERVER: ${{ inputs.server }}
+      run: |
+        if [ -n "$CHAINSAW_SERVER" ]; then
+          echo "CHAINSAW_SERVER=$CHAINSAW_SERVER" >> "$GITHUB_ENV"
+        fi
+
+    - name: Run chainsaw scan-repo
+      id: scan
+      if: ${{ inputs.scan-repo == 'true' }}
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        set +e
+        report="$RUNNER_TEMP/chainsaw-report.json"
+        chainsaw scan-repo . --json > "$report"
+        rc=$?
+        set -uo pipefail
+
+        # Annotation level tracks the mode: in block mode an incomplete scan
+        # fails the job at the `Enforce mode` step, so it is an error there
+        # and a warning in warn mode.
+        if [ "${MODE}" = "block" ]; then lvl="error"; else lvl="warning"; fi
+
+        # scan-repo's contract (core/cli/scan_repo.go): 0 = clean tree,
+        # 10 = bypass findings, report written either way. There is NO
+        # `severity` field on a finding — the old `select(.severity ==
+        # "block")` filter matched nothing and made this gate permanently
+        # dead — so the gate is "findings != 0" and every finding counts.
+        # Any other exit code means the tree is not provably clean: 2 covers
+        # both a mistyped path and candidate files the walk could not read,
+        # and the report is then missing or partial. Reading that as "clean"
+        # is exactly the fail-open this step used to have via its
+        # unconditional `exit 0`.
+        scan_ok="true"
+        findings=""
+        if [ "$rc" = "0" ] || [ "$rc" = "10" ]; then
+          if ! findings=$(jq '.findings | length' "$report" 2>/dev/null) || [ -z "$findings" ]; then
+            scan_ok="false"
+            findings=""
+            echo "::${lvl}::chainsaw scan-repo exited ${rc} but wrote no parseable JSON report to ${report}. The tree is NOT provably clean."
+          fi
+        else
+          scan_ok="false"
+          echo "::${lvl}::chainsaw scan-repo exited ${rc} (expected 0 = clean tree, or 10 = bypass findings). The tree is NOT provably clean — exit 2 means a bad path or files the scan could not read."
+        fi
+
+        # `policy_hits` is retained for backwards compatibility only and now
+        # mirrors `findings`; see the output description above.
+        {
+          echo "findings=${findings}"
+          echo "policy_hits=${findings}"
+          echo "report_path=${report}"
+          echo "scan_rc=${rc}"
+          echo "scan_ok=${scan_ok}"
+        } >> "$GITHUB_OUTPUT"
+        echo "scan exit=${rc} ok=${scan_ok} findings=${findings:-unknown}"
+
+    - name: Run chainsaw doctor
+      id: doctor
+      shell: bash
+      env:
+        CHAINSAW_TOKEN: ${{ inputs.token }}
+      run: |
+        set +e
+        flags=(--strict)
+        if [ "${{ inputs.attest }}" = "true" ] && [ -n "${CHAINSAW_SERVER:-}" ]; then
+          flags+=(--attest)
+        fi
+        chainsaw doctor "${flags[@]}"
+        rc=$?
+        echo "exit_code=${rc}" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Run chainsaw pr-scan
+      id: pr_scan
+      if: ${{ github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+      run: |
+        set +e
+        set -uo pipefail
+        if [ "${MODE}" = "block" ]; then lvl="error"; else lvl="warning"; fi
+        report="$RUNNER_TEMP/chainsaw-pr-scan.json"
+
+        # actions/checkout defaults to `fetch-depth: 1`, which leaves the PR
+        # BASE commit out of the local object store. pr-scan then cannot
+        # resolve --base, exits non-zero without writing a report, and every
+        # `jq … || echo 0` below would read 0 — a silent "clean" on a PR that
+        # was never inspected. Make the base reachable if we can, fall back
+        # to the base-branch tip, and if neither resolves say so loudly and
+        # let `Enforce mode` decide. Consumers should still set
+        # `fetch-depth: 0` on actions/checkout; this is the degrade path.
+        have_commit() { git cat-file -e "${1}^{commit}" 2>/dev/null; }
+
+        base_ref=""
+        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+          if have_commit "$BASE_SHA"; then
+            base_ref="$BASE_SHA"
+          else
+            git fetch --no-tags --quiet origin "$BASE_SHA" >/dev/null 2>&1 || true
+            if have_commit "$BASE_SHA"; then
+              base_ref="$BASE_SHA"
+            elif [ -n "${BASE_REF:-}" ]; then
+              git fetch --no-tags --quiet origin \
+                "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}" >/dev/null 2>&1 || true
+              if have_commit "origin/${BASE_REF}"; then
+                base_ref="origin/${BASE_REF}"
+                echo "::warning::Chainsaw: the PR base commit ${BASE_SHA} is not in this checkout (shallow clone). Falling back to origin/${BASE_REF}, so the dependency diff may not match the PR exactly. Add 'fetch-depth: 0' to your actions/checkout step."
+              fi
+            fi
+          fi
+        else
+          echo "::${lvl}::Chainsaw: the workspace is not a git repository, so chainsaw pr-scan cannot diff this PR."
+        fi
+
+        if [ -z "$base_ref" ]; then
+          echo "::${lvl}::Chainsaw: could not resolve the PR base commit (${BASE_SHA}) or origin/${BASE_REF:-<unknown>}. chainsaw pr-scan did NOT run and this PR's dependency changes were NOT inspected. Add 'fetch-depth: 0' to your actions/checkout step."
+          {
+            echo "pr_scan_ran=false"
+            echo "pr_scan_rc="
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Same story for the head commit: on a shallow checkout the PR head
+        # may be absent, but the workspace is already checked out at it.
+        head_ref="$HEAD_SHA"
+        if ! have_commit "$HEAD_SHA"; then
+          git fetch --no-tags --quiet origin "$HEAD_SHA" >/dev/null 2>&1 || true
+          if ! have_commit "$HEAD_SHA"; then
+            head_ref="HEAD"
+            echo "::warning::Chainsaw: the PR head commit ${HEAD_SHA} is not in this checkout; diffing against the checked-out HEAD instead."
+          fi
+        fi
+
+        chainsaw pr-scan --base "$base_ref" --head "$head_ref" --json --output-file "$report"
+        rc=$?
+
+        # pr-scan's contract (core/cli/pr_scan.go): 0 clean, 10 warning-level
+        # findings, 20 blocking findings, 30 a monitored manifest failed to
+        # parse. Anything else means it did not complete.
+        case "$rc" in
+          0|10|20|30) ;;
+          *)
+            echo "::${lvl}::chainsaw pr-scan exited ${rc} (expected 0, 10, 20 or 30). This PR's dependency changes were NOT inspected."
+            ;;
+        esac
+
+        added=$(jq '.summary.added // 0' "$report" 2>/dev/null) || added=""
+        upgraded=$(jq '.summary.upgraded // 0' "$report" 2>/dev/null) || upgraded=""
+        blocking=$(jq '.summary.blocking // 0' "$report" 2>/dev/null) || blocking=""
+        warnings=$(jq '.summary.warnings // 0' "$report" 2>/dev/null) || warnings=""
+        if [ -z "$added" ] && [ "$rc" != "0" ]; then
+          echo "::${lvl}::chainsaw pr-scan wrote no parseable report to ${report}; its counters are unknown, not zero."
+        fi
+        {
+          echo "pr_scan_report=${report}"
+          echo "pr_scan_added=${added:-0}"
+          echo "pr_scan_upgraded=${upgraded:-0}"
+          echo "pr_scan_blocking=${blocking:-0}"
+          echo "pr_scan_warnings=${warnings:-0}"
+          echo "pr_scan_rc=${rc}"
+          echo "pr_scan_ran=true"
+        } >> "$GITHUB_OUTPUT"
+        echo "pr-scan exit=${rc} base=${base_ref} head=${head_ref}"
+
+    - name: Comment on pull request
+      if: ${{ inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        FINDINGS: ${{ steps.scan.outputs.findings }}
+        SCAN_OK: ${{ steps.scan.outputs.scan_ok }}
+        SCAN_RC: ${{ steps.scan.outputs.scan_rc }}
+        REPORT: ${{ steps.scan.outputs.report_path }}
+        PR_SCAN_REPORT: ${{ steps.pr_scan.outputs.pr_scan_report }}
+        PR_SCAN_RAN: ${{ steps.pr_scan.outputs.pr_scan_ran }}
+        PR_SCAN_RC: ${{ steps.pr_scan.outputs.pr_scan_rc }}
+        PR_SCAN_ADDED: ${{ steps.pr_scan.outputs.pr_scan_added }}
+        PR_SCAN_UPGRADED: ${{ steps.pr_scan.outputs.pr_scan_upgraded }}
+        PR_SCAN_BLOCKING: ${{ steps.pr_scan.outputs.pr_scan_blocking }}
+        PR_SCAN_WARNINGS: ${{ steps.pr_scan.outputs.pr_scan_warnings }}
+        ATTRIBUTION: ${{ inputs.attribution }}
+      run: |
+        set -euo pipefail
+        if [ -z "${FINDINGS:-}" ] && [ -z "${PR_SCAN_ADDED:-}" ] \
+           && [ "${SCAN_OK:-true}" != "false" ] && [ "${PR_SCAN_RAN:-true}" != "false" ]; then
+          echo "no scan output; skipping comment"
+          exit 0
+        fi
+        body_file="$RUNNER_TEMP/chainsaw-comment.md"
+        {
+          echo "### Chainsaw Guard"
+          echo
+
+          # ── bypass-file scan summary ──────────────────────────────────
+          # A check that did not complete is reported as incomplete, never
+          # folded into the clean case.
+          if [ "${SCAN_OK:-}" = "false" ]; then
+            echo ":rotating_light: \`chainsaw scan-repo\` did not complete (exit ${SCAN_RC:-unknown}). **This tree is not provably clean of bypass files.**"
+          elif [ "${FINDINGS:-0}" = "0" ]; then
+            echo ":white_check_mark: No bypass files found."
+          else
+            echo ":warning: **${FINDINGS} finding(s)** in this PR."
+            echo
+            echo "Re-run locally:"
+            echo '```'
+            echo 'chainsaw scan-repo .'
+            echo '```'
+          fi
+
+          # ── pr-scan coverage ─────────────────────────────────────────
+          if [ "${PR_SCAN_RAN:-}" = "false" ]; then
+            echo
+            echo ":rotating_light: \`chainsaw pr-scan\` could not run — the PR base commit is not in the checkout. **Dependency changes were not inspected.** Add \`fetch-depth: 0\` to your \`actions/checkout\` step."
+          fi
+
+          # ── manifest/lockfile diff summary ───────────────────────────
+          # `blocking` counts entries whose verdict is "block". pr-scan runs
+          # offline heuristics only and none of its signals carry
+          # severity "block" today, so this counter reads 0 on every offline
+          # run — the pr-scan gate keys on the exit code, not on this number.
+          if [ "${PR_SCAN_RAN:-}" = "true" ]; then
+            case "${PR_SCAN_RC:-0}" in
+              0|10|20|30) ;;
+              *)
+                echo
+                echo ":rotating_light: \`chainsaw pr-scan\` exited ${PR_SCAN_RC} — unexpected. **Dependency changes were not inspected.**"
+                ;;
+            esac
+          fi
+          pr_total=$(( ${PR_SCAN_ADDED:-0} + ${PR_SCAN_UPGRADED:-0} ))
+          if [ "$pr_total" -gt 0 ]; then
+            echo
+            if [ "${PR_SCAN_BLOCKING:-0}" != "0" ]; then
+              echo ":no_entry: **${pr_total} dependency change(s)** — ${PR_SCAN_BLOCKING} blocking, ${PR_SCAN_WARNINGS:-0} warning(s)."
+            else
+              echo ":warning: **${pr_total} dependency change(s)** — 0 blocking, ${PR_SCAN_WARNINGS:-0} warning(s)."
+            fi
+            echo
+            echo "#### Added/upgraded dependencies (${pr_total})"
+            echo
+
+            # Render per-package lines from the JSON report (capped at 20).
+            if [ -f "${PR_SCAN_REPORT:-}" ]; then
+              jq -r '
+                ((.added // []) + (.upgraded // []))
+                | .[0:20]
+                | .[]
+                | (
+                    if .verdict == "block" then ":no_entry:"
+                    elif .verdict == "warn" then ":warning:"
+                    else ":white_check_mark:"
+                    end
+                  ) + " **[" + .ecosystem + "]** `" + .name + "@" + .version + "`"
+                  + if .previous_version then " *(was " + .previous_version + ")*" else "" end
+                  + if (.signals | length) > 0 then
+                      " — " + (.signals | map(.id + ": " + .reason) | join("; "))
+                    else ""
+                    end
+              ' "$PR_SCAN_REPORT" 2>/dev/null || true
+
+              # "+N more" tail when capped.
+              jq -r '
+                ((.added // []) + (.upgraded // [])) | length
+                | if . > 20 then "+ " + (. - 20 | tostring) + " more (see full report)" else "" end
+              ' "$PR_SCAN_REPORT" 2>/dev/null || true
+            fi
+
+            echo
+            echo "<sub>Full report: download \`chainsaw-pr-scan.json\` from the run artifacts.</sub>"
+          fi
+
+          # ── opt-in attribution footer (WS4 #6) ───────────────────────
+          # OFF by default. Only appended when `attribution: true` is set on
+          # the action — an advocacy loop, never forced. Kept to a single
+          # subdued line with an install link so it reads as attribution, not
+          # an ad.
+          if [ "${ATTRIBUTION:-false}" = "true" ]; then
+            echo
+            echo "---"
+            echo "<sub>:shield: Protected by [Chainsaw](https://chain305.com) — block malicious, typosquatted, and vulnerable packages in CI. [Install the guard](https://chain305.com/install.sh).</sub>"
+          fi
+        } > "$body_file"
+        gh pr comment "${{ github.event.pull_request.number }}" \
+          --repo "${{ github.repository }}" \
+          --body-file "$body_file" || true
+
+    - name: Enforce mode
+      shell: bash
+      # This is the single decision point. Every earlier step records its
+      # outcome and returns 0 so the PR comment always posts; the mode gate
+      # lives here.
+      #
+      # What it gates on:
+      #   * scan-repo findings != 0        (previously: a `severity` field
+      #     that scanFinding does not have, so the gate was permanently dead)
+      #   * scan-repo not completing       (previously: an unconditional
+      #     `exit 0` that discarded the exit code entirely)
+      #   * doctor --strict exit != 0
+      #   * pr-scan exit >= the pr-scan-fail-on threshold, and pr-scan not
+      #     completing or being skipped (previously: `pr_scan_blocking`,
+      #     which is 0 on every offline run, so this gate was dead too)
+      env:
+        MODE: ${{ inputs.mode }}
+        PR_SCAN_FAIL_ON: ${{ inputs.pr-scan-fail-on }}
+        FINDINGS: ${{ steps.scan.outputs.findings }}
+        SCAN_OK: ${{ steps.scan.outputs.scan_ok }}
+        SCAN_RC: ${{ steps.scan.outputs.scan_rc }}
+        DOCTOR_RC: ${{ steps.doctor.outputs.exit_code }}
+        PR_SCAN_RC: ${{ steps.pr_scan.outputs.pr_scan_rc }}
+        PR_SCAN_RAN: ${{ steps.pr_scan.outputs.pr_scan_ran }}
+      run: |
+        set -euo pipefail
+
+        # pr-scan gate threshold. 20 = "a blocking finding, or a manifest
+        # that failed to parse (30)". 10 additionally fails on warning-level
+        # findings, which the offline signal sc.new_dep raises for EVERY
+        # newly added dependency — hence the opt-in.
+        case "${PR_SCAN_FAIL_ON:-block}" in
+          block) threshold=20 ;;
+          warn)  threshold=10 ;;
+          *)
+            echo "::error::pr-scan-fail-on must be \"block\" or \"warn\" (got \"${PR_SCAN_FAIL_ON}\")"
+            exit 1
+            ;;
+        esac
+
+        # Plain string accumulator, not an array: macOS runners ship bash 3.2,
+        # where `${#arr[@]}` on an empty array trips `set -u`.
+        reasons=""
+        add_reason() { reasons="${reasons}  - ${1}"$'\n'; }
+
+        if [ "${SCAN_OK:-}" = "false" ]; then
+          add_reason "chainsaw scan-repo did not complete (exit ${SCAN_RC:-unknown}) — the tree is not provably clean"
+        elif [ -n "${FINDINGS:-}" ] && [ "${FINDINGS}" != "0" ]; then
+          add_reason "chainsaw scan-repo found ${FINDINGS} bypass finding(s)"
+        fi
+
+        if [ -n "${DOCTOR_RC:-}" ] && [ "${DOCTOR_RC}" != "0" ]; then
+          add_reason "chainsaw doctor --strict exited ${DOCTOR_RC}"
+        fi
+
+        # PR_SCAN_RAN is empty on non-pull_request events, where pr-scan is
+        # correctly skipped and must not gate anything.
+        if [ "${PR_SCAN_RAN:-}" = "false" ]; then
+          add_reason "chainsaw pr-scan could not run (PR base commit unavailable) — dependency changes were not inspected"
+        elif [ "${PR_SCAN_RAN:-}" = "true" ]; then
+          pr_rc="${PR_SCAN_RC:-}"
+          case "$pr_rc" in
+            "")
+              add_reason "chainsaw pr-scan reported no exit code — its result is unknown, not clean"
+              ;;
+            0|10|20|30)
+              if [ "$pr_rc" -ge "$threshold" ]; then
+                add_reason "chainsaw pr-scan exited ${pr_rc} (at or above the pr-scan-fail-on=${PR_SCAN_FAIL_ON:-block} threshold of ${threshold})"
+              fi
+              ;;
+            *)
+              add_reason "chainsaw pr-scan exited ${pr_rc} — unexpected; dependency changes were not inspected"
+              ;;
+          esac
+        fi
+
+        if [ "$MODE" != "block" ]; then
+          if [ -n "$reasons" ]; then
+            echo "mode=${MODE} — not failing the job. In block mode this run would have failed:"
+            printf '%s' "$reasons"
+          else
+            echo "mode=${MODE} — clean (scan_rc=${SCAN_RC:-n/a} findings=${FINDINGS:-n/a} doctor_rc=${DOCTOR_RC:-n/a} pr_scan_rc=${PR_SCAN_RC:-n/a})"
+          fi
+          exit 0
+        fi
+
+        if [ -n "$reasons" ]; then
+          echo "mode=block — failing the job:"
+          printf '%s' "$reasons"
+          exit 1
+        fi
+        echo "mode=block — clean, exiting 0"

@@ -1,0 +1,44 @@
+# Example consumer workflow for Chainsaw Guard.
+#
+# Copy this file to `.github/workflows/chainsaw.yml` in your repo, open
+# a PR, and the Action will post a findings comment within ~30 seconds.
+#
+# Flip `mode: block` and wire this job as a required status check on
+# your branch protection rule once you're ready to enforce.
+name: Chainsaw Guard
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  chainsaw-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Required. At the default depth of 1 the PR base commit is not in
+          # the checkout, so `chainsaw pr-scan` has nothing to diff against
+          # and the dependency changes in the PR go uninspected.
+          fetch-depth: 0
+
+      - name: Package security scan
+        uses: Chain305/chainsaw-core/enforcement/github-actions@v1
+        with:
+          mode: warn           # warn | block
+          # Uncomment to attest to a control plane:
+          # server: ${{ secrets.CHAINSAW_SERVER }}
+          # token:  ${{ secrets.CHAINSAW_TOKEN }}
+          # attest: true
+          scan-repo: true
+          # Which pr-scan exit code fails the job in block mode.
+          # "block" (default) = exit 20 (blocking finding) or 30 (a manifest
+          # failed to parse). "warn" also fails on exit 10, which fires on
+          # every PR that adds a dependency — opt in deliberately.
+          pr-scan-fail-on: block
