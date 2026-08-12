@@ -590,7 +590,10 @@ func serverInstallPreflight(ctx context.Context, specs []packageSpec) ([]guardVe
 			continue
 		}
 		seen[key] = true
-		candidates = append(candidates, scanPkg{Name: spec.Name, Version: spec.Version})
+		// The loop above already narrowed to spec.Ecosystem == "npm", so
+		// the coordinate is unambiguous — say so on the wire rather than
+		// letting the server fall back to a cross-registry lookup.
+		candidates = append(candidates, scanPkg{Name: spec.Name, Version: spec.Version, Ecosystem: spec.Ecosystem})
 	}
 	if len(candidates) == 0 {
 		return nil, false, ""

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chain305/chainsaw-core/pgstore"
+	"github.com/chain305/chainsaw-core/policy"
 	"github.com/chain305/chainsaw-core/tenancy"
 )
 
@@ -1115,17 +1116,96 @@ func (s *Store) SetVulnerabilityMetadata(meta VulnerabilityMetadata) error {
 	return err
 }
 
+// searchVulnerabilityLegacyQuery is the ecosystem-agnostic lookup: every
+// vulnerability_metadata row for a package+version, across all repositories.
+// It is the EXACT query SearchVulnerability has always issued and is what an
+// ecosystem-less caller (an older CLI that POSTs {name, version} only) still
+// gets — see searchVulnerabilityQuery.
+const searchVulnerabilityLegacyQuery = `SELECT repository, package, version, is_vulnerable, cvss_score, epss_score,
+		cves, cve_details, scanner_db_digest, scanned_at, created_at, updated_at
+		FROM vulnerability_metadata WHERE org_id=? AND package=? AND version=?`
+
+// searchVulnerabilityEcosystemQuery is the same lookup plus the backing
+// repository's format, so the caller can tell an npm `commander` row apart
+// from a PyPI `commander` row. vulnerability_metadata has no ecosystem column
+// of its own — the ecosystem of a row is a property of the repository that
+// produced it — so the dimension is recovered by joining repositories, which
+// needs no schema change and no backfill.
+//
+// The join is LEFT and repositories' PRIMARY KEY is (org_id, name), so it can
+// neither drop nor duplicate a vulnerability_metadata row; it only annotates
+// one. Orphaned rows (repository since deleted) come back with a NULL format.
+const searchVulnerabilityEcosystemQuery = `SELECT vm.repository, vm.package, vm.version, vm.is_vulnerable,
+		vm.cvss_score, vm.epss_score, vm.cves, vm.cve_details, vm.scanner_db_digest, vm.scanned_at,
+		vm.created_at, vm.updated_at, r.format
+		FROM vulnerability_metadata vm
+		LEFT JOIN repositories r ON r.org_id = vm.org_id AND r.name = vm.repository
+		WHERE vm.org_id=? AND vm.package=? AND vm.version=?`
+
+// searchVulnerabilityQuery picks the lookup for a requested ecosystem. An
+// empty ecosystem means "caller did not say" and MUST reproduce the historical
+// behaviour byte-for-byte, so it returns the legacy query untouched rather
+// than a join that happens to be equivalent.
+func searchVulnerabilityQuery(ecosystem string) string {
+	if strings.TrimSpace(ecosystem) == "" {
+		return searchVulnerabilityLegacyQuery
+	}
+	return searchVulnerabilityEcosystemQuery
+}
+
+// vulnerabilityRowMatchesEcosystem reports whether a vulnerability_metadata
+// row backed by a repository of format repoFormat should be reported to a
+// caller that asked for wantEcosystem.
+//
+// Exclusion requires POSITIVE evidence of a mismatch: a row is dropped only
+// when its repository format maps to a KNOWN ecosystem that differs from the
+// requested one. A row whose repository row is gone (format ""), or whose
+// format is a token this build cannot map, is RETAINED — an unresolvable
+// format is not proof the row belongs to a different registry, and silently
+// hiding a CVE is the worse of the two failures.
+//
+// Format aliasing (yarn/bun → npm, pypi → pip, gradle → maven, gomod → go)
+// goes through policy.EcosystemForFormat, the tree's existing normaliser, so
+// this does not introduce a second spelling of "npm" vs "npmjs".
+func vulnerabilityRowMatchesEcosystem(repoFormat, wantEcosystem string) bool {
+	want := strings.ToLower(strings.TrimSpace(wantEcosystem))
+	if want == "" {
+		return true
+	}
+	got := string(policy.EcosystemForFormat(strings.ToLower(strings.TrimSpace(repoFormat))))
+	if got == "" {
+		return true
+	}
+	return got == string(policy.EcosystemForFormat(want))
+}
+
 // SearchVulnerability finds vulnerability records for a specific package+version across all repositories.
+//
+// It is the ecosystem-agnostic entry point and is retained verbatim for
+// callers outside this module; SearchVulnerabilityInEcosystem is the
+// ecosystem-aware form.
 func (s *Store) SearchVulnerability(packageName, version string) ([]VulnerabilityMetadata, error) {
+	return s.SearchVulnerabilityInEcosystem(packageName, version, "")
+}
+
+// SearchVulnerabilityInEcosystem finds vulnerability records for a specific
+// package+version, restricted to a single registry ecosystem.
+//
+// ecosystem is a repository format or registry name in any of the spellings
+// policy.EcosystemForFormat accepts ("npm", "yarn", "pip", "pypi", "gradle",
+// "gomod", …); it is canonicalised before use. An EMPTY ecosystem means the
+// caller could not say which registry it meant — for example an older CLI that
+// POSTs {name, version} with no ecosystem field — and yields exactly the
+// historical cross-repository behaviour.
+func (s *Store) SearchVulnerabilityInEcosystem(packageName, version, ecosystem string) ([]VulnerabilityMetadata, error) {
 	if s == nil || s.sql == nil {
 		return nil, ErrUnavailable
 	}
 	orgID := tenancy.NormalizeOrgID(s.orgID)
+	ecosystem = strings.TrimSpace(ecosystem)
+	filterByEcosystem := ecosystem != ""
 
-	rows, err := s.sql.DB().Query(`SELECT repository, package, version, is_vulnerable, cvss_score, epss_score,
-		cves, cve_details, scanner_db_digest, scanned_at, created_at, updated_at
-		FROM vulnerability_metadata WHERE org_id=? AND package=? AND version=?`,
-		orgID, packageName, version)
+	rows, err := s.sql.DB().Query(searchVulnerabilityQuery(ecosystem), orgID, packageName, version)
 	if err != nil {
 		return nil, err
 	}
@@ -1140,10 +1220,18 @@ func (s *Store) SearchVulnerability(packageName, version string) ([]Vulnerabilit
 			cvesJSON, scannerDBDigest sql.NullString
 			cveDetailsJSON            sql.NullString
 			scannedAt                 sql.NullTime
+			repoFormat                sql.NullString
 		)
-		if err := rows.Scan(&meta.Repository, &meta.Package, &meta.Version, &isVulnerable, &cvssScore, &epssScore,
-			&cvesJSON, &cveDetailsJSON, &scannerDBDigest, &scannedAt, &meta.CreatedAt, &meta.UpdatedAt); err != nil {
+		dest := []any{&meta.Repository, &meta.Package, &meta.Version, &isVulnerable, &cvssScore, &epssScore,
+			&cvesJSON, &cveDetailsJSON, &scannerDBDigest, &scannedAt, &meta.CreatedAt, &meta.UpdatedAt}
+		if filterByEcosystem {
+			dest = append(dest, &repoFormat)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
+		}
+		if filterByEcosystem && !vulnerabilityRowMatchesEcosystem(repoFormat.String, ecosystem) {
+			continue
 		}
 		meta.IsVulnerable = isVulnerable == 1
 		if cvssScore.Valid {

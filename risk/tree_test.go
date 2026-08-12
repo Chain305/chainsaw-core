@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chain305/chainsaw-core/depgraph"
@@ -195,5 +196,123 @@ func TestEvaluateTree_Summary(t *testing.T) {
 	if total := te.Summary.ByVerdict[VerdictAllow] + te.Summary.ByVerdict[VerdictWarn]; total != 2 {
 		t.Errorf("expected 2 verdicts counted across allow/warn, got %d (%v)",
 			total, te.Summary.ByVerdict)
+	}
+}
+
+// unavailableInput is the "we could not fetch the facts" Input — the
+// distinction this suite exists to protect.
+func unavailableInput(k depgraph.Key) Input {
+	in := cleanInput(k)
+	in.SignalsUnavailable = true
+	in.UnavailableReason = "provider unavailable"
+	return in
+}
+
+// TestEvaluatePackage_Unavailable_IsNotAllow is the unit-level statement of
+// the fix: an Input whose facts were never obtained must not be scored like
+// a package that was checked and found clean.
+func TestEvaluatePackage_Unavailable_IsNotAllow(t *testing.T) {
+	clean := EvaluatePackage(cleanInput(dk("a", "1")), Options{})
+	if clean.Verdict != VerdictAllow {
+		t.Fatalf("baseline broken: clean input → verdict %q, want allow", clean.Verdict)
+	}
+
+	ev := EvaluatePackage(unavailableInput(dk("a", "1")), Options{})
+	if ev.Verdict == VerdictAllow {
+		t.Error("unavailable input scored VerdictAllow — an outage must not read as clean")
+	}
+	if ev.Verdict != VerdictUnknown {
+		t.Errorf("verdict = %q, want %q", ev.Verdict, VerdictUnknown)
+	}
+	for _, cat := range AllCategories() {
+		if cs, ok := ev.DirectScore.Categories[cat]; !ok || cs.DataAvailable {
+			t.Errorf("category %q reports DataAvailable=%v, want false", cat, cs.DataAvailable)
+		}
+	}
+	if !strings.Contains(ev.Resolution.Summary, "provider unavailable") {
+		t.Errorf("resolution summary drops the reason: %q", ev.Resolution.Summary)
+	}
+	if ev.Key.Package != "a" {
+		t.Errorf("identity lost: key = %+v", ev.Key)
+	}
+}
+
+// TestEvaluateTree_UnavailableNode_CountedNotScored asserts the tree
+// treats an unevaluated node as a counted non-answer: it does not join the
+// allow bucket and it does not drag MinOverall to zero.
+func TestEvaluateTree_UnavailableNode_CountedNotScored(t *testing.T) {
+	g := depgraph.NewGraph()
+	a, b := dk("a", "1"), dk("b", "1")
+	g.AddNode(a, true, true)
+	g.AddNode(b, false, true)
+	g.AddEdge(a, b)
+	g.AddRoot(a)
+
+	te := EvaluateTree(g, map[depgraph.Key]Input{
+		a: cleanInput(a),
+		b: unavailableInput(b),
+	}, Options{})
+
+	if te.Summary.UnknownCount != 1 {
+		t.Errorf("UnknownCount = %d, want 1", te.Summary.UnknownCount)
+	}
+	if te.Summary.ByVerdict[VerdictUnknown] != 1 {
+		t.Errorf("ByVerdict[unknown] = %d, want 1", te.Summary.ByVerdict[VerdictUnknown])
+	}
+	if te.Summary.ByVerdict[VerdictAllow] != 1 {
+		t.Errorf("ByVerdict[allow] = %d, want 1 (only A was evaluated)", te.Summary.ByVerdict[VerdictAllow])
+	}
+	// MinOverall must reflect A alone — the unevaluated node's Overall=0
+	// means "no score" and must not be mistaken for the tree's worst.
+	wantMin := te.ByKey[a].RolledUp.Overall
+	if te.Summary.MinOverall != wantMin {
+		t.Errorf("MinOverall = %d, want %d; an unevaluated node's 0 must not be read as a score",
+			te.Summary.MinOverall, wantMin)
+	}
+}
+
+// TestEvaluateTree_UnavailableDescendant_DoesNotQuarantineAncestors is the
+// other half of the doctrine: on a QUERY surface, "could not evaluate" is
+// reported, not enforced. An unevaluated child must not crater its parent
+// into a block — that would turn a backend outage into a tree-wide refusal.
+func TestEvaluateTree_UnavailableDescendant_DoesNotQuarantineAncestors(t *testing.T) {
+	g := depgraph.NewGraph()
+	a, b := dk("a", "1"), dk("b", "1")
+	g.AddNode(a, true, true)
+	g.AddNode(b, false, true)
+	g.AddEdge(a, b)
+	g.AddRoot(a)
+
+	te := EvaluateTree(g, map[depgraph.Key]Input{
+		a: cleanInput(a),
+		b: unavailableInput(b),
+	}, Options{})
+
+	aEval := te.ByKey[a]
+	if aEval == nil {
+		t.Fatal("no eval for A")
+	}
+	if aEval.Verdict != VerdictAllow {
+		t.Errorf("A verdict = %q, want allow — A's own signals were evaluated and are clean", aEval.Verdict)
+	}
+	if aEval.RolledUp.Overall != aEval.DirectScore.Overall {
+		t.Errorf("A RolledUp.Overall = %d but DirectScore.Overall = %d — an unevaluated child is not evidence of risk",
+			aEval.RolledUp.Overall, aEval.DirectScore.Overall)
+	}
+	if len(aEval.Resolution.TransitiveBlame) != 0 {
+		t.Errorf("A blames %v for a child that was never evaluated", aEval.Resolution.TransitiveBlame)
+	}
+
+	// And a genuinely malicious child still blames the parent — the skip
+	// above must not have disabled rollup generally.
+	g2 := depgraph.NewGraph()
+	g2.AddNode(a, true, true)
+	g2.AddNode(b, false, true)
+	g2.AddEdge(a, b)
+	g2.AddRoot(a)
+	te2 := EvaluateTree(g2, map[depgraph.Key]Input{a: cleanInput(a), b: maliciousInput(b)}, Options{})
+	if te2.ByKey[a].RolledUp.Overall >= te2.ByKey[a].DirectScore.Overall {
+		t.Errorf("malicious child no longer drags the parent: RolledUp = %d, DirectScore = %d",
+			te2.ByKey[a].RolledUp.Overall, te2.ByKey[a].DirectScore.Overall)
 	}
 }

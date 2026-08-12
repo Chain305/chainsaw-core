@@ -32,6 +32,7 @@ func newAuditExportRunCmd(out, errOut *bytes.Buffer) *cobra.Command {
 	cmd.Flags().String("action", "", "")
 	cmd.Flags().String("actor", "", "")
 	cmd.Flags().Int("limit", 0, "")
+	cmd.Flags().Bool("allow-truncated", false, "")
 	cmd.SetOut(out)
 	cmd.SetErr(errOut)
 	return cmd

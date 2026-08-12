@@ -9,7 +9,9 @@ package cli
 //   0   every node Allow
 //   1   at least one Warn or UpgradeAvailable
 //   11  at least one Quarantine or Replace (the hard enforcement block)
-//   2   operational error (HTTP / server / IO); 3 auth; 4 usage
+//   2   operational error (HTTP / server / IO), OR the server could not
+//       evaluate one or more packages — an incomplete scan is not a pass
+//   3 auth; 4 usage
 //
 // The exit-code ladder is the headline feature for CI integration: wire
 // this directly into a GitHub Action / Buildkite step and the build gates
@@ -45,10 +47,12 @@ Examples:
   chainsaw intel scan --json
 
 Exit codes:
-  0   all nodes are Allow
+  0   all nodes are Allow — and every node was actually evaluated
   1   one or more nodes are Warn or UpgradeAvailable
   11  one or more nodes are Quarantine or Replace (hard enforcement block)
-  2   operational error (HTTP / server / IO)   3  auth   4  usage`,
+  2   operational error (HTTP / server / IO), or the server could not
+      evaluate one or more packages (the scan is incomplete)
+  3   auth   4  usage`,
 	RunE: runIntelScan,
 }
 
@@ -211,6 +215,12 @@ func runIntelScan(cmd *cobra.Command, _ []string) error {
 		})
 	} else {
 		renderTreeSummary(tree, path, kind)
+		// Server-side degradation (packages the intelligence backend
+		// could not evaluate) arrives in the envelope's warnings. Print
+		// them on the TEXT path too — a warning only a --json caller can
+		// see is a warning the operator never reads. stderr keeps stdout
+		// parseable and matches the "evaluating …" progress line.
+		renderEnvelopeWarnings(env)
 	}
 
 	// The recap is already on stdout; signal the CI ladder via a typed exit
@@ -224,10 +234,41 @@ func runIntelScan(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// renderEnvelopeWarnings prints server-side warnings on the human path.
+// Goes to stderr so a caller redirecting stdout to a report file still
+// sees that the report is incomplete, and so the recap stays machine-
+// readable for anyone parsing it.
+func renderEnvelopeWarnings(env *v1Envelope) {
+	if env == nil || len(env.Warnings) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Warnings from the server:")
+	for _, wmsg := range env.Warnings {
+		fmt.Fprintf(os.Stderr, "  ! %s\n", wmsg)
+	}
+}
+
+// unevaluatedCount reports how many nodes the server could not evaluate.
+// Prefers the explicit summary field and falls back to the verdict
+// histogram so the CLI stays correct against a server that ships one but
+// not the other.
+func unevaluatedCount(tree *v1TreeData) int {
+	if tree == nil {
+		return 0
+	}
+	if n := tree.Summary.UnknownCount; n > 0 {
+		return n
+	}
+	return tree.Summary.ByVerdict["unknown"]
+}
+
 // treeExitCode distills the tree summary into a CI-friendly exit code.
-// Quarantine/Replace > Warn/UpgradeAvailable > Allow. Unknown verdicts
-// are treated as Allow-equivalent (0) so a future server-side verdict
-// doesn't blow up old CLI builds.
+// Quarantine/Replace > could-not-evaluate > Warn/UpgradeAvailable > Allow.
+// Verdict strings this build does not recognise are still treated as
+// Allow-equivalent (0) so a future server-side verdict doesn't blow up old
+// CLI builds — but "unknown" is NOT one of those: it is the server saying
+// explicitly that it could not evaluate, and it is handled below.
 //
 // SECURITY/CONTRACT (invariant B): a quarantine/replace verdict is the
 // strongest enforcement BLOCK this command emits. It MUST NOT collide with
@@ -235,6 +276,21 @@ func runIntelScan(cmd *cobra.Command, _ []string) error {
 // otherwise confuse "malicious package" with "server was down". It maps to the
 // command-specific ExitIntelBlock(11), keeping the ordering 0 < 1 < 11 so the
 // ladder still distinguishes clean < warn < hard-block.
+//
+// A tree containing unevaluated nodes maps to ExitOpError(2), and does so
+// AHEAD of warn/upgrade:
+//
+//   - It cannot be 0. Code 0 is documented as "all nodes are Allow"; nodes
+//     the server never evaluated are not Allow, and returning 0 is exactly
+//     the fail-open this command had — CI would go green on an outage.
+//   - It is not a BLOCK, so it must not take 1 or 11. Nothing was found;
+//     the lookup did not happen. Invariant B cuts both ways: an operational
+//     degradation must not masquerade as an enforcement outcome any more
+//     than an enforcement outcome may masquerade as an error.
+//   - It outranks warn(1) because "the scan is incomplete" is a claim about
+//     the WHOLE result — summarising a partial tree as "warnings only"
+//     would understate it. A hard block still wins, because a quarantine we
+//     did observe is a real finding regardless of what else was missed.
 func treeExitCode(tree *v1TreeData) int {
 	if tree == nil {
 		return ExitOK
@@ -242,6 +298,9 @@ func treeExitCode(tree *v1TreeData) int {
 	v := tree.Summary.ByVerdict
 	if v["quarantine"] > 0 || v["replace"] > 0 {
 		return ExitIntelBlock
+	}
+	if unevaluatedCount(tree) > 0 {
+		return ExitOpError
 	}
 	if v["warn"] > 0 || v["upgrade_available"] > 0 {
 		return ExitBlocked
@@ -254,10 +313,19 @@ func treeExitCode(tree *v1TreeData) int {
 // riskiest nodes. The table is intentionally compact — operators who
 // want the full breakdown per node use --json.
 func renderTreeSummary(tree *v1TreeData, path, kind string) {
+	unevaluated := unevaluatedCount(tree)
+
 	fmt.Printf("Lockfile: %s (%s)\n", path, kind)
 	fmt.Printf("Nodes:    %d total (%d direct, %d transitive)\n",
 		tree.Summary.TotalNodes, tree.Summary.DirectCount, tree.Summary.TransitiveCount)
 	fmt.Printf("Min overall: %d (%s)\n", tree.Summary.MinOverall, gradeFor(tree.Summary.MinOverall))
+	if unevaluated > 0 {
+		// Said before the verdict table, not after it: the counts below
+		// describe only the packages that were actually evaluated, and
+		// the reader has to know that before reading them.
+		fmt.Printf("INCOMPLETE: %d of %d packages could not be evaluated — this is not a clean result.\n",
+			unevaluated, tree.Summary.TotalNodes)
+	}
 	fmt.Println()
 
 	// By-verdict histogram in a stable, human-meaningful order.
@@ -269,6 +337,9 @@ func renderTreeSummary(tree *v1TreeData, path, kind string) {
 			continue
 		}
 		fmt.Printf("  %-18s %d\n", verdictDisplay(vk), n)
+	}
+	if unevaluated > 0 {
+		fmt.Printf("  %-18s %d\n", "Not evaluated", unevaluated)
 	}
 
 	// Top-10 riskiest — sort by RolledUp.Overall asc (lower is worse),
@@ -298,8 +369,13 @@ func renderTreeSummary(tree *v1TreeData, path, kind string) {
 		overall := "—"
 		verdict := "—"
 		if n.Eval != nil {
-			overall = fmt.Sprintf("%d", n.Eval.RolledUp.Overall)
 			verdict = verdictDisplay(n.Eval.Verdict)
+			// An unevaluated node's Overall is 0 meaning "no score",
+			// not "scored zero". Render it as "—" so the table never
+			// shows a fabricated number.
+			if n.Eval.Verdict != "unknown" {
+				overall = fmt.Sprintf("%d", n.Eval.RolledUp.Overall)
+			}
 		}
 		rows = append(rows, []string{
 			n.Key.Ecosystem,
@@ -314,9 +390,13 @@ func renderTreeSummary(tree *v1TreeData, path, kind string) {
 
 // safeOverall returns the rolled-up overall for sorting, treating a nil
 // Eval as 100 (best) so rows without an evaluation sink to the bottom
-// rather than spuriously topping the "riskiest" list.
+// rather than spuriously topping the "riskiest" list. An unevaluated node
+// gets the same treatment: its Overall is 0 because nothing was scored,
+// and letting that sort to the top would present "we could not look" as
+// "this is the riskiest package in your tree". The INCOMPLETE line and
+// the server warnings are what report those nodes.
 func safeOverall(n v1TreeNode) int {
-	if n.Eval == nil {
+	if n.Eval == nil || n.Eval.Verdict == "unknown" {
 		return 100
 	}
 	return n.Eval.RolledUp.Overall

@@ -23,6 +23,20 @@ const (
 	VerdictUpgradeAvailable Verdict = "upgrade_available" // newer safe version of same package exists
 	VerdictReplace          Verdict = "replace"           // recommend alternative package
 	VerdictQuarantine       Verdict = "quarantine"        // block until manual review
+
+	// VerdictUnknown means the engine COULD NOT EVALUATE this package —
+	// the facts were unavailable (backend down, scan errored, no
+	// Report). It is not a risk judgement at all, and in particular it
+	// is NOT a weaker Allow: an evaluation that never ran must never
+	// present as a clean bill of health.
+	//
+	// Consumers MUST NOT fold Unknown into the Allow bucket. On query /
+	// reporting surfaces the honest handling is to report it as
+	// "not evaluated" and let the operator decide; on enforcement
+	// surfaces the unavailability posture is owned by core/coverage's
+	// opt-in gate (docs/plan_optional_fail_closed.md), not by this
+	// verdict — the risk engine advises, it does not gate.
+	VerdictUnknown Verdict = "unknown"
 )
 
 // Key identifies a package version across ecosystems. Duplicated here (vs

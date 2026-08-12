@@ -17,7 +17,11 @@ package cli
 //
 //   chainsaw risk-weights apply --simulate-id <id>
 //       PUT /api/v1/intel/weights with the same proposed weights plus
-//       the simulate_id from a fresh `preview` run. Returns
+//       the simulate_id from a fresh `preview` run. The server persists
+//       proposed_signal_weights to risk_weight_overrides (the rows the
+//       engine reads at scan time) inside the simulate gate, then
+//       returns what it read back; apply diffs that against the --set
+//       values and fails if anything didn't land. Returns
 //       CHW-4830 if the simulate is missing / stale / mismatched —
 //       the same error code the server emits for any simulate-required
 //       surface (org-delete missing is CHW-4831, expired is CHW-4928;
@@ -51,11 +55,15 @@ import (
 // payload. Only the fields the CLI actually surfaces are typed; the
 // raw envelope is still echoed under --json so an integrator can pick
 // up new fields without us cutting a release.
+// SignalWeights is the per-signal override map the server reads back
+// out of storage. `apply` diffs its --set values against this to prove
+// the write landed instead of trusting a 200.
 type riskWeightsShowData struct {
-	Overridden bool               `json:"overridden"`
-	Effective  map[string]float64 `json:"effective"`
-	UpdatedAt  string             `json:"updatedAt,omitempty"`
-	UpdatedBy  string             `json:"updatedBy,omitempty"`
+	Overridden    bool               `json:"overridden"`
+	Effective     map[string]float64 `json:"effective"`
+	SignalWeights map[string]int     `json:"signalWeights,omitempty"`
+	UpdatedAt     string             `json:"updatedAt,omitempty"`
+	UpdatedBy     string             `json:"updatedBy,omitempty"`
 }
 
 // riskWeightsSignalOverride is the shape returned by
@@ -130,8 +138,13 @@ var riskWeightsPreviewCmd = &cobra.Command{
 Use --set repeatedly to override individual signals:
 
     chainsaw risk-weights preview \
-        --set isVulnerable=70 \
-        --set publisherChanged=50
+        --set vuln.cvss_high=70 \
+        --set sc.publisher_changed=50
+
+Signal ids must exist in the engine registry — list them with
+'chainsaw risk-weights show' or GET /api/risk/signals. A few signals
+that back instant-block enforcement (vuln.kev, sc.known_malicious,
+qual.checksum_mismatch) are not tunable and are rejected.
 
 Prints the simulate_id, the would-block / would-permit / flip counts,
 and the first 10 sample flips. The simulate_id is required by 'apply'
@@ -141,21 +154,20 @@ and expires after 1 hour.`,
 
 var riskWeightsApplyCmd = &cobra.Command{
 	Use:   "apply",
-	Short: "UNAVAILABLE — per-signal weights are not persisted by the server",
-	Long: `apply is currently a no-op and now fails rather than reporting success.
+	Short: "Persist a previewed weight set (requires a fresh --simulate-id)",
+	Long: `apply PUTs the same --set values you previewed, attached to your
+preview's simulate_id:
 
-It PUT the same --set values you previewed, attached to your preview's
-simulate_id. The server used proposed_signal_weights only to re-derive the
-inputs hash for the CHW-4830 staleness check, then wrote an
-orgweights.Overrides row — which has no signal-weight field. The per-signal
-values were discarded on every run, while the command printed
-"Weights applied." and exited 0.
+    chainsaw risk-weights apply --simulate-id <id> --set vuln.cvss_high=70
 
-Fixing this needs a server change (persist proposed_signal_weights in the
-v1 weights handler). Until then:
+The --set values must match the ones you previewed exactly — the server
+re-derives the simulate inputs hash from them and returns CHW-4830 if
+they drifted, if the preview is older than 1h, or if another operator
+saved different weights in between. Re-run 'preview' and apply the new id.
 
-  chainsaw risk-weights show      # read the effective per-signal weights
-  chainsaw risk-weights preview   # model a change without applying it`,
+apply prints the weights the server read BACK from storage, so the output
+is proof the write landed rather than an echo of the request. Confirm
+independently with 'chainsaw risk-weights show'.`,
 	RunE: runRiskWeightsApply,
 }
 
@@ -252,6 +264,16 @@ func runRiskWeightsShow(cmd *cobra.Command, _ []string) error {
 		// Soft-fail: if /api/risk/overrides is unreachable we still want
 		// to show the category-level view rather than abort.
 		fmt.Fprintf(os.Stderr, "warning: signal overrides unavailable: %v\n", err)
+	}
+	// GET /api/v1/intel/weights now reports the same per-signal weights
+	// (both surfaces read the same rows). Fall back to it when the
+	// richer endpoint is unreachable so `show` can still prove what
+	// `apply` persisted — the round-trip check has to survive one
+	// endpoint being down.
+	if len(sig.Overrides) == 0 && len(cat.SignalWeights) > 0 {
+		for id, w := range cat.SignalWeights {
+			sig.Overrides = append(sig.Overrides, riskWeightsSignalOverride{SignalID: id, Weight: w})
+		}
 	}
 
 	if useJSON(cmd) {
@@ -400,38 +422,114 @@ func renderRiskWeightsPreview(r riskWeightsSimulateResp, draft map[string]int) {
 
 // ── apply ───────────────────────────────────────────────────────────────────
 
-// errRiskWeightsApplyNotPersisted is what `apply` returns instead of
-// pretending. Package-level so a test can pin the operator-facing text.
-var errRiskWeightsApplyNotPersisted = fmt.Errorf(
-	"`risk-weights apply` cannot persist per-signal weights.\n" +
-		"PUT /api/v1/intel/weights reads proposed_signal_weights only to re-derive the simulate " +
-		"inputs hash, then writes an orgweights.Overrides row — a struct with no signal-weight field " +
-		"at all. Every --set value is dropped by the write.\n" +
-		"This command used to make that request, print \"Weights applied.\" and exit 0, so the whole " +
-		"preview-then-confirm gate guarded a write that never happened. It now fails instead. " +
-		"The fix is server-side: persist proposed_signal_weights in the v1 weights handler.\n" +
-		"To read the current per-signal weights: `chainsaw risk-weights show`.")
+// errRiskWeightsNotPersisted is returned when the server accepts the PUT
+// but the weights it reads back don't match what we sent. Package-level
+// so a test can pin it.
+//
+// This is the regression guard for P3. `apply` used to PUT its --set
+// values to a handler that read proposed_signal_weights only to
+// re-derive the simulate inputs hash and then wrote a row with no
+// signal-weight field — the values were dropped on every run while the
+// command printed "Weights applied." and exited 0. A 200 is therefore
+// NOT evidence of a write. The only evidence is the server reading the
+// values back out of storage, which is what we check below.
+var errRiskWeightsNotPersisted = fmt.Errorf("server accepted the request but did not persist the weights")
 
-// runRiskWeightsApply refuses, loudly, before touching the network.
+// runRiskWeightsApply PUTs the previewed weight set and then verifies,
+// against the server's read-back, that every --set value actually
+// landed.
 //
-// The flag validation above it is kept so the failure an operator sees
-// is the REAL problem and not a misleading "you forgot --simulate-id".
-//
-// Deliberately NOT worked around client-side by looping
+// Deliberately NOT implemented client-side by looping
 // PUT /api/risk/overrides/{signal}: that is a non-atomic multi-request
 // write (a partial failure strands the org on a weight set nobody
 // previewed), and it performs the real write OUTSIDE the simulate_id
-// guard, reducing that guard to decoration. A silent no-op is bad; an
-// unguarded, half-applied risk model is worse.
-func runRiskWeightsApply(_ *cobra.Command, _ []string) error {
+// guard, reducing that guard to decoration. The write is one request,
+// inside the gate, server-side.
+func runRiskWeightsApply(cmd *cobra.Command, _ []string) error {
 	if riskWeightsSimulateID == "" {
 		return fmt.Errorf("--simulate-id is required (run `chainsaw risk-weights preview` first)")
 	}
 	if len(riskWeightsApplySet) == 0 {
 		return fmt.Errorf("at least one --set <signalId>=<value> is required (must match preview)")
 	}
-	if _, err := parseSetFlags(riskWeightsApplySet); err != nil {
+	signalWeights, err := parseSetFlags(riskWeightsApplySet)
+	if err != nil {
 		return err
 	}
-	return errRiskWeightsApplyNotPersisted
+	client, err := newV1Client(cmd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
+	}
+	ctx := context.Background()
+
+	// Round-trip the current category weights unchanged: this flow tunes
+	// per-signal weights only, and the simulate gate hashes the category
+	// map too — sending anything else would fail the staleness check.
+	cat, err := effectiveCategoryWeights(ctx, client)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
+	}
+	body := riskWeightsSimulateReq{
+		Weights:               cat,
+		ProposedSignalWeights: signalWeights,
+		SimulateID:            riskWeightsSimulateID,
+	}
+	// Failures below RETURN rather than os.Exit so the whole apply path
+	// stays testable end-to-end. classifyCLIError already maps them to
+	// ExitOpError(2), and the verify failure pins that code explicitly —
+	// the documented exit contract is unchanged.
+	raw, _, err := client.doUnwrap(ctx, http.MethodPut, "/api/v1/intel/weights", body)
+	if err != nil {
+		return err
+	}
+	var saved riskWeightsShowData
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		return fmt.Errorf("decode apply response: %w", err)
+	}
+	if err := verifyRiskWeightsPersisted(signalWeights, saved.SignalWeights); err != nil {
+		return &ExitCodeError{Code: ExitOpError, Err: err}
+	}
+
+	if useJSON(cmd) {
+		return PrintJSONTo(cmd, saved)
+	}
+	fmt.Println("Weights applied. Server read back:")
+	keys := make([]string, 0, len(signalWeights))
+	for k := range signalWeights {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Printf("  %-32s %4d\n", k, saved.SignalWeights[k])
+	}
+	fmt.Println("\nVerify independently with: chainsaw risk-weights show")
+	return nil
+}
+
+// verifyRiskWeightsPersisted compares what we asked for against what the
+// server says is now stored. Every requested signal must be present with
+// the requested value; anything else means the write was partial or
+// dropped, and the operator needs to know that instead of seeing
+// "Weights applied."
+func verifyRiskWeightsPersisted(want, got map[string]int) error {
+	missing := make([]string, 0, len(want))
+	for id, w := range want {
+		have, ok := got[id]
+		if !ok {
+			missing = append(missing, fmt.Sprintf("%s (wanted %d, absent from server read-back)", id, w))
+			continue
+		}
+		if have != w {
+			missing = append(missing, fmt.Sprintf("%s (wanted %d, server has %d)", id, w, have))
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf("%w:\n  %s\nThe request returned success but the values did not land. "+
+		"Do NOT assume the weight set is live — check `chainsaw risk-weights show` and report this",
+		errRiskWeightsNotPersisted, strings.Join(missing, "\n  "))
 }

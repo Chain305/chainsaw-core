@@ -26,6 +26,38 @@ type auditLogResponse struct {
 	Events  []auditEvent `json:"events"`
 	Actions []string     `json:"actions"`
 	Actors  []string     `json:"actors"`
+
+	// --- Export completeness (C9). Present only on the ?export=true path,
+	// and only from a server new enough to report it. Pointers, so a nil
+	// Truncated means "this server never told us" — which is NOT the same
+	// claim as "nothing was clipped" and must not be treated as one.
+	Count     *int                   `json:"count,omitempty"`
+	Total     *int                   `json:"total,omitempty"`
+	Truncated *bool                  `json:"truncated,omitempty"`
+	Sources   []auditExportSource    `json:"sources,omitempty"`
+	Window    *auditExportWindowInfo `json:"window,omitempty"`
+}
+
+// auditExportSource is one underlying source's contribution to an export and,
+// crucially, what it left behind. Mirrors
+// internal/server/dashboard.go::auditExportSourcePayload.
+type auditExportSource struct {
+	Source     string `json:"source"`
+	Returned   int    `json:"returned"`
+	Total      int    `json:"total"`
+	TotalKnown bool   `json:"total_known"`
+	Limit      int    `json:"limit"`
+	Truncated  bool   `json:"truncated"`
+	Note       string `json:"note,omitempty"`
+}
+
+// auditExportWindowInfo is the time range the server actually queried.
+// Mirrors internal/server/dashboard.go::auditExportWindowPayload.
+type auditExportWindowInfo struct {
+	Start          *time.Time `json:"start,omitempty"`
+	End            *time.Time `json:"end,omitempty"`
+	DefaultApplied bool       `json:"default_applied"`
+	DefaultDays    int        `json:"default_days,omitempty"`
 }
 
 // auditViewServerCap is the row ceiling the server applies to the non-export
@@ -41,16 +73,15 @@ const auditViewServerCap = 500
 // auditViewExportHint points a capped/filtered `audit view` at `audit export`.
 //
 // C9: it used to promise "use `chainsaw audit export` for the full range" — a
-// claim the server cannot honour. The export path has its own ceiling
-// (auditExportServerRowCap rows per source, auditExportServerWindowDays days),
-// so "full range" was false for exactly the compliance handoff that sentence was
-// written for. Offer export as the LARGER window it actually is, and name the
-// limit.
-var auditViewExportHint = fmt.Sprintf(
-	"note: `audit view` shows only the server's most-recent events. "+
-		"`chainsaw audit export` opts into a larger window (%s), "+
-		"but is not unbounded either.",
-	auditExportWindowNote)
+// claim the server could not honour, and the replacement quoted hardcoded
+// ceilings that had themselves drifted from the server's real ones (the
+// events log clamps to its own capacity, well under the 10000 the CLI was
+// quoting). The export now asks the server what it actually returned and
+// refuses to write a clipped file, so the honest hint is to point at that
+// behaviour rather than at a number this process cannot know.
+const auditViewExportHint = "note: `audit view` shows only the server's most-recent events. " +
+	"`chainsaw audit export --start … --end …` queries a caller-specified window server-side " +
+	"and refuses to write the file if the server reports the result was clipped."
 
 var auditCmd = &cobra.Command{
 	Use:     "audit",

@@ -19,6 +19,26 @@ type Input struct {
 	Package   string
 	Version   string
 
+	// SignalsUnavailable marks this coordinate as NOT EVALUATED: the
+	// caller could not obtain the facts (intelligence backend down,
+	// scan errored, no Report). It is NOT the same as "we looked and
+	// found nothing" — an Input with every field at its zero value is
+	// indistinguishable from a genuinely clean package, and the
+	// evaluator would score it 100/allow. Setting this flag makes the
+	// difference explicit: EvaluatePackage short-circuits to
+	// VerdictUnknown with every category marked DataAvailable=false.
+	//
+	// Name mirrors policy.Input.SignalsUnavailable, the existing
+	// vocabulary for the same fact on the enforcement side (see
+	// docs/plan_optional_fail_closed.md). Callers that DO have facts
+	// must leave this false.
+	SignalsUnavailable bool
+	// UnavailableReason is the operator-facing explanation for
+	// SignalsUnavailable — the error text, or the name of the
+	// component that was down. Surfaced verbatim in Resolution.Summary
+	// and in API warnings, so keep it short and non-sensitive.
+	UnavailableReason string
+
 	// --- Vulnerability ---
 	IsVulnerable   bool
 	MaxCVSS        float64

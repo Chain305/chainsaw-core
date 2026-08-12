@@ -2,6 +2,7 @@ package risk
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -69,6 +70,14 @@ const (
 // The tree evaluator (future commit) produces distinct values by folding
 // in transitive descendants.
 func EvaluatePackage(in Input, opts Options) *Evaluation {
+	// "Could not evaluate" is answered before any signal runs. Scoring an
+	// Input whose facts were never fetched produces a 100/allow — the
+	// same output a genuinely clean package produces — so the caller's
+	// outage would be reported to the user as a clean bill of health.
+	if in.SignalsUnavailable {
+		return UnavailableEvaluation(in, opts)
+	}
+
 	fired := runPrimitiveSignals(in, opts.SignalWeightOverrides)
 
 	// Short-circuit for instant-block signals. Checksum-mismatch gets the
@@ -650,6 +659,51 @@ func minCategoryScore(cats map[Category]CategoryScore) (int, Category) {
 		}
 	}
 	return minScore, worst
+}
+
+// UnavailableEvaluation produces the "could not evaluate" result for a
+// coordinate whose facts were never obtained (Input.SignalsUnavailable).
+//
+// Every category is marked DataAvailable=false, which is the same
+// distinction the engine already draws per-category ("absence of data is
+// not absence of findings" — see CategoryScore.DataAvailable and the idna
+// 3.15 regression it was added for). Applied to every category at once it
+// yields Overall=0 through computeOverall's re-normalisation, because
+// there is no available weight to score against.
+//
+// Read Overall=0 here as "no score", not as "worst possible score": the
+// companion Verdict is Unknown, and consumers must branch on the verdict
+// rather than on the number. Rendering surfaces should print "—".
+//
+// Exported so API layers can construct the same result without routing a
+// synthetic Input through the whole evaluator.
+func UnavailableEvaluation(in Input, opts Options) *Evaluation {
+	cats := make(map[Category]CategoryScore, len(CategoryWeights))
+	for _, cat := range AllCategories() {
+		cats[cat] = CategoryScore{Score: 0, Grade: "", DataAvailable: false}
+	}
+	score := Score{Overall: 0, Categories: cats, MinCategoryScore: 0}
+	summary := "Risk signals could not be evaluated for this package — this is NOT a clean result."
+	if reason := strings.TrimSpace(in.UnavailableReason); reason != "" {
+		summary = "Risk signals could not be evaluated for this package (" + reason +
+			") — this is NOT a clean result."
+	}
+	return &Evaluation{
+		Key: Key{
+			Ecosystem: in.Ecosystem,
+			Package:   in.Package,
+			Version:   in.Version,
+		},
+		DirectScore: score,
+		RolledUp:    score,
+		Verdict:     VerdictUnknown,
+		Resolution: Resolution{
+			Verdict: VerdictUnknown,
+			Summary: summary,
+		},
+		EvaluatedAt:   opts.now(),
+		EngineVersion: EngineVersion,
+	}
 }
 
 // instantBlock produces a zero-score Quarantine verdict for instant-kill

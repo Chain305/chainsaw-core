@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	depanalyzer "github.com/chain305/chainsaw-core/depparser/analyzer"
+	ftypes "github.com/chain305/chainsaw-core/fanal"
+	"github.com/chain305/chainsaw-core/policy"
 )
 
 // scanSchemaVersion identifies the JSON envelope shape `chainsaw scan` emits.
@@ -137,11 +139,83 @@ var supplyChainConditionSeverity = map[string]string{
 type scanPkg struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+
+	// Ecosystem is the registry the coordinate came from ("npm", "pip",
+	// "maven", …), canonicalised through policy.EcosystemForFormat so the
+	// CLI and the server speak one spelling. Without it a name+version is
+	// ambiguous — npm's commander@2.20.3 and PyPI's commander 2.20.3 are
+	// different packages — and the server answers both with whichever row
+	// it happens to find.
+	//
+	// omitempty: a bare `chainsaw scan name@version` and a stdin spec line
+	// carry no ecosystem, and neither does a lockfile whose language has no
+	// registry we proxy. Those items go on the wire in the pre-ecosystem
+	// shape and the server falls back to the pre-ecosystem lookup.
+	Ecosystem string `json:"ecosystem,omitempty"`
+}
+
+// ecosystemForLang maps the depparser LangType attached to a parsed package
+// onto the canonical ecosystem name the scan API expects.
+//
+// Two steps on purpose. The switch collapses the lockfile-flavour aliases the
+// parser registry emits (yarn.lock and pnpm-lock.yaml are both npm; poetry,
+// uv and pylock are all PyPI; pom, gradle and sbt all resolve Maven
+// coordinates) onto a repository FORMAT; policy.EcosystemForFormat then folds
+// that format onto the canonical ecosystem. Going through the existing
+// normaliser rather than returning a literal keeps this from becoming a second
+// spelling table that can drift from the policy evaluator's.
+//
+// Collapsing the flavours matters for the dedup key: a tree carrying both
+// package-lock.json and yarn.lock must NOT report lodash twice.
+//
+// Languages with no ecosystem we can scan (hex, conan, julia, conda) return ""
+// — the item ships in the legacy shape rather than under an invented name.
+func ecosystemForLang(l ftypes.LangType) string {
+	var format string
+	switch l {
+	case ftypes.Npm, ftypes.Bun, ftypes.Yarn, ftypes.Pnpm, ftypes.NodePkg, ftypes.JavaScript:
+		format = "npm"
+	case ftypes.Pip, ftypes.Pipenv, ftypes.Poetry, ftypes.Uv, ftypes.PyLock, ftypes.PythonPkg:
+		format = "pip"
+	case ftypes.Bundler, ftypes.GemSpec:
+		format = "rubygems"
+	case ftypes.Cargo, ftypes.RustBinary:
+		format = "cargo"
+	case ftypes.Composer, ftypes.ComposerVendor:
+		format = "composer"
+	case ftypes.NuGet, ftypes.DotNetCore, ftypes.PackagesProps:
+		format = "nuget"
+	case ftypes.Pom, ftypes.Gradle, ftypes.Sbt, ftypes.Jar:
+		format = "maven"
+	case ftypes.GoModule, ftypes.GoBinary:
+		format = "go"
+	case ftypes.Cocoapods:
+		format = "cocoapods"
+	case ftypes.Swift:
+		format = "swift"
+	case ftypes.Pub:
+		format = "pub"
+	default:
+		return ""
+	}
+	return string(policy.EcosystemForFormat(format))
+}
+
+// scanPkgKey is the identity of a scanned coordinate. The ecosystem is part
+// of it: keying on name@version alone collapsed npm's commander@2.20.3 and
+// PyPI's commander 2.20.3 into a single scanned coordinate, so one of the two
+// was never evaluated and the other's CVEs were attributed to both.
+func scanPkgKey(ecosystem, name, version string) string {
+	return ecosystem + "|" + name + "@" + version
 }
 
 type scanResultItem struct {
-	Name       string   `json:"name"`
-	Version    string   `json:"version"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	// Ecosystem echoes the registry the server resolved this row against.
+	// Empty against a server older than the ecosystem field, or for a
+	// coordinate whose ecosystem could not be determined.
+	Ecosystem  string   `json:"ecosystem,omitempty"`
 	Repository string   `json:"repository,omitempty"`
 	Status     string   `json:"status"`
 	Severity   string   `json:"severity,omitempty"`
@@ -661,7 +735,17 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 			signals = strings.Join(r.TriggeredConditions, ", ")
 			anySignals = true
 		}
-		rows[i] = []string{r.Name, r.Version, severity, cvss, cves, signals}
+		// Qualify the package cell with its ecosystem so two same-named
+		// coordinates from different registries are distinguishable — the
+		// tree that pins npm commander@2.20.3 and PyPI commander 2.20.3
+		// now yields two rows, and an unqualified table would render them
+		// as the same package with two different verdicts. Inert against a
+		// server that does not send the field.
+		name := r.Name
+		if r.Ecosystem != "" {
+			name = r.Name + " (" + r.Ecosystem + ")"
+		}
+		rows[i] = []string{name, r.Version, severity, cvss, cves, signals}
 	}
 	PrintTable([]string{"PACKAGE", "VERSION", "SEVERITY", "CVSS", "CVEs", "SIGNALS"}, rows)
 
@@ -789,12 +873,13 @@ func collectFromManifests(dir string) ([]scanPkg, error) {
 		if p.Name == "" || p.Version == "" {
 			continue
 		}
-		key := p.Name + "@" + p.Version
+		eco := ecosystemForLang(p.Lang)
+		key := scanPkgKey(eco, p.Name, p.Version)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		all = append(all, scanPkg{Name: p.Name, Version: p.Version})
+		all = append(all, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: eco})
 	}
 	return all, nil
 }
@@ -821,16 +906,16 @@ func collectFromStdin(r io.Reader) ([]scanPkg, error) {
 	}
 	all := make([]scanPkg, 0, 16)
 	seen := make(map[string]bool, 16)
-	add := func(name, version string) {
+	add := func(name, version, ecosystem string) {
 		if name == "" || version == "" {
 			return
 		}
-		key := name + "@" + version
+		key := scanPkgKey(ecosystem, name, version)
 		if seen[key] {
 			return
 		}
 		seen[key] = true
-		all = append(all, scanPkg{Name: name, Version: version})
+		all = append(all, scanPkg{Name: name, Version: version, Ecosystem: ecosystem})
 	}
 
 	var skipped int
@@ -856,14 +941,16 @@ func collectFromStdin(r io.Reader) ([]scanPkg, error) {
 				continue
 			}
 			for _, p := range pkgs {
-				add(p.Name, p.Version)
+				add(p.Name, p.Version, p.Ecosystem)
 			}
 			continue
 		}
 
-		// Otherwise treat the line as a name@version spec.
+		// Otherwise treat the line as a name@version spec. A bare spec
+		// names no registry, so it goes on the wire in the legacy
+		// ecosystem-less shape — there is nothing to infer from.
 		if pkg, err := parsePackageRef(line); err == nil {
-			add(pkg.Name, pkg.Version)
+			add(pkg.Name, pkg.Version, pkg.Ecosystem)
 			continue
 		}
 
@@ -898,7 +985,7 @@ func collectFromPath(path string, isDir bool) ([]scanPkg, error) {
 		if p.Name == "" || p.Version == "" {
 			continue
 		}
-		out = append(out, scanPkg{Name: p.Name, Version: p.Version})
+		out = append(out, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: ecosystemForLang(p.Lang)})
 	}
 	return out, nil
 }

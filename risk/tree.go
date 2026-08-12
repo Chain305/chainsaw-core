@@ -62,6 +62,15 @@ type TreeSummary struct {
 	ByVerdict               map[Verdict]int
 	MinOverall              int
 	MaxTransitiveBlameChain int
+
+	// UnknownCount is the number of nodes the engine COULD NOT evaluate
+	// (Input.SignalsUnavailable → VerdictUnknown). Broken out of
+	// ByVerdict as a first-class field because it is the one number a
+	// consumer must not miss: a summary with UnknownCount > 0 does not
+	// describe the whole tree, whatever the other counters say. It
+	// duplicates ByVerdict[VerdictUnknown] on purpose — a consumer that
+	// only knows the pre-Unknown verdict vocabulary still sees it.
+	UnknownCount int
 }
 
 // EvaluateTree scores an entire dependency graph. For each node it
@@ -73,6 +82,13 @@ type TreeSummary struct {
 //
 // EvaluateTree is safe for an empty graph — it returns a TreeEvaluation
 // with zero nodes and an empty ByVerdict map.
+//
+// Nodes whose Input carries SignalsUnavailable are NOT scored: they
+// resolve to VerdictUnknown, are excluded from the transitive rollup in
+// both directions (they neither absorb descendants' deficits nor
+// contribute one to their ancestors), are excluded from MinOverall, and
+// are counted in Summary.UnknownCount. A tree containing them is a
+// PARTIAL result and callers must say so.
 func EvaluateTree(graph *depgraph.Graph, inputs map[depgraph.Key]Input, opts Options) *TreeEvaluation {
 	te := &TreeEvaluation{
 		ByKey:   make(map[depgraph.Key]*Evaluation),
@@ -91,6 +107,13 @@ func EvaluateTree(graph *depgraph.Graph, inputs map[depgraph.Key]Input, opts Opt
 		// If caller didn't supply an Input for this key, synthesize one
 		// from the Key so EvaluatePackage still has identity fields. The
 		// resulting Evaluation will have a clean 100 overall.
+		//
+		// TRAP: that fallback is only correct when a missing entry means
+		// "nothing to report". If it means "we could not fetch the
+		// facts", the caller MUST supply an Input with
+		// SignalsUnavailable set — otherwise an outage is scored as a
+		// clean package. The fallback cannot tell the two apart, which
+		// is why the decision belongs to the caller.
 		if in.Ecosystem == "" && in.Package == "" && in.Version == "" {
 			in = Input{Ecosystem: k.Ecosystem, Package: k.Name, Version: k.Version}
 		}
@@ -104,6 +127,12 @@ func EvaluateTree(graph *depgraph.Graph, inputs map[depgraph.Key]Input, opts Opt
 	// rewrite RolledUp, and if the rolled-up score drops meaningfully,
 	// re-resolve the verdict and populate TransitiveBlame.
 	for k, ev := range te.ByKey {
+		// A node we could not evaluate has no direct score to roll
+		// descendants into, and folding descendants in would invent
+		// one. Leave it Unknown — the honest answer stays honest.
+		if ev.Verdict == VerdictUnknown {
+			continue
+		}
 		rolled, blame := rollupForNode(graph, k, ev, te.ByKey)
 		ev.RolledUp = rolled
 
@@ -192,6 +221,13 @@ func EvaluateTree(graph *depgraph.Graph, inputs map[depgraph.Key]Input, opts Opt
 			te.Summary.TransitiveCount++
 		}
 		te.Summary.ByVerdict[ev.Verdict]++
+		if ev.Verdict == VerdictUnknown {
+			// Unevaluated nodes are counted, never scored. Their
+			// Overall=0 means "no score" and would otherwise read as
+			// "the worst package in the tree" in MinOverall.
+			te.Summary.UnknownCount++
+			continue
+		}
 		if ev.RolledUp.Overall < te.Summary.MinOverall {
 			te.Summary.MinOverall = ev.RolledUp.Overall
 		}
@@ -240,6 +276,17 @@ func rollupForNode(graph *depgraph.Graph, self depgraph.Key, selfEval *Evaluatio
 		}
 		dEval, ok := byKey[dk]
 		if !ok {
+			continue
+		}
+		// An unevaluated descendant carries Overall=0 with every
+		// category DataAvailable=false. Folding that in would read as
+		// a 100-point deficit and drag every ancestor into quarantine
+		// — turning a backend outage into a tree-wide block. Skip it:
+		// the ancestor is still scored honestly on its OWN signals,
+		// and the unevaluated descendant is reported in its own right
+		// (TreeSummary.UnknownCount) rather than laundered into a
+		// score. "Could not evaluate" is not evidence of risk.
+		if dEval.Verdict == VerdictUnknown {
 			continue
 		}
 		node := graph.Nodes[dk]

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ func init() {
 	auditExportCmd.Flags().String("action", "", "Filter by action (substring match)")
 	auditExportCmd.Flags().String("actor", "", "Filter by actor (substring match)")
 	auditExportCmd.Flags().Int("limit", 0, "Maximum number of events to export (default 0 = all, unlike `audit view` which defaults to 50)")
+	auditExportCmd.Flags().Bool("allow-truncated", false, "Write the export even when the server reports it is incomplete (default: refuse)")
 	auditCmd.AddCommand(auditExportCmd)
 }
 
@@ -84,7 +86,17 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 	}
 
 	var resp auditLogResponse
-	if err := client.Get("/api/audit/logs?export=true", &resp); err != nil {
+	if err := client.Get(auditExportRequestPath(startTime, endTime), &resp); err != nil {
+		return err
+	}
+
+	// C9: decide on completeness BEFORE opening the sink. A truncated
+	// compliance export must not exist on disk at all unless the operator
+	// explicitly asked for a partial one — writing it and then printing a
+	// warning leaves a short file that outlives the terminal it was warned
+	// in.
+	allowTruncated, _ := cmd.Flags().GetBool("allow-truncated")
+	if err := reportAuditExportCompleteness(cmd, resp, allowTruncated); err != nil {
 		return err
 	}
 
@@ -129,32 +141,141 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.OutOrStderr(), "Exported %d audit event(s) to %s\n", len(events), outFile)
 	}
 	// C9: the export used to report a count and nothing else, which reads as
-	// "this is the whole range". It is not — the server caps the export at
-	// auditExportServerRowCap rows per source over the last
-	// auditExportServerWindowDays days, and the response carries no
-	// total/truncated field for the CLI to check. State the real window rather
-	// than inferring truncation from len(events) (a brittle guess that would
-	// break every working export). Stderr, so a `--out -` pipe stays clean.
-	fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", auditExportWindowNote)
+	// "this is the whole range". Print the window the SERVER says it queried,
+	// on stderr so a `--out -` pipe stays clean.
+	if note := auditExportWindowNote(resp.Window); note != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", note)
+	}
 	return nil
 }
 
-// The server's export ceiling, mirrored here so the CLI can describe it
-// honestly. internal/server/dashboard.go's handleAuditLogs builds the export
-// from events.ForOrg(orgID).ListSince(10000, now-90d), and the violations half
-// runs through listViolationEntries with defaultViolationLimit = 10000
-// (internal/server/violations_query.go). Neither response reports a total or a
-// truncated flag — when they do, prefer the server's own numbers over these
-// constants and drop the static note.
-const (
-	auditExportServerWindowDays = 90
-	auditExportServerRowCap     = 10000
-)
+// auditExportRequestPath builds the export request, passing the caller's
+// window to the server instead of filtering a fixed server-side slab
+// client-side. Before this the server always applied its own 90-day floor:
+// `--start 2026-01-01` run in August returned mid-May onward, and the CLI
+// filtered that already-clipped slab and reported the result as the range
+// the operator asked for.
+func auditExportRequestPath(start, end time.Time) string {
+	q := url.Values{}
+	q.Set("export", "true")
+	if !start.IsZero() {
+		q.Set("start", start.UTC().Format(time.RFC3339))
+	}
+	if !end.IsZero() {
+		q.Set("end", end.UTC().Format(time.RFC3339))
+	}
+	return "/api/audit/logs?" + q.Encode()
+}
 
-var auditExportWindowNote = fmt.Sprintf(
-	"the server returns at most %d rows per source and only the last %d days, "+
-		"so an export cannot cover a longer range than that",
-	auditExportServerRowCap, auditExportServerWindowDays)
+// auditExportWindowNote renders the server-reported window. Empty when the
+// server did not report one (an older build), because inventing a window is
+// exactly the failure being fixed.
+func auditExportWindowNote(win *auditExportWindowInfo) string {
+	if win == nil {
+		return ""
+	}
+	start := "the beginning of the log"
+	if win.Start != nil {
+		start = win.Start.UTC().Format(time.RFC3339)
+	}
+	end := "now"
+	if win.End != nil {
+		end = win.End.UTC().Format(time.RFC3339)
+	}
+	note := fmt.Sprintf("server queried %s → %s", start, end)
+	if win.DefaultApplied {
+		note += fmt.Sprintf(" (server default lookback of %d days — pass --start to widen)", win.DefaultDays)
+	}
+	return note
+}
+
+// reportAuditExportCompleteness is the C9 gate. The server now reports, per
+// source, how many rows exist in the requested window versus how many it
+// returned; this turns that into one of three outcomes:
+//
+//   - server says complete → nothing to say, write the file.
+//   - server says truncated → REFUSE, unless --allow-truncated. A short
+//     compliance artifact that claims to be whole is worse than no artifact:
+//     the operator finds out at audit time, not export time. The refusal
+//     names which source clipped and by how much, so the fix (a narrower
+//     --start/--end) is obvious.
+//   - server said nothing (older build) → warn loudly that completeness is
+//     UNVERIFIED and continue. Refusing here would break every export against
+//     a server that predates the field, and "we can't tell" is not the same
+//     claim as "it's clipped".
+//
+// Note the deliberate absence of a len(events)==cap heuristic: an org with
+// exactly cap rows is complete, and guessing would refuse it. The server is
+// the only thing that can answer this, which is why it now does.
+func reportAuditExportCompleteness(cmd *cobra.Command, resp auditLogResponse, allowTruncated bool) error {
+	errOut := cmd.ErrOrStderr()
+	if resp.Truncated == nil {
+		fmt.Fprintln(errOut,
+			"warning: this server does not report audit-export completeness, so this export "+
+				"CANNOT be verified as covering the requested range. It may be silently short. "+
+				"Upgrade the server, or reconcile the row count against another source before "+
+				"relying on this file for compliance.")
+		return nil
+	}
+	// A source that contributed rows but could not be counted is a third
+	// state: not clipped as far as we know, but not verified either. Say so
+	// rather than letting silence imply completeness. Sources that returned
+	// nothing are not worth a warning — they contributed no rows to vouch
+	// for.
+	for _, src := range resp.Sources {
+		if !src.TotalKnown && src.Returned > 0 {
+			fmt.Fprintf(errOut,
+				"warning: the server could not count the %q source, so the %d row(s) it "+
+					"contributed cannot be verified as complete.\n", src.Source, src.Returned)
+			// The note is where the server explains WHY it cannot count —
+			// e.g. the in-memory ring cannot tell which of its evicted rows
+			// were recovered from the durable audit table and which were
+			// never persisted. Printing the warning without it leaves the
+			// operator with no way to judge the risk. (The truncated branch
+			// below prints notes for its own sources.)
+			if src.Note != "" {
+				fmt.Fprintf(errOut, "  %s\n", src.Note)
+			}
+		}
+	}
+
+	if !*resp.Truncated {
+		return nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "the server clipped this export: it returned %d row(s) but the requested window holds at least %d",
+		derefInt(resp.Count, len(resp.Events)), derefInt(resp.Total, 0))
+	for _, src := range resp.Sources {
+		if !src.Truncated {
+			continue
+		}
+		fmt.Fprintf(&b, "\n  %s: returned %d of %d row(s) (server limit %d)",
+			src.Source, src.Returned, src.Total, src.Limit)
+		if src.Note != "" {
+			fmt.Fprintf(&b, "\n    %s", src.Note)
+		}
+	}
+	if note := auditExportWindowNote(resp.Window); note != "" {
+		fmt.Fprintf(&b, "\n  %s", note)
+	}
+
+	if allowTruncated {
+		fmt.Fprintf(errOut, "warning: %s\nwarning: writing a PARTIAL export anyway (--allow-truncated). "+
+			"Do not present this file as a complete audit record.\n", b.String())
+		return nil
+	}
+	return fmt.Errorf("refusing to write a truncated audit export — %s\n"+
+		"Narrow the window with --start/--end so each source fits under its limit, "+
+		"or pass --allow-truncated to write the partial export anyway", b.String())
+}
+
+func derefInt(p *int, fallback int) int {
+	if p == nil {
+		return fallback
+	}
+	return *p
+}
 
 // resolveExportWindow returns the [start, end) filter window, applying --since
 // (a relative duration) on top of --start/--end. --since wins when both are

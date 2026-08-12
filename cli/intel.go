@@ -143,6 +143,12 @@ type v1TreeSummary struct {
 	ByVerdict               map[string]int `json:"ByVerdict"`
 	MinOverall              int            `json:"MinOverall"`
 	MaxTransitiveBlameChain int            `json:"MaxTransitiveBlameChain"`
+	// UnknownCount is how many nodes the server COULD NOT evaluate.
+	// Non-zero means the tree is a partial result — see
+	// risk.TreeSummary.UnknownCount. Absent (0) from servers older than
+	// the fix, which is why the renderer also falls back to
+	// ByVerdict["unknown"].
+	UnknownCount int `json:"UnknownCount"`
 }
 
 type v1TreeData struct {
@@ -364,6 +370,10 @@ func verdictDisplay(v string) string {
 		return "REPLACE"
 	case "quarantine":
 		return "QUARANTINE"
+	case "unknown":
+		// Deliberately not "UNKNOWN" — that reads as a risk band. The
+		// server is saying the evaluation did not happen.
+		return "NOT EVALUATED"
 	default:
 		return strings.ToUpper(v)
 	}
