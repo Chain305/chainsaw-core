@@ -12,7 +12,7 @@
 # previously read "get.chain305.com — confirmed final value"; that subdomain was
 # never provisioned and returned 404, so this step failed for every consumer of
 # the action. scripts/check-cli-download-urls.sh now enforces the host.
-#   (same server as chain305.com; anonymous download, no auth required).
+# Anonymous download, no auth required.
 #
 # CHECKOUT REQUIREMENT: give `actions/checkout` `fetch-depth: 0`. At the
 #   default depth of 1 the PR base commit is not in the local object store,
