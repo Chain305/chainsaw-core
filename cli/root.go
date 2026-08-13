@@ -456,7 +456,12 @@ func init() {
 	// subcommand stays unchanged for richer output / JSON.
 	rootCmd.SetVersionTemplate("chainsaw {{.Version}}\n")
 
-	rootCmd.PersistentFlags().String("server", DefaultServer, "Server URL (overrides config; default baked at build via -X .../internal/cli.DefaultServer)")
+	// The ldflags path in this help text is published verbatim on
+	// docs.chain305.com/cli-reference/ by gen-cli-docs, so it has to name the
+	// symbol that actually exists. It read `.../internal/cli.DefaultServer`
+	// until the open-core split moved this package to core/ — a path no build
+	// has been able to set since.
+	rootCmd.PersistentFlags().String("server", DefaultServer, "Server URL (overrides config; default baked at build via -X github.com/chain305/chainsaw-core/cli.DefaultServer)")
 	rootCmd.PersistentFlags().String("token", "", "Auth token (overrides config)")
 	// A9: this used to read "Org ID (overrides config)", which every reader
 	// took to mean "run this command against another org". It does NOT: no
