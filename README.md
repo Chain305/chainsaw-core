@@ -94,10 +94,13 @@ guard under a network-denying sandbox and every block still fires identically.
 Nothing on the default path requires egress. What the tool does do on a TTY is
 *ask* whether you want the feed.
 
-**Byte-level behavioural analysis is opt-in and off by default.** It requires
-`CHAINSAW_GUARD_DEEP=1` or a staged artifact directory, and deep mode fetches
-package archives over the network, which waives the offline guarantee. The
-binary tells you on every run that it did not run.
+**Byte-level behavioural analysis is opt-in and off by default.** It needs
+either a staged artifact directory (`CHAINSAW_GUARD_ARTIFACT_DIR`, you supply
+the archives, still offline) or `CHAINSAW_GUARD_DEEP=1`, which fetches the
+archive over the network and so waives the offline guarantee. Deep fetch is
+further limited to **npm and cargo, and only for a version-pinned install** —
+`chainsaw npm install foo` gets no byte scan even with deep mode on. The binary
+tells you on every run when it did not run.
 
 **It is bypassable, on purpose.** The shell hook wraps your package manager; a
 determined developer types `/usr/local/bin/npm install` and routes around it.
