@@ -8,30 +8,53 @@ import "strings"
 // them. PURL is preserved verbatim for downstream rendering; Ecosystem
 // is derived from PURL when present and used as the identity tiebreaker
 // (so `pkg:npm/foo` and `pkg:pypi/foo` don't collide).
+// JSON tags: these types are serialized directly by `chainsaw sbom diff
+// --format json`. Without tags encoding/json used the Go field names, so the
+// documented machine format emitted Go-style capitalized keys ("Added",
+// "Name") — idiomatic for Go, wrong for a published JSON contract and unlike
+// every other machine format this CLI emits. Tagged lowercase, and the CLI
+// envelope carries a schemaVersion so a consumer can pin the shape.
 type Component struct {
-	Name      string
-	Version   string
-	Type      string
-	Ecosystem string
-	PURL      string
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Type      string `json:"type"`
+	Ecosystem string `json:"ecosystem"`
+	PURL      string `json:"purl"`
 	// Hash is optional metadata kept for stable diff identity when
 	// callers populate it; the current diff key is (name, type,
 	// ecosystem) and Hash is informational only.
-	Hash string
+	Hash string `json:"hash,omitempty"`
 }
 
 type ComponentChange struct {
-	Name       string
-	Type       string
-	Ecosystem  string
-	OldVersion string
-	NewVersion string
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Ecosystem  string `json:"ecosystem"`
+	OldVersion string `json:"oldVersion"`
+	NewVersion string `json:"newVersion"`
 }
 
 type DiffResult struct {
-	Added   []Component
-	Removed []Component
-	Changed []ComponentChange
+	Added   []Component       `json:"added"`
+	Removed []Component       `json:"removed"`
+	Changed []ComponentChange `json:"changed"`
+}
+
+// JSON returns the result with nil slices normalized to empty ones, so the
+// serialized form carries `"added": []` rather than `"added": null`. A
+// consumer doing `for c in doc["added"]` should not have to special-case the
+// no-difference case — which is the single most common outcome of a diff.
+func (r DiffResult) JSON() DiffResult {
+	if r.Added == nil {
+		r.Added = []Component{}
+	}
+	if r.Removed == nil {
+		r.Removed = []Component{}
+	}
+	if r.Changed == nil {
+		r.Changed = []ComponentChange{}
+	}
+	return r
 }
 
 // componentKey is the identity tuple used to match components across

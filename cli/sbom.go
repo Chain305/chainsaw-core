@@ -16,6 +16,11 @@ import (
 	"github.com/chain305/chainsaw-core/sbom"
 )
 
+// sbomDiffSchemaVersion identifies the JSON envelope `chainsaw sbom diff
+// --format json` emits. Same contract as scanSchemaVersion: bump only on a
+// backward-incompatible envelope change; additive fields keep the version.
+const sbomDiffSchemaVersion = "chainsaw.sbomdiff/v1"
+
 var sbomCmd = &cobra.Command{
 	Use:     "sbom",
 	GroupID: GrpScan,
@@ -397,10 +402,22 @@ func runSBOMDiff(cmd *cobra.Command, args []string) error {
 	format, _ := cmd.Flags().GetString("format")
 	switch strings.ToLower(format) {
 	case "json":
-		// S9 — honor --output; byte-identical to the previous
-		// MarshalIndent+Fprintln pair. cmd.OutOrStdout() stays the fallback so
+		// S9 — honor --output; cmd.OutOrStdout() stays the fallback so
 		// sbom_test.go's SetOut capture keeps working.
-		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), result)
+		//
+		// The envelope carries schemaVersion for the same reason `scan` and
+		// `why` do: a consumer can pin a known shape and detect a breaking
+		// change without diffing the whole body. This IS that breaking change
+		// — the diff previously serialized the bare Go struct, so its keys
+		// came out capitalized ("Added", "Name") and an empty diff emitted
+		// `null` rather than `[]`. Hence v1 starts here rather than being
+		// retro-fitted onto the old shape.
+		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), map[string]any{
+			"schemaVersion": sbomDiffSchemaVersion,
+			"added":         result.JSON().Added,
+			"removed":       result.JSON().Removed,
+			"changed":       result.JSON().Changed,
+		})
 	case "", "text":
 		// Honor --output on the text path too. The json branch above has done
 		// this since S9; this one still wrote straight to stdout, so
