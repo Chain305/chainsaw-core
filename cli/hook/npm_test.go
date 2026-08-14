@@ -155,7 +155,7 @@ func TestNpmWireAcceptsValidURL(t *testing.T) {
 	}
 	// Canonicalised URL should be embedded (no trailing slash before path).
 	// BUG-A6: org-scoped path; placeholder when WireOpts.OrgSlug unset.
-	if !strings.Contains(string(data), "registry=https://proxy.example.com/chainproxy/repository/@your-org-slug/npmjs/") {
+	if !strings.Contains(string(data), "registry=https://proxy.example.com/repository/@your-org-slug/npmjs/") {
 		t.Errorf("expected canonicalised registry line, got: %s", data)
 	}
 }

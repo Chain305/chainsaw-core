@@ -151,8 +151,15 @@ func newBundleVerifyCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&strict, "strict", false,
 		"Require full Sigstore authenticity (Fulcio cert chain + Rekor inclusion + OIDC issuer + signer identity), not just digest binding. Equivalent to CHAINSAW_INTEL_BUNDLE_STRICT_VERIFY=1. Off by default until the chainsaw-release-signer bot cutover; today's digest-only bundles fail --strict by design.")
+	// Y7: the prose back-ticks around `verify` were consumed by pflag's
+	// UnquoteUsage, which treats the FIRST back-quoted span in a usage
+	// string as that flag's VALUE PLACEHOLDER — so the signature-bypass
+	// escape hatch advertised itself as `--allow-unverified verify`, i.e. a
+	// bool flag claiming to take an argument. Single quotes here; pflag's
+	// `case "bool": name = ""` branch only fires once no back-quoted span
+	// is left, so this must stay back-tick-free.
 	cmd.Flags().BoolVar(&allowUnverified, "allow-unverified", false,
-		"Exit 0 even when signature verification was skipped via CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY. Dev/test only — it makes `verify` report success on a bundle nothing checked.")
+		"Exit 0 even when signature verification was skipped via CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY. Dev/test only — it makes 'verify' report success on a bundle nothing checked.")
 	return cmd
 }
 

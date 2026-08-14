@@ -11,6 +11,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// NOTE on fixtures: preview responses in this file and in
+// undo_retarget_test.go carry the server's REAL dry-run sentence. The only two
+// 200-response producers are internal/undo ("Dry run: would undo %s (action
+// %s). Run again without dry-run to apply.") and internal/server/undo_api.go
+// ("No undoable actions found for this org."). The old fixtures invented a
+// short phrase ("Would revert policy.update on pol-1") that no server emits,
+// which is what let the Y6 splice — Message pasted mid-clause into "Undo %s?"
+// — look reasonable in tests.
+
 // newUndoCmdForTest builds a fresh undo command mirroring the init() in
 // undo.go. The production undoCmd is a package-level singleton whose flag
 // state persists across invocations, so each test gets its own.
@@ -46,7 +55,7 @@ func TestUndo_NonTTYWithoutYesErrors(t *testing.T) {
 			DryRun:     true,
 			ActionType: "policy.update",
 			ActionID:   "act-42",
-			Message:    "Would revert policy.update on pol-1",
+			Message:    "Dry run: would undo policy.update (action act-42). Run again without dry-run to apply.",
 		})
 	}))
 	t.Cleanup(srv.Close)

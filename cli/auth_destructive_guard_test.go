@@ -57,6 +57,15 @@ func TestDestructiveVerbs_NonTTYWithoutYes_FailLoudly(t *testing.T) {
 			cmd := authClientRotateCmd()
 			return runAuthClientRotate(cmd, []string{"cli-1"})
 		}},
+		// N1: `token rotate` was the one destructive verb with no gate at
+		// all — no --yes flag, no guard — while its own Long text said it
+		// "invalidates the old secret immediately". A stray rotate in CI
+		// broke every consumer of that PAT with no prompt and no undo.
+		{"token rotate", func(t *testing.T) error {
+			cmd := tokenRotateCmd
+			t.Cleanup(func() { _ = cmd.Flags().Set("yes", "false") })
+			return runTokenRotate(cmd, []string{"ak-1"})
+		}},
 	}
 
 	for _, tc := range cases {
@@ -79,6 +88,188 @@ func TestDestructiveVerbs_NonTTYWithoutYes_FailLoudly(t *testing.T) {
 				t.Logf("%s failed before the confirm gate (%v); the gate itself is asserted by the message check below", tc.name, err)
 			}
 		})
+	}
+}
+
+// TestTokenRotate_NonTTYWithoutYes_FailsLoudly is the strict version of the
+// table entry above (that loop only t.Logf's when the message is not the
+// guard's, because two of its cases can fail at the transport first).
+// token rotate's guard fires before any client work, so it can be asserted
+// exactly — and it must be, because this is the gate N1 found missing.
+func TestTokenRotate_NonTTYWithoutYes_FailsLoudly(t *testing.T) {
+	withIsolatedConfigHome(t)
+	withNonTTYStdin(t)
+	viper.Set("server_url", "http://127.0.0.1:1")
+	viper.Set("token", "t")
+
+	cmd := tokenRotateCmd
+	t.Cleanup(func() { _ = cmd.Flags().Set("yes", "false") })
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	err := runTokenRotate(cmd, []string{"ak-live"})
+	if err == nil {
+		t.Fatal("token rotate returned nil in a non-TTY without --yes; the caller believes the secret was replaced")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("error = %q, want a message naming --yes", err)
+	}
+	if !strings.Contains(err.Error(), "ak-live") {
+		t.Errorf("error = %q, want it to name the token being rotated", err)
+	}
+	if strings.Contains(out.String(), "Aborted.") {
+		t.Error("printed 'Aborted.' instead of failing; that is the silent no-op this guard removes")
+	}
+}
+
+// ── N1: the set-completeness assertion ────────────────────────────────────────
+//
+// The table above is hand-written, and that is exactly how `token rotate` sat
+// ungated next to ten guarded siblings for as long as it did: nothing asserted
+// the SET was complete, only that the two listed entries behaved. The two maps
+// below close that.
+//
+// MEMBERSHIP RULE (deliberate, and the reason this is a curated list rather
+// than a pure heuristic):
+//
+//	A command requires a --yes gate when running it DESTROYS OR REPLACES
+//	durable state that the CLI offers no verb to restore — a credential
+//	secret, a policy, an exception, a tenant, or an enforcement posture.
+//	"No verb to restore" is the load-bearing half: `token rotate` qualifies
+//	because there is no un-rotate, while `team remove` does not because
+//	`team add` puts the mapping back.
+//
+// A pure heuristic cannot decide that (it cannot tell `admission soak clear`,
+// which computes a gate verdict and mutates nothing, from `policy delete`), and
+// a pure allowlist cannot notice the ELEVENTH command. So both run:
+//
+//  1. every command in requiresYesGate must exist and declare --yes; and
+//  2. every runnable command in the live tree whose verb sounds destructive
+//     must appear in requiresYesGate or in destructiveVerbExempt, with a
+//     written reason. A new `foo delete` fails this test on the day it is
+//     added, and the author must classify it rather than default into
+//     silence.
+var requiresYesGate = map[string]string{
+	"chainsaw token revoke":         "revokes a live PAT; no un-revoke verb",
+	"chainsaw token rotate":         "replaces a live PAT secret in place; no un-rotate verb (N1)",
+	"chainsaw auth client rotate":   "deletes + recreates a registry credential; the old secret is gone",
+	"chainsaw auth client delete":   "removes a registry credential; clients using it start failing",
+	"chainsaw policy delete":        "removes an enforcement policy; packages it blocked stop being blocked",
+	"chainsaw policy flip-to-block": "flips monitor → block org-wide; can wedge every install in CI",
+	"chainsaw exception delete":     "removes an exception; installs it allowed start being blocked",
+	"chainsaw finding suppress":     "permanently exempts a package@version from enforcement",
+	"chainsaw org delete":           "hard-deletes a tenant and every artifact it owns",
+	"chainsaw undo":                 "reverses a prior action; the reversal is itself a mutation",
+}
+
+// destructiveVerbExempt lists commands whose verb matches the vocabulary but
+// which do NOT meet the membership rule. One line of justification each —
+// if you cannot write the justification, the command belongs in
+// requiresYesGate instead.
+var destructiveVerbExempt = map[string]string{
+	"chainsaw admission soak clear":     "read-only: evaluates the soak gate and prints a kubectl patch; never applies it",
+	"chainsaw coverage expected remove": "removes a declared expected-source row; `coverage expected add` restores it",
+	"chainsaw team remove":              "removes a team mapping; `team add` restores it",
+	"chainsaw telemetry reset":          "resets local telemetry consent; `telemetry on/off` restores it, no server state",
+	"chainsaw uninstall-hook":           "removes the local package-manager hook; `install-hook` restores it, and refusing to let someone turn the guard off is worse than the fat-finger risk",
+}
+
+// destructiveVerbVocabulary is the trigger set for rule (2). Matched against
+// cmd.Name() — the verb, not the whole path — so it stays readable.
+var destructiveVerbVocabulary = []string{
+	"delete", "revoke", "rotate", "remove", "rm", "purge", "destroy",
+	"suppress", "undo", "reset", "clear", "uninstall", "wipe", "prune",
+	"drop", "flip-to-block",
+}
+
+// walkRunnableCommands returns every runnable command in the tree rooted at
+// root, hidden ones included — a hidden destructive verb is still reachable
+// from a script.
+func walkRunnableCommands(root *cobra.Command) []*cobra.Command {
+	var out []*cobra.Command
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.Runnable() {
+			out = append(out, c)
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(root)
+	return out
+}
+
+func hasYesFlag(c *cobra.Command) bool {
+	return c.Flags().Lookup("yes") != nil || c.InheritedFlags().Lookup("yes") != nil
+}
+
+// TestDestructiveCommands_AllDeclareYesFlag is rule (1): every command the
+// membership rule covers must actually offer the gate. This is the assertion
+// that would have failed on `token rotate` before N1.
+func TestDestructiveCommands_AllDeclareYesFlag(t *testing.T) {
+	byPath := map[string]*cobra.Command{}
+	for _, c := range walkRunnableCommands(rootCmd) {
+		byPath[c.CommandPath()] = c
+	}
+	for path, why := range requiresYesGate {
+		cmd, ok := byPath[path]
+		if !ok {
+			t.Errorf("%q is listed as requiring a --yes gate but no such runnable command exists; "+
+				"if it was renamed or removed, update requiresYesGate in this file", path)
+			continue
+		}
+		if !hasYesFlag(cmd) {
+			t.Errorf("%q declares no --yes flag, so it cannot be confirmed and cannot be scripted safely.\n"+
+				"  why it needs one: %s\n"+
+				"  fix: add `cmd.Flags().Bool(\"yes\", false, \"Skip confirmation prompt\")` and the "+
+				"non-TTY guard from runTokenRevoke", path, why)
+		}
+	}
+}
+
+// TestDestructiveCommands_SetIsComplete is rule (2): no command with a
+// destructive-sounding verb may sit outside BOTH lists. This is the structural
+// guard the hand-written table lacked — the eleventh hole cannot open silently.
+func TestDestructiveCommands_SetIsComplete(t *testing.T) {
+	matches := 0
+	for _, c := range walkRunnableCommands(rootCmd) {
+		name := c.Name()
+		matched := false
+		for _, verb := range destructiveVerbVocabulary {
+			if name == verb || strings.HasPrefix(name, verb+"-") || strings.HasSuffix(name, "-"+verb) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		matches++
+		path := c.CommandPath()
+		_, gated := requiresYesGate[path]
+		_, exempt := destructiveVerbExempt[path]
+		switch {
+		case gated && exempt:
+			t.Errorf("%q is in BOTH requiresYesGate and destructiveVerbExempt; pick one", path)
+		case !gated && !exempt:
+			t.Errorf("%q has a destructive verb (%q) but is classified in neither list.\n"+
+				"  Decide, in this file, which it is:\n"+
+				"    - it destroys or replaces durable state with no restoring verb → add it to\n"+
+				"      requiresYesGate AND give it the --yes + non-TTY guard from runTokenRevoke;\n"+
+				"    - it is reversible / read-only → add it to destructiveVerbExempt with the reason.\n"+
+				"  Defaulting to silence is how `token rotate` shipped ungated.", path, name)
+		}
+	}
+	// Anti-vacuity: if a refactor ever made the walk or the verb match come
+	// up empty, this test would "pass" while checking nothing — the exact
+	// failure mode it exists to prevent. The tree carried 15 verb matches
+	// when this was written; anything below the size of the two lists means
+	// the matcher, not the tree, changed.
+	if want := len(requiresYesGate) + len(destructiveVerbExempt); matches < want {
+		t.Fatalf("verb scan matched only %d commands but the two lists name %d; "+
+			"the walk or the vocabulary match is broken, so this test is not actually checking anything",
+			matches, want)
 	}
 }
 

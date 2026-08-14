@@ -793,6 +793,56 @@ func ReplaceRepositoriesForOrgTx(tx *sql.Tx, orgID string, repos []RepositoryCon
 	return nil
 }
 
+// ErrRepositoryExists reports that the org already has a repository under the
+// requested name. Callers surface it as 409 Conflict rather than letting the
+// create path silently redefine somebody else's repository.
+var ErrRepositoryExists = errors.New("repository already exists")
+
+// CreateRepositoryForOrg inserts ONE repository for the org and returns the
+// stored configuration read back from the database.
+//
+// Deliberately not ReplaceRepositoriesForOrg{,Tx}: those DELETE every row for
+// the org before writing, which is the right shape for a whole-config reload
+// and catastrophic for a single create — the caller would wipe every other
+// repository in the org. This reuses the same upsertRepository helper inside
+// a transaction of its own, fronted by an existence check so a name collision
+// returns ErrRepositoryExists instead of overwriting the existing definition
+// (upsertRepository on its own is ON CONFLICT DO UPDATE).
+//
+// The existence check is advisory, not a lock: two concurrent creates of the
+// same name can both observe "absent", in which case the second serialises on
+// the (org_id, name) unique index and lands as an update rather than a 409.
+// Both callers asked for the same repository to exist, so the end state is
+// still one row with the last writer's definition.
+func CreateRepositoryForOrg(store *pgstore.Store, orgID string, repo RepositoryConfig) (RepositoryConfig, error) {
+	if store == nil {
+		return RepositoryConfig{}, errors.New("database store is required")
+	}
+	orgID = tenancy.NormalizeOrgID(orgID)
+	repo.Name = strings.TrimSpace(repo.Name)
+	if repo.Name == "" {
+		return RepositoryConfig{}, errors.New("repository name is required")
+	}
+	if strings.TrimSpace(repo.Format) == "" {
+		return RepositoryConfig{}, errors.New("repository format is required")
+	}
+	err := store.WithTx(context.Background(), func(tx *sql.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM repositories WHERE org_id=? AND name=?)`,
+			orgID, repo.Name).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			return fmt.Errorf("%q: %w", repo.Name, ErrRepositoryExists)
+		}
+		return upsertRepository(tx, orgID, repo)
+	})
+	if err != nil {
+		return RepositoryConfig{}, err
+	}
+	return fetchRepository(store.DB(), orgID, repo.Name)
+}
+
 // UpdateRepositoryForOrg applies runtime updates to a repository record and returns
 // the updated configuration.
 func UpdateRepositoryForOrg(store *pgstore.Store, orgID, name string, update RepositoryUpdate) (RepositoryConfig, error) {

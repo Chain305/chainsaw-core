@@ -12,9 +12,11 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -602,5 +604,174 @@ func TestRunScan_NoStdinWhenNotOptedIn(t *testing.T) {
 	}
 	if tripped {
 		t.Fatal("positional scan read stdin — stdin batch must be opt-in (`-` / --stdin) only")
+	}
+}
+
+// ── B2b: a manifest that fails to parse must not exit 0 ──────────────────────
+//
+// collectFromManifests printed "warning: depparser walk: %v" to stderr and
+// carried on with whatever it got, and runScan treated the nil error as
+// success. A repo whose lockfile failed to parse was scanned for its other
+// manifests' dependencies only and CI went green — the most dangerous shape of
+// wrong answer this command can give. The contract is now: keep scanning what
+// parsed, but stop the exit code from lying.
+
+// badManifestTree writes a tree with ONE parseable manifest and ONE manifest
+// that cannot be parsed at all, and asserts the fixture still does what it
+// claims. If a parser ever starts tolerating this input the fixture is stale
+// and the test must fail loudly rather than silently pass.
+func badManifestTree(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask==2.0.1\nrequests==2.28.1\n"), 0o600); err != nil {
+		t.Fatalf("write requirements.txt: %v", err)
+	}
+	// Truncated mid-object: matched by name, unparseable by content.
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{ "lockfileVersion": 3, "packages": {  `), 0o600); err != nil {
+		t.Fatalf("write package-lock.json: %v", err)
+	}
+	return dir
+}
+
+func TestCollectFromManifests_ParseFailureIsReturnedWithThePartialSet(t *testing.T) {
+	pkgs, err := collectFromManifests(badManifestTree(t))
+
+	var parseErr *manifestParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("collectFromManifests err = %v, want *manifestParseError — a swallowed walk failure is what let `scan --path` exit 0 on a dropped lockfile", err)
+	}
+	// The packages that DID parse must survive: the fix is about the exit
+	// code, not about aborting the scan.
+	var names []string
+	for _, p := range pkgs {
+		names = append(names, p.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "flask,requests" {
+		t.Errorf("partial package set = %v, want [flask requests]; the parseable manifest must still be scanned", names)
+	}
+}
+
+func TestRunScan_ManifestParseFailureExits30(t *testing.T) {
+	url := runScanTestServer(t, scanAPIResponse{Results: []scanResultItem{}, Total: 2})
+	configureScan(t, url)
+	ensureFormatFlags(t)
+	dir := badManifestTree(t)
+	if err := scanCmd.Flags().Set("path", dir); err != nil {
+		t.Fatalf("set path: %v", err)
+	}
+
+	var runErr error
+	_, stderr := captureScanRun(t, func() {
+		runErr = runScan(newScanTestCmd(), nil)
+	})
+	if code := scanExitCode(t, runErr); code != ExitManifestParseError {
+		t.Fatalf("exit = %d, want %d — a dropped lockfile reported as a clean scan is a silent CI pass",
+			code, ExitManifestParseError)
+	}
+	// The same number pr-scan has always used for the same condition.
+	if ExitManifestParseError != prScanExitParseError {
+		t.Errorf("scan's parse-error code (%d) drifted from pr-scan's (%d)", ExitManifestParseError, prScanExitParseError)
+	}
+	// The reason has to be visible, not just encoded in $?.
+	if !strings.Contains(stderr, "failed to parse") || !strings.Contains(stderr, "package-lock.json") {
+		t.Errorf("stderr does not name the manifest that was dropped:\n%s", stderr)
+	}
+}
+
+func TestRunScan_BlockOutranksManifestParseError(t *testing.T) {
+	// Precedence mirrors pr-scan, which escalates 0/10 to 30 but leaves
+	// blocking alone: a real BLOCK is the stronger signal and the one CI
+	// gates on.
+	vuln := scanResultItem{Name: "flask", Version: "2.0.1", Status: "vulnerable", Severity: "critical"}
+	url := runScanTestServer(t, scanAPIResponse{Results: []scanResultItem{vuln}, Total: 2, Vulnerable: 1})
+	configureScan(t, url)
+	ensureFormatFlags(t)
+	if err := scanCmd.Flags().Set("path", badManifestTree(t)); err != nil {
+		t.Fatalf("set path: %v", err)
+	}
+
+	var runErr error
+	captureScanRun(t, func() { runErr = runScan(newScanTestCmd(), nil) })
+	if code := scanExitCode(t, runErr); code != ExitBlocked {
+		t.Fatalf("exit = %d, want ExitBlocked(%d)", code, ExitBlocked)
+	}
+}
+
+func TestRunScan_CleanTreeStillExitsZero(t *testing.T) {
+	// The control for the two above: no parse failure, no block, exit 0. A
+	// parse-error contract that fires on healthy trees would be worse than
+	// the bug.
+	url := runScanTestServer(t, scanAPIResponse{Results: []scanResultItem{}, Total: 2})
+	configureScan(t, url)
+	ensureFormatFlags(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask==2.0.1\n"), 0o600); err != nil {
+		t.Fatalf("write requirements.txt: %v", err)
+	}
+	if err := scanCmd.Flags().Set("path", dir); err != nil {
+		t.Fatalf("set path: %v", err)
+	}
+
+	var runErr error
+	captureScanRun(t, func() { runErr = runScan(newScanTestCmd(), nil) })
+	if code := scanExitCode(t, runErr); code != ExitOK {
+		t.Fatalf("a clean tree exited %d, want 0", code)
+	}
+}
+
+// ── Y3: bad argument shapes exit 4, not 2, and never call os.Exit ────────────
+//
+// These paths used to `fmt.Fprintf(os.Stderr, …); os.Exit(2)` from inside the
+// RunE. That bypassed the exitcodes.go contract (bad argument shape ->
+// ExitUsage(4)) AND Execute()'s telemetry flush, so a failing scan emitted no
+// cli.session.completed at all. Any test that reaches one of these lines on
+// the pre-fix code kills the test binary, which is why none existed.
+
+func TestRunScan_ArgumentShapeFailuresAreExitUsage(t *testing.T) {
+	cases := []struct {
+		name  string
+		path  string   // --path value, if any
+		args  []string // positional args
+		wantS string   // substring of the error message
+	}{
+		{"unparseable package ref", "", []string{"not-a-package-ref"}, "invalid package ref"},
+		{"--path does not exist", filepath.Join(t.TempDir(), "nope"), nil, "--path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			url := runScanTestServer(t, scanAPIResponse{})
+			configureScan(t, url)
+			ensureFormatFlags(t)
+			if tc.path != "" {
+				if err := scanCmd.Flags().Set("path", tc.path); err != nil {
+					t.Fatalf("set path: %v", err)
+				}
+			}
+
+			var runErr error
+			captureScanRun(t, func() { runErr = runScan(newScanTestCmd(), tc.args) })
+			if code := scanExitCode(t, runErr); code != ExitUsage {
+				t.Errorf("exit = %d, want ExitUsage(%d) — 'the invocation itself was wrong' is not an operational failure", code, ExitUsage)
+			}
+			if runErr == nil || !strings.Contains(runErr.Error(), tc.wantS) {
+				t.Errorf("error = %v, want it to mention %q", runErr, tc.wantS)
+			}
+		})
+	}
+}
+
+func TestRunScan_EmptyTreeIsExitUsage(t *testing.T) {
+	url := runScanTestServer(t, scanAPIResponse{})
+	configureScan(t, url)
+	ensureFormatFlags(t)
+	if err := scanCmd.Flags().Set("path", t.TempDir()); err != nil {
+		t.Fatalf("set path: %v", err)
+	}
+
+	var runErr error
+	captureScanRun(t, func() { runErr = runScan(newScanTestCmd(), nil) })
+	if code := scanExitCode(t, runErr); code != ExitUsage {
+		t.Errorf("exit = %d, want ExitUsage(%d)", code, ExitUsage)
 	}
 }

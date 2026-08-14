@@ -51,8 +51,15 @@ Exit codes:
 			return err
 		}
 		if code != 0 {
-			// Set the cobra exit code without printing a redundant error.
-			os.Exit(code)
+			// Y3/Y4 — returned, not os.Exit'd. The bare exit left the process
+			// before Execute() reached markSessionEnd + flushTelemetry, so the
+			// ONE outcome CI cares about (a high-severity finding, exit 1)
+			// emitted zero cli.session.completed events — the event that
+			// carries exit_code and error_class. It also bypassed the
+			// exitcodes.go contract entirely. Err stays nil so renderError
+			// prints nothing on top of the findings table the command already
+			// wrote (see root.go::renderError).
+			return &ExitCodeError{Code: code}
 		}
 		return nil
 	},
@@ -100,9 +107,11 @@ type scanActionsReport struct {
 }
 
 // runScanActions is the inner entrypoint for `chainsaw scan-actions`. It
-// returns (exitCode, err) so the cobra wrapper can call os.Exit on a
-// high-severity finding without polluting the test surface — tests call
-// runScanActions directly and assert on the returned exitCode.
+// returns (exitCode, err) and the cobra wrapper converts a non-zero code into
+// an &ExitCodeError. Tests may call either half: runScanActions directly for
+// the code, or the wrapper's RunE for the returned error. (The wrapper used to
+// os.Exit on the code, which is why the split exists at all — a test that
+// reached it killed the test binary.)
 func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 	// S8 — resolveFormat, not a bare GetString("format"): --json is a root
 	// persistent flag documented as "alias for --format=json" (root.go), and
@@ -160,7 +169,23 @@ func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 			return 0, err
 		}
 	default:
-		writeScanActionsText(out, errOut, report)
+		// S9b — the text result honors --output too. It used to write straight
+		// to cmd.OutOrStdout(), so `scan-actions . --format text --output R`
+		// exited 0, created no file, and put the findings on stdout. root.go's
+		// formatIsMachineReadable lets a --format-shadowing command through the
+		// --output validator on the grounds that it routes its result through a
+		// sink; that has to hold for every format in the vocabulary, not just
+		// the two machine ones.
+		//
+		// Color is decided from errOut (stderr TTY, see
+		// stderrIsTerminalForScanActions). A redirected result is a FILE, which
+		// must never receive ANSI, so the probe is withheld when --output is
+		// set — stderrIsTerminalForScanActions(nil) is false by construction.
+		colorProbe := errOut
+		if path, _ := cmd.Flags().GetString("output"); path != "" {
+			colorProbe = nil
+		}
+		writeScanActionsText(outWriterOr(cmd, out), colorProbe, report)
 	}
 
 	if report.Summary.High > 0 {

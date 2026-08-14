@@ -109,9 +109,14 @@ func runPolicyEval(cmd *cobra.Command, _ []string) error {
 	out, _ := json.MarshalIndent(dec, "", "  ")
 	fmt.Fprintln(cmd.OutOrStdout(), string(out))
 
+	// Y3/Y4 — a block is the EXPECTED enforcement outcome, so it keeps exit 1
+	// (ExitBlocked) and every existing block-gating script is unchanged. It is
+	// RETURNED so Execute() can flush telemetry: the bare os.Exit dropped the
+	// whole batch, including the session-completed event that records the
+	// block. Err is nil — the decision JSON above is the user-facing reason.
 	switch dec.Action {
 	case dsl.ActionBlock, dsl.ActionQuarantine:
-		os.Exit(1)
+		return &ExitCodeError{Code: ExitBlocked}
 	}
 	return nil
 }
@@ -129,7 +134,10 @@ func runPolicyGate(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if !valid {
-		return cliExitErr(2, "unknown surface %q — must be one of: pr, proxy, publish, promote, deploy, runtime", string(surface))
+		// ExitUsage, not ExitOpError: an unrecognised surface name is a bad
+		// argument shape, which exitcodes.go assigns to 4. Exiting 2 here told
+		// CI "infrastructure trouble" for what is a typo in the invocation.
+		return cliExitErr(ExitUsage, "unknown surface %q — must be one of: pr, proxy, publish, promote, deploy, runtime", string(surface))
 	}
 
 	bundle, _ := cmd.Flags().GetString("bundle")
@@ -179,9 +187,12 @@ func runPolicyGate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Same contract as runPolicyEval above: ExitBlocked(1), returned so the
+	// telemetry batch survives. The surface/action/violations lines printed
+	// above are the block reason, so Err stays nil.
 	switch dec.Action {
 	case dsl.ActionBlock, dsl.ActionQuarantine:
-		os.Exit(1)
+		return &ExitCodeError{Code: ExitBlocked}
 	}
 	return nil
 }
@@ -198,10 +209,17 @@ func readInputFixture(path string) (policy.Input, error) {
 	return in, nil
 }
 
+// cliExitErr builds the error a policy command returns for an operational
+// failure at a specific exit code.
+//
+// Y3/Y4: it used to print to stderr and call os.Exit(code) from inside the
+// RunE, which returned a zero error to cobra on a path that never actually
+// returned — bypassing Execute()'s exit-code mapping and dropping the whole
+// telemetry batch. The message is now carried on the error and printed by
+// renderError, which keeps a single stderr format for every CLI failure; the
+// "chainsaw policy:" prefix is preserved so existing log greps still match.
 func cliExitErr(code int, format string, args ...any) error {
-	fmt.Fprintf(os.Stderr, "chainsaw policy: "+format+"\n", args...)
-	os.Exit(code)
-	return nil
+	return &ExitCodeError{Code: code, Err: fmt.Errorf("chainsaw policy: "+format, args...)}
 }
 
 func shortDigest(d string) string {

@@ -110,13 +110,35 @@ func runWhy(cmd *cobra.Command, args []string) error {
 		return runWhyLocal(cmd, ecosystem, name, version)
 	}
 
+	// Y5: the local guard ledger used to be reachable ONLY when no server was
+	// configured. But /api/violations/blocked is built from the server `events`
+	// table (internal/server/violations_query.go), which can never contain a
+	// LOCAL guard block — so for anyone with a server configured, a block the
+	// guard had just printed came back "no recent block found" at rc=2. The
+	// ledger is now a FALLBACK: the server still answers first, and we consult
+	// this machine only when the server has nothing (or cannot be reached).
+	//
+	// --request-id is excluded on purpose: a request id is a server correlation
+	// id with no local analogue, so its distinct "may have expired from the
+	// audit buffer" error stays exactly as it was.
 	v, source, err := lookupBlock(client, ecosystem, name, version, reqID)
 	if err != nil {
+		if reqID == "" {
+			if rec := lookupLocalBlock(ecosystem, name, version); rec != nil {
+				fmt.Fprintf(os.Stderr,
+					"chainsaw: could not reach the configured server (%v); answering from this machine's local guard ledger only — team-wide history is not included.\n",
+					err)
+				return renderWhyLocal(cmd, rec)
+			}
+		}
 		return err
 	}
 	if v == nil {
 		if reqID != "" {
 			return fmt.Errorf("no blocked decision found for request-id %s (it may have expired from the audit buffer)", reqID)
+		}
+		if rec := lookupLocalBlock(ecosystem, name, version); rec != nil {
+			return renderWhyLocal(cmd, rec)
 		}
 		return fmt.Errorf("no recent block found for %s/%s@%s", ecosystem, name, version)
 	}
@@ -271,7 +293,15 @@ no server-side history to query here.
   CVE / policy detail and team-wide history need an account:
     Sign up free → https://chain305.com/chainsaw/signup`, coord)
 	}
+	return renderWhyLocal(cmd, rec)
+}
 
+// renderWhyLocal renders one local guard ledger entry. Split out of
+// runWhyLocal so the Y5 server-first fallback path can render a record it has
+// already found without re-running the lookup — and, more importantly, without
+// risking runWhyLocal's "no server is configured" not-found text on a run where
+// a server very much IS configured.
+func renderWhyLocal(cmd *cobra.Command, rec *guardBlockRecord) error {
 	if useJSON(cmd) {
 		return PrintJSONTo(cmd, map[string]any{
 			"schemaVersion": whySchemaVersion,

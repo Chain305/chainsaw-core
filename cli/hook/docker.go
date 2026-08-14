@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,6 +79,16 @@ func (m dockerManager) Wire(opts WireOpts) error {
 	if err != nil {
 		return err
 	}
+	// Docker is the one manager that does NOT take the server's base path.
+	// Every other renderer builds `<server>/repository/@<org>/<eco>/`, so it
+	// needs whatever prefix the deployment is mounted behind — but dockerd
+	// validates registry-mirrors entries and refuses to start on a URL that
+	// carries a path, query or fragment. Reduce to scheme://host; the docker
+	// registry is served from the host root under /v2/ regardless.
+	mirrorBase, err := dockerMirrorBase(base)
+	if err != nil {
+		return err
+	}
 
 	// daemon.json is strict JSON — merge mirror entries into whatever's
 	// already there, don't overwrite the file.
@@ -95,7 +106,7 @@ func (m dockerManager) Wire(opts WireOpts) error {
 		}
 	}
 	mirrors, _ := existing["registry-mirrors"].([]any)
-	chainsawMirror := base
+	chainsawMirror := mirrorBase
 	found := false
 	for _, m := range mirrors {
 		if s, ok := m.(string); ok && s == chainsawMirror {
@@ -121,6 +132,24 @@ func (m dockerManager) Wire(opts WireOpts) error {
 	// mirror" key inside the file would turn an unremovable mirror into a
 	// dead Docker daemon.
 	return recordDockerMirror(path, chainsawMirror)
+}
+
+// dockerMirrorBase reduces an already-validated server URL to the
+// scheme://host form dockerd accepts as a registry mirror.
+//
+// dockerd rejects a mirror with a path ("invalid mirror: path, query, or
+// fragment at end of the URI"), so an operator whose proxy is mounted at
+// https://chain305.com/chainproxy still gets https://chain305.com here.
+// Docker's own reference grammar can't express the org-scoped `@slug` URL
+// either — the server exposes a docker-compatible `chainproxy/<repo>/<image>`
+// image-name shape instead (stripChainproxyDockerPrefix, server-side), which
+// travels in the image reference rather than in the mirror URL.
+func dockerMirrorBase(serverURL string) (string, error) {
+	u, err := url.Parse(serverURL)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid server URL: could not derive host for the docker registry mirror")
+	}
+	return u.Scheme + "://" + u.Host, nil
 }
 
 // dockerSidecarPath is the out-of-band record of the mirrors chainsaw added

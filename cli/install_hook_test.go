@@ -276,21 +276,30 @@ func TestInstallHook_AllManagers_WriteSentinelViaPerName(t *testing.T) {
 //
 //	https://chain305.com/repository/pypi/simple
 //
-// while the dashboard's "Save this secret now" snippet uses the proxy-
-// mounted, org-scoped form
+// while the dashboard's "Save this secret now" snippet uses the org-scoped
+// form
 //
 //	https://chain305.com/chainproxy/repository/@<slug>/pypi/simple/
 //
 // The proxy rejects the legacy form with HTTP 400/404. This test wires
 // the pip manager with explicit --org and --credentials and asserts the
 // generated pip.conf contains the canonical URL shape, including the
-// /chainproxy/ prefix, the @<slug>/ segment, and the trailing slash.
+// @<slug>/ segment and the trailing slash.
+//
+// The server URL here is https://chain305.com/chainproxy because that is
+// what released binaries actually bake in as DefaultServer
+// (scripts/build-cli-binaries.sh) — the /chainproxy segment is the SaaS
+// edge mount, and it reaches the emitted URL by being part of the
+// configured server, not by being hardcoded in the renderer (B5). This
+// test previously configured https://chain305.com and expected the prefix
+// to materialise anyway, which is precisely the bug: every root-mounted
+// deployment got a prefix its proxy does not serve.
 func TestInstallHook_PipEmitsChainproxyOrgScopedURL(t *testing.T) {
 	_, pipconf, _ := withHookEnv(t)
 
 	viper.Reset()
 	t.Cleanup(viper.Reset)
-	viper.Set("server_url", "https://chain305.com")
+	viper.Set("server_url", "https://chain305.com/chainproxy")
 
 	cmd := newInstallHookCmd()
 	cmd.SetArgs([]string{"pip", "--scope", "project", "--org", "smoke-appsec-20260520", "--credentials", "smoke-appsec-a:KBHfU6"})
@@ -331,14 +340,16 @@ func TestInstallHook_PipEmitsChainproxyOrgScopedURL(t *testing.T) {
 }
 
 // TestInstallHook_NpmEmitsChainproxyOrgScopedURL is the npm sibling of
-// the pip regression test: registry= line must include the /chainproxy/
-// prefix and the @<slug>/ org segment, matching the dashboard snippet.
+// the pip regression test: on the hosted API base the registry= line must
+// come out byte-identical to the dashboard snippet — the /chainproxy edge
+// mount carried through from the configured server, plus the @<slug>/ org
+// segment.
 func TestInstallHook_NpmEmitsChainproxyOrgScopedURL(t *testing.T) {
 	npmrc, _, _ := withHookEnv(t)
 
 	viper.Reset()
 	t.Cleanup(viper.Reset)
-	viper.Set("server_url", "https://chain305.com")
+	viper.Set("server_url", "https://chain305.com/chainproxy")
 
 	cmd := newInstallHookCmd()
 	cmd.SetArgs([]string{"npm", "--org", "acme-corp"})
@@ -386,6 +397,81 @@ func TestInstallHook_NpmDoesNotDoubleChainproxyForCloudAPIBase(t *testing.T) {
 	if strings.Contains(got, "/chainproxy/chainproxy/") {
 		t.Fatalf(".npmrc contains duplicated /chainproxy segment:\n%s", got)
 	}
+}
+
+// TestInstallHook_RootMountedServerGetsNoEdgePrefix is the B5 regression
+// guard, and the direct counterpart to the two hosted tests above.
+//
+// `/chainproxy` is an OPTIONAL edge prefix that nginx/Traefik STRIP before
+// forwarding. The server routes on the literal `/repository/` prefix and
+// strips nothing (internal/server/server_routing.go), so on every
+// root-mounted deployment — the documented `docker compose up` quick-start,
+// a bare `chainsaw-proxy -listen :8787`, a `kubectl port-forward` — a
+// hardcoded prefix produced a registry URL the server never serves, and
+// every wired package manager 404'd. Ten of the eleven managers were
+// affected; only docker (bare host mirror) was not.
+//
+// So: no configured base path, no prefix in the output.
+func TestInstallHook_RootMountedServerGetsNoEdgePrefix(t *testing.T) {
+	npmrc, _, _ := withHookEnv(t)
+
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	viper.Set("server_url", "http://localhost:8787")
+
+	cmd := newInstallHookCmd()
+	cmd.SetArgs([]string{"npm", "--org", "acme-corp"})
+	var out, errb bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\nstderr: %s", err, errb.String())
+	}
+	got := string(mustReadFile(t, npmrc))
+	want := "registry=http://localhost:8787/repository/@acme-corp/npmjs/"
+	if !strings.Contains(got, want) {
+		t.Fatalf(".npmrc missing prefix-free registry line\nwant: %s\ngot:\n%s", want, got)
+	}
+	if strings.Contains(got, "chainproxy") {
+		t.Fatalf(".npmrc invented a /chainproxy edge prefix the server does not route:\n%s", got)
+	}
+}
+
+// TestNormalizeHookServerURL pins the one rule the emitted registry base
+// follows: the deployment's base path is whatever the operator configured,
+// never something the CLI invents (B5).
+func TestNormalizeHookServerURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"hosted api base keeps its edge prefix", "https://chain305.com/chainproxy", "https://chain305.com/chainproxy"},
+		{"trailing slash trimmed", "https://chain305.com/chainproxy/", "https://chain305.com/chainproxy"},
+		{"root-mounted stays prefix-free", "http://localhost:8787", "http://localhost:8787"},
+		{"root-mounted with trailing slash", "http://127.0.0.1:8787/", "http://127.0.0.1:8787"},
+		{"an arbitrary self-host prefix survives", "https://host.internal/chainsaw/api", "https://host.internal/chainsaw/api"},
+		{"query and fragment dropped", "https://host/base?x=1#frag", "https://host/base"},
+		{"empty stays empty", "", ""},
+		{"whitespace only stays empty", "   ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeHookServerURL(tc.in); got != tc.want {
+				t.Fatalf("normalizeHookServerURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// mustReadFile is a tiny read helper so the URL-shape tests above stay
+// about the URL rather than about error plumbing.
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
 }
 
 func TestMintClientCredentialsSendsDefaultExpiryDate(t *testing.T) {

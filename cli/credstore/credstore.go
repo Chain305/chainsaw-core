@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	keyring "github.com/zalando/go-keyring"
 
@@ -61,18 +62,53 @@ func defaultFilePath() string {
 	return filepath.Join(platform.ConfigHome(), "credentials.json")
 }
 
-// probeKeyring does a round-trip Set/Delete to decide if the OS keyring is
-// usable. Any error (no D-Bus session, locked keychain, unsupported platform)
-// falls us through to the file store.
-func probeKeyring() bool {
+// probeKeyringTimeout bounds the keyring probe. Overridable in tests.
+//
+// Y9: the probe used to call keyring.Set / keyring.Delete inline. go-keyring
+// (v0.2.8) has no context API, and its darwin backend execs `/usr/bin/security
+// -i` then cmd.Wait()s with no deadline — so an UNUSABLE login keychain (the
+// deterministic case: a $HOME with no Library/Keychains, e.g. a service
+// account, a fresh CI runner, or any `HOME=…` sandbox) makes `security` BLOCK
+// on its stdin prompt instead of returning an error. The probe never returned,
+// and because Default() sits under every authenticated command, EVERY such
+// command hung forever rather than falling through to the file store as the
+// comment on probeKeyring promises. Two seconds is generous: a healthy macOS
+// Keychain round-trip is ~0.2s and Linux without D-Bus errors out immediately.
+var probeKeyringTimeout = 2 * time.Second
+
+// keyringRoundTrip performs the actual Set/Delete probe. Split out as a var so
+// tests can substitute a backend that blocks (the failure mode above) or errors
+// without needing a real OS keyring.
+var keyringRoundTrip = func() error {
 	const probeSvc, probeAcct = "chainsaw-probe", "probe"
 	if err := keyring.Set(probeSvc, probeAcct, "1"); err != nil {
+		return err
+	}
+	return keyring.Delete(probeSvc, probeAcct)
+}
+
+// probeKeyring does a round-trip Set/Delete to decide if the OS keyring is
+// usable. Any error (no D-Bus session, locked keychain, unsupported platform)
+// falls us through to the file store — and so does a backend that simply never
+// answers, which is what the timeout below is for.
+func probeKeyring() bool {
+	// Buffered so the goroutine can always finish its send and be collected
+	// even after we have given up waiting.
+	done := make(chan bool, 1)
+	go func() { done <- keyringRoundTrip() == nil }()
+
+	timer := time.NewTimer(probeKeyringTimeout)
+	defer timer.Stop()
+	select {
+	case ok := <-done:
+		return ok
+	case <-timer.C:
+		// Deliberately leak the blocked goroutine and any orphaned `security`
+		// child: there is no way to cancel go-keyring's call, the process is
+		// about to do its real work and exit, and hanging the user's command is
+		// strictly worse. Treat "no answer" as "keyring unusable".
 		return false
 	}
-	if err := keyring.Delete(probeSvc, probeAcct); err != nil {
-		return false
-	}
-	return true
 }
 
 // --- keyring backend ------------------------------------------------------

@@ -270,13 +270,13 @@ func TestSBOMExportResolvesDashOShorthand(t *testing.T) {
 // local `output` without the shorthand silently un-registers the persistent
 // flag for that one command, which is invisible until a user types -o.
 func TestEveryCommandResolvesDashOToOutput(t *testing.T) {
-	// Commands known to still shadow --output. These live outside this
-	// workstream's file ownership; the fix is the same one-line deletion
-	// applied to sbom export. Listed (not skipped silently) so the debt is
-	// visible in the test output.
-	knownShadowed := map[string]bool{
-		"chainsaw policy export": true,
-	}
+	// Commands known to still shadow --output. EMPTY — the debt is paid:
+	// `chainsaw policy export` was the last entry, and dropping its local
+	// --output (core/cli/policy.go, same one-line deletion applied to sbom
+	// export) made `policy export -o file` work. The map and the tolerant
+	// branches below stay so a future workstream can park a defect it does
+	// not own; an empty map means this guard is strict today.
+	knownShadowed := map[string]bool{}
 
 	// Deliberately does NOT force cobra's persistent-flag merge: mutating every
 	// command's flag set as a side effect of a test is how you get order-

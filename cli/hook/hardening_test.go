@@ -67,12 +67,12 @@ func TestXMLRefusalPrintsMergeableFragment(t *testing.T) {
 		{
 			mavenManager{},
 			"<?xml version=\"1.0\"?>\n<settings/>\n",
-			[]string{"<mirrorOf>*</mirrorOf>", "chainproxy/repository/@acme-corp/maven-central", "<id>chainsaw-maven</id>"},
+			[]string{"<mirrorOf>*</mirrorOf>", "repository/@acme-corp/maven-central", "<id>chainsaw-maven</id>"},
 		},
 		{
 			nugetManager{},
 			"<?xml version=\"1.0\"?>\n<configuration/>\n",
-			[]string{`<add key="Chainsaw"`, "chainproxy/repository/@acme-corp/nuget-official"},
+			[]string{`<add key="Chainsaw"`, "repository/@acme-corp/nuget-official"},
 		},
 	} {
 		t.Run(tc.manager.Name(), func(t *testing.T) {

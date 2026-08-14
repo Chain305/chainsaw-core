@@ -476,7 +476,7 @@ Examples:
 func init() {
 	policySimulateCmd.Flags().Bool("json", false, "Output as JSON")
 	policySimulateCmd.Flags().String("repository", "",
-		"Repository the install would come from (e.g. npm-proxy). Without it, repo-scoped policies report `conditional` rather than a guessed verdict.")
+		"Repository the install would come from (e.g. npm-proxy). Without it, repo-scoped policies report 'conditional' rather than a guessed verdict.")
 	policyCmd.AddCommand(policySimulateCmd)
 }
 
@@ -926,8 +926,37 @@ var policyExportCmd = &cobra.Command{
 
 func init() {
 	policyExportCmd.Flags().String("format", "yaml", "Output format: yaml|json")
-	policyExportCmd.Flags().String("output", "", "Write to file instead of stdout")
+	// NO local --output here — same reason as the S10 note in sbom.go. root
+	// declares StringP("output","o",…), and cobra's AddFlagSet skips a
+	// persistent flag whose NAME already exists locally, which dropped the
+	// persistent flag AND its `o` shorthand for this one command:
+	// `chainsaw policy export -o /tmp/p.yaml` failed with "unknown shorthand
+	// flag: 'o' in -o" (exit 4) while -o worked everywhere else. The long
+	// --output form worked, which is what kept it hidden. runPolicyExport
+	// reads --output off the inherited flag unchanged.
 	policyCmd.AddCommand(policyExportCmd)
+}
+
+// resolvedExportFormat normalizes the --format value the way runPolicyExport's
+// switch does: anything that isn't "json" serializes as YAML.
+func resolvedExportFormat(format string) string {
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		return "json"
+	}
+	return "yaml"
+}
+
+// formatForExt maps a filename's extension to the serialization it advertises,
+// or "" when the extension carries no such claim (.txt, no extension, …).
+func formatForExt(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	default:
+		return ""
+	}
 }
 
 func runPolicyExport(cmd *cobra.Command, _ []string) error {
@@ -945,6 +974,20 @@ func runPolicyExport(cmd *cobra.Command, _ []string) error {
 
 	format, _ := cmd.Flags().GetString("format")
 	outputFile, _ := cmd.Flags().GetString("output")
+
+	// Y1: the serializer comes from --format alone; --output's extension is
+	// never consulted. `policy export --output policies.json` (no --format)
+	// therefore writes YAML into a .json file. `policy import` now decodes
+	// either shape so the round-trip is no longer broken, but the file still
+	// lies about its contents to every other tool — say so. Changed("format")
+	// separates the silent default from a deliberate `--format yaml`.
+	if outputFile != "" {
+		if want := formatForExt(outputFile); want != "" && want != resolvedExportFormat(format) {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"chainsaw: writing %s to %q — the extension says %s. Use --format %s to match.\n",
+				resolvedExportFormat(format), outputFile, want, want)
+		}
+	}
 
 	var data []byte
 	var err error
@@ -1182,14 +1225,17 @@ func runPolicyImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("read file: %w", err)
 	}
 
+	// Y1: this used to pick the decoder from the FILE EXTENSION —
+	// `.json` → json.Unmarshal, anything else → yaml.Unmarshal — with no
+	// fallback. `policy export` picks its serializer solely from --format
+	// (default "yaml") and never looks at --output's extension, so
+	// `policy export --output policies.json` writes YAML into a .json file and
+	// re-importing it died with `parse policies.json: invalid character ' ' in
+	// numeric literal`. YAML is a superset of JSON and yaml.Unmarshal accepts
+	// both, so decode everything as YAML — the same thing policy_lint.go does.
+	// A genuinely malformed file still errors, with the filename attached.
 	var policies []map[string]any
-	ext := strings.ToLower(filepath.Ext(file))
-	if ext == ".json" {
-		err = json.Unmarshal(data, &policies)
-	} else {
-		err = yaml.Unmarshal(data, &policies)
-	}
-	if err != nil {
+	if err := yaml.Unmarshal(data, &policies); err != nil {
 		return fmt.Errorf("parse %s: %w", file, err)
 	}
 

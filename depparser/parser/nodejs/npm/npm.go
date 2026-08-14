@@ -24,13 +24,21 @@ import (
 	ftypes "github.com/chain305/chainsaw-core/fanal"
 )
 
+// lockPackage is one entry in the v2/v3 flat "packages" map.
+//
+// Deliberately does NOT carry a "dependencies" field. In v2/v3 an entry's
+// "dependencies" is a map of name → semver RANGE STRING (npm mirrors
+// package.json's runtime deps into the root packages[""] entry), so a
+// map[string]v1Dep field made encoding/json fail the whole document with an
+// UnmarshalTypeError and Parse threw away a fully decoded lockfile. Nothing
+// below reads it, so it stays gone — add a map[string]string only if a caller
+// genuinely needs the declared ranges.
 type lockPackage struct {
-	Name         string           `json:"name"`
-	Version      string           `json:"version"`
-	Dev          bool             `json:"dev"`
-	Peer         bool             `json:"peer"`
-	Link         bool             `json:"link"`
-	Dependencies map[string]v1Dep `json:"dependencies"` // v1 nested
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Dev     bool   `json:"dev"`
+	Peer    bool   `json:"peer"`
+	Link    bool   `json:"link"`
 }
 
 type v1Dep struct {

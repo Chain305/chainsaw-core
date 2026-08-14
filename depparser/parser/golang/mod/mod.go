@@ -43,7 +43,7 @@ func Parse(r io.Reader) ([]ftypes.Package, error) {
 			// Single-line require.
 			parts := strings.Fields(strings.TrimPrefix(line, "require "))
 			if len(parts) >= 2 {
-				out = append(out, ftypes.Package{Name: parts[0], Version: parts[1]})
+				out = append(out, ftypes.Package{Name: parts[0], Version: normaliseVersion(parts[1])})
 			}
 			continue
 		}
@@ -56,8 +56,25 @@ func Parse(r io.Reader) ([]ftypes.Package, error) {
 		}
 		parts := strings.Fields(line)
 		if len(parts) >= 2 {
-			out = append(out, ftypes.Package{Name: parts[0], Version: parts[1]})
+			out = append(out, ftypes.Package{Name: parts[0], Version: normaliseVersion(parts[1])})
 		}
 	}
 	return out, sc.Err()
+}
+
+// normaliseVersion strips the leading "v" from a Go module version so this
+// parser agrees byte-for-byte with its go.sum sibling (../sum, which has
+// always stripped it) and with Trivy.
+//
+// Why this matters: a directory holding BOTH go.mod and go.sum used to emit
+// every module twice — once "1.6.0" from go.sum, once "v1.6.0" from go.mod —
+// and the scan dedup key compares raw version strings, so the pair never
+// collapsed (650 rows for 419 distinct coordinates on this repo's own files).
+//
+// The stripped spelling is NOT resolvable against the Go module proxy, whose
+// protocol requires the "v". Consumers that build proxy URLs re-add it — see
+// core/intelligence/provider_registrymetadata.go (goProxyVersion) and
+// core/depparser/dependency/id.go (ID).
+func normaliseVersion(v string) string {
+	return strings.TrimPrefix(v, "v")
 }

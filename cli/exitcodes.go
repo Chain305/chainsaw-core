@@ -47,6 +47,24 @@ const (
 	// package with a server/IO failure (invariant B). Weaker Warn/UpgradeAvailable
 	// trees still map to ExitBlocked(1); the ladder stays 0 < 1 < 11.
 	ExitIntelBlock = 11
+	// ExitManifestParseError — one or more manifests/lockfiles that the command
+	// was asked to read failed to parse, so DEPENDENCIES WERE DROPPED and the
+	// result set is incomplete. The command still reports everything that did
+	// parse; the exit code is what stops CI from reading an incomplete scan as
+	// a clean one.
+	//
+	// B2b: `chainsaw scan --path` printed "warning: depparser walk: …" to
+	// stderr and exited 0, so a repo whose lockfile failed to parse was scanned
+	// for its manifest's direct dependencies only and CI went green. 30 is
+	// deliberately the SAME number pr-scan has published since it shipped
+	// (prScanExitParseError, documented in `chainsaw pr-scan --help` as "one or
+	// more monitored manifests failed to parse (dependencies dropped)"), so a
+	// CI step that combines both gates keys on one value for one meaning.
+	//
+	// Precedence mirrors pr-scan's: a real BLOCK outranks it. pr-scan escalates
+	// 0/10 to 30 but leaves 20 alone; `scan` returns ExitBlocked(1) when the
+	// gate fires and 30 only when it did not.
+	ExitManifestParseError = 30
 )
 
 // ExitCodeError lets a Cobra RunE bubble up a specific process exit code

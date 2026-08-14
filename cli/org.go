@@ -93,8 +93,14 @@ func init() {
 		"Commit the delete. Requires --simulate-id from a recent --dry-run.")
 	orgDeleteCmd.Flags().Bool("yes", false,
 		"Skip the interactive y/N prompt. Required for non-TTY runs.")
+	// Y7: the prose back-ticks around the login command were consumed by
+	// pflag's UnquoteUsage — it takes the FIRST back-quoted span in a usage
+	// string as the flag's VALUE PLACEHOLDER — so `chainsaw org delete
+	// --help` advertised "--slug chainsaw auth login". Single quotes here,
+	// and exactly one back-quoted span (`org-id`) is deliberately absent so
+	// the flag renders as the plain "--slug string".
 	orgDeleteCmd.Flags().String("slug", "",
-		"Org slug to delete. Defaults to the org_id from config (--org flag or `chainsaw auth login`).")
+		"Org slug OR org id to delete. Resolved against the orgs this account can see; defaults to the org_id from config (--org flag or 'chainsaw auth login').")
 	orgDeleteCmd.Flags().Bool("json", false, "Emit machine-readable JSON instead of pretty-printed output.")
 	orgCmd.AddCommand(orgDeleteCmd)
 	rootCmd.AddCommand(orgCmd)
@@ -104,6 +110,10 @@ func init() {
 // handleOrgDeletePreview in internal/server/admin_orgs_simulate.go.
 // We don't import the server type; the field names are part of the
 // API contract (TTL ratchet test in qa/ pins them).
+//
+// OrgID / OrgSlug / OrgName are CLI-populated (the server envelope has
+// no org block) so a --json consumer can see WHICH org the preview
+// resolved to. Additive: every server-sourced key keeps its name.
 type orgDeletePreviewResponse struct {
 	SimulateID string           `json:"simulate_id"`
 	Summary    string           `json:"summary"`
@@ -112,6 +122,90 @@ type orgDeletePreviewResponse struct {
 	Fallback   string           `json:"fallback,omitempty"`
 	TTLSeconds int              `json:"ttl_seconds,omitempty"`
 	Kind       string           `json:"kind,omitempty"`
+
+	OrgID   string `json:"org_id,omitempty"`
+	OrgSlug string `json:"org_slug,omitempty"`
+	OrgName string `json:"org_name,omitempty"`
+}
+
+// orgListItem is one element of the {"orgs":[…]} envelope served by
+// GET /api/orgs (listUserOrgs in internal/server/orgs.go). Only the
+// three identity fields are decoded — role/permissions/timestamps are
+// irrelevant to identifier resolution.
+type orgListItem struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+// codeOrgNotFound is errcodes.CodeOrgNotFound. Duplicated as a literal
+// because core/ is the open-core module (github.com/chain305/chainsaw-core)
+// and cannot import the private module's internal/errcodes. Keep in sync
+// with internal/errcodes/registry_orgs.go — the point of reusing the code
+// is that a locally-detected missing org is indistinguishable, to an
+// operator or a CI grep, from the server-side CHW-4201 the commit path
+// already returns.
+const codeOrgNotFound = "CHW-4201"
+
+// errOrgNotFound builds the same CHW-4201 envelope the server's DELETE
+// path returns, so `--dry-run` on a ghost org fails with the identical
+// code the commit would have produced instead of printing a confident
+// all-zeroes preview. Status 404 → classifyCLIError "not_found" →
+// ExitOpError(2), matching the commit path's exit code exactly.
+func errOrgNotFound(ident string) error {
+	return &apiError{
+		Code:   codeOrgNotFound,
+		Status: 404,
+		Message: fmt.Sprintf(
+			"organization not found: %q matches no org id and no org slug visible to this account; verify the identifier and that the org has not been deleted",
+			ident),
+	}
+}
+
+// resolveOrgIdentifier turns the operator-supplied identifier (a slug OR
+// a raw org id) into the org id the API expects, by looking it up in
+// GET /api/orgs.
+//
+// N3: `--slug` was assigned STRAIGHT into orgID and sent as the org id,
+// so the flag never accepted a slug at all — and because the preview
+// endpoint walks the cascade tables with `WHERE org_id = <whatever>`, a
+// slug, a typo, and a genuinely empty org all produced the same
+// all-zeroes inventory at exit 0, followed by a copy-pasteable confirm
+// line. The two-step gate exists so the operator sees what will be
+// destroyed BEFORE confirming; a preview that cannot tell those three
+// cases apart is safety theatre. Resolution happens once, in
+// runOrgDelete, so the preview and the commit address the same org and a
+// simulate_id minted from a slug is redeemable with the same slug.
+//
+// ID match wins over slug match: ids are the server's own handles, and
+// an org whose slug happened to equal another org's id must not shadow
+// it on the irreversible command.
+//
+// A lookup failure is returned, not swallowed. This is the only
+// irreversible verb in the CLI; if we cannot enumerate the orgs this
+// account can see, we must not hand back a preview that implies we
+// verified anything. GET /api/orgs needs only an authenticated identity
+// (requireIdentity), a strictly lower bar than the PermOrgDelete the
+// delete itself requires, so any caller that could legitimately delete
+// can also resolve.
+func resolveOrgIdentifier(client *APIClient, ident string) (orgListItem, error) {
+	var resp struct {
+		Orgs []orgListItem `json:"orgs"`
+	}
+	if err := client.Get("/api/orgs", &resp); err != nil {
+		return orgListItem{}, fmt.Errorf("cannot verify org %q: listing organizations failed: %w", ident, err)
+	}
+	for _, o := range resp.Orgs {
+		if o.ID == ident {
+			return o, nil
+		}
+	}
+	for _, o := range resp.Orgs {
+		if o.Slug != "" && o.Slug == ident {
+			return o, nil
+		}
+	}
+	return orgListItem{}, errOrgNotFound(ident)
 }
 
 // runOrgDelete is the verb dispatcher.
@@ -121,12 +215,12 @@ func runOrgDelete(cmd *cobra.Command, _ []string) error {
 		return errServerNotConfigured(cmd)
 	}
 
-	orgID := strings.TrimSpace(viper.GetString("org_id"))
-	if slug, _ := cmd.Flags().GetString("slug"); slug != "" {
-		orgID = strings.TrimSpace(slug)
+	ident := strings.TrimSpace(viper.GetString("org_id"))
+	if slug, _ := cmd.Flags().GetString("slug"); strings.TrimSpace(slug) != "" {
+		ident = strings.TrimSpace(slug)
 	}
-	if orgID == "" {
-		return fmt.Errorf("no org selected — pass --slug <org-id> or set `org_id` via `chainsaw --org <id>` / `chainsaw auth login`")
+	if ident == "" {
+		return fmt.Errorf("no org selected — pass --slug <org-slug|org-id> or set org_id via `chainsaw --org <id>` / `chainsaw auth login`")
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -147,26 +241,48 @@ func runOrgDelete(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("specify either --dry-run (preview) or --simulate-id (re-diff / confirm)")
 	}
 
-	if dryRun {
-		return runOrgDeletePreview(cmd, client, orgID, asJSON)
+	// Resolve BEFORE dispatching so preview and commit address the same
+	// org: a simulate_id minted from `--slug acme` must be redeemable with
+	// `--slug acme`, which is only true if both legs send the same id.
+	org, err := resolveOrgIdentifier(client, ident)
+	if err != nil {
+		return err
 	}
-	return runOrgDeleteCommit(cmd, client, orgID, simulateID, confirm, yes, asJSON)
+
+	if dryRun {
+		return runOrgDeletePreview(cmd, client, org, asJSON)
+	}
+	return runOrgDeleteCommit(cmd, client, org.ID, simulateID, confirm, yes, asJSON)
 }
 
 // runOrgDeletePreview is the --dry-run path. POSTs the preview, prints
 // the inventory snapshot, and prints the simulate_id alongside the
 // next-step command for copy-paste.
-func runOrgDeletePreview(cmd *cobra.Command, client *APIClient, orgID string, asJSON bool) error {
+func runOrgDeletePreview(cmd *cobra.Command, client *APIClient, org orgListItem, asJSON bool) error {
 	var resp orgDeletePreviewResponse
-	if err := client.Post("/api/orgs/"+url.PathEscape(orgID)+"/delete/preview", nil, &resp); err != nil {
+	if err := client.Post("/api/orgs/"+url.PathEscape(org.ID)+"/delete/preview", nil, &resp); err != nil {
 		return err
 	}
+	// Stamp the resolved identity onto the envelope. Without it a --json
+	// consumer sees an inventory with no way to tell which org produced it
+	// — the same ambiguity the human path had.
+	resp.OrgID, resp.OrgSlug, resp.OrgName = org.ID, org.Slug, org.Name
 	if asJSON {
 		return PrintJSONTo(cmd, resp)
 	}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Org-delete preview for %q:\n\n", orgID)
+	// Echo BOTH the id and the slug: the operator typed one of them, and
+	// on the irreversible command they should see the other before they
+	// copy the confirm line.
+	label := org.ID
+	if org.Slug != "" {
+		label = fmt.Sprintf("%s (slug %s)", org.ID, org.Slug)
+	}
+	if org.Name != "" {
+		label += fmt.Sprintf(" — %q", org.Name)
+	}
+	fmt.Fprintf(out, "Org-delete preview for %s:\n\n", label)
 	if resp.Summary != "" {
 		fmt.Fprintln(out, resp.Summary)
 		fmt.Fprintln(out)
@@ -200,7 +316,11 @@ func runOrgDeletePreview(cmd *cobra.Command, client *APIClient, orgID string, as
 	}
 	fmt.Fprintf(out, "simulate_id: %s  (expires in %ds)\n", resp.SimulateID, ttl)
 	fmt.Fprintln(out, "\nTo commit:")
-	fmt.Fprintf(out, "  chainsaw org delete --simulate-id %s --confirm --yes\n", resp.SimulateID)
+	// Carry --slug through. The printed line used to omit it, so a preview
+	// staged against one org and pasted into a shell whose config org_id
+	// pointed elsewhere would send the simulate_id at the WRONG org. Naming
+	// the resolved id makes the confirm line self-contained.
+	fmt.Fprintf(out, "  chainsaw org delete --slug %s --simulate-id %s --confirm --yes\n", org.ID, resp.SimulateID)
 	return nil
 }
 

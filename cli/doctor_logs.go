@@ -252,7 +252,7 @@ func init() {
 	logs := &cobra.Command{
 		Use:     "logs",
 		GroupID: GrpDebug,
-		Short:   "Inspect chainsaw-proxy logs",
+		Short:   "Inspect chainsaw-proxy logs (kubectl; --stdin for non-k8s)",
 	}
 	logs.AddCommand(newLogsTailCmd())
 	rootCmd.AddCommand(logs)

@@ -16,8 +16,9 @@ package cli
 //     What we're verifying is that the proxy *saw* the attempt.
 //   - Per-manager driver builds the right install command. The install is
 //     expected to fail (404 / unknown package). We swallow the failure
-//     and instead query /api/events?package_name=<sentinel> to confirm
-//     receipt.
+//     and instead query /api/events for the sentinel to confirm receipt —
+//     matching on logical_path, the field a 404'd request actually
+//     populates, as well as package_name. See pollAuditReceipt.
 //   - Three outcomes:
 //        PASS  — proxy saw the sentinel (the hook works)
 //        FAIL  — proxy did NOT see the sentinel within timeout (BYPASS:
@@ -272,8 +273,15 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 			verifyExitOverride(1)
 			return nil
 		}
-		flushTelemetry() // before any os.Exit in the caller drops the batch
-		os.Exit(1)
+		// Y3/Y4 — returned, not os.Exit'd. The bare exit skipped Execute()'s
+		// markSessionEnd + flushTelemetry, so the FAIL outcome — the one a CI
+		// gate exists to catch — emitted no cli.session.completed at all. The
+		// explicit flushTelemetry() that used to guard against that is gone
+		// with the exit it guarded: Execute() flushes on every path now, and a
+		// second flush here would emit the batch BEFORE markSessionEnd queues
+		// the session event. Exit 1 is unchanged; Err stays nil so renderError
+		// adds nothing to the verdict already printed.
+		return &ExitCodeError{Code: 1}
 	case verifyDegraded:
 		// Exit 0 so a flaky network doesn't break CI. The output still
 		// makes clear we couldn't confirm.
@@ -282,10 +290,13 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// verifyExitOverride mirrors doctorExitOverride (doctor_upgrade.go): the
-// FAIL path ends in os.Exit, which a test cannot observe without forking a
-// process. Tests substitute this to assert the CI exit contract — most
-// importantly that --json and --verbose do not change it.
+// verifyExitOverride mirrors doctorExitOverride (doctor_upgrade.go). It
+// predates the ExitCodeError conversion: the FAIL path used to end in os.Exit,
+// which a test could not observe without forking a process, so tests
+// substituted this hook to assert the CI exit contract — most importantly that
+// --json and --verbose do not change it. Kept because the existing suite
+// asserts through it, but no longer load-bearing: with it nil the FAIL code is
+// observable as a returned error (bare_exit_removal_test.go).
 var verifyExitOverride func(int)
 
 // newSentinelCoord returns a unique-per-run package coordinate of the
@@ -323,9 +334,9 @@ type receiptResult struct {
 	degradedReason string
 }
 
-// pollAuditReceipt queries /api/events?package_name=<sentinel> on a poll
-// interval until either the sentinel appears (PASS), the context times
-// out (FAIL), or we hit a non-recoverable transport error (DEGRADED).
+// pollAuditReceipt queries /api/events for the sentinel on a poll interval
+// until either it appears (PASS), the context times out (FAIL), or we hit a
+// non-recoverable transport error (DEGRADED).
 //
 // Why poll: the proxy writes the event row asynchronously (via
 // auditBuffer.add → batched DB insert), so a single GET right after the
@@ -333,8 +344,24 @@ type receiptResult struct {
 // dashboard refresh cadence.
 //
 // Why /api/events: it's the existing, permissioned audit query surface
-// (server_bom_events.go::handleEvents) and already supports
-// `?package_name=<partial>` LIKE matching. No new endpoint required.
+// (server_bom_events.go::handleEvents) and already supports partial LIKE
+// matching. No new endpoint required.
+//
+// Why logical_path AND package_name (server-side OR): the sentinel is
+// DESIGNED not to exist upstream, and events.package_name is projected from
+// the upstream response's metadata (activity.go::enrichFromResponse), which a
+// 404 response does not carry (core/proxy/facet.go returns a Response with nil
+// Content for 4xx). So the row the proxy writes for the sentinel has
+// package_name NULL and only logical_path names it — a package_name-only query
+// could never match, and verify-hook reported "client bypassed chainsaw"
+// against a perfectly wired client. package_name stays in the query so a hit
+// on a real coordinate still counts.
+//
+// The alternative fix — synthesising a package_name onto 4xx rows — was
+// rejected deliberately: events.package_name is the projection the BOM and
+// inventory surfaces read (internal/events/bom.go, idx_events_bom), so
+// fabricating a coordinate for every 404 would put packages that do not exist
+// into customers' SBOMs.
 func pollAuditReceipt(ctx context.Context, sentinel string) receiptResult {
 	server := strings.TrimSpace(cfgServerURL())
 	token := strings.TrimSpace(cfgToken())
@@ -345,7 +372,8 @@ func pollAuditReceipt(ctx context.Context, sentinel string) receiptResult {
 		return receiptResult{outcome: verifyDegraded, degradedReason: "not authenticated to query the audit log (run `chainsaw auth login`)"}
 	}
 	client := newClient()
-	path := "/api/events?package_name=" + url.QueryEscape(sentinel) + "&limit=10"
+	path := "/api/events?logical_path=" + url.QueryEscape(sentinel) +
+		"&package_name=" + url.QueryEscape(sentinel) + "&limit=10"
 
 	// First call: classify the error class. If the audit API is
 	// reachable AND the sentinel is already there, return PASS
@@ -431,20 +459,39 @@ type eventsResponseEnvelope struct {
 
 type eventsResponseItem struct {
 	RequestedPackage string `json:"requested_package"`
-	EventType        string `json:"event_type"`
+	// LogicalPath is the request path the proxy recorded. It is the field
+	// that actually carries the sentinel: the sentinel package does not
+	// exist, so the 404 response has no metadata to project a
+	// requested_package from. See pollAuditReceipt.
+	LogicalPath string `json:"logical_path"`
+	EventType   string `json:"event_type"`
 }
 
-// matchSentinelInEvents reports whether any event's requested_package
-// contains the sentinel substring. The server-side LIKE filter already
-// did this work, but we defend against the off-chance the filter is
-// ignored (older server, schema drift) by re-checking client-side.
+// matchSentinelInEvents reports whether any event names the sentinel, in
+// either the requested_package projection or the recorded request path. The
+// server-side LIKE filter already did this work, but we defend against the
+// off-chance the filter is ignored (older server, schema drift) by
+// re-checking client-side — and this client-side match, not `total`, is the
+// verdict (see pollAuditReceipt).
+//
+// Both fields are checked because either one alone loses a real case: a 404'd
+// sentinel populates only the path, while a server predating the logical_path
+// field on the wire returns only the package.
 func matchSentinelInEvents(items []eventsResponseItem, sentinel string) bool {
 	for _, it := range items {
-		if strings.Contains(it.RequestedPackage, sentinel) {
+		if eventNamesSentinel(it, sentinel) {
 			return true
 		}
 	}
 	return false
+}
+
+// eventNamesSentinel is the single per-row predicate behind both the verdict
+// (matchSentinelInEvents) and the display tally (countSentinelMatches), so the
+// two can never disagree about what counts as a hit.
+func eventNamesSentinel(it eventsResponseItem, sentinel string) bool {
+	return strings.Contains(it.RequestedPackage, sentinel) ||
+		strings.Contains(it.LogicalPath, sentinel)
 }
 
 // countSentinelMatches reports how many events matched, for the human
@@ -460,7 +507,7 @@ func matchSentinelInEvents(items []eventsResponseItem, sentinel string) bool {
 func countSentinelMatches(items []eventsResponseItem, sentinel string, total int) int {
 	n := 0
 	for _, it := range items {
-		if strings.Contains(it.RequestedPackage, sentinel) {
+		if eventNamesSentinel(it, sentinel) {
 			n++
 		}
 	}

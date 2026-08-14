@@ -230,8 +230,13 @@ func runScanRepo(cmd *cobra.Command, args []string) error {
 		printScanReport(cmd, report)
 	}
 
+	// Y3/Y4 — returned, not os.Exit'd. The bare exit skipped Execute()'s
+	// telemetry flush entirely, so a drift-detecting scan-repo (the outcome CI
+	// cares about) emitted zero cli.session.completed events. doctorExitDrift
+	// (10) is unchanged — ExitCodeError carries arbitrary codes — and Err
+	// stays nil so renderError adds nothing to the report already printed.
 	if len(report.Findings) > 0 {
-		os.Exit(doctorExitDrift)
+		return &ExitCodeError{Code: doctorExitDrift}
 	}
 	// X2 — a tree with no findings but with candidate files we could not read
 	// is NOT provably clean, so it must not exit 0. ExitOpError(2) rather than

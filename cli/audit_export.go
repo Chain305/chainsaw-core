@@ -38,13 +38,13 @@ Examples:
 
 func init() {
 	auditExportCmd.Flags().String("format", "csv", "Output format: csv|json|ndjson")
-	auditExportCmd.Flags().String("out", "", "Write to file instead of stdout (use - for stdout)")
+	auditExportCmd.Flags().String("out", "", "Write to file instead of stdout (use - for stdout); the global --output/-o is an alias")
 	auditExportCmd.Flags().String("start", "", "Filter events on or after this date (RFC3339 or YYYY-MM-DD)")
 	auditExportCmd.Flags().String("end", "", "Filter events on or before this date (RFC3339 or YYYY-MM-DD)")
 	auditExportCmd.Flags().String("since", "", "Relative time window (e.g. 24h, 7d, 30m); overrides --start if set")
 	auditExportCmd.Flags().String("action", "", "Filter by action (substring match)")
 	auditExportCmd.Flags().String("actor", "", "Filter by actor (substring match)")
-	auditExportCmd.Flags().Int("limit", 0, "Maximum number of events to export (default 0 = all, unlike `audit view` which defaults to 50)")
+	auditExportCmd.Flags().Int("limit", 0, "Maximum number of events to export (default 0 = all, unlike 'audit view' which defaults to 50)")
 	auditExportCmd.Flags().Bool("allow-truncated", false, "Write the export even when the server reports it is incomplete (default: refuse)")
 	auditCmd.AddCommand(auditExportCmd)
 }
@@ -109,7 +109,11 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 		events = events[:limit]
 	}
 
-	sink, err := openExportSink(mustString(cmd, "out"))
+	outFile, err := resolveAuditExportPath(cmd)
+	if err != nil {
+		return err
+	}
+	sink, err := openExportSink(outFile)
 	if err != nil {
 		return err
 	}
@@ -137,7 +141,7 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 	// Only emit a friendly summary when writing to a real file — keep stdout
 	// streams pure so they can be piped into other tools without a status line
 	// contaminating the output.
-	if outFile := mustString(cmd, "out"); outFile != "" && outFile != "-" {
+	if outFile != "" && outFile != "-" {
 		fmt.Fprintf(cmd.OutOrStderr(), "Exported %d audit event(s) to %s\n", len(events), outFile)
 	}
 	// C9: the export used to report a count and nothing else, which reads as
@@ -147,6 +151,35 @@ func runAuditExport(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", note)
 	}
 	return nil
+}
+
+// resolveAuditExportPath returns the file the export must land in, reconciling
+// this command's own --out with the global --output.
+//
+// S9b — `audit export` predates the global --output/-o and named its own sink
+// flag --out, then read ONLY that one. Both spellings are published: this
+// command's help says `--out audit.csv`, and the recipe quoted in root.go's
+// formatIsMachineReadable (the reason `audit export --format csv` is exempt
+// from the --output validator) says `--output audit.csv`. The --output form
+// therefore exited 0 having created no file, streaming 55 KB of CSV to stdout
+// instead — a silent no-op, and on a compliance artifact.
+//
+// --out wins when both name the SAME destination or only it is set: it is this
+// command's own, longest-standing spelling. Two DIFFERENT destinations are
+// refused rather than silently resolved, because honouring one and dropping the
+// other is the same class of silent loss this fixes. ExitUsage(4): the
+// invocation was wrong, not the server.
+func resolveAuditExportPath(cmd *cobra.Command) (string, error) {
+	local := strings.TrimSpace(mustString(cmd, "out"))
+	global := strings.TrimSpace(mustString(cmd, "output"))
+	if local != "" && global != "" && local != global {
+		return "", &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+			"--out %q and --output %q name different files; pass only one", local, global)}
+	}
+	if local != "" {
+		return local, nil
+	}
+	return global, nil
 }
 
 // auditExportRequestPath builds the export request, passing the caller's

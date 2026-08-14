@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 // TestResolveMintURL_PrefersServerMeta verifies the robust path: when the
@@ -100,6 +102,58 @@ func TestConsoleURL_And_MintURL(t *testing.T) {
 			}
 			if got := apiKeyMintURL(tc.server); got != tc.wantMint {
 				t.Errorf("apiKeyMintURL(%q) = %q, want %q", tc.server, got, tc.wantMint)
+			}
+		})
+	}
+}
+
+// TestGuardDashboardURL_FollowsConfiguredServer pins Y11b: `guard status` used
+// to hardcode https://chain305.com/chainsaw/overview for the signed-in CTA, so
+// a self-hoster who had just authenticated against THEIR server was sent to
+// someone else's dashboard. The link now rides the same consoleURL mapping as
+// the mint-URL guidance, and only falls back to the hosted literal when no
+// server is configured at all.
+func TestGuardDashboardURL_FollowsConfiguredServer(t *testing.T) {
+	cases := []struct {
+		name   string
+		server string
+		want   string
+	}{
+		{
+			name:   "self-host chainproxy split",
+			server: "https://chainsaw.corp.example/chainproxy",
+			want:   "https://chainsaw.corp.example/chainsaw/overview",
+		},
+		{
+			name:   "root-basepath self-host",
+			server: "https://chainsaw.internal",
+			want:   "https://chainsaw.internal/overview",
+		},
+		{
+			name:   "trailing slash tolerated",
+			server: "https://chainsaw.corp.example/chainproxy/",
+			want:   "https://chainsaw.corp.example/chainsaw/overview",
+		},
+		{
+			name:   "hosted saas",
+			server: "https://chain305.com/chainproxy",
+			want:   "https://chain305.com/chainsaw/overview",
+		},
+		{
+			name:   "no server configured falls back to the hosted console",
+			server: "",
+			want:   hostedGuardDashboardURL,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			if tc.server != "" {
+				viper.Set("server_url", tc.server)
+			}
+			if got := guardDashboardURL(); got != tc.want {
+				t.Errorf("guardDashboardURL() with server %q = %q, want %q", tc.server, got, tc.want)
 			}
 		})
 	}

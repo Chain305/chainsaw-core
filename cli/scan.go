@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -276,6 +277,18 @@ Batch input:
   chainsaw scan -            read newline-delimited package specs / lockfile
   chainsaw scan --stdin      paths from stdin (opt-in; bare scan never reads stdin)
 
+Exit codes:
+  0   clean — nothing at or above the gate
+  1   blocked — findings at or above the threshold (--fail-on, else any
+      vulnerable package or high/critical supply-chain condition)
+  2   operational failure (network, server, IO)
+  3   configuration or authentication problem
+  4   bad invocation (unknown flag, unparseable package ref, --path with
+      nothing scannable under it)
+  30  one or more manifests failed to parse (dependencies dropped) — the
+      packages that did parse were still scanned. Same code, same meaning as
+      chainsaw pr-scan. A block (1) outranks it.
+
 Examples:
   chainsaw scan lodash@4.17.11
   chainsaw scan --path .
@@ -290,7 +303,12 @@ func init() {
 	scanCmd.Flags().String("path", "", "Scan all dependencies found in a local project manifest")
 	scanCmd.Flags().String("severity", "", "Minimum severity to display: critical, high, medium, low")
 	scanCmd.Flags().String("fail-on", "", "Exit 1 only when vulnerabilities at or above this severity are found")
-	scanCmd.Flags().Bool("stdin", false, "Read newline-delimited package specs / lockfile paths from stdin (opt-in; same as the `-` arg)")
+	// Y7: no backticks in this usage string. pflag's UnquoteUsage treats the
+	// first back-quoted span as the flag's value placeholder, so "the `-`
+	// arg" rendered a BOOL flag as `--stdin -`. Once the backticks are gone
+	// UnquoteUsage's `case "bool": name = ""` branch fires and --stdin
+	// correctly shows no argument token.
+	scanCmd.Flags().Bool("stdin", false, "Read newline-delimited package specs / lockfile paths from stdin (opt-in; same as the '-' arg)")
 	// S6 — the shared 30s client timeout hard-caps a scan this command
 	// advertises as accepting 10,000 packages, with no way to raise it. The
 	// default here is deliberately well above 30s; NewAPIClient's 30s stays put
@@ -363,49 +381,81 @@ func runScan(cmd *cobra.Command, args []string) error {
 
 	const maxPackages = 10_000
 
+	// Y3/Y4 — every failure below RETURNS a typed error instead of calling
+	// os.Exit. A bare os.Exit inside a RunE never returns to Execute(), so it
+	// bypassed BOTH the documented exit-code contract in exitcodes.go (every
+	// one of these was a flat 2, including plain bad-argument shapes that the
+	// contract puts at ExitUsage(4)) and the telemetry flush — the whole
+	// batch, including the cli.session.completed carrying exit_code and
+	// error_class, was dropped for every failing scan.
+	//
+	// The mapping is the contract's: a wrong ARGUMENT (unparseable ref,
+	// non-existent --path, an input with nothing scannable in it, an input
+	// over the ceiling) is ExitUsage(4); an IO/stream failure is
+	// ExitOpError(2); dropped dependencies are ExitManifestParseError(30).
 	var packages []scanPkg
+	// manifestParseErr is set when a manifest or lockfile the user pointed us
+	// at failed to parse. It does NOT abort the scan — everything that did
+	// parse is still scanned and reported — but it is turned into
+	// ExitManifestParseError(30) at the end so CI cannot read an incomplete
+	// scan as a clean one (B2b).
+	var manifestParseErr *manifestParseError
 	switch {
 	case useStdin:
-		var err error
-		packages, err = collectFromStdin(scanStdin)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(2)
+		pkgs, err := collectFromStdin(scanStdin)
+		if err != nil && !errors.As(err, &manifestParseErr) {
+			// A hard read failure on the stream itself: operational.
+			return &ExitCodeError{Code: ExitOpError, Err: err}
 		}
+		packages = pkgs
 		if len(packages) == 0 {
-			fmt.Fprintln(os.Stderr, "error: no package specs or parseable lockfile paths read from stdin")
-			os.Exit(2)
+			if manifestParseErr != nil {
+				return &ExitCodeError{Code: ExitManifestParseError, Err: manifestParseErr}
+			}
+			return &ExitCodeError{Code: ExitUsage, Err: errors.New("no package specs or parseable lockfile paths read from stdin")}
 		}
 		if len(packages) > maxPackages {
-			fmt.Fprintf(os.Stderr, "error: read %d packages from stdin; maximum per scan is %d — narrow the input\n", len(packages), maxPackages)
-			os.Exit(2)
+			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+				"read %d packages from stdin; maximum per scan is %d — narrow the input", len(packages), maxPackages)}
 		}
 	case pathFlag != "":
 		if _, err := os.Stat(pathFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "error: --path %q: %v\n", pathFlag, err)
-			os.Exit(2)
+			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("--path %q: %w", pathFlag, err)}
 		}
-		var err error
-		packages, err = collectFromManifests(pathFlag)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(2)
+		pkgs, err := collectFromManifests(pathFlag)
+		if err != nil && !errors.As(err, &manifestParseErr) {
+			// The only non-parse failure this returns is "no supported
+			// manifest or lockfile found here" — the user aimed --path at the
+			// wrong directory, which is a bad argument, not an op failure.
+			return &ExitCodeError{Code: ExitUsage, Err: err}
 		}
+		packages = pkgs
 		if len(packages) == 0 {
-			fmt.Fprintf(os.Stderr, "error: no pinned dependencies found in %s\n", pathFlag)
-			os.Exit(2)
+			if manifestParseErr != nil {
+				return &ExitCodeError{Code: ExitManifestParseError, Err: manifestParseErr}
+			}
+			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("no pinned dependencies found in %s", pathFlag)}
 		}
 		if len(packages) > maxPackages {
-			fmt.Fprintf(os.Stderr, "error: found %d packages; maximum per scan is %d — narrow the scope with a subdirectory\n", len(packages), maxPackages)
-			os.Exit(2)
+			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+				"found %d packages; maximum per scan is %d — narrow the scope with a subdirectory", len(packages), maxPackages)}
 		}
 	default:
 		pkg, err := parsePackageRef(rest[0])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(2)
+			return &ExitCodeError{Code: ExitUsage, Err: err}
 		}
 		packages = []scanPkg{pkg}
+	}
+
+	// Surface the dropped dependencies BEFORE the scan runs, and never gate it
+	// on --quiet: this is the reason for a non-zero exit, not chatter, and the
+	// --quiet invariant forbids suppressing that. stderr keeps stdout pure for
+	// the JSON/SARIF sinks.
+	if manifestParseErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", manifestParseErr)
+		fmt.Fprintf(os.Stderr, "         scanning the %d dependency/dependencies that did parse; exit code will be %d\n",
+			len(packages), ExitManifestParseError)
 	}
 
 	// Resolve the result format up-front: it gates both the progress notice
@@ -535,8 +585,11 @@ func runScan(cmd *cobra.Command, args []string) error {
 		// every finding the gate considered — --severity is a human display
 		// filter, not a SARIF-scope control.
 		if err := writeScanSARIF(outWriter(cmd), resp.Results); err != nil {
-			fmt.Fprintf(os.Stderr, "error: write sarif: %v\n", err)
-			os.Exit(2)
+			// A render failure is operational (unwritable sink) and must
+			// abort BEFORE the gate below: emitting a verdict computed
+			// against a result nobody received is worse than either outcome
+			// alone (same rule emitAndGate encodes).
+			return &ExitCodeError{Code: ExitOpError, Err: fmt.Errorf("write sarif: %w", err)}
 		}
 	default:
 		// Surface the unscanned count before the table/clean message so an
@@ -603,6 +656,16 @@ func runScan(cmd *cobra.Command, args []string) error {
 				return &ExitCodeError{Code: ExitBlocked}
 			}
 		}
+	}
+
+	// B2b — nothing blocked, but a manifest was dropped, so this scan is NOT
+	// evidence of a clean tree and must not exit 0. Placed AFTER the block
+	// gate so a real block still outranks it, mirroring pr-scan (which
+	// escalates 0/10 to 30 but leaves blocking(20) alone). The warning was
+	// already printed above, so this error carries the reason for anyone who
+	// only reads the tail of the log.
+	if manifestParseErr != nil {
+		return &ExitCodeError{Code: ExitManifestParseError, Err: manifestParseErr}
 	}
 	return nil
 }
@@ -853,17 +916,31 @@ func parsePackageRef(ref string) (scanPkg, error) {
 // adding a new ecosystem is a new file under internal/depparser/parser/,
 // not an edit to this function.
 //
-// Parser errors for a single file are surfaced as a single aggregate
-// warning (the walk continues), so one malformed lockfile in a monorepo
-// does not fail the overall scan. A complete absence of parseable files
-// returns an error to preserve the old CLI behaviour of "tell the user
-// we scanned nothing".
+// The walk CONTINUES past a single malformed lockfile, so one bad file in a
+// monorepo still yields a useful scan of everything else — but the failure is
+// RETURNED as a *manifestParseError wrapped around the partial package set,
+// never swallowed.
+//
+// B2b: this used to print "warning: depparser walk: %v" to stderr and carry
+// on with whatever it got, and runScan treated the nil error as success. A
+// repo whose lockfile failed to parse was therefore scanned for its
+// manifest's direct dependencies only and CI went green — the single most
+// dangerous shape of wrong answer this command can give. The parse failure is
+// a REPORTING contract, independent of any one parser's bugs: the caller
+// decides the exit code (ExitManifestParseError), and the packages that did
+// parse are still returned and still scanned.
+//
+// A complete absence of parseable files returns an error to preserve the old
+// CLI behaviour of "tell the user we scanned nothing".
 func collectFromManifests(dir string) ([]scanPkg, error) {
-	regPkgs, err := depanalyzer.WalkDir(context.Background(), dir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: depparser walk: %v\n", err)
-	}
+	regPkgs, walkErr := depanalyzer.WalkDir(context.Background(), dir)
 	if len(regPkgs) == 0 {
+		if walkErr != nil {
+			// Files WERE found and every one of them failed; saying "no
+			// supported manifest found" would be a second lie on top of the
+			// first. Report the parse failure itself.
+			return nil, &manifestParseError{Target: dir, Err: walkErr}
+		}
 		return nil, fmt.Errorf("no supported manifest or lockfile found in %s (see internal/depparser/analyzer for the full supported list)", dir)
 	}
 
@@ -881,8 +958,30 @@ func collectFromManifests(dir string) ([]scanPkg, error) {
 		seen[key] = true
 		all = append(all, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: eco})
 	}
+	if walkErr != nil {
+		// Partial success: `all` is everything that parsed, and the error says
+		// the set is incomplete. Callers that only want a best-effort list can
+		// still use the packages; runScan turns this into exit 30.
+		return all, &manifestParseError{Target: dir, Err: walkErr}
+	}
 	return all, nil
 }
+
+// manifestParseError reports that at least one manifest or lockfile under the
+// scanned tree could not be parsed, so the dependency set is INCOMPLETE. It is
+// carried alongside the packages that did parse (see collectFromManifests) —
+// the point is that the exit code stops lying, not that the command aborts.
+type manifestParseError struct {
+	// Target is the directory, file, or input stream the user named.
+	Target string
+	Err    error
+}
+
+func (e *manifestParseError) Error() string {
+	return fmt.Sprintf("%s: one or more manifests failed to parse — dependencies were dropped: %v", e.Target, e.Err)
+}
+
+func (e *manifestParseError) Unwrap() error { return e.Err }
 
 // collectFromStdin reads newline-delimited input (P2.9 stdin batch) and returns
 // the deduplicated package set. Each non-blank, non-comment line is either:
@@ -919,6 +1018,10 @@ func collectFromStdin(r io.Reader) ([]scanPkg, error) {
 	}
 
 	var skipped int
+	// B2b: paths whose manifest/lockfile failed to parse. Distinct from
+	// `skipped` (lines that never named anything scannable) — these DROPPED
+	// dependencies, which is what makes the exit code lie.
+	var parseFailures []error
 	sc := bufio.NewScanner(r)
 	// Lockfile paths are short; a generous line cap guards against a pathological
 	// single line without allowing unbounded growth.
@@ -935,13 +1038,24 @@ func collectFromStdin(r io.Reader) ([]scanPkg, error) {
 		// spec.
 		if info, err := os.Stat(line); err == nil {
 			pkgs, perr := collectFromPath(line, info.IsDir())
-			if perr != nil {
-				fmt.Fprintf(os.Stderr, "warning: stdin path %q: %v\n", line, perr)
-				skipped++
-				continue
-			}
+			// B2b: a parse failure comes back WITH whatever did parse. Keep
+			// those packages (dropping them would lose coverage the pre-B2b
+			// code had) and record the failure so the caller can refuse to
+			// exit 0 on an incomplete set.
 			for _, p := range pkgs {
 				add(p.Name, p.Version, p.Ecosystem)
+			}
+			if perr != nil {
+				var mpe *manifestParseError
+				if errors.As(perr, &mpe) {
+					parseFailures = append(parseFailures, perr)
+				} else {
+					// Not a parse failure — an unreadable path or a directory
+					// with no manifests at all. Nothing was dropped because
+					// nothing was ever found; warn and skip as before.
+					fmt.Fprintf(os.Stderr, "warning: stdin path %q: %v\n", line, perr)
+					skipped++
+				}
 			}
 			continue
 		}
@@ -961,6 +1075,9 @@ func collectFromStdin(r io.Reader) ([]scanPkg, error) {
 		return nil, fmt.Errorf("read stdin: %w", err)
 	}
 	_ = skipped // surfaced per-line above; kept for future telemetry hooks
+	if len(parseFailures) > 0 {
+		return all, &manifestParseError{Target: "stdin", Err: errors.Join(parseFailures...)}
+	}
 	return all, nil
 }
 
@@ -978,7 +1095,10 @@ func collectFromPath(path string, isDir bool) ([]scanPkg, error) {
 	}
 	regPkgs, err := depanalyzer.ParseBytes(context.Background(), path, content)
 	if err != nil {
-		return nil, err
+		// B2b: the user named this lockfile explicitly and it failed to parse,
+		// so its whole dependency set was dropped. Typed so the caller can
+		// tell it apart from "this path is not a manifest at all".
+		return nil, &manifestParseError{Target: path, Err: err}
 	}
 	out := make([]scanPkg, 0, len(regPkgs))
 	for _, p := range regPkgs {

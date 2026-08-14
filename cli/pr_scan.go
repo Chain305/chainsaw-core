@@ -47,10 +47,13 @@ import (
 // pr-scan exit codes — distinct from the doctor matrix so a CI step that
 // combines both gets a predictable non-zero without ambiguity.
 const (
-	prScanExitOK         = 0
-	prScanExitWarning    = 10
-	prScanExitBlocking   = 20
-	prScanExitParseError = 30
+	prScanExitOK       = 0
+	prScanExitWarning  = 10
+	prScanExitBlocking = 20
+	// Aliased to the shared constant so "dependencies were dropped" is one
+	// number with one meaning across the CLI — `scan --path` returns the same
+	// 30 for the same condition (see exitcodes.go). The value is unchanged.
+	prScanExitParseError = ExitManifestParseError
 )
 
 // prScanSignal is a single supply-chain signal attached to a coordinate.
@@ -158,9 +161,12 @@ func runPRScan(cmd *cobra.Command, _ []string) error {
 		// --output-file results.sarif` wrote the document to stdout, created no
 		// file, and reported success — the following upload-sarif step then
 		// failed on a missing file or uploaded a stale artifact. Render into a
-		// buffer and write the file explicitly: runPRScan ends in os.Exit for a
-		// non-zero verdict, which skips deferred Close, so a deferred file
-		// handle here would truncate the very document CI consumes.
+		// buffer and write the file explicitly rather than handing a deferred
+		// *os.File to the encoder: os.WriteFile has no unflushed-buffer window
+		// at all, so the document CI consumes can never be truncated. (This
+		// used to also be load-bearing because runPRScan ended in os.Exit,
+		// which skips deferred Close; that exit now goes through Execute()
+		// — see the return below — but the explicit write stays.)
 		if outputFile != "" {
 			var buf bytes.Buffer
 			if err := writePRScanSARIF(&buf, report); err != nil {
@@ -197,8 +203,15 @@ func runPRScan(cmd *cobra.Command, _ []string) error {
 		exitCode = prScanExitBlocking
 	}
 
+	// Y3/Y4 — return the code instead of calling os.Exit. A bare os.Exit here
+	// never returned to Execute(), so the entire telemetry batch (including
+	// the cli.session.completed carrying exit_code and error_class) was
+	// dropped on every non-clean pr-scan — measured as 0 session-completed
+	// events for an exit-10 run. The custom 10/20/30 values are unchanged:
+	// ExitCodeError carries an arbitrary code. Err stays nil so renderError
+	// prints nothing on top of the report the command already emitted.
 	if exitCode != prScanExitOK {
-		os.Exit(exitCode)
+		return &ExitCodeError{Code: exitCode}
 	}
 	return nil
 }

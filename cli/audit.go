@@ -101,7 +101,7 @@ func init() {
 	auditViewCmd.Flags().String("since", "", "Relative time window (e.g. 24h, 7d, 30m); mutually exclusive with --start")
 	auditViewCmd.Flags().String("action", "", "Filter by action (substring match)")
 	auditViewCmd.Flags().String("actor", "", "Filter by actor (substring match)")
-	auditViewCmd.Flags().Int("limit", 50, "Maximum number of events to display (default 50; 0 = all). Note: `audit export` defaults to 0/all.")
+	auditViewCmd.Flags().Int("limit", 50, "Maximum number of events to display (default 50; 0 = all). Note: 'audit export' defaults to 0/all.")
 	auditViewCmd.Flags().Bool("json", false, "Output as JSON")
 	auditCmd.AddCommand(auditViewCmd)
 	rootCmd.AddCommand(auditCmd)

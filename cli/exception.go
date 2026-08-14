@@ -131,7 +131,7 @@ func init() {
 	exceptionCreateCmd.Flags().Int("days", 0, "Number of days before the exception expires (mutually exclusive with --expires-at and --expires). Defaults to 30 when no other expiry flag is supplied.")
 	exceptionCreateCmd.Flags().String("expires-at", "", "Explicit RFC3339 timestamp for expiry (mutually exclusive with --days and --expires)")
 	exceptionCreateCmd.Flags().String("from-file", "", "Read request body as JSON from file (--ecosystem/--days/--expires-at/--reason still apply on top)")
-	exceptionCreateCmd.Flags().String("cve", "", "CVE ID (or comma-separated list) the exception applies to (e.g. CVE-2021-44228). Required for `chainsaw sbom vex export` to emit a VEX row.")
+	exceptionCreateCmd.Flags().String("cve", "", "CVE ID (or comma-separated list) the exception applies to (e.g. CVE-2021-44228). Required for 'chainsaw sbom vex export' to emit a VEX row.")
 	exceptionCreateCmd.Flags().String("decision", "", "VEX decision: 'allow' (default — maps to not_affected), 'monitor' (in_triage), or 'deny'. Empty falls through to the server default of allow.")
 	exceptionCreateCmd.Flags().String("vex-note", "", "Free-text justification used in the CycloneDX VEX 'analysis.detail' field. Falls back to --reason when omitted.")
 	exceptionCreateCmd.Flags().Bool("json", false, "Print created exception as JSON")

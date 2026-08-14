@@ -31,6 +31,24 @@ func telemetryConsentLabel(st *guardState) string {
 	}
 }
 
+// hostedGuardDashboardURL is the dashboard for the hosted SaaS. Used only when
+// no server is configured at all, where there is nothing better to point at.
+const hostedGuardDashboardURL = "https://chain305.com/chainsaw/overview"
+
+// guardDashboardURL is the "see the dashboard" link shown to a signed-in user.
+//
+// Y11b: this was hardcoded to the hosted SaaS console, so a self-hoster who had
+// just signed in to THEIR server was pointed at someone else's dashboard.
+// Derive it from the configured server through the same consoleURL helper the
+// mint-URL guidance uses (auth.go), which maps a baked `…/chainproxy` API base
+// onto the `…/chainsaw` web console.
+func guardDashboardURL() string {
+	if base := consoleURL(cfgServerURL()); base != "" {
+		return base + "/overview"
+	}
+	return hostedGuardDashboardURL
+}
+
 var guardStatusCmd = &cobra.Command{
 	Use:          "status",
 	Short:        "Show local guard activity, privacy state, and account sync status",
@@ -109,7 +127,7 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	if cfgToken() == "" {
 		fmt.Fprintln(out, "Not signed in. Sign up free to sync these across your team and see org-wide threats → "+guardCTA(guardNudgeBaseSignup, st.Consent))
 	} else {
-		fmt.Fprintln(out, "Signed in — your guard activity syncs to your account. See the dashboard → https://chain305.com/chainsaw/overview")
+		fmt.Fprintln(out, "Signed in — your guard activity syncs to your account. See the dashboard → "+guardDashboardURL())
 	}
 
 	return nil

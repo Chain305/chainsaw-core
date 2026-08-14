@@ -38,12 +38,16 @@ chain: the root --server flag, the CHAINSAW_SERVER environment variable, or
 the saved config (set via ` + "`chainsaw auth login`" + `). If no server is
 configured, the block is still written but without a server URL.
 
-The generated URLs include the ` + "`/chainproxy/repository/@<org-slug>/`" + ` prefix
-so they match the dashboard's "Save this secret now" snippet exactly —
-the proxy rejects slug-less or prefix-less URLs with CHW-4314 ("legacy URLs
-without the org slug are disabled"). The org slug is resolved from --org
-when set, then from /api/orgs after ` + "`chainsaw auth login`" + `, and finally
-falls back to a visible placeholder so a misconfigured install fails loud.
+The generated URLs are ` + "`<server>/repository/@<org-slug>/<ecosystem>/`" + `, matching
+the dashboard's "Save this secret now" snippet exactly. Any base path comes
+from the configured server URL itself, so a deployment mounted behind an edge
+prefix (` + "`--server https://chain305.com/chainproxy`" + `) and one served at the root
+(` + "`--server http://localhost:8787`" + `) each get a URL their own proxy serves.
+
+The org slug is resolved from --org when set, then from /api/orgs after
+` + "`chainsaw auth login`" + `, and finally falls back to a visible placeholder so a
+misconfigured install fails loud: the proxy rejects SLUG-less URLs with
+CHW-4314 ("legacy URLs without the org slug are disabled").
 
 Examples:
   chainsaw install-hook npm
@@ -269,11 +273,29 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// normalizeHookServerURL converts the API base URL into the host base used by
-// package-manager registry snippets. Cloud builds use /chainproxy as the API
-// base, while hook renderers append the production /chainproxy/repository/...
-// mount themselves. Leaving /chainproxy in both places produces
-// /chainproxy/chainproxy/repository/... and every install 401s/404s.
+// normalizeHookServerURL canonicalises the configured server URL into the base
+// every generated registry URL is built on: `<base>/repository/@<org>/<eco>/`.
+//
+// It PRESERVES the URL's path, because that path IS the deployment's base path
+// (B5). `/chainproxy` is an optional edge mount that nginx/Traefik strip before
+// forwarding; the server routes on the literal `/repository/` prefix and strips
+// nothing. So the only honest source for a prefix is what the operator actually
+// configured:
+//
+//	--server https://chain305.com/chainproxy → https://chain305.com/chainproxy
+//	                                           (SaaS; released binaries bake
+//	                                           this in, so hosted output is
+//	                                           unchanged byte-for-byte)
+//	--server http://localhost:8787           → http://localhost:8787
+//	                                           (root-mounted quick-start; emits
+//	                                           the prefix-free URL the server
+//	                                           actually serves)
+//
+// Hook renderers no longer prepend a prefix of their own (see
+// hook.OrgScopedRepoPath), so there is nothing left to double up.
+//
+// Query and fragment are dropped: they are meaningless on an API base and
+// would land in the middle of the concatenated registry URL.
 func normalizeHookServerURL(serverURL string) string {
 	raw := strings.TrimRight(strings.TrimSpace(serverURL), "/")
 	if raw == "" {
@@ -283,10 +305,11 @@ func normalizeHookServerURL(serverURL string) string {
 	if err != nil || u.Host == "" {
 		return raw
 	}
-	if strings.TrimRight(u.Path, "/") == "/chainproxy" {
-		u.Path = ""
-		u.RawPath = ""
-	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawFragment = ""
 	return strings.TrimRight(u.String(), "/")
 }
 

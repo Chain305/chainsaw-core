@@ -322,11 +322,17 @@ func runSBOMVerify(cmd *cobra.Command, _ []string) error {
 
 	result, err := sbom.VerifySignedSBOM(ctx, bundleBytes, &bom, cache)
 	if err != nil {
-		// Exit non-zero so CI gates on verify failure. Print the error
-		// to stderr (cobra prints to stdout by default for RunE errors,
-		// which makes scripting messier).
-		fmt.Fprintf(os.Stderr, "verify failed: %v\n", err)
-		os.Exit(1)
+		// A failed signature check is a VERDICT, not a tool failure, so it
+		// keeps ExitBlocked(1) — the code every CI gate on this command
+		// already keys on.
+		//
+		// Y3/Y4: it is RETURNED rather than os.Exit'd. The bare exit skipped
+		// Execute() entirely, dropping the telemetry batch (no
+		// cli.session.completed for the one outcome worth recording) and
+		// bypassing the exit-code contract. renderError prints the message to
+		// stderr, which is where this always went — cobra's stdout default is
+		// suppressed via SilenceErrors on rootCmd.
+		return &ExitCodeError{Code: ExitBlocked, Err: fmt.Errorf("verify failed: %w", err)}
 	}
 
 	if asJSON {
@@ -396,7 +402,17 @@ func runSBOMDiff(cmd *cobra.Command, args []string) error {
 		// sbom_test.go's SetOut capture keeps working.
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), result)
 	case "", "text":
-		writeDiffText(cmd.OutOrStdout(), result)
+		// Honor --output on the text path too. The json branch above has done
+		// this since S9; this one still wrote straight to stdout, so
+		// `sbom diff a b --format text --output X` exited 0, created no file,
+		// and printed the diff to stdout — the exact silent no-op the (now
+		// corrected) --output refusal used to mask. formatIsMachineReadable
+		// in root.go exempts every --format-shadowing command wholesale on
+		// the ground that they all route results through a sink honouring
+		// --output; this line is part of making that premise true.
+		// cmd.OutOrStdout() stays the fallback so sbom_test.go's SetOut
+		// capture keeps working, exactly as in the json branch.
+		writeDiffText(outWriterOr(cmd, cmd.OutOrStdout()), result)
 		return nil
 	default:
 		return fmt.Errorf("unknown format %q — supported values: text, json", format)

@@ -9,6 +9,8 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -388,5 +390,73 @@ func TestRunPRScan_SARIFHonoursOutputFile(t *testing.T) {
 	}
 	if _, ok := doc["runs"]; !ok {
 		t.Errorf("SARIF file has no runs[]: %s", string(data))
+	}
+}
+
+// ── Y3/Y4: a non-clean verdict returns its code, it does not os.Exit ─────────
+//
+// runPRScan ended in `os.Exit(exitCode)`. Because that never returns to
+// Execute(), markSessionEnd never ran and the whole telemetry batch — including
+// the cli.session.completed carrying exit_code and error_class — was dropped for
+// every pr-scan that found anything. Measured before the fix: an exit-10 run
+// emitted 0 session-completed events; after, exactly 1, with exit_code 10.
+//
+// It also made this path untestable: any test that reached it killed the test
+// binary. That is why the assertions below could not exist before.
+func TestRunPRScan_NonCleanVerdictReturnsExitCodeError(t *testing.T) {
+	dir := newGitRepoForGate(t)
+	writeFileIn(t, dir, "package.json", `{"name":"x","dependencies":{"lodash":"4.17.21"}}`)
+	gitIn(t, dir, "add", ".")
+	gitIn(t, dir, "commit", "-m", "base")
+	base := gitIn(t, dir, "rev-parse", "HEAD")
+	// A newly ADDED dependency is what pr-scan exists to flag.
+	writeFileIn(t, dir, "package.json", `{"name":"x","dependencies":{"lodash":"4.17.21","left-pad":"1.3.0"}}`)
+	gitIn(t, dir, "add", ".")
+	gitIn(t, dir, "commit", "-m", "head")
+
+	cmd := &cobra.Command{Use: "pr-scan", RunE: runPRScan}
+	cmd.Flags().String("base", "", "")
+	cmd.Flags().String("head", "HEAD", "")
+	cmd.Flags().String("repo-path", ".", "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.Flags().String("output-file", "", "")
+	cmd.Flags().Bool("strict", false, "")
+	cmd.Flags().String("format", "", "")
+	cmd.Flags().String("output", "", "")
+	for k, v := range map[string]string{"base": base, "repo-path": dir, "json": "true"} {
+		if err := cmd.Flags().Set(k, v); err != nil {
+			t.Fatalf("set %s: %v", k, err)
+		}
+	}
+	cmd.SetOut(io.Discard)
+
+	err := runPRScan(cmd, nil)
+	if err == nil {
+		t.Fatal("a pr-scan that flagged an added dependency returned no error; CI would read it as clean")
+	}
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) {
+		t.Fatalf("runPRScan returned a non-ExitCodeError: %v", err)
+	}
+	if coded.Code != prScanExitWarning && coded.Code != prScanExitBlocking {
+		t.Errorf("exit code = %d, want %d (warning) or %d (blocking)", coded.Code, prScanExitWarning, prScanExitBlocking)
+	}
+	// A message-less ExitCodeError keeps renderError silent, so the report
+	// printed above stays the only user-facing output on the block path.
+	if coded.Err != nil {
+		t.Errorf("ExitCodeError carries a message (%v); renderError would print it on top of the report", coded.Err)
+	}
+}
+
+// TestPRScanParseErrorCodeMatchesScan pins the two commands to ONE number for
+// "dependencies were dropped", which is the whole reason `chainsaw scan --path`
+// reuses 30 rather than inventing a code.
+func TestPRScanParseErrorCodeMatchesScan(t *testing.T) {
+	if prScanExitParseError != ExitManifestParseError {
+		t.Errorf("prScanExitParseError = %d, ExitManifestParseError = %d; a CI step combining both gates can no longer key on one value",
+			prScanExitParseError, ExitManifestParseError)
+	}
+	if prScanExitParseError != 30 {
+		t.Errorf("prScanExitParseError = %d, want 30 — the value pr-scan has published in its --help since it shipped", prScanExitParseError)
 	}
 }

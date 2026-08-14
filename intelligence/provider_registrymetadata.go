@@ -2569,11 +2569,29 @@ func encodeGoModulePath(p string) string {
 	return b.String()
 }
 
+// goProxyVersion re-adds the leading "v" the depparsers strip.
+//
+// The Go module proxy protocol REQUIRES canonical semver — "@v/1.6.0.info"
+// is rejected as an invalid version, only "@v/v1.6.0.info" resolves. Both Go
+// lockfile parsers (core/depparser/parser/golang/{mod,sum}) emit the stripped
+// spelling so their coordinates dedup against each other and match how vuln
+// DBs index semver, which means every version reaching this provider needs
+// the prefix put back. Idempotent: a version that already has it is returned
+// untouched. Mirrors the idiom in core/depparser/dependency/id.go.
+func goProxyVersion(ver string) string {
+	ver = strings.TrimSpace(ver)
+	if ver == "" || strings.HasPrefix(ver, "v") {
+		return ver
+	}
+	return "v" + ver
+}
+
 func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (PartialReport, error) {
 	module := encodeGoModulePath(strings.TrimSpace(pkg))
 	if module == "" {
 		return PartialReport{}, nil
 	}
+	ver = goProxyVersion(ver)
 	infoURL := fmt.Sprintf("%s/%s/@v/%s.info", p.endpoints.goproxy, module, url.PathEscape(ver))
 	var info struct {
 		Version string `json:"Version"`
@@ -2662,7 +2680,9 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 // downstream constraint resolver matches them against cached
 // intelligence rows as exact version strings.
 func (p *registryMetadataProvider) fetchGoMod(ctx context.Context, module, ver string, pr *PartialReport) *DependenciesSection {
-	modURL := fmt.Sprintf("%s/%s/@v/%s.mod", p.endpoints.goproxy, module, url.PathEscape(ver))
+	// Defensive: runGo already normalised, but this is reachable from any
+	// future caller and an un-prefixed version 404s on the proxy.
+	modURL := fmt.Sprintf("%s/%s/@v/%s.mod", p.endpoints.goproxy, module, url.PathEscape(goProxyVersion(ver)))
 	var body []byte
 	warn, err := p.fetchDecoded(ctx, modURL, "text/plain", func(r io.Reader) error {
 		// 1 MiB ceiling: real-world go.mod files are <50KB; this is
@@ -2729,10 +2749,12 @@ func (p *registryMetadataProvider) fetchGoMod(ctx context.Context, module, ver s
 // Joins multi-license entries with " OR " to match SPDX expression
 // conventions used by the other providers in this file.
 func (p *registryMetadataProvider) fetchDepsDevGoLicense(ctx context.Context, pkg, ver string) string {
+	// deps.dev indexes Go versions in canonical "vX.Y.Z" form, same as the
+	// module proxy — a stripped version returns 404.
 	endpoint := fmt.Sprintf("%s/v3/systems/go/packages/%s/versions/%s",
 		p.endpoints.depsdev,
 		url.PathEscape(strings.TrimSpace(pkg)),
-		url.PathEscape(strings.TrimSpace(ver)))
+		url.PathEscape(goProxyVersion(ver)))
 	var resp struct {
 		Licenses []string `json:"licenses"`
 	}

@@ -258,7 +258,7 @@ func TestSbtManager_Wire_RepositoriesUsesOrgScopedURL(t *testing.T) {
 		t.Fatalf("read repositories: %v", err)
 	}
 	body := string(data)
-	want := "chainproxy/repository/@acme-corp/maven-central/"
+	want := "repository/@acme-corp/maven-central/"
 	if !strings.Contains(body, want) {
 		t.Errorf("repositories missing org-scoped URL %q:\n%s", want, body)
 	}

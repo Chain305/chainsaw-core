@@ -109,15 +109,25 @@ func runUndo(cmd *cobra.Command, _ []string) error {
 			}
 			previewPath := path + "?dry_run=true"
 			var preview undoResult
+			var previewMsg string
 			if perr := client.Post(previewPath, nil, &preview); perr == nil {
-				if preview.Message != "" {
-					targetDesc = preview.Message
-				} else if preview.ActionType != "" {
+				// Y6: targetDesc used to be overwritten with preview.Message,
+				// which is ALWAYS a complete sentence — the only two producers
+				// of a 200 are internal/undo ("Dry run: would undo %s (action
+				// %s). Run again without dry-run to apply.") and undo_api ("No
+				// undoable actions found for this org."). Splicing either into
+				// `Undo %s?` told the operator to "run again without dry-run"
+				// while they were already at the live confirmation, and it
+				// discarded the perfectly good "action <id>" set above. Build
+				// the clause from the STRUCTURED fields and print the server's
+				// sentence on its own line instead.
+				if preview.ActionType != "" {
 					targetDesc = preview.ActionType
 					if preview.ActionID != "" {
 						targetDesc = preview.ActionType + " (" + preview.ActionID + ")"
 					}
 				}
+				previewMsg = strings.TrimSpace(preview.Message)
 				// C7 (preview/confirm TOCTOU): the preview parsed ActionID and
 				// then threw it away, and the confirmed POST re-hit the UNPINNED
 				// /undo-last. The server resolves that with GetLastUndoable(orgID)
@@ -137,7 +147,9 @@ func runUndo(cmd *cobra.Command, _ []string) error {
 			if !stdinIsTerminal() {
 				return fmt.Errorf("refusing to undo %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", targetDesc)
 			}
-			fmt.Println(targetDesc)
+			if previewMsg != "" {
+				fmt.Println(previewMsg)
+			}
 			if !PromptConfirm(fmt.Sprintf("Undo %s?", targetDesc)) {
 				fmt.Println("Aborted.")
 				return nil

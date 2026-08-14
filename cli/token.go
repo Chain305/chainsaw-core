@@ -236,13 +236,17 @@ var tokenRotateCmd = &cobra.Command{
 	Long: "Rotate an existing token: server generates a new cleartext secret, " +
 		"keeps the same id/name/scopes/expires_at, and invalidates the old " +
 		"secret immediately. The new cleartext is shown ONCE — save it before " +
-		"the command returns. Use --json for CI consumption.",
+		"the command returns. Every consumer of the old secret starts failing " +
+		"the moment this returns and there is no un-rotate, so the command " +
+		"confirms first. Use --yes to skip the prompt in scripts, and --json " +
+		"for CI consumption.",
 	Args: cobra.ExactArgs(1),
 	RunE: runTokenRotate,
 }
 
 func init() {
 	tokenRotateCmd.Flags().Bool("json", false, "Print the rotated token payload as JSON (cleartext included once)")
+	tokenRotateCmd.Flags().Bool("yes", false, "Skip confirmation prompt")
 	tokenCmd.AddCommand(tokenRotateCmd)
 }
 
@@ -254,6 +258,29 @@ func runTokenRotate(cmd *cobra.Command, args []string) error {
 	id := strings.TrimSpace(args[0])
 	if id == "" {
 		return fmt.Errorf("token id is required")
+	}
+
+	// N1: rotate is destructive and was the ONE hole in the confirmation
+	// gate every sibling has (token revoke below, auth client rotate /
+	// delete, policy delete / flip-to-block, exception delete, finding
+	// suppress, org delete, undo). Rotating replaces the live secret
+	// server-side — this command's own Long text says "invalidates the old
+	// secret immediately" — so a stray `chainsaw token rotate $ID` in CI
+	// broke every consumer of that PAT instantly, with no prompt and no
+	// un-rotate verb to recover with. Same guard, same wording, same
+	// non-TTY rationale as runTokenRevoke: PromptConfirm returns false off
+	// a terminal, so an unguarded prompt would have made a scripted rotate
+	// print "Aborted." at exit 0 — the silent no-op A5 removed everywhere
+	// else.
+	yes, _ := cmd.Flags().GetBool("yes")
+	if !yes {
+		if !stdinIsTerminal() {
+			return fmt.Errorf("refusing to rotate token %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
+		}
+		if !PromptConfirm(fmt.Sprintf("Rotate token %q? The current secret stops authenticating immediately and cannot be recovered.", id)) {
+			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			return nil
+		}
 	}
 
 	var resp struct {

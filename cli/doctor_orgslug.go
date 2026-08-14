@@ -4,7 +4,7 @@ package cli
 // plan_10of10_surfaces).
 //
 // The silent-insecure trap this closes: a client that routes installs
-// through an org-scoped proxy URL (/chainproxy/repository/@<slug>/<eco>/...)
+// through an org-scoped proxy URL (<server>/repository/@<slug>/<eco>/...)
 // with the WRONG or MISSING org slug is rejected by the backend BEFORE any
 // package coordinate is evaluated:
 //
@@ -22,12 +22,16 @@ package cli
 // The check probes the org-scoped repo path with the caller's resolved org
 // slug and classifies the response:
 //
-//   OK        the org-scoped path is accepted (2xx / 401 / 403 / 404-on-a-
-//             real-package / anything that is NOT the org-slug rejection).
+//   OK        the org-scoped path is accepted (2xx / 401 / 403 / anything
+//             that is neither the org-slug rejection nor a 404).
 //             The slug routes; the guard would fire. Passes SILENTLY.
 //   WRONGSLUG the probe came back CHW-4314 (400) or CHW-1303 (404 unknown
 //             org). The slug is wrong/missing — LOUD failure + remediation,
 //             non-zero exit.
+//   UNROUTED  the probe came back 404 with no CHW envelope: nothing is
+//             mounted at the repository path this client would use. Same
+//             dead-on-arrival consequence as a wrong slug, different cause
+//             and different fix — LOUD failure + remediation, non-zero exit.
 //   SKIPPED   no server / no token / no resolvable slug — nothing to probe.
 //             Not a failure (the free local guard needs no slug).
 //   NETERR    the probe could not reach the server (DNS, connect, TLS,
@@ -47,7 +51,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -63,8 +66,13 @@ type orgSlugOutcome string
 const (
 	orgSlugOK        orgSlugOutcome = "OK"
 	orgSlugWrongSlug orgSlugOutcome = "WRONG_SLUG"
-	orgSlugSkipped   orgSlugOutcome = "SKIPPED"
-	orgSlugNetErr    orgSlugOutcome = "NET_ERROR"
+	// orgSlugUnrouted is a 404 that is NOT the unknown-org rejection: the
+	// repository path a wired client would use isn't served at all. Split
+	// out from WRONG_SLUG because the slug may be perfectly correct — the
+	// base path is what's wrong — so the remediation differs.
+	orgSlugUnrouted orgSlugOutcome = "PATH_NOT_ROUTED"
+	orgSlugSkipped  orgSlugOutcome = "SKIPPED"
+	orgSlugNetErr   orgSlugOutcome = "NET_ERROR"
 )
 
 // orgSlugResult is the structured result of the check. Stable JSON shape so
@@ -79,11 +87,16 @@ type orgSlugResult struct {
 }
 
 // orgSlugProbeEcosystem is the ecosystem whose org-scoped repo path we probe.
-// npm is universal (present in every seeded repo set) and its base path
-// (/chainproxy/repository/@<slug>/npm/) is a cheap, side-effect-free GET —
-// the org-slug guard fires on it BEFORE any package coordinate is resolved,
-// which is exactly what we want to test.
-const orgSlugProbeEcosystem = "npm"
+// "npmjs" is the seeded npm repo name (configs/seed.yaml) and the one
+// install-hook npm actually writes, so the probe exercises a path a wired
+// client really uses. Its base path (<server>/repository/@<slug>/npmjs/) is a
+// cheap, side-effect-free GET — the org-slug guard fires on it BEFORE any
+// package coordinate is resolved, which is exactly what we want to test.
+//
+// It used to be "npm", a repository name nothing registers. That was
+// survivable only because the auth gate answers before repo resolution; now
+// that a 404 is a failure verdict, the probe must name the real repo.
+const orgSlugProbeEcosystem = "npmjs"
 
 // orgSlugProbeTimeout bounds the single probe request. Short — this is a
 // diagnostic, not a download — but long enough to absorb a slow TLS
@@ -110,7 +123,7 @@ func runDoctorOrgSlugCheck(cmd *cobra.Command, jsonMode bool) error {
 		"error_code": res.ErrorCode,
 	})
 
-	if res.Outcome == orgSlugWrongSlug {
+	if res.Outcome == orgSlugWrongSlug || res.Outcome == orgSlugUnrouted {
 		// Fail CLOSED + LOUD: non-zero exit so CI gates catch the
 		// dead-on-arrival config. Returning an error routes through cobra's
 		// error path (renderError) and flushes the deferred telemetry, same
@@ -141,6 +154,9 @@ func (e *orgSlugCheckError) Error() string {
 	code := e.res.ErrorCode
 	if code == "" {
 		code = fmt.Sprintf("HTTP %d", e.res.Status)
+	}
+	if e.res.Outcome == orgSlugUnrouted {
+		return fmt.Sprintf("org-scoped repository path is not served — the install guard did NOT fire (%s)", code)
 	}
 	return fmt.Sprintf("wrong org slug — the install guard did NOT fire (%s)", code)
 }
@@ -240,6 +256,23 @@ func probeOrgSlug(ctx context.Context, server, token, slug string) orgSlugResult
 		return res
 	}
 
+	// A 404 that is not CHW-1303 means nothing answers at the repository
+	// path — the router never matched it. It used to fall through to OK,
+	// which is how `chainsaw doctor` certified a completely dead URL as
+	// "the guard would fire for this slug" (B5): install-hook wrote a
+	// hardcoded /chainproxy prefix that only exists as an OPTIONAL edge
+	// mount, and doctor probed the same dead URL and passed on its 404.
+	//
+	// A proxy that serves this deployment answers the repository BASE path
+	// with 401 (CHW-1001, client credentials required), 403, or a structured
+	// CHW envelope — never a bare 404. So this is evidence of a real break,
+	// not a nonexistent-package miss (the probe names no package).
+	if resp.StatusCode == http.StatusNotFound {
+		res.Outcome = orgSlugUnrouted
+		res.Reason = "nothing is served at the org-scoped repository path; every install through this config would 404"
+		return res
+	}
+
 	res.Outcome = orgSlugOK
 	res.Reason = "org-scoped repository path accepted; the guard would fire for this slug"
 	return res
@@ -287,25 +320,20 @@ func bodyContains(body []byte, needle string) bool {
 }
 
 // orgSlugProbeURL builds the org-scoped repo base path for the probe:
-// <server>/chainproxy/repository/@<slug>/npm/. Uses the same helper
-// install-hook uses (hook.OrgScopedRepoPath) so the probed path is
-// byte-identical to what a wired client would request. The server base may
-// or may not already carry the /chainproxy prefix (self-hosted vs SaaS), so
-// we splice the helper's output onto the scheme+host and trim any double
-// prefix.
+// <server>/repository/@<slug>/npmjs/. Uses the same helpers install-hook
+// uses — normalizeHookServerURL for the base and hook.OrgScopedRepoPath for
+// the path — so the probed URL is byte-identical to what a wired client
+// requests. That identity is the whole point: if the probe and the emitted
+// config can disagree, doctor can pass while every install 404s.
+//
+// The base path comes from the configured server URL and nowhere else (B5).
+// This used to splice a hardcoded `chainproxy/` in and un-double it when the
+// server URL already ended in one — which meant a root-mounted deployment
+// (`--server http://localhost:8787`) was probed at a path the server does
+// not route, always 404'd, and was then classified OK.
 func orgSlugProbeURL(server, slug string) string {
-	server = strings.TrimRight(server, "/")
-	repoPath := hook.OrgScopedRepoPath(slug, orgSlugProbeEcosystem) // chainproxy/repository/@<slug>/npm
-
-	// If the configured server already ends in the routing prefix (a
-	// self-hosted URL like https://host/chainproxy), don't double it.
-	if u, err := url.Parse(server); err == nil && u.Path != "" {
-		trimmedPrefix := strings.TrimPrefix(repoPath, "chainproxy/")
-		if strings.HasSuffix(strings.TrimRight(u.Path, "/"), "/chainproxy") || strings.HasSuffix(strings.TrimRight(u.Path, "/"), "chainproxy") {
-			return server + "/" + trimmedPrefix + "/"
-		}
-	}
-	return server + "/" + repoPath + "/"
+	base := normalizeHookServerURL(server)
+	return base + "/" + hook.OrgScopedRepoPath(slug, orgSlugProbeEcosystem) + "/"
 }
 
 // printOrgSlugResult renders the human-readable verdict. The LOUD wrong-slug
@@ -331,6 +359,22 @@ func printOrgSlugResult(cmd *cobra.Command, res orgSlugResult) {
 		fmt.Fprintln(errOut, "             chainsaw install-hook <manager> --org <your-org-slug>")
 		fmt.Fprintln(errOut, "        2. Re-run `chainsaw doctor` to confirm the slug now routes.")
 		fmt.Fprintf(errOut, "      See https://docs.chain305.com/errors/%s\n", firstNonEmpty(res.ErrorCode, "CHW-4314"))
+	case orgSlugUnrouted:
+		fmt.Fprintln(errOut, "")
+		fmt.Fprintf(errOut, "FAIL  org slug: REPOSITORY PATH NOT SERVED — the install guard did NOT fire.\n")
+		fmt.Fprintf(errOut, "      %q returned HTTP 404 with no chainsaw error envelope, so\n", res.ProbeURL)
+		fmt.Fprintln(errOut, "      nothing is mounted there. Every install through this config 4xx's,")
+		fmt.Fprintln(errOut, "      the client falls back to the public registry, and NOTHING is")
+		fmt.Fprintln(errOut, "      checked. A malicious or typosquatted package would sail through.")
+		fmt.Fprintln(errOut, "      The org slug itself may be fine — this is about the URL's base path.")
+		fmt.Fprintln(errOut, "      Fix:")
+		fmt.Fprintln(errOut, "        1. Point --server at the base URL your proxy is actually served")
+		fmt.Fprintln(errOut, "           on, INCLUDING any edge prefix. Behind an nginx/Traefik mount:")
+		fmt.Fprintln(errOut, "             chainsaw --server https://chain305.com/chainproxy doctor")
+		fmt.Fprintln(errOut, "           Served at the root (docker compose, port-forward, bare binary):")
+		fmt.Fprintln(errOut, "             chainsaw --server http://localhost:8787 doctor")
+		fmt.Fprintln(errOut, "        2. Re-run `chainsaw install-hook <manager>` so the wired config")
+		fmt.Fprintln(errOut, "           picks up the corrected base, then `chainsaw doctor` to confirm.")
 	case orgSlugSkipped:
 		fmt.Fprintf(out, "org slug: skipped — %s\n", res.Reason)
 	case orgSlugNetErr:

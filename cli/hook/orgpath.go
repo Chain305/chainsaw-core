@@ -7,8 +7,9 @@
 // legacy URLs without the org slug are disabled on this instance").
 //
 // The server-side renderer in internal/server/server_configsnippets.go
-// applies the same rule. This file mirrors that helper for the CLI so
-// `chainsaw install-hook <ecosystem>` produces URLs the proxy accepts.
+// applies the same rule, and this file is its CLI mirror — deliberately
+// down to the returned string, so `chainsaw install-hook <ecosystem>` and
+// the dashboard's "Save this secret now" snippet emit the same URL.
 // See docs/smoke-test-appsec-journey.md (BUG-A6, BUG-14) for the full
 // failure recipe and the rationale for the fail-closed placeholder.
 package hook
@@ -38,26 +39,35 @@ var orgSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 // a loud error instead of a silently-broken install months later.
 const placeholderOrgSlug = "your-org-slug"
 
-// OrgScopedRepoPath returns "chainproxy/repository/@<orgSlug>/<ecosystem>"
-// — the path segment every install-hook template splices in between the
-// host base and the ecosystem-specific suffix (e.g. "/simple/" for pip,
+// OrgScopedRepoPath returns "repository/@<orgSlug>/<ecosystem>" — the path
+// segment every install-hook template splices in between the server base
+// URL and the ecosystem-specific suffix (e.g. "/simple/" for pip,
 // "/v3/index.json" for nuget, "/" for npm/yarn/bun/cargo).
 //
-// The `chainproxy/` prefix matches the production reverse-proxy mount —
-// nginx routes chain305.com/chainproxy/* to the proxy backend, and the
-// dashboard's "Save this secret now" page (POST /api/clients) emits
-// snippets in the exact same `chainproxy/repository/@<slug>/<ecosystem>/`
-// shape. The CLI's `chainsaw --server https://chain305.com install-hook
-// <ecosystem>` MUST produce the same URL or every install fails with
-// HTTP 400 / 404 because the bare /repository/... path is unrouted at
-// the edge.
+// NO deployment prefix is baked in here, and that is load-bearing (B5).
+// `/chainproxy` is an OPTIONAL edge mount: nginx/Traefik route
+// chain305.com/chainproxy/* to the proxy and STRIP the prefix before
+// forwarding (docs/dockerized/README.md, docs/install-k3s-helm.md). The
+// server itself routes on the literal `/repository/` prefix and has no
+// StripPrefix anywhere — so a hardcoded `chainproxy/` here 404s on every
+// root-mounted deployment: the documented `docker compose up` quick-start,
+// a bare `chainsaw-proxy -listen :8787`, a `kubectl port-forward`.
+//
+// The deployment's base path, when it has one, therefore comes from the
+// CONFIGURED SERVER URL's own path (`--server https://chain305.com/chainproxy`
+// → `/chainproxy`; `--server http://localhost:8787` → none). Callers
+// concatenate `<serverURL>/<this>/`. That is exactly the server's own model:
+// internal/server/server_configsnippets.go's orgScopedRepoPath is likewise
+// prefix-free and its callers prepend requestBaseURL(r), which contributes a
+// base path only when the request actually arrived through one.
 //
 // Empty orgSlug falls back to placeholderOrgSlug rather than emitting
 // the legacy slug-less form, which the proxy rejects with CHW-4314.
 //
 // Docker registry mirroring deliberately does NOT use this helper —
-// docker login takes a bare host (no path), and the proxy mounts the
-// docker registry under a different routing rule. See docker.go.
+// dockerd's registry-mirrors entries must be a bare scheme://host with no
+// path at all, and the proxy mounts the docker registry under a different
+// routing rule. See docker.go.
 // OrgScopedRepoPath is the lenient, exported form kept for callers that have
 // no error channel (doctor's org-slug probe). An unusable slug degrades to
 // the visible placeholder rather than being spliced in raw.
@@ -84,5 +94,5 @@ func orgScopedRepoPath(orgSlug, ecosystem string) (string, error) {
 	if !orgSlugPattern.MatchString(slug) {
 		return "", fmt.Errorf("invalid org slug %q: expected 1-63 characters matching [a-z0-9][a-z0-9-]* (e.g. acme-corp)", orgSlug)
 	}
-	return "chainproxy/repository/@" + slug + "/" + ecosystem, nil
+	return "repository/@" + slug + "/" + ecosystem, nil
 }

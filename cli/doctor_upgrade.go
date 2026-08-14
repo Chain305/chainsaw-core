@@ -75,9 +75,13 @@ var openDBProberForDoctor = func(dsn string) (doctor.DBProber, func(), error) {
 // runDoctorUpgradeCheck is the RunE target when --upgrade-check or
 // --fix is set. It composes doctor.Options from the command flags,
 // invokes doctor.Run, renders the scorecard, applies fixes (when
-// asked), then exits with the documented code. Because it calls
-// os.Exit, tests substitute doctorExitOverride to observe the code
-// without actually exiting.
+// asked), then RETURNS the documented code as an &ExitCodeError.
+//
+// doctorExitOverride predates that: the failing path used to end in os.Exit,
+// which a test could not observe without forking a process, so tests
+// substituted this hook. It is kept because the existing suite asserts through
+// it, but it is no longer load-bearing — with it nil, the exit code is
+// observable as a returned error (bare_exit_removal_test.go).
 var doctorExitOverride func(int)
 
 // doctorPortsOverride lets tests inject the TCP port list for the
@@ -161,8 +165,16 @@ func runDoctorUpgradeCheck(cmd *cobra.Command, _ []string) error {
 			doctorExitOverride(exit)
 			return nil
 		}
-		flushTelemetry() // before any os.Exit in the caller drops the batch
-		os.Exit(exit)
+		// Y3/Y4 — returned, not os.Exit'd. The bare exit skipped Execute()'s
+		// markSessionEnd + flushTelemetry, so a failing upgrade-check dropped
+		// its whole batch — including cli.session.completed and its exit_code.
+		// The explicit flushTelemetry() that used to guard against that is gone
+		// with the exit it guarded: Execute() flushes on every path now, and a
+		// second flush here would emit the batch BEFORE markSessionEnd queues
+		// the session event. report.ExitCode() is unchanged — ExitCodeError
+		// carries arbitrary codes — and Err stays nil so renderError adds
+		// nothing to the scorecard already printed.
+		return &ExitCodeError{Code: exit}
 	}
 	return nil
 }

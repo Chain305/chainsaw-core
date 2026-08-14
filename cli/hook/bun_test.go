@@ -113,17 +113,17 @@ func TestBunWireWithServerEmitsNpmrcShape(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	body := string(data)
-	wantRegistry := "registry=https://proxy.example.com/chainproxy/repository/@acme/npmjs/"
+	wantRegistry := "registry=https://proxy.example.com/repository/@acme/npmjs/"
 	if !strings.Contains(body, wantRegistry) {
 		t.Errorf("missing registry line %q in body:\n%s", wantRegistry, body)
 	}
 	// :_auth line on the no-creds path is a literal placeholder; when no
 	// creds passed we get "<base64(client_id:secret)>" — but the host/path
 	// prefix MUST be present.
-	if !strings.Contains(body, "//proxy.example.com/chainproxy/repository/@acme/npmjs/:_auth=") {
+	if !strings.Contains(body, "//proxy.example.com/repository/@acme/npmjs/:_auth=") {
 		t.Errorf("missing :_auth line (host/path prefix):\n%s", body)
 	}
-	if !strings.Contains(body, "//proxy.example.com/chainproxy/repository/@acme/npmjs/:always-auth=true") {
+	if !strings.Contains(body, "//proxy.example.com/repository/@acme/npmjs/:always-auth=true") {
 		t.Errorf("missing :always-auth=true line:\n%s", body)
 	}
 	// No TOML — bun ignores it.

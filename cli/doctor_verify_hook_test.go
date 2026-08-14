@@ -52,22 +52,36 @@ func TestVerifyHookKnowsAllInstallHookManagers(t *testing.T) {
 	}
 }
 
-// TestVerifyHook_PassWhenSentinelInAuditLog covers the happy path: the
-// audit API returns a row matching the sentinel coordinate → PASS.
+// TestVerifyHook_PassWhenSentinelInAuditLog covers the happy path against
+// the row the REAL server writes for a sentinel (B6).
+//
+// This fixture used to answer with `requested_package: <sentinel>`, which
+// pinned a contract the shipped proxy cannot satisfy: the sentinel is
+// designed not to exist, events.package_name is projected from the upstream
+// response metadata (activity.go::enrichFromResponse) and a 4xx response
+// carries no Content at all (core/proxy/facet.go), so package_name is NULL
+// on every sentinel row. Against a live stack the check therefore reported
+// "proxy never saw the sentinel — client bypassed chainsaw" for a perfectly
+// wired client whose traffic provably reached the proxy. The receipt has to
+// be verified on a field the row actually carries: logical_path.
 func TestVerifyHook_PassWhenSentinelInAuditLog(t *testing.T) {
-	var gotPackageName string
+	var gotPackageName, gotLogicalPath string
 	srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/events" {
 			http.NotFound(w, r)
 			return
 		}
 		gotPackageName = r.URL.Query().Get("package_name")
+		gotLogicalPath = r.URL.Query().Get("logical_path")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"total": 1,
 			"events": []map[string]any{
 				{
-					"requested_package": gotPackageName,
+					// Exactly what the proxy records for a 404'd sentinel:
+					// the path names it, the package projection is empty.
+					"requested_package": "",
+					"logical_path":      "/" + gotLogicalPath,
 					"event_type":        "install",
 				},
 			},
@@ -85,8 +99,76 @@ func TestVerifyHook_PassWhenSentinelInAuditLog(t *testing.T) {
 	if res.matchCount != 1 {
 		t.Errorf("matchCount = %d, want 1", res.matchCount)
 	}
+	// Both filters must be sent: logical_path is what matches a 404'd
+	// sentinel, package_name keeps a real-coordinate hit counting.
+	if !strings.HasPrefix(gotLogicalPath, "chainsaw-verify-") {
+		t.Errorf("server got logical_path = %q, want chainsaw-verify- prefix", gotLogicalPath)
+	}
 	if !strings.HasPrefix(gotPackageName, "chainsaw-verify-") {
 		t.Errorf("server got package_name = %q, want chainsaw-verify- prefix", gotPackageName)
+	}
+}
+
+// TestVerifyHook_PassOnLogicalPathWithEmptyPackageName is the narrow,
+// explicit statement of the B6 contract: a row whose package_name is EMPTY
+// and whose logical_path names the sentinel is a PASS. That is the ONLY
+// shape the shipped server produces for a sentinel, so if this ever fails
+// verify-hook is back to being unpassable in production.
+func TestVerifyHook_PassOnLogicalPathWithEmptyPackageName(t *testing.T) {
+	const sentinel = "chainsaw-verify-0badc0de-1700000000"
+	srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/events" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total": 1,
+			"events": []map[string]any{
+				{
+					"requested_package": "",
+					"logical_path":      "/repository/@acme/npmjs/" + sentinel,
+					"event_type":        "install",
+				},
+			},
+		})
+	})
+	withConfiguredServer(t, srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res := pollAuditReceipt(ctx, sentinel)
+
+	if res.outcome != verifyPass {
+		t.Fatalf("outcome = %s, want PASS — a receipt on logical_path with a NULL package_name is the shipped server's sentinel row (reason=%s)", res.outcome, res.degradedReason)
+	}
+}
+
+// TestVerifyHook_UnrelatedLogicalPathIsNotAReceipt is the other half of the
+// B6 contract: widening the match must not weaken it. A row that names some
+// other package in its path is not a receipt, and `total` must not rescue
+// it — that is the D5 rule (the client-side match is the verdict, total is
+// count-only) which a version-skewed proxy or a query-stripping gateway
+// would otherwise defeat.
+func TestVerifyHook_UnrelatedLogicalPathIsNotAReceipt(t *testing.T) {
+	srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total": 4213, // server ignored the filter: unfiltered org count
+			"events": []map[string]any{
+				{"requested_package": "lodash", "logical_path": "/repository/@acme/npmjs/lodash", "event_type": "install"},
+				{"requested_package": "", "logical_path": "/repository/@acme/npmjs/express", "event_type": "install"},
+			},
+		})
+	})
+	withConfiguredServer(t, srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	res := pollAuditReceipt(ctx, "chainsaw-verify-11111111-1700000000")
+
+	if res.outcome != verifyFail {
+		t.Fatalf("outcome = %s, want FAIL — no row names the sentinel, and total must never certify a bypass", res.outcome)
 	}
 }
 

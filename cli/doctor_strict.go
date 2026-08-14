@@ -230,9 +230,15 @@ func runDoctorStrict(cmd *cobra.Command, _ []string) error {
 		printStrictReport(cmd, report, exit)
 	}
 
+	// Y3/Y4 — returned, not os.Exit'd. The manual flushTelemetry() that used to
+	// sit here was a patch over the real problem: os.Exit inside a RunE never
+	// returns to Execute(), so markSessionEnd never ran and the
+	// cli.session.completed event carrying exit_code / error_class was never
+	// QUEUED — flushing early could not save an event that did not exist yet.
+	// Returning the code lets Execute() do both, in order. doctorExitDrift and
+	// friends keep their values.
 	if exit != doctorExitOK {
-		flushTelemetry() // before any os.Exit in the caller drops the batch
-		os.Exit(exit)
+		return &ExitCodeError{Code: exit}
 	}
 	return nil
 }

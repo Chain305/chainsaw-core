@@ -58,7 +58,7 @@ func TestUndo_ConfirmedUndoIsPinnedToPreviewedAction(t *testing.T) {
 				DryRun:     true,
 				ActionType: "policy.update",
 				ActionID:   "act-42",
-				Message:    "Would revert policy.update on pol-1",
+				Message:    "Dry run: would undo policy.update (action act-42). Run again without dry-run to apply.",
 			})
 			return
 		}

@@ -4,9 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/chain305/chainsaw-core/cli/hook"
 )
 
 // TestProbeOrgSlugClassification is the core table for WS2 #10: the
@@ -49,10 +50,25 @@ func TestProbeOrgSlugClassification(t *testing.T) {
 			wantOutcome: orgSlugOK,
 		},
 		{
-			name:        "generic 404 with no CHW-1303 (nonexistent package on a CORRECT slug) -> ok, NOT wrong-slug",
+			// B5: a 404 is never OK. The probe names no package — it asks
+			// for the repository BASE path — so a proxy serving this
+			// deployment answers 401/403 or a structured CHW envelope.
+			// Classifying 404 as OK is exactly how doctor reported
+			// "org-scoped repository path accepted; the guard would fire
+			// for this slug" against a completely dead URL.
+			//
+			// It is still not WRONG_SLUG: the slug may be perfectly
+			// correct and the base path wrong, and the remediation differs.
+			name:        "generic 404 with no CHW-1303 -> unrouted, NOT ok and NOT wrong-slug",
 			status:      http.StatusNotFound,
 			body:        `{"code":"CHW-4300","message":"package not found"}`,
-			wantOutcome: orgSlugOK,
+			wantOutcome: orgSlugUnrouted,
+		},
+		{
+			name:        "bare 404 from an unmatched route -> unrouted",
+			status:      http.StatusNotFound,
+			body:        "404 page not found\n",
+			wantOutcome: orgSlugUnrouted,
 		},
 		{
 			name:        "bare 400 with no CHW code -> ok, NOT wrong-slug (no false positive on ambiguous 400)",
@@ -66,7 +82,7 @@ func TestProbeOrgSlugClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// The probe must hit the org-scoped repo base path.
-				if !strings.Contains(r.URL.Path, "/repository/@acme-corp/npm") {
+				if r.URL.Path != "/repository/@acme-corp/npmjs/" {
 					t.Errorf("probe hit unexpected path %q", r.URL.Path)
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -169,21 +185,37 @@ func TestClassifyOrgSlugRejection(t *testing.T) {
 }
 
 // TestOrgSlugProbeURLShape verifies the probe targets the byte-identical
-// org-scoped path a wired client would use, and does not double the
-// /chainproxy prefix for a self-hosted URL that already carries it.
+// org-scoped path a wired client would use — which means it takes its base
+// path from the configured server URL and invents nothing (B5). If the probe
+// and install-hook can disagree about the base path, doctor can pass green
+// while every install 404s, which is exactly what happened.
 func TestOrgSlugProbeURLShape(t *testing.T) {
 	cases := []struct {
 		server string
 		slug   string
 		want   string
 	}{
-		{"https://chain305.com", "acme", "https://chain305.com/chainproxy/repository/@acme/npm/"},
-		{"https://chain305.com/", "acme", "https://chain305.com/chainproxy/repository/@acme/npm/"},
-		{"https://host/chainproxy", "acme", "https://host/chainproxy/repository/@acme/npm/"},
+		{"https://chain305.com/chainproxy", "acme", "https://chain305.com/chainproxy/repository/@acme/npmjs/"},
+		{"https://chain305.com/chainproxy/", "acme", "https://chain305.com/chainproxy/repository/@acme/npmjs/"},
+		{"http://127.0.0.1:8787", "acme", "http://127.0.0.1:8787/repository/@acme/npmjs/"},
+		{"http://127.0.0.1:8787/", "acme", "http://127.0.0.1:8787/repository/@acme/npmjs/"},
 	}
 	for _, c := range cases {
 		if got := orgSlugProbeURL(c.server, c.slug); got != c.want {
 			t.Errorf("orgSlugProbeURL(%q,%q) = %q, want %q", c.server, c.slug, got, c.want)
+		}
+	}
+}
+
+// TestOrgSlugProbeURLMatchesInstallHook is the anti-drift pin behind the
+// test above: whatever install-hook writes into a manager config is what
+// doctor must probe. Compares against the same two helpers the npm renderer
+// composes, for both deployment shapes.
+func TestOrgSlugProbeURLMatchesInstallHook(t *testing.T) {
+	for _, server := range []string{"https://chain305.com/chainproxy", "http://127.0.0.1:8787"} {
+		wired := normalizeHookServerURL(server) + "/" + hook.OrgScopedRepoPath("acme", orgSlugProbeEcosystem) + "/"
+		if got := orgSlugProbeURL(server, "acme"); got != wired {
+			t.Errorf("probe URL %q diverges from the wired registry URL %q for server %q", got, wired, server)
 		}
 	}
 }

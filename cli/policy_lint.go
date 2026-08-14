@@ -150,7 +150,14 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	out := cmd.OutOrStdout()
+	// S9b — honor --output for BOTH formats. `policy lint` shadows --format
+	// with its own text|json vocabulary, which exempts it from root.go's
+	// --output validator on the stated grounds that a --format-shadowing
+	// command routes its result through a sink honouring --output. It did not:
+	// both branches wrote to cmd.OutOrStdout(), so `policy lint --output R`
+	// created no file and printed the findings to stdout. cmd.OutOrStdout()
+	// stays the no-file fallback so tests capturing via cmd.SetOut still work.
+	out := outWriterOr(cmd, cmd.OutOrStdout())
 	switch strings.ToLower(format) {
 	case "json":
 		enc := json.NewEncoder(out)
@@ -162,11 +169,19 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 		printLintText(out, report)
 	}
 
+	// Y3/Y4 — returned, not os.Exit'd. The two bare exits left the process
+	// before Execute() reached markSessionEnd + flushTelemetry, so the only
+	// two outcomes worth recording (findings present) dropped the whole
+	// telemetry batch including cli.session.completed and its exit_code. The
+	// NUMBERS are unchanged — ExitCodeError carries arbitrary codes, and
+	// `policy lint --help` publishes "0 clean, 1 warnings only, 2 any errors".
+	// Err stays nil so renderError adds nothing to the findings list already
+	// printed.
 	switch {
 	case report.Errors > 0:
-		os.Exit(lintExitError)
+		return &ExitCodeError{Code: lintExitError}
 	case report.Warnings > 0:
-		os.Exit(lintExitWarning)
+		return &ExitCodeError{Code: lintExitWarning}
 	}
 	return nil
 }

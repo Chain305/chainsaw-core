@@ -58,17 +58,61 @@ var authLogoutCmd = &cobra.Command{
 			return fmt.Errorf("clearing credentials: %w", err)
 		}
 		emit("cli.auth.logout", nil)
+		// Y8: the clears above only reach the credstore and the YAML — tiers 3
+		// and 4 of cfgToken (root.go). An exported CHAINSAW_TOKEN (tier 2) or a
+		// --token flag (tier 1) outranks both, so `auth status` immediately
+		// after this "successful" logout still reports Authenticated. Say so,
+		// naming the source, the way `gh auth logout` does. rc stays 0 and the
+		// deletion stays unconditional: the stored credential really is gone.
+		override := activeTokenOverride(cmd)
 		// X8: `auth logout --json` printed "OK: Logged out" — human prose on
 		// stdout at rc=0, straight into whatever was parsing it.
 		if useJSON(cmd) {
 			return PrintJSONTo(cmd, map[string]any{
-				"logged_out": true,
-				"server":     server,
+				"logged_out":       true,
+				"server":           server,
+				"env_token_active": override != "",
 			})
 		}
 		printSuccess(cmd.OutOrStdout(), cmd, "Logged out")
+		if override != "" {
+			warnTokenOverrideRemains(cmd.ErrOrStderr(), override)
+		}
 		return nil
 	},
+}
+
+// activeTokenOverride names the credential source that still outranks the
+// credstore entry and the YAML `token:` key that `auth logout` clears, or ""
+// when nothing does. Mirrors cfgToken's precedence (root.go): --token first,
+// then CHAINSAW_TOKEN. Read from the flag/env directly rather than via
+// cfgToken() so a stale viper value from tiers 3/4 can't be mistaken for one
+// of these two.
+func activeTokenOverride(cmd *cobra.Command) string {
+	if cmd != nil {
+		// --token is a root persistent flag, merged into the subcommand's set
+		// by cobra at parse time; Lookup returns nil in unit tests that don't
+		// register it, which is fine.
+		if f := cmd.Flags().Lookup("token"); f != nil && strings.TrimSpace(f.Value.String()) != "" {
+			return "--token"
+		}
+	}
+	if strings.TrimSpace(os.Getenv("CHAINSAW_TOKEN")) != "" {
+		return "CHAINSAW_TOKEN"
+	}
+	return ""
+}
+
+// warnTokenOverrideRemains explains that the session is still live despite the
+// logout, and how to finish the job. Goes to stderr so stdout stays parseable.
+func warnTokenOverrideRemains(w io.Writer, source string) {
+	if source == "CHAINSAW_TOKEN" {
+		fmt.Fprintln(w, "Warning: CHAINSAW_TOKEN is still set in this environment, so commands remain authenticated.")
+		fmt.Fprintln(w, "  Saved credentials were removed. To finish signing out:  unset CHAINSAW_TOKEN")
+		return
+	}
+	fmt.Fprintln(w, "Warning: --token was passed on this command line, so it still overrides the cleared credentials.")
+	fmt.Fprintln(w, "  Saved credentials were removed. Re-run without --token to see the signed-out state.")
 }
 
 func init() {

@@ -28,9 +28,19 @@ package cli
 //       harden quorum is CHW-4910; the risk-weights gate sits in the
 //       same simulate-then-confirm family).
 //
-// Exit codes:
-//   0 success
-//   2 stale or missing simulate, usage error, transport error
+// Exit codes: the shared contract in exitcodes.go, no command-specific values.
+//
+//	0 success
+//	2 operational failure — transport error, malformed response, a stale or
+//	  missing simulate (the server's CHW-4830)
+//	3 configuration or authentication problem — no server configured, not
+//	  logged in, 401/403
+//	4 usage — a malformed --set pair or a missing required flag
+//
+// Y3: every one of these used to be a flat os.Exit(2) from inside the RunE,
+// which both bypassed the contract (a missing server exited 2 here and 3 from
+// `chainsaw intel health`, through the SAME errServerNotConfigured helper) and
+// dropped the telemetry batch. The failures now return.
 //
 // We deliberately keep the JSON wire shape local — same rationale as
 // internal/cli/intel.go: a server-side rename should break the CLI loud
@@ -176,8 +186,12 @@ func init() {
 		"signal weight override in the form <signalId>=<int>; repeat for multiple")
 	riskWeightsApplyCmd.Flags().StringSliceVar(&riskWeightsApplySet, "set", nil,
 		"same --set values used during preview (must match exactly)")
+	// Y7: single quotes, not backticks — pflag's UnquoteUsage would take
+	// "`risk-weights preview`" as this flag's value placeholder and render
+	// it as `--simulate-id risk-weights preview` instead of
+	// `--simulate-id string`.
 	riskWeightsApplyCmd.Flags().StringVar(&riskWeightsSimulateID, "simulate-id", "",
-		"simulate_id returned by a fresh `risk-weights preview` run")
+		"simulate_id returned by a fresh 'risk-weights preview' run")
 
 	riskWeightsCmd.AddCommand(riskWeightsShowCmd)
 	riskWeightsCmd.AddCommand(riskWeightsPreviewCmd)
@@ -240,20 +254,27 @@ func effectiveCategoryWeights(ctx context.Context, c *v1Client) (map[string]floa
 func runRiskWeightsShow(cmd *cobra.Command, _ []string) error {
 	client, err := newV1Client(cmd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
+		// Y3 — return it untouched. newV1Client already produces the right
+		// error for each cause: errServerNotConfigured carries
+		// ExitCodeError{ExitConfigAuth} and "not authenticated" classifies as
+		// auth, so both land on 3. The old os.Exit(2) OVERWROTE that, which is
+		// why `chainsaw risk-weights show` with no server exited 2 while
+		// `chainsaw intel health` — same helper, same condition — exited 3.
+		return err
 	}
 	ctx := context.Background()
 
 	rawCat, env, err := client.doUnwrap(ctx, http.MethodGet, "/api/v1/intel/weights", nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
+		// Y3/Y4 — returned, not exited: Execute() classifies it (401/403 -> 3,
+		// network/IO -> 2) and, unlike os.Exit, still flushes telemetry.
+		return err
 	}
 	var cat riskWeightsShowData
 	if err := json.Unmarshal(rawCat, &cat); err != nil {
-		fmt.Fprintf(os.Stderr, "error: decode weights: %v\n", err)
-		os.Exit(2)
+		// A malformed body is operational: ExitOpError(2), pinned explicitly
+		// so it cannot drift if classifyCLIError's buckets change.
+		return &ExitCodeError{Code: ExitOpError, Err: fmt.Errorf("decode weights: %w", err)}
 	}
 
 	// Per-signal overrides live behind /api/risk/overrides — not behind
@@ -340,15 +361,21 @@ func runRiskWeightsPreview(cmd *cobra.Command, _ []string) error {
 	}
 	client, err := newV1Client(cmd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
+		// Y3 — return it untouched. newV1Client already produces the right
+		// error for each cause: errServerNotConfigured carries
+		// ExitCodeError{ExitConfigAuth} and "not authenticated" classifies as
+		// auth, so both land on 3. The old os.Exit(2) OVERWROTE that, which is
+		// why `chainsaw risk-weights show` with no server exited 2 while
+		// `chainsaw intel health` — same helper, same condition — exited 3.
+		return err
 	}
 	ctx := context.Background()
 
 	cat, err := effectiveCategoryWeights(ctx, client)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
+		// Y3/Y4 — returned, not exited: Execute() classifies it (401/403 -> 3,
+		// network/IO -> 2) and, unlike os.Exit, still flushes telemetry.
+		return err
 	}
 	body := riskWeightsSimulateReq{
 		Weights:               cat,
@@ -358,8 +385,9 @@ func runRiskWeightsPreview(cmd *cobra.Command, _ []string) error {
 	// server writes the simulate response directly. Use APIClient.do.
 	var resp riskWeightsSimulateResp
 	if err := client.api.do(http.MethodPost, "/api/v1/intel/weights/simulate", body, &resp); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
+		// Y3/Y4 — returned, not exited: Execute() classifies it (401/403 -> 3,
+		// network/IO -> 2) and, unlike os.Exit, still flushes telemetry.
+		return err
 	}
 
 	if useJSON(cmd) {
@@ -458,8 +486,13 @@ func runRiskWeightsApply(cmd *cobra.Command, _ []string) error {
 	}
 	client, err := newV1Client(cmd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
+		// Y3 — return it untouched. newV1Client already produces the right
+		// error for each cause: errServerNotConfigured carries
+		// ExitCodeError{ExitConfigAuth} and "not authenticated" classifies as
+		// auth, so both land on 3. The old os.Exit(2) OVERWROTE that, which is
+		// why `chainsaw risk-weights show` with no server exited 2 while
+		// `chainsaw intel health` — same helper, same condition — exited 3.
+		return err
 	}
 	ctx := context.Background()
 
@@ -468,8 +501,9 @@ func runRiskWeightsApply(cmd *cobra.Command, _ []string) error {
 	// map too — sending anything else would fail the staleness check.
 	cat, err := effectiveCategoryWeights(ctx, client)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
+		// Y3/Y4 — returned, not exited: Execute() classifies it (401/403 -> 3,
+		// network/IO -> 2) and, unlike os.Exit, still flushes telemetry.
+		return err
 	}
 	body := riskWeightsSimulateReq{
 		Weights:               cat,

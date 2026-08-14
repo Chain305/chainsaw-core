@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -94,6 +93,25 @@ func resolveReportFormat(cmd *cobra.Command) string {
 	return format
 }
 
+// reportTabWriter returns the tabwriter every `report` subcommand renders its
+// TEXT result through.
+//
+// S9b — all four subcommands wrote the text table to a `tabwriter.NewWriter(
+// os.Stdout, …)`, so --output was honoured on the json path and silently
+// dropped on the text path: `report exposure --format text --output R` exited
+// 0, created no file, and put 8,405 bytes on stdout. root.go's
+// formatIsMachineReadable explicitly lets `report {exposure,multiversion,
+// provenance,sla} --format text --output X` through the validator on the
+// grounds that this family routes its result through a sink that honours
+// --output — this is the sink that makes that true.
+//
+// Routing through cmd.OutOrStdout() (not raw os.Stdout) additionally makes the
+// text path honour cobra's SetOut, which is how every test in this package
+// captures output.
+func reportTabWriter(cmd *cobra.Command) *tabwriter.Writer {
+	return tabwriter.NewWriter(outWriterOr(cmd, cmd.OutOrStdout()), 0, 0, 2, ' ', 0)
+}
+
 type reportMultiVersionRow struct {
 	Version string   `json:"version"`
 	Repos   []string `json:"repos"`
@@ -145,7 +163,7 @@ func runReportMultiVersion(cmd *cobra.Command, _ []string) error {
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := reportTabWriter(cmd)
 	fmt.Fprintln(tw, "ECOSYSTEM\tPACKAGE\tVERSIONS\tREPOS")
 	for _, e := range env.Data {
 		repoSet := make(map[string]struct{})
@@ -208,7 +226,7 @@ func runReportProvenance(cmd *cobra.Command, _ []string) error {
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := reportTabWriter(cmd)
 	fmt.Fprintln(tw, "ECOSYSTEM\tINSTALLS\tWITH PROVENANCE\tCOVERAGE")
 	for _, e := range env.Data {
 		fmt.Fprintf(tw, "%s\t%d\t%d\t%.1f%%\n",
@@ -273,7 +291,7 @@ func runReportExposure(cmd *cobra.Command, _ []string) error {
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := reportTabWriter(cmd)
 	fmt.Fprintln(tw, "AT\tECOSYSTEM\tPACKAGE\tVERSION\tREPOSITORY")
 	for _, e := range env.Data {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
@@ -331,7 +349,7 @@ func runReportSLA(cmd *cobra.Command, _ []string) error {
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := reportTabWriter(cmd)
 	fmt.Fprintln(tw, "OWNERS\tRESOLVED\tMEAN\tMEDIAN")
 	for _, e := range env.Data {
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",

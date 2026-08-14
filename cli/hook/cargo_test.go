@@ -143,7 +143,7 @@ func TestCargoWireProducesQuotedTOML(t *testing.T) {
 	// TOML basic-string literal.
 	// BUG-A6: URL must be org-scoped; missing OrgSlug falls back to the
 	// "your-org-slug" placeholder so the snippet fails closed.
-	want := `registry = "sparse+https://proxy.example.com/chainproxy/repository/@your-org-slug/crates-io/"`
+	want := `registry = "sparse+https://proxy.example.com/repository/@your-org-slug/crates-io/"`
 	if !strings.Contains(string(data), want) {
 		t.Errorf("config.toml missing quoted registry line %q; got:\n%s", want, data)
 	}

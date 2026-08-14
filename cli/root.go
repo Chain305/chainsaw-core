@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,6 +55,76 @@ Then: ` + "`chainsaw setup`" + ` for an interactive first-time wizard, or
 // case-insensitive; resolveFormat already folds JSON/Json to "json".
 var globalResultFormats = map[string]bool{"table": true, "json": true}
 
+// extraCommandFormats lists the formats a command accepts ON TOP of the
+// global table|json vocabulary, for commands that EXTEND the root --format
+// inside their RunE instead of shadowing it with a local flag.
+//
+// B3 — `scan` and `pr-scan` both advertise sarif in --help and both
+// implement it (writeScanSARIF / writePRScanSARIF), but neither declares a
+// local --format, so ownsGlobalFlag reports them as owning the root's flag
+// and the table|json check above rejected the very value the help text
+// promises. `chainsaw scan lodash@4.17.21 --format sarif` exited 4 with
+// "invalid --format" from v0.20.0 onward — a regression against v0.19.9,
+// where the emitter was reachable.
+//
+// The fix is deliberately an ALLOWLIST rather than a local --format flag on
+// those two commands: a local flag makes ownsGlobalFlag false, which opts
+// the command out of ALL validation here, so `chainsaw scan --format bogus`
+// would silently render a table at rc=0 again — the exact X10 defect this
+// validator exists to close. Keys are cmd.CommandPath(); values are folded
+// through strings.ToLower like the global set.
+var extraCommandFormats = map[string]map[string]bool{
+	"chainsaw scan":    {"sarif": true}, // emitted by writeScanSARIF, core/cli/scan.go
+	"chainsaw pr-scan": {"sarif": true}, // emitted by writePRScanSARIF, core/cli/pr_scan.go
+}
+
+// supportedFormatsFor renders the accepted --format vocabulary for a command
+// (the global set plus any per-command extras) for use in the error message,
+// so a user who mistypes `--format sarf` on `scan` is told sarif is legal.
+func supportedFormatsFor(cmd *cobra.Command) string {
+	// Stable, human order: the two globals first, then the extras sorted.
+	out := []string{"table", "json"}
+	var extra []string
+	for v := range extraCommandFormats[cmd.CommandPath()] {
+		extra = append(extra, v)
+	}
+	sort.Strings(extra)
+	return strings.Join(append(out, extra...), ", ")
+}
+
+// formatIsMachineReadable reports whether the RESOLVED --format for this
+// command yields a machine-readable document that --output can meaningfully
+// redirect to a file.
+//
+// B3 (second branch) — this used to be `useJSON(cmd)`, i.e. "json or
+// nothing". That silently killed --output for EVERY other machine format,
+// including on the eleven commands that shadow --format with vocabularies of
+// their own. Verbatim-published invocations that stopped working:
+//
+//	chainsaw scan-actions . --format sarif --output chainsaw.sarif
+//	chainsaw sbom export --format cyclonedx --output sbom.json
+//	chainsaw audit export --format csv --output audit.csv
+//	chainsaw policy export --format yaml --output policy.yaml
+//
+// A command that shadows --format owns a vocabulary this file cannot
+// validate, and every one of those commands writes its result through a sink
+// that honours --output (outWriter / outWriterOr), so the refusal is skipped
+// for them wholesale — including their human-ish `text` format, which
+// `report {exposure,multiversion,provenance,sla} --format text --output X`
+// documents. What stays refused is the case the refusal was written for: a
+// command on the GLOBAL vocabulary rendering the human table, whose
+// renderers write to os.Stdout directly and take no sink.
+func formatIsMachineReadable(cmd *cobra.Command) bool {
+	if useJSON(cmd) {
+		return true
+	}
+	if !ownsGlobalFlag(cmd, "format") {
+		return true
+	}
+	f, _ := cmd.Flags().GetString("format")
+	return extraCommandFormats[cmd.CommandPath()][strings.ToLower(strings.TrimSpace(f))]
+}
+
 // validateOutputFlags enforces the two contracts the global output flags
 // advertise but never checked. Both failures are ExitUsage(4) — the user
 // mistyped a flag, which is not an operational failure.
@@ -73,13 +144,20 @@ var globalResultFormats = map[string]bool{"table": true, "json": true}
 // ~15 lines; PrintTableTo can be added additively if a need ever appears.
 //
 // EXEMPTIONS — both checks are skipped for a command that declares its OWN
-// --format / --output flag. Eleven commands shadow --format (audit export,
-// policy export, policy lint, repo create, report ×4, sbom export, sbom
-// diff, scan-actions) with vocabularies spanning csv/ndjson/yaml/sarif/
-// text/cyclonedx/spdx; validating those against table|json would break
-// every one of them, and their machine formats legitimately want --output.
-// Cobra's mergePersistentFlags keeps the LOCAL flag, so the identity test
-// below (is this the root's own *pflag.Flag?) is exact.
+// --format flag (and the --output check is additionally skipped for a
+// command declaring its own --output). Eleven commands shadow --format
+// (audit export, policy export, policy lint, repo create, report ×4, sbom
+// export, sbom diff, scan-actions) with vocabularies spanning csv/ndjson/
+// yaml/sarif/text/cyclonedx/spdx; validating those against table|json would
+// break every one of them, and their machine formats legitimately want the
+// GLOBAL --output (scan-actions and the report family use it). Cobra's
+// mergePersistentFlags keeps the LOCAL flag, so the identity test below (is
+// this the root's own *pflag.Flag?) is exact.
+//
+// EXTENSIONS — a command may also accept extra formats without shadowing
+// the flag at all (scan/pr-scan and sarif). Those are declared in
+// extraCommandFormats above, which keeps them inside BOTH checks rather
+// than opting them out.
 //
 // Guard wrappers (npm/pip/go/cargo/gem) and cargo-credentials run with
 // DisableFlagParsing, so cobra never parses argv for them and every flag
@@ -93,9 +171,10 @@ func validateOutputFlags(cmd *cobra.Command) error {
 	}
 	if ownsGlobalFlag(cmd, "format") {
 		f, _ := cmd.Flags().GetString("format")
-		if f != "" && !globalResultFormats[strings.ToLower(strings.TrimSpace(f))] {
+		v := strings.ToLower(strings.TrimSpace(f))
+		if f != "" && !globalResultFormats[v] && !extraCommandFormats[cmd.CommandPath()][v] {
 			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
-				"invalid --format %q: supported values are table, json (--json is sugar for --format=json)", f)}
+				"invalid --format %q: supported values are %s (--json is sugar for --format=json)", f, supportedFormatsFor(cmd))}
 		}
 	}
 	if !ownsGlobalFlag(cmd, "output") {
@@ -105,12 +184,23 @@ func validateOutputFlags(cmd *cobra.Command) error {
 	if path == "" {
 		return nil
 	}
-	// --output only has a defined meaning for a machine-readable result.
-	// With the global --format vocabulary that means json; anything else
-	// resolves to the human table, whose renderers do not take a sink.
-	if !useJSON(cmd) {
+	// --output only has a defined meaning for a machine-readable result;
+	// the human table's renderers write to os.Stdout directly and take no
+	// sink. See formatIsMachineReadable for what counts.
+	if !formatIsMachineReadable(cmd) {
+		// Name every machine format THIS command has, not just json — on
+		// `scan` the honest answer includes sarif.
+		alt := "--format=json"
+		if extra := extraCommandFormats[cmd.CommandPath()]; len(extra) > 0 {
+			names := []string{"json"}
+			for v := range extra {
+				names = append(names, v)
+			}
+			sort.Strings(names)
+			alt = "--format=" + strings.Join(names, "|")
+		}
 		return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
-			"--output is only supported with a machine-readable format; add --json (or --format=json), or redirect stdout with `> %s`", path)}
+			"--output is only supported with a machine-readable format; add --json (or %s), or redirect stdout with `> %s`", alt, path)}
 	}
 	return nil
 }
@@ -269,6 +359,19 @@ func Execute() {
 		var coded *ExitCodeError
 		if errors.As(err, &coded) && coded.Code != 0 {
 			exitCode = coded.Code
+			// The two halves of the contract must agree. classifyCLIError
+			// reads the error STRING, so a command that states its outcome
+			// structurally — `return &ExitCodeError{Code: ExitUsage}` — lands
+			// in the "other" bucket and reports error_class="other" alongside
+			// exit_code=4. That is the same "reported two different ways"
+			// split the X3/X4 note in classifyCLIError describes. When the
+			// classifier has no opinion, take the class from the code the
+			// command actually chose.
+			if errClass == "" || errClass == "other" {
+				if c := classForExitCode(coded.Code); c != "" {
+					errClass = c
+				}
+			}
 		}
 		renderError(err)
 	}
@@ -300,6 +403,25 @@ func Execute() {
 // a plain (non-ExitCodeError) error. See the exit-code contract in
 // exitcodes.go. Operational failures land on ExitOpError(2) so they are never
 // confused with an enforcement block (ExitBlocked(1)).
+// classForExitCode is the inverse of exitCodeForClass, used only to fill in a
+// telemetry error_class that classifyCLIError could not infer from the message.
+// It deliberately covers ONLY the cross-cutting 0–4 buckets: a command-specific
+// code (>=10) means the command had its own outcome to report, and inventing a
+// generic class for it would be less informative than leaving the classifier's
+// answer alone. Returns "" when it has nothing to add.
+func classForExitCode(code int) string {
+	switch code {
+	case ExitConfigAuth:
+		return "auth"
+	case ExitUsage:
+		return "usage"
+	case ExitOpError:
+		return "other"
+	default:
+		return ""
+	}
+}
+
 func exitCodeForClass(class string) int {
 	switch class {
 	case "auth", "permission":
@@ -441,6 +563,13 @@ func classifyCLIError(err error) string {
 		strings.Contains(msg, "requires at least") ||
 		strings.Contains(msg, "requires exactly") ||
 		strings.Contains(msg, "invalid argument") ||
+		// cobra: `required flag(s) "bundle", "input" not set` — the most
+		// common argument-shape error in this CLI (14 commands declare a
+		// required flag) and the one this switch was missing. Without it
+		// `chainsaw policy gate pr` with no --bundle exited 2, telling CI
+		// "infrastructure failure" for an incomplete invocation, while
+		// `--nonexistent-flag` on the same command correctly exited 4.
+		strings.Contains(msg, "not set") && strings.Contains(msg, "required flag") ||
 		strings.Contains(msg, "flag needs an argument"):
 		// Cobra's argument-count / flag-shape errors are usage errors, not
 		// operational failures (invariant B: usage -> ExitUsage(4)).
@@ -472,7 +601,13 @@ func init() {
 	// tenancy boundary, so the FLAG is not the thing to change. The three
 	// real consumers are all local: `status` display, the `org delete`
 	// target, and a VEX document field in `sbom`.
-	rootCmd.PersistentFlags().String("org", "", "Org ID used for LOCAL purposes only (status display, `org delete` target, SBOM/VEX metadata). It is NOT sent to the server — your org is resolved from your token's identity.")
+	// Y7: the value placeholder here is pflag's, not prose. pflag's
+	// UnquoteUsage consumes the FIRST back-quoted span in a usage string as
+	// the flag's ARGUMENT NAME, so the old "`org delete` target" rendered
+	// this persistent flag as `--org org delete` on all 143 help screens.
+	// Single quotes keep the prose and let pflag fall back to the type name
+	// ("--org string"). Never reintroduce backticks here.
+	rootCmd.PersistentFlags().String("org", "", "Org ID used for LOCAL purposes only (status display, 'org delete' target, SBOM/VEX metadata). It is NOT sent to the server — your org is resolved from your token's identity.")
 	rootCmd.PersistentFlags().Bool("json", false, "Output JSON instead of human-readable text (alias for --format=json)")
 	rootCmd.PersistentFlags().Bool("no-color", false, "Disable colored output")
 
