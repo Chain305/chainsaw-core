@@ -68,12 +68,11 @@ gate, no phone-home. [What is and isn't in this repo](#open-core).
 
 **Understand it** — [What Chainsaw does](#what-chainsaw-does) ·
 [Ecosystems](#ecosystems) · [Risk signals](#risk-signals) · [Policy and
-enforcement surfaces](#policy-and-enforcement-surfaces) · [Registry
-proxy](#registry-proxy) · [Air-gapped operation](#air-gapped-operation)
+enforcement](#policy-and-enforcement)
 
-**Use it** — [Quickstart](#quickstart) · [How the guard works](#how-the-guard-works)
-· [What gets checked](#what-gets-checked) · [CI](#ci) · [CLI
-reference](#cli-reference) · [Configuration](#configuration)
+**Use it** — [Quickstart](#quickstart) · [How the guard
+works](#how-the-guard-works) · [What gets checked](#what-gets-checked) ·
+[CI](#ci) · [CLI reference](#cli-reference) · [Configuration](#configuration)
 
 **Evaluate it** — [Scope and limits](#scope-and-limits) · [Measured
 performance](#measured-performance) · [False
@@ -82,6 +81,11 @@ compares](#how-it-compares)
 
 **Build on it** — [Go libraries](#go-libraries) · [Open core](#open-core) ·
 [Telemetry](#telemetry) · [Security](#security)
+
+**Full reference** — [docs/](docs/) — [CLI](docs/cli.md) ·
+[Configuration](docs/configuration.md) · [Ecosystems](docs/ecosystems.md) ·
+[Signals](docs/signals.md) · [Policy](docs/policy.md) ·
+[Measurement](docs/measurement.md)
 
 ---
 
@@ -119,84 +123,56 @@ it is in this repository; the multi-tenant server is the commercial module. See
 
 ## Ecosystems
 
-**The install guard intercepts five package managers**: npm, pip, Go, Cargo and
-RubyGems. That is the offline, no-account surface.
+Three surfaces with three different reaches. Conflating them is the easiest way
+to mis-state what Chainsaw covers, so they are listed apart.
 
-**The registry proxy and risk engine cover sixteen.** Signal coverage genuinely
-differs per ecosystem — an upstream that publishes no maintainer metadata cannot
-produce a maintainer signal — so the support matrix is a compiled-in table
-([`policy/proxy_matrix.go`](policy/proxy_matrix.go)) rather than a marketing
-claim, queryable at `GET /api/policies/support-matrix`. A policy rule whose
-condition is unsupported for an ecosystem emits a `policy.rule.skipped` audit
-event instead of silently never firing.
-
-Of 46 policy conditions:
-
-| Ecosystem | Full | Partial | Not supported |
-|---|---:|---:|---:|
-| npm | 40 | 3 | 3 |
-| PyPI | 39 | 2 | 5 |
-| RubyGems | 36 | 3 | 7 |
-| Cargo | 34 | 1 | 11 |
-| Composer | 32 | 3 | 11 |
-| Go | 29 | 1 | 16 |
-| CocoaPods | 26 | 2 | 18 |
-| NuGet | 24 | 10 | 12 |
-| Maven | 21 | 13 | 12 |
-| Swift | 21 | 8 | 17 |
-| Pub (Dart) | 19 | 11 | 16 |
-| Hugging Face | 17 | 1 | 28 |
-| Docker / OCI | 16 | 0 | 30 |
-| Yum | 14 | 1 | 31 |
-| DNF | 14 | 1 | 31 |
-| APT | 12 | 1 | 33 |
-
-**Manifest and lockfile parsing** is a third, wider surface. `pr-scan` reads
-these locally, with no server:
-
-| Ecosystem | Files |
+| Surface | Reach |
 |---|---|
-| npm | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `npm-shrinkwrap.json` |
-| pip | `requirements*.txt` (incl. `requirements-dev.txt`), `Pipfile.lock`, `poetry.lock`, `uv.lock` |
-| Go | `go.sum` |
-| Cargo | `Cargo.lock` |
-| RubyGems | `Gemfile.lock` |
+| Offline install guard | **5 package managers** — npm, pip, Go, Cargo, RubyGems |
+| Local lockfile parsing (`pr-scan`) | **12 manifest formats** across those 5 |
+| Registry proxy + risk engine | **16 ecosystems** |
 
-The parser packages ([`depparser/`](depparser), [`formats/`](formats)) go
-further and additionally handle Maven `pom.xml`, Gradle (`build.gradle`,
-`build.gradle.kts`, `gradle.lockfile`), NuGet `packages.lock.json`, Composer
-`composer.lock`, Swift `Package.resolved`, CocoaPods `Podfile.lock`, Dart
-`pubspec.lock`, plus Conda, Hex, Julia, SBT and C dependency formats. Those feed
-SBOM generation and server-side scanning rather than the local `pr-scan` path.
+The sixteen: npm, PyPI, Maven, Cargo, Composer, RubyGems, NuGet, Go, Hugging
+Face, CocoaPods, Swift, Pub (Dart), Docker/OCI, APT, Yum, DNF.
+
+Coverage across them is **not uniform** — of 46 policy conditions, npm supports
+40 fully and APT supports 12, because an upstream that publishes no maintainer
+metadata cannot produce a maintainer signal. The matrix is compiled into the
+binary ([`policy/proxy_matrix.go`](policy/proxy_matrix.go)), queryable at
+`GET /api/policies/support-matrix`, and a rule skipped for this reason emits a
+`policy.rule.skipped` audit event rather than silently never firing.
+
+**Per-ecosystem numbers and every supported manifest format:
+[docs/ecosystems.md](docs/ecosystems.md).**
 
 ---
 
 ## Risk signals
 
-**76 signals are registered** ([`risk/registry.go`](risk/registry.go)), grouped
-into five categories. The full set is evaluated server-side; the offline guard
-runs the subset that needs no external data (typosquat, known-malicious, and —
-opt-in — the byte-level checks).
+**76 signals are registered** ([`risk/registry.go`](risk/registry.go)), each
+scored with a severity and a weight rather than a bare boolean.
 
 | Category | Count | Examples |
 |---|---:|---|
-| Supply chain | 48 | known-malicious, typosquat (3 confidence tiers), install script fetches remote, manifest confusion, publisher changed, hidden Unicode, reserved-namespace violation, transitive malware, capability flags (network / shell / filesystem / eval / native code), unsafe pickle opcodes, model-card injection, unpinned GitHub Action refs |
-| Licence | 9 | copyleft, non-permissive, missing, unidentified, ambiguous classifier, SPDX exception present, changed from previous version |
+| Supply chain | 48 | known-malicious, typosquat (3 confidence tiers), install script fetches remote, manifest confusion, publisher changed, hidden Unicode, transitive malware, capability flags (network / shell / filesystem / eval), unsafe pickle opcodes, unpinned GitHub Action refs |
+| Licence | 9 | copyleft, non-permissive, missing, unidentified, ambiguous classifier, changed from previous version |
 | Vulnerability | 7 | critical / high / medium / low CVSS, EPSS high exploit probability, KEV known-exploited, fix available |
-| Quality | 6 | checksum mismatch, minified code, version anomaly, declared MCP server / agent tool, unverified MCP provenance |
+| Quality | 6 | checksum mismatch, minified code, version anomaly, declared MCP server / agent tool |
 | Maintenance | 6 | abandoned repo, no recent release, single maintainer, very new package, very low downloads |
 
-`chainsaw intel signals` lists them live from a configured server. Signals are
-scored, not merely boolean, and per-org weights can be overridden with
-`chainsaw risk-weights`.
+The full set is evaluated server-side. **The offline guard runs the subset
+needing no external data**: typosquat, known-malicious, and — opt-in — the
+byte-level checks.
+
+**All 76 with severities and weights: [docs/signals.md](docs/signals.md).**
 
 ---
 
-## Policy and enforcement surfaces
+## Policy and enforcement
 
 Policy is Rego (Open Policy Agent). One bundle, one input schema, and the same
-`Decide()` call at every surface — a rule fires wherever its input fields are
-populated.
+decision call at every surface — a rule you write once fires wherever its input
+fields are populated.
 
 | Surface | Where it runs |
 |---|---|
@@ -206,52 +182,24 @@ populated.
 | `publish` | pre-publish gate |
 | `deploy` | Kubernetes admission webhook |
 
-Evaluate a bundle locally, with no server, against a JSON fixture:
+Evaluate a bundle locally, no server, no account:
 
-```sh
-chainsaw policy gate proxy --bundle ./policies --input event.json
-chainsaw policy eval --bundle ./policies --input pr.json
+```console
+$ chainsaw policy gate proxy --bundle ./policies --input event.json
+surface=proxy action=allow violations=0 bundle=aaf8cc651c8d
 ```
 
-Exit codes are identical across surfaces, so one CI status mapping works
-everywhere. Org policy management, monitor-mode rollout (`policy flip-to-block`
-with a would-block preview), scoped exceptions with expiry, and the audit trail
-are server-backed.
+**The registry proxy** is the enforcement point a shell wrapper cannot be: it
+covers every client including CI runners and machines you do not administer, and
+cannot be routed around by calling the real binary directly. It runs in your own
+network — `proxy/`, `policy/` and `policyengine/` here are its open core.
 
-A sixth surface, `promote` (environment-to-environment promotion), exists in the
-enum but has **no production caller** — it is reserved, not shipped, and is
-listed here only because you will see it in the code.
+**Air-gapped**, intelligence ships as a Sigstore-signed bundle with per-file
+content hashes, verified before it is trusted (`chainsaw bundle verify`).
 
----
-
-## Registry proxy
-
-Chainsaw can sit in front of your registries as a pull-through proxy, which is
-the enforcement point a shell wrapper cannot be: it applies to every client,
-including CI runners and machines you do not administer, and it cannot be
-bypassed by invoking the real binary directly.
-
-The proxy speaks the 16 ecosystems above, evaluates policy on fetch, and records
-every decision. It runs in your own network — `proxy/`, `policy/` and
-`policyengine/` in this repository are the open-core of it.
-
----
-
-## Air-gapped operation
-
-The offline guard needs nothing. For a fully disconnected proxy, intelligence
-ships as a **signed bundle**: a manifest with per-file content hashes and a
-Sigstore signature, verified before it is trusted.
-
-```sh
-chainsaw bundle verify ./intel-bundle    # 0 fresh · 1 stale · 2 verification failed
-```
-
-Point the proxy at it with `CHAINSAW_INTEL_BUNDLE_PATH`. An unverified bundle
-never underwrites a corpus-membership exemption unless you explicitly pass
-`--allow-unverified`.
-
----
+Org policy management, monitor-mode rollout with would-block previews, scoped
+exceptions with expiry, Kubernetes admission and the audit trail are
+server-backed. **Details: [docs/policy.md](docs/policy.md).**
 
 ---
 
@@ -317,8 +265,9 @@ non-interactive shell**, so CI never fetches and never sends.
 
 ## How the guard works
 
-This section is about the local, offline install guard. There is no daemon, no background process, and no network call on the default
-path. `guard init` prints seven lines of shell:
+This section is about the local, offline install guard. There is no daemon, no
+background process, and no network call on the default path. `guard init` prints
+seven lines of shell:
 
 ```console
 $ chainsaw guard init zsh
@@ -354,26 +303,18 @@ shadow a PATH lookup — so `npm` (function) → `chainsaw npm` → real `npm` b
 ```
 
 **The known-malicious index.** 11 curated historic incidents are compiled into
-the binary as a floor (`event-stream`/`flatmap-stream`, `ua-parser-js`, and
+the binary as a floor (`event-stream`/`flatmap-stream`, `ua-parser-js` and
 similar). `chainsaw guard update` replaces that floor with the full OpenSSF
 malicious-packages set (~231k entries), cached on disk and read offline
 thereafter. The feed comes from
 [OpenSSF's repository](https://github.com/ossf/malicious-packages), not from us.
 
-**The typosquat detector.** Four independent methods run against an embedded
-popularity corpus — no feed, no network, and crucially no prior sighting of the
-attacking name. A brand-new typosquat is on nobody's blocklist; it is still one
-edit away from `lodash`.
+**The typosquat detector.** Four methods — `edit-distance`, `homoglyph`,
+`combosquat` and `reorder` — run against an embedded popularity corpus. No feed,
+no network, and crucially no prior sighting of the attacking name: a brand-new
+typosquat is on nobody's blocklist, but it is still one edit away from `lodash`.
 
-| Method | Catches |
-|---|---|
-| `edit-distance` | `lodahs` → `lodash`, `requsts` → `requests` |
-| `homoglyph` | Unicode lookalikes and confusables in the name |
-| `combosquat` | A popular name embedded in a longer one — `lodashn`, `pydantics` |
-| `reorder` | Transposed name segments |
-
-Corpus depth differs by ecosystem, and it matters — **npm and PyPI are deep,
-the rest are shallow**:
+Corpus depth differs by ecosystem, and it matters:
 
 | Ecosystem | Embedded corpus |
 |---|---|
@@ -387,15 +328,9 @@ Corpus membership grants an exact-match exemption, so it is a trust decision. It
 rides reviewed data — a seed PR in this repo, or a Sigstore-verified bundle —
 never a live per-client fetch, whose ranking would be attacker-gameable.
 
-**State on disk.** Three locations, all inspectable, all yours:
-
-| What | Where |
-|---|---|
-| Config, allowlist | `~/.config/chainsaw/` (Linux, honors `XDG_CONFIG_HOME`) · `%APPDATA%\Chainsaw\` (Windows) · `~/.chainsaw/` (macOS) |
-| Local allowlist | `<config>/guard_allowlist.json` |
-| Cached malicious feed | `<user cache dir>/chainsaw/known_malicious.json` |
-
-Override with `CHAINSAW_CONFIG_HOME` and `CHAINSAW_GUARD_DB`.
+Config, the local allowlist and the cached feed are three plain files you can
+read, diff and back up; paths are in
+[docs/configuration.md](docs/configuration.md#where-state-lives).
 
 ---
 
@@ -467,122 +402,33 @@ Full inputs: [`enforcement/github-actions/action.yml`](enforcement/github-action
 
 ## CLI reference
 
-49 commands. `chainsaw <command> --help` for flags on any of them. Commands
-marked **local** need no account and no server; the rest are clients for a
-Chainsaw control plane and say so if none is configured.
+49 top-level commands. Full table, marked local vs server-backed, plus global
+flags and exit codes: **[docs/cli.md](docs/cli.md)**.
 
-**Guard (install-time)** — all local
+The ones you need on day one:
 
-| Command | |
-|---|---|
-| `npm` `pip` `go` `cargo` `gem` | Run the package manager through the guard |
-| `guard init` | Print (or `--install`) the shell functions that do that automatically |
-| `guard update` | Fetch the full known-malicious set for offline use |
-| `guard allow` | Clear a false typosquat block, locally and permanently |
-| `guard status` | Local guard activity, privacy state, account sync |
-| `install-hook` / `uninstall-hook` | Wire chainsaw into a package manager's own config, or remove it |
-| `cargo-credentials` | Cargo credential-provider helper |
-
-**Target & scan**
-
-| Command | |
-|---|---|
-| `why` | **local** — explain why a package install was blocked |
-| `pr-scan` | **local** — diff manifests, flag added or upgraded dependencies |
-| `scan-repo` | **local** — scan a repo tree for chainsaw-bypass config files |
-| `scan-actions` | **local** — scan GitHub Actions workflows for supply-chain risk |
-| `sbom` | **local** for `diff`; `export` is server-backed |
-| `scan` | Scan packages for vulnerabilities |
-| `scan-remote` | Upload one lockfile, stream the aggregated report |
-
-**Policy & enforcement**
-
-| Command | |
-|---|---|
-| `policy` | Manage release policies (create, simulate, flip-to-block, import/export) |
-| `admission` | K8s admission webhook helpers |
-| `risk-weights` | Show, preview and apply per-signal risk-weight overrides |
-
-**Intelligence**
-
-| Command | |
-|---|---|
-| `intel` | Query the v1 risk-intelligence API |
-| `pkg` | Package discovery and inspection |
-| `deps` | Dependency commands |
-| `affected` | Which repos, clients and SBOMs contain a package or CVE |
-| `verify` | Verify a package's provenance attestation chain |
-
-**Audit & findings**
-
-| Command | |
-|---|---|
-| `finding` | Triage lifecycle: ack / snooze / resolve / suppress / reopen |
-| `exception` | Scoped allow-rules with expiry |
-| `audit` | Audit event commands |
-| `report` | Cross-org reports derived from install events |
-
-**Config & auth**
-
-| Command | |
-|---|---|
-| `setup` | Interactive first-time wizard |
-| `auth` | Log in / out (`--device` for headless, CI and agents) |
-| `introduce` | **local** — the mental models, personas and vocabulary every surface shares |
-| `onboard` · `onboarding` | Record and inspect onboarding state |
-| `bundle` | **local** — manage and verify the offline intelligence bundle |
-| `org` · `repo` · `team` · `token` · `codeowners` · `status` · `undo` | Control-plane management |
-
-**Debug & diagnostics**
-
-| Command | |
-|---|---|
-| `doctor` | **local** — diagnose package-manager wiring and install health |
-| `features` | **local** — edition capabilities and server entitlements |
-| `coverage` | **local** — inspect install-coverage measurements |
-| `telemetry` | **local** — inspect or control local analytics |
-| `version` · `completion` · `logs` | |
-
-**Global flags** — `--json` / `--format` · `-o, --output` · `-q, --quiet` ·
-`-v, --verbose` · `--no-color` · `--server` · `--token`
-
-`--quiet` suppresses chatter only. Results and block reasons are always emitted.
+```sh
+chainsaw guard init --install   # route npm/pip/go/cargo/gem through the guard
+chainsaw why npm <pkg>          # explain any verdict
+chainsaw guard allow <coord>    # clear a false typosquat block
+chainsaw doctor                 # what's wired, what isn't
+chainsaw pr-scan --base main    # CI: flag deps added or upgraded in a PR
+chainsaw features               # what this binary can do
+```
 
 ---
 
 ## Configuration
 
-Every guard-relevant environment variable:
+Environment variables, on-disk state locations, and the opt-in fail-closed
+coverage gate: **[docs/configuration.md](docs/configuration.md)**.
 
-| Variable | Effect |
-|---|---|
-| `CHAINSAW_OFFLINE=1` | Never touch the network. Suppresses both first-run prompts. |
-| `CHAINSAW_CONFIG_HOME` | Override the config directory (CI, Nix, portable installs). |
-| `CHAINSAW_GUARD_DB` | Override the cached known-malicious feed path. |
-| `CHAINSAW_GUARD_DEEP=1` | Enable byte-level analysis by fetching archives. **Waives the offline guarantee.** npm and cargo, pinned versions only. |
-| `CHAINSAW_GUARD_ARTIFACT_DIR` | Byte-level analysis over archives *you* stage. Stays offline. |
-| `CHAINSAW_COVERAGE_MODE` | `off` (default) · `warn` · `closed` — see below. |
-| `CHAINSAW_COVERAGE_REQUIRED` | Comma-separated data sources that must be evaluable. |
-| `CHAINSAW_TELEMETRY_DISABLED=1` | Force telemetry off regardless of local state. |
-| `CHAINSAW_QUIET` / `CHAINSAW_VERBOSE` | Output level, same as `-q` / `-v`. |
-| `CHAINSAW_SERVER` / `CHAINSAW_TOKEN` | Control-plane URL and credentials. |
-
-### Refusing when a signal cannot be evaluated
-
-Fail-open is right for a workstation and wrong for some regulated and air-gapped
-deployments. An opt-in, off-by-default gate lets you name the data sources that
-must be evaluable, and refuse when one is not:
+The two most load-bearing:
 
 ```sh
-export CHAINSAW_COVERAGE_MODE=warn          # off (default) | warn | closed
-export CHAINSAW_COVERAGE_REQUIRED=typosquat,malware
+export CHAINSAW_OFFLINE=1        # never touch the network; suppresses both first-run prompts
+export CHAINSAW_COVERAGE_MODE=warn   # off (default) | warn | closed — refuse when a signal is unavailable
 ```
-
-Start in `warn` — it reports what `closed` would have refused, and refuses
-nothing. `typosquat` always works offline; `malware` needs `guard update`; `cve`,
-`registry_metadata` and `provenance` need the server and are **never** available
-offline. Requiring one the guard cannot see refuses every install, with a
-readable reason. That is intended, not a bug.
 
 ---
 
@@ -599,13 +445,13 @@ determined developer types `/usr/local/bin/npm install` and routes around it.
 Our own test suite asserts exactly that
 ([`cli/bypass_matrix_test.go`](cli/bypass_matrix_test.go)). Closing the gap is a
 registry-proxy and lockfile-pinning property, not something a local wrapper can
-promise — that is exactly what the [registry proxy](#registry-proxy) is for.
+promise — that is exactly what the [registry proxy](docs/policy.md#registry-proxy) is for.
 **Treat the local guard as a seatbelt on your own machine, not a control you can
 attest to an auditor.**
 
 **It fails open.** If a signal cannot be evaluated it prints a notice and lets
 the install proceed. A thin feed must never break `npm install`. That default is
-changeable — see [fail-closed coverage](#refusing-when-a-signal-cannot-be-evaluated).
+changeable — see [fail-closed coverage](docs/configuration.md#refusing-when-a-signal-cannot-be-evaluated).
 
 **Byte-level analysis is opt-in and off by default.** It needs either a staged
 artifact directory (`CHAINSAW_GUARD_ARTIFACT_DIR` — you supply the archives,
@@ -633,73 +479,47 @@ you want the feed.
 ## Measured performance
 
 A catch rate without a false-positive rate is marketing. Both are published,
-with their scope stated, and both harnesses are in this repository.
+and the typosquat harnesses ship in this repository.
 
-### Name-level typosquat — the default install path
+**Name-level typosquat — the default install path:**
 
 | | |
 |---|---|
-| **False-block rate** | **1.02%** (down from 1.87%) |
-| **Corpus** | 24,206 real package names held **out** of the detector's own seed index (npm ranks 5,001+, PyPI ranks 3,001+); intersection with the shipped seed verified empty |
-| **Still refused** | 247 of 24,206 |
-| **Recall cost of that reduction** | 8.2% of the typosquat lane's blocks on the OpenSSF feed (92 of 1,122) |
+| False-block rate | **1.02%** on 24,206 real names held out of the detector's own seed index |
+| Still refused | 247 of 24,206 |
+| Recall cost of that reduction | **8.2%** of the typosquat lane's blocks on the OpenSSF feed (92 of 1,122) |
 
-Quoting either number without the other misrepresents the trade. The upstream
-lists are themselves popularity-ranked and reach npm rank 17,334 out of ~3M
-packages, so this samples the near tail — it is a lower bound.
+Quoting either number without the other misrepresents the trade.
 
-### Byte-level scanner — the opt-in deep mode
+**Byte-level scanner — the opt-in deep mode, not the default path:**
 
 | | Real malware (597 samples) | Benign corpus (860 packages) |
 |---|---|---|
-| **Hard-block** | 46.2% | 0.81% false-block |
-| **Any signal** (surfaces, does not block) | 69% | 5% |
-
-**Caveats, before you quote these:**
-
-- This measures the **byte scanner**, not the default install path.
-- The 0.81% benign corpus is drawn from the same popularity seeds the typosquat
-  detector uses as its target index, so every name is an exact match and is
-  cleared before any distance check runs — it *cannot* produce a typosquat false
-  block. It is a floor, not an estimate of what you will experience. The
-  typosquat class is measured separately, at 1.02%, above.
-- It is a composite: npm measured 0/600, PyPI 7/260 = 2.69%.
-- The 597 malware samples are a deterministic first-N slice of a public dataset,
-  not a random sample.
-- Detector changes were made against this corpus and then re-measured on it.
+| Hard-block | 46.2% | 0.81% false-block |
+| Any signal (surfaces, does not block) | 69% | 5% |
 
 **We do not claim zero false positives.** We published a 0.00% once, it did not
 reproduce on a wider corpus, and we retired it.
 
-### Reproducing
-
-Both typosquat harnesses are here —
-[`cli/guard_typosquat_fp_eval_test.go`](cli/guard_typosquat_fp_eval_test.go) and
-[`cli/guard_typosquat_recall_eval_test.go`](cli/guard_typosquat_recall_eval_test.go).
-They skip without a corpus, so they do not run in CI; the recall harness runs
-against the feed `chainsaw guard update` caches. The held-out corpus builder and
-the byte-level harness still live in the private monorepo — moving them across so
-these numbers are independently reproducible is tracked work.
+Every caveat that belongs with these numbers — what the corpora are, why 0.81%
+is a floor rather than an estimate, the npm 0/600 vs PyPI 2.69% split, that
+detector changes were made against this corpus and then re-measured on it, and
+what is not yet independently reproducible — is in
+**[docs/measurement.md](docs/measurement.md)**. Please read it before quoting
+any of the above.
 
 ---
 
 ## False positives, and the escape hatch
 
-Name-similarity inference refuses legitimate packages. It is a real cost and it
-is designed for, not hand-waved: **a block with no way forward gets the guard
-uninstalled**, so every refusal the local allowlist can clear prints the way out
-on the same screen.
+Name-similarity inference refuses legitimate packages. It is a real cost, and it
+is designed for rather than hand-waved: **a block with no way forward gets the
+guard uninstalled**, so every refusal the local allowlist can clear prints the
+way out on the same screen.
 
-A rune added to or dropped from an *end* of a popular name is how sibling
-packages get named — `nan`→`nano`, `listr`→`listr2`, `attr`→`attrs` — not how
-names get mistyped, so that shape **warns** rather than refuses. One carve-out:
-an append or prepend against a household name (a target inside the top 500) keeps
-refusing, because attackers lean on that shape heavily — `lodashn`, `hdebug` and
-`pydantics` are all in the OpenSSF feed.
-
-Survivors of that narrowing include `npm:jsdoc` (against `jsdom`), `npm:stylus`
+Real packages still refused include `npm:jsdoc` (against `jsdom`), `npm:stylus`
 (against `stylis`), `npm:tslint` (against `eslint`) and the whole
-`pypi:nvidia-*-cu11` family (against `-cu12`). The class is narrower, not gone.
+`pypi:nvidia-*-cu11` family. The class is narrow, not gone.
 
 If one bites you, clear that single coordinate on this machine — offline,
 permanently, without turning the guard off:
@@ -711,11 +531,10 @@ chainsaw guard allow --remove npm:jsdoc   # undo it
 ```
 
 **A waiver is scoped and never silent.** It clears typosquat verdicts only —
-known-malicious feed hits, known-vulnerable versions and byte-level checks are
-refused by `guard allow` and keep blocking. Every install of a waived coordinate
-reprints the suppressed verdict and how to undo it, and that line survives
-`--quiet`, so a stale or planted entry shows up in the CI log rather than only
-under `guard allow --list`:
+known-malicious feed hits and byte-level checks are refused by `guard allow` and
+keep blocking. Every install of a waived coordinate reprints the suppressed
+verdict and how to undo it, and that line survives `--quiet`, so a stale or
+planted entry shows up in the CI log rather than only under `guard allow --list`:
 
 ```
 chainsaw  ~ waived  npm:jsdoc — looks like a typosquat of "jsdom" (distance 1, edit-distance, target rank #451) (a local allowlist entry cleared this — undo: chainsaw guard allow --remove npm:jsdoc)
@@ -737,7 +556,9 @@ Reason:     looks like a typosquat of "express" (distance 1, edit-distance, targ
 Source:     this machine's offline guard (known-malicious floor + typosquat)
 ```
 
-Reports of other false blocks are welcome in the issue tracker.
+Why the detector was narrowed, and what that cost in recall:
+[docs/measurement.md](docs/measurement.md). Reports of other false blocks are
+welcome in the issue tracker.
 
 ---
 
