@@ -1,165 +1,184 @@
-# chainsaw-core
+# chainsaw
 
-The open-core of [Chainsaw](https://chain305.com) — a firewall for your package
-managers. This module ships the `chainsaw` CLI and the embeddable proxy/policy/
-intelligence libraries it is built on. The enterprise control plane (multi-tenant
-server, dashboard, premium intelligence, SSO/SCIM, signed-policy hardening) lives
-in a separate private module and is not part of this repository.
+**A firewall for your package managers.** It refuses malicious and typosquatted
+packages at the moment you install them — before any install script runs, on your
+machine, with no account and nothing sent anywhere.
 
-> **Module:** `github.com/chain305/chainsaw-core`
+```
+$ chainsaw npm install flatmap-stream
+chainsaw  ✗ blocked  npm:flatmap-stream — known-malicious (CHW-FLOOR-flatmap-stream)
+chainsaw  ✗ refused at the install path — nothing was installed
 
-## What's here
+$ chainsaw npm install lodahs        # typo for lodash
+chainsaw  ✗ blocked  npm:lodahs — looks like a typosquat of "lodash" (distance 1, edit-distance, target rank #101)
+chainsaw  ✗ refused at the install path — nothing was installed
 
-- **`chainsaw` CLI** (`cmd/chainsaw`) — guard installs locally (`chainsaw npm/pip/go`
-  refuses malicious/typosquatted packages before they hit your build), point your
-  package managers at a Chainsaw proxy, wire install hooks (`install-hook`), scan PRs
-  (`pr-scan`), inspect packages, and run `doctor` health checks.
-- **Proxy + policy engine** (`proxy/`, `policy/`, `policyengine/`) — the
-  pull-through policy proxy and its precedence-based rule engine, usable as a
-  library.
-- **Supply-chain intelligence** (`intelligence/`, `risk/`, `typosquat/`,
-  `malware/`, `depgraph/`, `sbom/`, `provenance/`) — the deterministic,
-  locally-computable signals (typosquat, reserved-namespaces, hidden-unicode,
-  install-scripts, checksum, manifest-confusion, release-freshness, license,
-  embedded-keyring provenance) that run on every ecosystem.
-- **Coverage gate** (`coverage/`) — a stdlib-only leaf package holding the whole
-  optional fail-closed decision: given a declared posture and a ledger of which
-  data sources could be evaluated, decide whether to refuse. Off by default; see
-  [Optional: refuse when a signal could not be evaluated](#optional-refuse-when-a-signal-could-not-be-evaluated).
-- **Ecosystem format parsers** (`formats/`, `depparser/`) for npm, PyPI,
-  RubyGems, Maven, NuGet, Composer, Cargo, Docker, Go modules, Swift, CocoaPods,
-  Hugging Face, APT, and Yum/DNF.
-
-## Install
-
-Install the CLI from source with the Go toolchain:
-
-```sh
-go install github.com/chain305/chainsaw-core/cmd/chainsaw@latest
+$ chainsaw npm install lodash        # real package, gets out of the way
+added 1 package in 195ms
 ```
 
-This drops a `chainsaw` binary in `$(go env GOPATH)/bin`. Make sure that
-directory is on your `PATH`.
+Every other supply-chain tool tells you about the compromised dependency *after*
+it is in your lockfile, your `node_modules`, and your CI cache. A postinstall
+script does not wait for your next scan. Chainsaw sits at the install path and
+says no.
 
-Or install the pre-built binary with the hosted one-liner (detects your
-OS/arch and verifies the SHA-256 checksum):
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/chain305/chainsaw-core.svg)](https://pkg.go.dev/github.com/chain305/chainsaw-core)
+[![Go Report Card](https://goreportcard.com/badge/github.com/chain305/chainsaw-core)](https://goreportcard.com/report/github.com/chain305/chainsaw-core)
+
+---
+
+## Install
 
 ```sh
 curl -fsSL https://chain305.com/install.sh | sh
 ```
 
-Signed GitHub Releases (SLSA provenance + Sigstore signatures) will follow
-once the first signed release is cut (pending the release-signer bot); until
-then, the one-liner above, `go install`, and building from source are the
-supported install paths.
-
-## Quickstart
+Or with the Go toolchain:
 
 ```sh
-# 1. Guard your installs — run your package manager THROUGH Chainsaw and
-#    malicious or typosquatted packages are refused before they enter the build.
-#    Fully local: the default path sends nothing off your machine.
-chainsaw npm install lodash        # also: chainsaw pip install … / chainsaw go get …
-
-# 2. Check local package-manager wiring and report what's installed/wired.
-chainsaw doctor
-
-# 3. Point a package manager at a Chainsaw proxy (writes the managed block
-#    into its user config; re-runnable and idempotent).
-chainsaw install-hook npm
-
-# 4. In CI, diff a PR's manifest/lockfile changes and flag added or
-#    upgraded dependencies before they merge.
-chainsaw pr-scan
+go install github.com/chain305/chainsaw-core/cmd/chainsaw@latest
 ```
 
-`chainsaw npm/pip/go` evaluate every install locally and refuse on a hit, then
-hand off to the real tool — offline typosquat detection (npm, PyPI, Go) plus a
-built-in known-malicious floor of well-known attacks. A bare `chainsaw npm install`
-/ `npm ci` or `pip install -r requirements.txt` scans the whole resolved lockfile.
-The default path is offline and sends nothing; for the full OpenSSF
-malicious-packages set, run the opt-in `chainsaw guard update` (the one networked
-step). **By default the guard fails open**: if a signal could not be evaluated it
-prints a visible notice and lets the install proceed, so a thin feed or an
-unreachable server never breaks `npm install`. That default can be changed — see
-below — but you have to ask for it.
+## Try it in 30 seconds
 
-### Optional: refuse when a signal could not be evaluated
+```sh
+# 1. Watch it refuse a real piece of malware. Nothing is installed, and
+#    nothing about your machine is sent anywhere.
+chainsaw npm install flatmap-stream
 
-Fail-open is the right default for a developer workstation and the wrong one for
-some regulated and air-gapped deployments. For those, an **opt-in, off-by-default**
-gate lets you name data sources that must be evaluable and refuse the package when
-one is not:
+# 2. Ask why.
+chainsaw why npm flatmap-stream
+
+# 3. Make it automatic — npm/pip/go then route through the guard with no
+#    extra typing.
+eval "$(chainsaw guard init zsh)"     # or bash / fish
+```
+
+That is the whole product on a laptop. No signup, no config file, no daemon.
+
+## What it actually catches
+
+We publish both halves of the measurement, from a single run over one corpus,
+because a catch rate without a false-positive rate is marketing:
+
+| | Real malware (597 samples) | Top packages (860) |
+|---|---|---|
+| **Hard-block** — refuses the install | **46.2%** | **0.81%** false-block |
+| **Any signal** — surfaces, does not block | 69% | 5% |
+
+Measured 2026-08-12 on the byte-level guard, *before* the 231k-entry
+known-malicious name feed that catches known-bad coordinates by name on top of
+this. Every false block was PyPI; npm measured zero. The seven false blocks are
+nameable — `tqdm`'s Telegram progress bar, `litellm`'s Slack alerting,
+`ipython`'s `%pastebin` — and the corpus is rebuildable with a committed script.
+
+We do not claim zero false positives. We published a 0.00% once; it did not
+reproduce under a wider corpus, so we retired the claim. A reproducible 0.81% is
+worth more than an unreproducible zero.
+
+## How it is different
+
+- **It blocks, it does not report.** The verdict happens at the install path, not
+  in a dashboard you read on Tuesday.
+- **Offline by default.** The typosquat corpus and a known-malicious floor are
+  embedded in the binary. The default path makes no network calls — run it on an
+  air-gapped box and it still works. `chainsaw guard update` is the one opt-in
+  networked step, and it fetches the full OpenSSF malicious-packages set.
+- **Nothing leaves your machine.** Your dependency graph is not uploaded to
+  anyone, including us. There is no account to create.
+- **It fails open, on purpose.** If a signal cannot be evaluated, it prints a
+  visible notice and lets the install proceed. A thin feed or an unreachable
+  server must never break `npm install`. That default is changeable — see
+  [fail-closed coverage](#refusing-when-a-signal-cannot-be-evaluated) — but you
+  have to ask for it.
+
+## Ecosystems
+
+npm · yarn · bun · PyPI · Go modules · Cargo · RubyGems · Maven · Gradle ·
+NuGet · Composer · Docker/OCI · Swift · CocoaPods · Dart/pub · Hugging Face ·
+APT · Yum/DNF
+
+Typosquat detection is offline for npm, PyPI and Go. The known-malicious floor
+and the rest of the signals run on every ecosystem above.
+
+## Beyond the laptop
+
+```sh
+chainsaw doctor              # read-only: what's wired, what isn't
+chainsaw install-hook npm    # point a package manager at a Chainsaw proxy
+chainsaw pr-scan --base main # CI status check: flag deps added or upgraded in a PR
+chainsaw scan --path .       # scan a whole project's resolved lockfiles
+chainsaw sbom export         # CycloneDX / SPDX
+```
+
+`chainsaw --help` lists all 50 commands.
+
+## How it works
+
+The guard evaluates every install locally and refuses on a hit, then hands off to
+the real package manager. The signals are deterministic and locally computable —
+typosquat distance against an embedded popularity corpus, reserved namespaces,
+hidden Unicode, install scripts, checksum mismatch, manifest confusion, release
+freshness, license, and embedded-keyring provenance — so they need no server and
+no account.
+
+This repository is also a set of Go libraries, not just a CLI: the pull-through
+policy proxy (`proxy/`, `policy/`, `policyengine/`), the intelligence and risk
+engines (`intelligence/`, `risk/`, `typosquat/`, `malware/`, `depgraph/`,
+`sbom/`, `provenance/`), and the ecosystem parsers (`formats/`, `depparser/`)
+are all importable.
+
+```sh
+go build ./cmd/chainsaw   # build the CLI
+go test ./...             # run the suite
+```
+
+The module is self-contained: it builds standalone with `GOWORK=off go build ./...`.
+
+### Refusing when a signal cannot be evaluated
+
+Fail-open is right for a workstation and wrong for some regulated and air-gapped
+deployments. An opt-in, off-by-default gate lets you name the data sources that
+must be evaluable and refuse the package when one is not:
 
 ```sh
 export CHAINSAW_COVERAGE_MODE=warn          # off (default) | warn | closed
 export CHAINSAW_COVERAGE_REQUIRED=typosquat,malware
 ```
 
-- **`off` is the default.** Unset, none of this runs and behaviour is identical to
-  a build without the feature. Chainsaw does not fail closed as shipped.
-- **Start in `warn`.** It reports exactly what `closed` would have refused and
-  refuses nothing, so you can measure before enforcing.
-- **Valid sources:** `malware`, `cve`, `typosquat`, `provenance`,
-  `registry_metadata`, `checksum`, `install_scripts`, `hidden_unicode`. An unknown
-  name is a hard configuration error, never a silent no-op.
-- **Be honest about what an offline guard can see.** `typosquat` always works (the
-  corpus is embedded). `malware` needs `chainsaw guard update` to have fetched the
-  full feed. `cve`, `registry_metadata` and `provenance` need the server and are
-  *never* available offline. `checksum`, `install_scripts` and `hidden_unicode`
-  need the package bytes, so they need staged artifacts or deep mode. Requiring one
-  the guard cannot see refuses every install, with a readable reason — that is the
-  intended answer, not a bug.
-- `CHAINSAW_COVERAGE_BREAK_GLASS=1` disables the gate for one invocation and logs
-  loudly. An explicitly configured posture that cannot be honoured is fatal rather
-  than silently downgraded to off.
+Start in `warn` — it reports exactly what `closed` would have refused and refuses
+nothing. Be honest about what an offline guard can see: `typosquat` always works,
+`malware` needs `chainsaw guard update`, and `cve` / `registry_metadata` /
+`provenance` need the server and are never available offline. Requiring one the
+guard cannot see refuses every install, with a readable reason — that is the
+intended answer, not a bug. Full reference:
+[docs.chain305.com](https://docs.chain305.com).
 
-The same variables exist on the Chainsaw registry proxy, the publish path, and the
-K8s admission webhook in the enterprise module. They are **not** wired into
-`chainsaw pr-scan`.
+## Open core, and what's commercial
 
-To make it automatic, add `eval "$(chainsaw guard init zsh)"` (or `bash`/`fish`) to
-your shell config — `npm`, `pip`, and `go` then route through the guard with no
-extra typing.
+Everything in this repository is free and Apache-2.0, runs standalone with no
+server, and requires no account. That includes the CLI, the guard, the proxy and
+policy engine, and every locally-computable signal listed above.
 
-`chainsaw doctor` is read-only and safe to run anywhere. `install-hook`
-edits a package manager's user config (and can be reverted with
-`uninstall-hook`). `pr-scan` is intended as a CI status check.
+The commercial control plane is a separate, private module: the multi-tenant
+server and dashboard, premium intelligence, SSO/SCIM, signed-policy bundles,
+SIEM connectors, and billing. It layers org-wide policy, central reporting and
+the premium detectors on top of this core — it does not gate what is here.
 
-Run `chainsaw --help` for the full command list.
+## Security
 
-## Free core vs Enterprise
+- **Reporting a vulnerability:** see [SECURITY.md](SECURITY.md).
+- **Release signing:** binaries are currently distributed with SHA-256 checksums
+  over TLS. Sigstore-signed releases with SLSA provenance are pending the
+  release-signer identity; the installer's signature check is opt-in until then
+  and says so rather than pretending to verify.
 
-This repository is the **free, open-core** of Chainsaw. It ships the
-`chainsaw` CLI and the proxy/policy/intelligence libraries it is built on,
-which run standalone with no server.
+## Links
 
-The **enterprise control plane** lives in a separate private module and is
-not part of this repository. It adds the multi-tenant server and dashboard,
-premium intelligence, SSO/SCIM, the admin hardening wizard and signed-policy
-bundles, SIEM connectors, and billing. The signals in this module
-(typosquat, reserved-namespaces, hidden-unicode, install-scripts, checksum,
-manifest-confusion, release-freshness, license, embedded-keyring provenance)
-are deterministic and locally computable, so the open core is useful on its
-own; the enterprise tier layers org-wide policy, central reporting, and the
-premium detectors on top.
+[Docs](https://docs.chain305.com) ·
+[chain305.com](https://chain305.com) ·
+[Contributing](CONTRIBUTING.md) ·
+[Changelog](CHANGELOG.md)
 
-See the docs at <https://docs.chain305.com> for the full product picture.
-
-## Build
-
-```sh
-go build ./cmd/chainsaw        # builds the chainsaw CLI
-go test ./...                  # runs the suite
-```
-
-The module is self-contained: it builds standalone with `GOWORK=off go build ./...`.
-
-## License
-
-Apache License 2.0 — see [LICENSE](LICENSE). This module (the `chainsaw` CLI
-and the decision engine: proxy, policy, intelligence, risk, typosquat,
-malware, depgraph, SBOM, provenance) is free and open source, no account
-required. The enterprise control plane (multi-tenant server, dashboard,
-premium intelligence, SSO/SCIM, hardening, policy signing, SIEM) is
-closed-source commercial software in a separate private module.
+Apache-2.0 — see [LICENSE](LICENSE).
