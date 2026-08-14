@@ -226,8 +226,63 @@ func (s packageSpec) String() string {
 type guardVerdict struct {
 	Spec     packageSpec
 	Block    bool
-	Severity string // "malicious" | "known-vulnerable" | "typosquat-high" | "typosquat-medium" | ""
+	Severity string // "malicious" | "known-vulnerable" | "typosquat-high" | "typosquat-demoted" | "typosquat-medium" | ""
 	Reason   string
+	// Unwaivable marks a verdict the local allowlist must never clear and
+	// whose escape-hatch hint must never be printed, EVEN THOUGH its severity
+	// is in the allowlistable family. Exactly one arm sets it today: the
+	// homoglyph block. Its severity stays "typosquat-high" (that is what the
+	// user is being told, and the recall suite pins it), but a name built from
+	// Unicode confusables is not inference a user can sensibly overrule — and
+	// the hint would render a coordinate that LOOKS like the real package
+	// ("chainsaw guard allow npm:lоdash" with a Cyrillic о reads as `lodash`),
+	// i.e. advice to allow the very package the user thinks they are
+	// installing. See guardAllowlistableVerdict in guard_allow.go.
+	Unwaivable bool
+	// WaivedSeverity and WaivedReason record the typosquat verdict an explicit
+	// local allowlist entry SUPPRESSED for this coordinate — empty when nothing
+	// was waived. They ride the verdict that was actually returned (usually an
+	// ALLOW, but a behavioral block or warn from the byte scan below is equally
+	// possible), because a waiver is orthogonal to the outcome: the user needs
+	// to be told both "this was cleared by your allowlist" and whatever the rest
+	// of the ladder went on to say.
+	//
+	// They exist because the waiver used to be COMPLETELY silent. A cleared
+	// verdict produced no output line, so one planted line in
+	// ~/.chainsaw/guard_allowlist.json was a permanent hole that looked
+	// byte-identical to an install the guard never had an opinion about. The
+	// only surface that revealed it was `guard allow --list`, which nobody runs
+	// on a machine they do not already suspect. printGuardVerdicts now prints a
+	// waiver notice for every one of these, --quiet included.
+	//
+	// WHY NOT ALSO RecentBlocks AND TELEMETRY — decided, not overlooked:
+	//
+	//   - RecentBlocks (guard_nudge.go) is the ring `chainsaw why` reads to
+	//     explain a BLOCK offline. A waived coordinate was not blocked; putting
+	//     it there would make `chainsaw why <pkg>` report a refusal that never
+	//     happened, and it would evict real blocks from a 25-slot ring. The ring
+	//     is also local-only and never transmitted, so it does nothing for the
+	//     fleet-visibility half of the problem either. The local audit surface
+	//     for waivers already exists and is exact — the allowlist file itself,
+	//     which carries the verdict text and a timestamp per entry.
+	//
+	//   - Telemetry is consent-gated precisely because a BLOCKED package's name
+	//     may be a private or internal one (the consent prompt says so in those
+	//     words). A WAIVED name is strictly more sensitive, not less: it is a
+	//     name this user singled out and vouched for, and the set of waivers is
+	//     a machine-specific configuration fingerprint. It is also not a block,
+	//     so it cannot ride install.guard.block without corrupting the blocked
+	//     count that activation and the dashboards key off. A fleet operator who
+	//     needs waiver visibility should get it from the server-side exception
+	//     surface, where the coordinate is already known and the reporting is
+	//     an explicit org decision — not by widening the anonymous local-guard
+	//     stream to carry names that were never refused.
+	//
+	// So the answer to "a fleet dashboard cannot see it" is: make it loud on the
+	// install output, every run, unsuppressable — which is where the operator
+	// and CI log both are — and leave the telemetry stream alone.
+	WaivedSeverity string
+	WaivedReason   string
 }
 
 // localGuard holds the offline signal engines. Build once per invocation; the
@@ -384,10 +439,38 @@ func (g *localGuard) bundleCorpus(ecosystem string) []typosquat.PopularPackage {
 //   - homoglyph typosquat                   → BLOCK (byte-level confusable
 //     collision with a popular name has no legitimate explanation)
 //   - edit-distance d=1 vs top-ranked target → BLOCK (the crossenv/loadash
-//     shape; rank cutoff guardTyposquatBlockRankCutoff)
+//     shape; rank cutoff guardTyposquatBlockRankCutoff, plus the target-length
+//     and edit-shape predicates in guard_typosquat_gate.go — rank alone refused
+//     real packages such as `nano` and `args` that merely sit one edit from a
+//     popular short name)
+//   - a d=1 hit the gate DEMOTED                → WARN, severity
+//     "typosquat-demoted": the evidence cleared the rank cutoff and only the
+//     shape/length predicates downgraded it, so it is printed even under
+//     --quiet (guard_install.go). A verdict the gate itself downgraded is the
+//     one a CI operator most needs to see.
 //   - any other typosquat hit (d=1 tail-rank, d≥2, reorder) → WARN
 //     (pass; two real packages one edit apart is common in the long tail —
 //     the 2026-07 incident's katex/preact/recharts class)
+//
+// A coordinate the user has explicitly allowed (`chainsaw guard allow`, see
+// guard_allow.go) skips the EDIT-DISTANCE typosquat lane — and only that. The
+// known-malicious and known-vulnerable arms return above it, the HOMOGLYPH arm
+// is hoisted above the consult (a confusable collision is not inference a
+// waiver may overrule), and the byte-level scan below it still runs. A waiver
+// is never silent: the suppressed verdict rides back on WaivedSeverity /
+// WaivedReason and printGuardVerdicts announces it on every install, --quiet
+// included.
+// guardTyposquatReason renders the user-facing explanation for one typosquat
+// detection. Shared by the hoisted homoglyph arm and the ladder below it so
+// the two cannot drift into describing the same evidence differently.
+func guardTyposquatReason(res typosquat.DetectionResult) string {
+	if res.TargetRank > 0 {
+		return fmt.Sprintf("looks like a typosquat of %q (distance %d, %s, target rank #%d)",
+			res.SimilarTo, res.Distance, res.Method, res.TargetRank)
+	}
+	return fmt.Sprintf("looks like a typosquat of %q (distance %d, %s)", res.SimilarTo, res.Distance, res.Method)
+}
+
 func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdict {
 	if res := g.malware.Lookup(ctx, spec.Ecosystem, spec.Name, spec.Version); res.IsKnownMalicious {
 		reason := "known-malicious package"
@@ -408,8 +491,36 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	// old early return let the warn mask the block.
 	var pendingWarn guardVerdict
 
+	// waived carries the typosquat verdict an explicit local allowlist entry
+	// suppressed, so EVERY return below can report it; withWaiver stamps it on
+	// whatever verdict the rest of the ladder produces. See guardVerdict's
+	// WaivedSeverity for why this is not also a RecentBlocks row or a telemetry
+	// event. A waiver that produces no output at all is what this closure exists
+	// to stop: it made one line of local JSON an invisible, permanent hole.
+	var waived guardVerdict
+	withWaiver := func(v guardVerdict) guardVerdict {
+		v.WaivedSeverity, v.WaivedReason = waived.Severity, waived.Reason
+		return v
+	}
+
 	if d := g.detector(spec.Ecosystem); d != nil {
 		res := d.Check(ctx, spec.Ecosystem, spec.Name)
+
+		// HOMOGLYPH, hoisted ABOVE the allowlist consult on purpose. A name
+		// that collides with a popular one only through Unicode confusables is
+		// byte-level evidence, not name-similarity inference, and the escape
+		// hatch exists to overrule inference. Leaving it inside the consult
+		// made the archetypal attack waivable by a coordinate the user cannot
+		// visually distinguish from the real package: `chainsaw guard allow
+		// npm:lоdash` (Cyrillic о) renders as `npm:lodash`. Unwaivable also
+		// suppresses the block printer's hint — see guardAllowlistableVerdict.
+		if res.IsSuspected && res.Method == "homoglyph" && res.Confidence == "high" {
+			return guardVerdict{
+				Spec: spec, Block: true, Severity: guardSeverityTyposquatHigh, Unwaivable: true,
+				Reason: guardTyposquatReason(res),
+			}
+		}
+
 		if res.IsSuspected {
 			// Verdict ladder, split by METHOD rather than the detector's flat
 			// confidence: the certainty gradient homoglyph > edit-d1-vs-top >
@@ -437,21 +548,58 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 			// low-confidence bottom of the ladder no verdict exists to carry it,
 			// and a string built for a verdict that can never be emitted reads to
 			// the next person as a dropped result.
-			reason := func() string {
-				if res.TargetRank > 0 {
-					return fmt.Sprintf("looks like a typosquat of %q (distance %d, %s, target rank #%d)",
-						res.SimilarTo, res.Distance, res.Method, res.TargetRank)
-				}
-				return fmt.Sprintf("looks like a typosquat of %q (distance %d, %s)", res.SimilarTo, res.Distance, res.Method)
-			}
+			reason := func() string { return guardTyposquatReason(res) }
+			// d1InCutoff is the population the block-lane gate speaks for: a
+			// single edit against a target inside the rank cutoff. Splitting it
+			// out is what lets a hit the GATE demoted be labelled differently
+			// from a hit that was never block-eligible in the first place.
+			// (The homoglyph arm returned above, before the allowlist consult.)
+			d1InCutoff := res.Method == "edit-distance" && res.Distance == 1 &&
+				res.TargetRank > 0 && res.TargetRank <= guardTyposquatBlockRankCutoff
+			// lane is the verdict the EVIDENCE earns, computed before the
+			// allowlist is consulted. That order is what makes a waiver
+			// reportable rather than silent: "your allowlist suppressed this"
+			// needs the this, and the consult used to run first and throw the
+			// answer away.
+			var lane guardVerdict
 			switch {
-			case res.Method == "homoglyph" && res.Confidence == "high":
-				return guardVerdict{Spec: spec, Block: true, Severity: "typosquat-high", Reason: reason()}
-			case res.Method == "edit-distance" && res.Distance == 1 &&
-				res.TargetRank > 0 && res.TargetRank <= guardTyposquatBlockRankCutoff:
-				return guardVerdict{Spec: spec, Block: true, Severity: "typosquat-high", Reason: reason()}
+			case d1InCutoff && guardTyposquatBlockGate.allowsD1Block(spec.Ecosystem, spec.Name, res):
+				lane = guardVerdict{Spec: spec, Block: true, Severity: guardSeverityTyposquatHigh, Reason: reason()}
+			case d1InCutoff:
+				// DEMOTED by the gate, not by the evidence. Its own severity so
+				// the printer can keep it out of the --quiet suppression that
+				// covers ordinary medium-confidence chatter: this is the class
+				// where the gate is trading recall for false blocks, and an
+				// operator who never sees it cannot audit that trade.
+				lane = guardVerdict{Spec: spec, Block: false, Severity: guardSeverityTyposquatDemoted, Reason: reason()}
 			case res.Confidence == "high" || res.Confidence == "medium":
-				pendingWarn = guardVerdict{Spec: spec, Block: false, Severity: "typosquat-medium", Reason: reason()}
+				lane = guardVerdict{Spec: spec, Block: false, Severity: guardSeverityTyposquatMedium, Reason: reason()}
+			}
+
+			// The ONE allowlist consult (guard_allow.go). It gates the whole
+			// typosquat lane and nothing else, which is what makes the security
+			// boundary structural rather than a rule someone must remember:
+			//   - known-malicious and known-vulnerable already returned ABOVE, so
+			//     a waiver is physically incapable of clearing either;
+			//   - the homoglyph arm returned above it too;
+			//   - the byte-level scan below is downstream and unconditioned, so a
+			//     cleared name falls through to it exactly as a clean name does — a
+			//     waiver can never mask a behavioral block, which is the failure the
+			//     pendingWarn comment further down exists to prevent in the other
+			//     direction.
+			switch {
+			case lane.Severity == "":
+				// The deliberate silence documented above. Nothing was
+				// suppressed, so a waiver notice here would announce a
+				// suppression that never happened — and would leak the
+				// low-confidence combosquat population we specifically decided
+				// not to speak about.
+			case guardAllowlistClearsTyposquat(spec):
+				waived = lane
+			case lane.Block:
+				return lane
+			default:
+				pendingWarn = lane
 			}
 		}
 	}
@@ -463,16 +611,16 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	// Fail-open: nil bytes or a clean read just falls through to ALLOW.
 	if data := guardArtifactBytes(spec); len(data) > 0 {
 		if bv := analyzeArtifact(spec.Ecosystem, data); bv.Block {
-			return guardVerdict{Spec: spec, Block: true, Severity: bv.Severity, Reason: bv.Reason}
+			return withWaiver(guardVerdict{Spec: spec, Block: true, Severity: bv.Severity, Reason: bv.Reason})
 		} else if bv.Severity != "" && pendingWarn.Severity == "" {
 			pendingWarn = guardVerdict{Spec: spec, Block: false, Severity: bv.Severity, Reason: bv.Reason}
 		}
 	}
 
 	if pendingWarn.Severity != "" {
-		return pendingWarn
+		return withWaiver(pendingWarn)
 	}
-	return guardVerdict{Spec: spec, Block: false}
+	return withWaiver(guardVerdict{Spec: spec, Block: false})
 }
 
 func supplementalInstallAdvisory(spec packageSpec) (string, bool) {

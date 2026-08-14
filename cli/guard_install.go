@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -501,31 +502,7 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 		verdicts = append(verdicts, onlineVerdicts...)
 		blocked = blocked || onlineBlocked
 	}
-	for _, v := range verdicts {
-		switch {
-		case v.Block:
-			// A block verdict is NEVER suppressed by --quiet. Spec + Reason carry
-			// untrusted text (a crafted install arg or a lockfile name), so scrub
-			// terminal control sequences before echoing — see sanitizeForTerminal.
-			fmt.Fprintf(os.Stderr, "%s  %s  %s — %s\n",
-				tag, c(ansiRed+ansiBold, "✗ blocked"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))), sanitizeForTerminal(v.Reason))
-		case strings.HasPrefix(v.Severity, serverSeverityPrefix):
-			// A server row below the block threshold (CHAINSAW_GUARD_SERVER_BLOCK_SEVERITY,
-			// default "high"). Still shown — the finding is true, it just doesn't
-			// earn a refusal — but it's an allow-line, so it's chatter under --quiet.
-			if !isQuiet {
-				fmt.Fprintf(os.Stderr, "%s  %s  %s — %s %s\n",
-					tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason),
-					c(ansiDim, "(server: "+strings.TrimPrefix(v.Severity, serverSeverityPrefix)+" — allowed)"))
-			}
-		case v.Severity == "typosquat-medium" || v.Severity == "behavioral-medium":
-			// Medium-confidence ALLOW warning is chatter — gated by --quiet.
-			if !isQuiet {
-				fmt.Fprintf(os.Stderr, "%s  %s  %s — %s %s\n",
-					tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason), c(ansiDim, "(medium confidence — allowed)"))
-			}
-		}
-	}
+	printGuardVerdicts(os.Stderr, tag, verdicts, isQuiet)
 
 	if blocked {
 		fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiRed+ansiBold, "✗ refused at the install path — nothing was installed"))
@@ -1039,4 +1016,96 @@ func execPassthrough(bin string, args []string) error {
 		return err
 	}
 	return nil
+}
+
+// printGuardVerdicts writes the user-visible verdict lines. Extracted from the
+// install path so the --quiet contract is unit-testable in-process: which
+// severities survive --quiet is a security-relevant decision, and proving it
+// by shelling out to a real `npm install` would mean running an install of a
+// package the guard deliberately ALLOWED.
+//
+// INVARIANT D: --quiet silences chatter, never a refusal, never what to do
+// about one, never a verdict the GATE downgraded (see
+// guardSeverityTyposquatDemoted), and never a verdict a local ALLOWLIST entry
+// waived (guardVerdict.WaivedSeverity).
+func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQuiet bool) {
+	col := guardColorEnabled()
+	c := func(code, s string) string {
+		if col {
+			return code + s + ansiReset
+		}
+		return s
+	}
+	for _, v := range verdicts {
+		// THE WAIVER NOTICE, printed BESIDE whatever the verdict turned out to
+		// be rather than as one of its arms — a coordinate can be both waived by
+		// name and blocked on its bytes, and the operator needs both lines.
+		//
+		// Never suppressed by --quiet, and this is the deliberate part. INVARIANT
+		// D silences chatter; a waiver is the opposite of chatter. It is the one
+		// line that distinguishes "the guard had no opinion about this package"
+		// from "the guard had an opinion and a file on this machine overruled
+		// it", and without it a single planted allowlist entry is a permanent
+		// hole that looks exactly like a clean install — in CI, where --quiet is
+		// the mode people actually run. Its volume is bounded by the size of the
+		// allowlist, which is a set of decisions a human typed one at a time, so
+		// it cannot become the noise --quiet exists to remove.
+		if v.WaivedSeverity != "" {
+			fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+				tag, c(ansiYellow, "~ waived"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))),
+				sanitizeForTerminal(v.WaivedReason),
+				c(ansiDim, "(a local allowlist entry cleared this — undo: chainsaw guard allow --remove "+guardHintCoordinate(v.Spec)+")"))
+		}
+		switch {
+		case v.Block:
+			// A block verdict is NEVER suppressed by --quiet. Spec + Reason carry
+			// untrusted text (a crafted install arg or a lockfile name), so scrub
+			// terminal control sequences before echoing — see sanitizeForTerminal.
+			fmt.Fprintf(out, "%s  %s  %s — %s\n",
+				tag, c(ansiRed+ansiBold, "✗ blocked"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))), sanitizeForTerminal(v.Reason))
+			// The escape hatch, named at the only moment it matters. A user who
+			// cannot get past a false block uninstalls the guard, so a refusal
+			// that offers no way forward costs more coverage than it buys.
+			// Shown ONLY for verdicts the allowlist can actually clear
+			// (guardAllowlistableVerdict, guard_allow.go) — printing it beside
+			// a known-malicious block, or beside a homoglyph block whose
+			// coordinate is visually identical to the real package, would
+			// advertise a bypass that either does not exist or should not be
+			// taken. Not suppressed by --quiet: it is part of the block
+			// verdict, and INVARIANT D silences chatter, never a refusal or
+			// what to do about one.
+			if guardAllowlistableVerdict(v) {
+				fmt.Fprintf(out, "%s  %s\n", tag,
+					c(ansiDim, "if you have verified this package is real: chainsaw guard allow "+guardHintCoordinate(v.Spec)))
+			}
+		case strings.HasPrefix(v.Severity, serverSeverityPrefix):
+			// A server row below the block threshold (CHAINSAW_GUARD_SERVER_BLOCK_SEVERITY,
+			// default "high"). Still shown — the finding is true, it just doesn't
+			// earn a refusal — but it's an allow-line, so it's chatter under --quiet.
+			if !isQuiet {
+				fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+					tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason),
+					c(ansiDim, "(server: "+strings.TrimPrefix(v.Severity, serverSeverityPrefix)+" — allowed)"))
+			}
+		case v.Severity == guardSeverityTyposquatDemoted:
+			// A d=1 hit inside the rank cutoff that the block-lane gate
+			// DEMOTED on edit shape or target length (guard_typosquat_gate.go).
+			// NOT suppressed by --quiet, unlike the medium-confidence chatter
+			// below. The evidence cleared the block threshold and a heuristic —
+			// ours, tuned to stop refusing real packages like `nano` — is what
+			// downgraded it. In CI, --quiet is the mode people run, and a
+			// silent downgrade is exactly the trade an operator has to be able
+			// to audit. It stays a warning, never an exit-code change.
+			fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+				tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason),
+				c(ansiDim, "(name-similarity only — allowed, not a refusal)"))
+		case v.Severity == guardSeverityTyposquatMedium || v.Severity == "behavioral-medium":
+			// Medium-confidence ALLOW warning is chatter — gated by --quiet.
+			if !isQuiet {
+				fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+					tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason), c(ansiDim, "(medium confidence — allowed)"))
+			}
+		}
+	}
+
 }

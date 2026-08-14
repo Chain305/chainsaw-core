@@ -289,7 +289,7 @@ func (d *Detector) Check(_ context.Context, ecosystem, packageName string) Detec
 	if len(matches) > 0 {
 		best := matches[0]
 		for _, m := range matches[1:] {
-			if m.Distance < best.Distance {
+			if betterEditMatch(m, best, ranks) {
 				best = m
 			}
 		}
@@ -396,6 +396,38 @@ func (d *Detector) Check(_ context.Context, ecosystem, packageName string) Detec
 	}
 
 	return DetectionResult{}
+}
+
+// betterEditMatch reports whether `cand` should replace `best` as the nearest
+// popular name for a query.
+//
+// WHY A TOTAL ORDER. BKTree.Search walks `node.children`, a Go map, so its
+// result slice arrives in a per-run randomized order. Selecting the nearest
+// match with a bare `m.Distance < best.Distance` therefore resolves EQUIDISTANT
+// targets by map-iteration order: `args` sits at distance 1 from both `yargs`
+// (rank #70) and `arg` (rank #263) in the npm corpus, and Check used to return
+// whichever one the map handed over first. That used to be cosmetic — only the
+// target name in the reason string changed — but every consumer that keys a
+// DECISION off SimilarTo/TargetRank (the install guard's block-lane gate, for
+// one) inherits the coin flip and blocks a name on some runs and warns on
+// others. Check must be a pure function of (corpus, query).
+//
+// The order is: nearest distance wins; then the more popular target (lower
+// rank, i.e. the name an attacker would actually be squatting); then the
+// lexicographically smaller name so an unranked corpus is still deterministic.
+// Rank 0 means "not in the rank index" and sorts last, never first.
+func betterEditMatch(cand, best SearchResult, ranks map[string]int) bool {
+	if cand.Distance != best.Distance {
+		return cand.Distance < best.Distance
+	}
+	cr, br := ranks[cand.Word], ranks[best.Word]
+	if cr != br {
+		if cr == 0 || br == 0 {
+			return br == 0 // an unranked incumbent loses to any ranked candidate
+		}
+		return cr < br
+	}
+	return cand.Word < best.Word
 }
 
 // checkCombosquat detects packages that embed a popular name with only a

@@ -9,13 +9,16 @@ $ chainsaw npm install lodahs
 chainsaw  offline known-malicious + typosquat active; run `chainsaw guard update` for the full OpenSSF malicious-package set
 chainsaw  behavioral byte scan not run; using name/feed/typosquat checks only (set CHAINSAW_GUARD_DEEP=1 or stage artifacts for byte-level coverage)
 chainsaw  ✗ blocked  npm:lodahs — looks like a typosquat of "lodash" (distance 1, edit-distance, target rank #101)
+chainsaw  if you have verified this package is real: chainsaw guard allow npm:lodahs
 chainsaw  ✗ refused at the install path — nothing was installed
 chainsaw: usage telemetry is OFF until you opt in. Enable with `chainsaw telemetry on` (anonymous usage + blocked-package data, helps improve detection). See https://chain305.com/legal/privacy
 ```
 
 That is the real output, copied verbatim — every notice included, nothing
 trimmed. It is noisier than a marketing screenshot and we would rather you see
-it now than be surprised by it.
+it now than be surprised by it. The `guard allow` line is printed on every
+refusal the local allowlist can clear, because a block with no way forward gets
+the guard uninstalled; see [Known false positives](#known-false-positives).
 
 The typosquat check needs no feed and no network: it catches names that have
 never been seen before, which is the point, because a brand-new typosquat is on
@@ -116,18 +119,75 @@ changeable — see [fail-closed coverage](#refusing-when-a-signal-cannot-be-eval
 
 ## Known false positives
 
-The typosquat detector blocks by edit distance against a popularity corpus, and
-it does produce false positives on short, legitimate names. Two we know of:
+The typosquat check is name-similarity inference, and it does refuse legitimate
+packages. `npm:nano` and `npm:args`, the two this section used to name, now warn
+instead of refusing.
+
+A rune added to or dropped from an *end* of a popular name is how sibling
+packages get named — `nan`→`nano`, `listr`→`listr2`, `attr`→`attrs` — not how
+names get mistyped, so that shape warns rather than refuses. One carve-out: an
+append or a prepend against a household name (a target inside the top 500) keeps
+refusing, because attackers use that shape heavily — `lodashn`, `hdebug`,
+`pydantics` are all in the OpenSSF feed.
+
+**Measured: 1.02% of held-out real packages are refused, down from 1.87%.**
+The scope, because this is not the same measurement as the section below:
+
+- It is the **name-level typosquat verdict on the default install path**, not the
+  byte scanner.
+- The corpus is 24,206 real package names deliberately held **out** of the
+  detector's own seed index (npm ranks 5,001+, PyPI ranks 3,001+), with the
+  intersection against the shipped seed verified empty. The 0.81% below is
+  measured on a corpus drawn *from* that seed, where every name is an exact
+  match and is cleared before any distance check runs, so it cannot produce a
+  typosquat false block at all.
+- Those upstream lists are themselves popularity-ranked and reach npm rank
+  17,334 out of ~3M packages, so this samples the near tail. It is a lower
+  bound.
+- The recall cost is published with it: the same change gives up 8.2% of the
+  typosquat lane's blocks on names in the OpenSSF malicious-packages feed (92 of
+  1,122). Quoting either number without the other misrepresents the trade.
+- Both harnesses are in this repository —
+  [`cli/guard_typosquat_fp_eval_test.go`](cli/guard_typosquat_fp_eval_test.go)
+  and
+  [`cli/guard_typosquat_recall_eval_test.go`](cli/guard_typosquat_recall_eval_test.go)
+  — and both skip without a corpus, so they do not run in CI. The recall one
+  runs against the feed `chainsaw guard update` caches. The held-out corpus is
+  still built by a script in the private monorepo; moving it across is tracked
+  work.
+
+**247 of those 24,206 are still refused.** Survivors include `npm:jsdoc` (against
+`jsdom`), `npm:stylus` (against `stylis`), `npm:tslint` (against `eslint`) and
+the whole `pypi:nvidia-*-cu11` family (against `-cu12`). The class is narrower,
+not gone.
+
+If one bites you, clear that single coordinate on this machine — offline,
+permanently, without turning the guard off:
+
+```sh
+chainsaw guard allow npm:jsdoc            # clear one false typosquat block
+chainsaw guard allow --list               # what this machine has allowed, and why
+chainsaw guard allow --remove npm:jsdoc   # undo it
+```
+
+That clears typosquat verdicts only. Known-malicious feed hits, known-vulnerable
+versions and the byte-level checks are refused by `guard allow` and keep
+blocking. A waiver is never silent: every install of a waived coordinate prints
+the verdict that was suppressed and how to undo it, and that line survives
+`--quiet`, so a stale or planted entry shows up in the CI log rather than only
+under `guard allow --list`.
 
 ```
-npm:nano  — blocked as a typosquat of "nan"   (nano is the Apache CouchDB client)
-npm:args  — blocked as a typosquat of "arg"
+chainsaw  ~ waived  npm:jsdoc — looks like a typosquat of "jsdom" (distance 1, edit-distance, target rank #451) (a local allowlist entry cleared this — undo: chainsaw guard allow --remove npm:jsdoc)
 ```
 
-If one bites you: `chainsaw why npm <name>` explains the verdict, and the
-package still installs by calling your package manager directly. We would rather
-list these than let you discover them mid-launch. Reports of others are welcome
-in the issue tracker.
+A waiver deliberately does **not** enter the local `chainsaw why` ring or the
+telemetry stream: it was not a refusal, so recording it as one would report a
+block that never happened and corrupt the blocked counts, and a waived name is
+more sensitive than a blocked one, not less.
+
+`chainsaw why npm <name>` explains any verdict. Reports of other false blocks are
+welcome in the issue tracker.
 
 ## Measured detection rate
 
@@ -144,18 +204,19 @@ a false-positive rate is marketing:
 - They measure the **byte-level scanner**, which is the opt-in deep mode
   described above — *not* the default install path.
 - The benign corpus is drawn from the same popularity seed lists the typosquat
-  detector uses as its target index, so it systematically under-counts exactly
-  the class of false positive listed in the section above. The 0.81% is a floor,
-  not an estimate of what you will experience.
+  detector uses as its target index, so it cannot produce a typosquat false
+  block at all — that class is measured separately, at 1.02%, in the section
+  above. The 0.81% is a floor, not an estimate of what you will experience.
 - It is a composite: npm measured 0/600, PyPI 7/260 = 2.69%.
 - The 597 malware samples are a deterministic first-N slice of a public dataset,
   not a random sample.
 - Detector changes were made against this corpus and then re-measured on it.
 
 We do not claim zero false positives. We published a 0.00% once, it did not
-reproduce on a wider corpus, and we retired it. Method and the full miss
-breakdown are in the private monorepo today; moving the measurement harness into
-this repository so the numbers are independently reproducible is tracked work.
+reproduce on a wider corpus, and we retired it. The two typosquat harnesses
+above are in this repository; the byte-level method and the full miss breakdown
+are in the private monorepo today, and moving those harnesses across so the
+numbers are independently reproducible is tracked work.
 
 ## How it compares
 
@@ -185,6 +246,7 @@ chainsaw doctor                 # package-manager wiring health
 chainsaw pr-scan --base main    # CI check: flag deps added or upgraded in a PR
 chainsaw scan-repo .            # find committed bypass config
 chainsaw sbom diff a.json b.json
+chainsaw guard allow --list     # typosquat verdicts waived on this machine
 
 # Server-backed (needs `chainsaw auth login`):
 chainsaw scan --path .          # full CVE + intelligence scan
@@ -192,7 +254,7 @@ chainsaw policy list            # org policy
 chainsaw sbom export
 ```
 
-`chainsaw --help` lists all 50 commands and marks which are which.
+`chainsaw --help` lists all 49 commands and marks which are which.
 
 ## Telemetry
 
