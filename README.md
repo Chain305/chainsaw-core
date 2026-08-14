@@ -47,6 +47,19 @@ chainsaw doctor                  # read-only: what's wired, what isn't
 eval "$(chainsaw guard init zsh)"   # make it automatic (or bash / fish)
 ```
 
+**Heads-up on the first run in a real terminal.** After the first block you get
+two prompts, and **both default to Yes, so a blind Enter accepts them**:
+
+1. *"Download the full OpenSSF malicious-package feed now?"* — a ~40MB fetch
+   from GitHub that replaces the 11-entry embedded floor with ~231k entries. It
+   takes a minute or two.
+2. *"Share detection signals?"* — turns on telemetry. See
+   [Telemetry](#telemetry) for exactly what that sends.
+
+Decline either and nothing is lost; the offline typosquat check is unaffected.
+To skip both entirely, `export CHAINSAW_OFFLINE=1`. Neither prompt appears in a
+non-interactive shell, so CI never fetches and never sends.
+
 ## What it does, precisely
 
 Read this section before you decide whether it is useful to you. Being wrong
@@ -70,10 +83,16 @@ guarded today.
 
 **Signals that run by default, offline:** typosquat distance against an embedded
 popularity corpus (npm, PyPI, Go), plus an embedded known-malicious floor of
-**11 historic incidents**. `chainsaw guard update` is an opt-in, one-time fetch
-that replaces that floor with the full ~231k-entry OpenSSF malicious-packages
-set. Everything else — CVE lookup, registry metadata, provenance — needs the
-server and is unavailable offline.
+**11 historic incidents**. `chainsaw guard update` replaces that floor with the
+full ~231k-entry OpenSSF malicious-packages set — and on an interactive terminal
+the guard *offers* to run it for you, defaulting to Yes (see
+[Try it](#try-it)). Everything else — CVE lookup, registry metadata, provenance
+— needs the server and is unavailable offline.
+
+The offline claim is testable, and we have tested it adversarially: run the
+guard under a network-denying sandbox and every block still fires identically.
+Nothing on the default path requires egress. What the tool does do on a TTY is
+*ask* whether you want the feed.
 
 **Byte-level behavioural analysis is opt-in and off by default.** It requires
 `CHAINSAW_GUARD_DEEP=1` or a staged artifact directory, and deep mode fetches
