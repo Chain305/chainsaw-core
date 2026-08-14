@@ -1,7 +1,17 @@
 # chainsaw
 
-**Blocks typosquatted and known-malicious packages at install time — offline, on
-your machine, with no account and no daemon.**
+**Supply-chain enforcement for package installs — on the developer's machine, in
+CI, at the registry proxy, at publish time, and at Kubernetes admission.** It
+refuses known-malicious and typosquatted packages, known-vulnerable versions,
+bad licences, and anything else your policy declines: **76 risk signals, 16
+package ecosystems**, one policy language, five enforcement surfaces.
+
+**The install-time guard runs entirely offline with no account, no server and no
+daemon.** That is the part most people meet first, and it is what the demo below
+shows. Everything broader — CVE and EPSS data, licence and provenance signals,
+org policy, SBOM export, admission control — is served by the Chainsaw proxy or
+control plane. This repository holds the open-core of *both*: the guard, the
+detection engines, the policy engine, the registry proxy, and the parsers.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/chain305/chainsaw-core.svg)](https://pkg.go.dev/github.com/chain305/chainsaw-core)
@@ -49,19 +59,21 @@ blocks, an occasional prompt to sign up. Neither appears in CI.
 
 </details>
 
-**This repository is the open core of [Chainsaw](https://chain305.com)**: the
-CLI, the install-time guard, the detection engines, the policy proxy, and the
-ecosystem parsers — all Apache-2.0, all standalone. No license check, no plan
-gate, no phone-home. A separate commercial control plane builds on top of it;
-[everything about that split is spelled out below](#open-core).
+Everything here is Apache-2.0 and runs standalone — no licence check, no plan
+gate, no phone-home. [What is and isn't in this repo](#open-core).
 
 ---
 
 ## Contents
 
-**Use it** — [Quickstart](#quickstart) · [How it works](#how-it-works) · [What
-gets checked](#what-gets-checked) · [CI](#ci) · [CLI reference](#cli-reference)
-· [Configuration](#configuration)
+**Understand it** — [What Chainsaw does](#what-chainsaw-does) ·
+[Ecosystems](#ecosystems) · [Risk signals](#risk-signals) · [Policy and
+enforcement surfaces](#policy-and-enforcement-surfaces) · [Registry
+proxy](#registry-proxy) · [Air-gapped operation](#air-gapped-operation)
+
+**Use it** — [Quickstart](#quickstart) · [How the guard works](#how-the-guard-works)
+· [What gets checked](#what-gets-checked) · [CI](#ci) · [CLI
+reference](#cli-reference) · [Configuration](#configuration)
 
 **Evaluate it** — [Scope and limits](#scope-and-limits) · [Measured
 performance](#measured-performance) · [False
@@ -70,6 +82,176 @@ compares](#how-it-compares)
 
 **Build on it** — [Go libraries](#go-libraries) · [Open core](#open-core) ·
 [Telemetry](#telemetry) · [Security](#security)
+
+---
+
+## What Chainsaw does
+
+Chainsaw evaluates a package and decides whether it may enter your environment.
+The same decision engine runs at five points, so a rule you write once fires
+wherever its inputs exist.
+
+| Capability | Local CLI, no account | Server-backed |
+|---|:---:|:---:|
+| Typosquat detection (4 methods, embedded corpus) | ✅ | ✅ |
+| Known-malicious index (OpenSSF, ~231k entries) | ✅ | ✅ |
+| Byte-level behavioural scan (IOC + hidden-Unicode) | ✅ opt-in | ✅ |
+| Blocking installs of npm/pip/go/cargo/gem | ✅ | ✅ |
+| Lockfile and manifest diffing in CI (`pr-scan`) | ✅ | ✅ |
+| Bypass-config detection (`scan-repo`) | ✅ | ✅ |
+| GitHub Actions workflow risk (`scan-actions`) | ✅ | ✅ |
+| SBOM diffing | ✅ | ✅ |
+| Rego policy evaluation against a local bundle | ✅ | ✅ |
+| CVE / CVSS / EPSS / KEV vulnerability data | — | ✅ |
+| Licence, maintenance, provenance, capability signals | — | ✅ |
+| Registry pull-through proxy (16 ecosystems) | — | ✅ |
+| Org policy, exceptions, audit trail, findings triage | — | ✅ |
+| SBOM / VEX export, provenance attestation chains | — | ✅ |
+| Kubernetes admission control, publish-time gating | — | ✅ |
+| Air-gapped signed intelligence bundles | — | ✅ |
+
+"Server-backed" means a Chainsaw proxy or control plane — which you can run
+yourself, including fully air-gapped, or use hosted. The client code for all of
+it is in this repository; the multi-tenant server is the commercial module. See
+[Open core](#open-core).
+
+---
+
+## Ecosystems
+
+**The install guard intercepts five package managers**: npm, pip, Go, Cargo and
+RubyGems. That is the offline, no-account surface.
+
+**The registry proxy and risk engine cover sixteen.** Signal coverage genuinely
+differs per ecosystem — an upstream that publishes no maintainer metadata cannot
+produce a maintainer signal — so the support matrix is a compiled-in table
+([`policy/proxy_matrix.go`](policy/proxy_matrix.go)) rather than a marketing
+claim, queryable at `GET /api/policies/support-matrix`. A policy rule whose
+condition is unsupported for an ecosystem emits a `policy.rule.skipped` audit
+event instead of silently never firing.
+
+Of 46 policy conditions:
+
+| Ecosystem | Full | Partial | Not supported |
+|---|---:|---:|---:|
+| npm | 40 | 3 | 3 |
+| PyPI | 39 | 2 | 5 |
+| RubyGems | 36 | 3 | 7 |
+| Cargo | 34 | 1 | 11 |
+| Composer | 32 | 3 | 11 |
+| Go | 29 | 1 | 16 |
+| CocoaPods | 26 | 2 | 18 |
+| NuGet | 24 | 10 | 12 |
+| Maven | 21 | 13 | 12 |
+| Swift | 21 | 8 | 17 |
+| Pub (Dart) | 19 | 11 | 16 |
+| Hugging Face | 17 | 1 | 28 |
+| Docker / OCI | 16 | 0 | 30 |
+| Yum | 14 | 1 | 31 |
+| DNF | 14 | 1 | 31 |
+| APT | 12 | 1 | 33 |
+
+**Manifest and lockfile parsing** is a third, wider surface. `pr-scan` reads
+these locally, with no server:
+
+| Ecosystem | Files |
+|---|---|
+| npm | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `npm-shrinkwrap.json` |
+| pip | `requirements*.txt` (incl. `requirements-dev.txt`), `Pipfile.lock`, `poetry.lock`, `uv.lock` |
+| Go | `go.sum` |
+| Cargo | `Cargo.lock` |
+| RubyGems | `Gemfile.lock` |
+
+The parser packages ([`depparser/`](depparser), [`formats/`](formats)) go
+further and additionally handle Maven `pom.xml`, Gradle (`build.gradle`,
+`build.gradle.kts`, `gradle.lockfile`), NuGet `packages.lock.json`, Composer
+`composer.lock`, Swift `Package.resolved`, CocoaPods `Podfile.lock`, Dart
+`pubspec.lock`, plus Conda, Hex, Julia, SBT and C dependency formats. Those feed
+SBOM generation and server-side scanning rather than the local `pr-scan` path.
+
+---
+
+## Risk signals
+
+**76 signals are registered** ([`risk/registry.go`](risk/registry.go)), grouped
+into five categories. The full set is evaluated server-side; the offline guard
+runs the subset that needs no external data (typosquat, known-malicious, and —
+opt-in — the byte-level checks).
+
+| Category | Count | Examples |
+|---|---:|---|
+| Supply chain | 48 | known-malicious, typosquat (3 confidence tiers), install script fetches remote, manifest confusion, publisher changed, hidden Unicode, reserved-namespace violation, transitive malware, capability flags (network / shell / filesystem / eval / native code), unsafe pickle opcodes, model-card injection, unpinned GitHub Action refs |
+| Licence | 9 | copyleft, non-permissive, missing, unidentified, ambiguous classifier, SPDX exception present, changed from previous version |
+| Vulnerability | 7 | critical / high / medium / low CVSS, EPSS high exploit probability, KEV known-exploited, fix available |
+| Quality | 6 | checksum mismatch, minified code, version anomaly, declared MCP server / agent tool, unverified MCP provenance |
+| Maintenance | 6 | abandoned repo, no recent release, single maintainer, very new package, very low downloads |
+
+`chainsaw intel signals` lists them live from a configured server. Signals are
+scored, not merely boolean, and per-org weights can be overridden with
+`chainsaw risk-weights`.
+
+---
+
+## Policy and enforcement surfaces
+
+Policy is Rego (Open Policy Agent). One bundle, one input schema, and the same
+`Decide()` call at every surface — a rule fires wherever its input fields are
+populated.
+
+| Surface | Where it runs |
+|---|---|
+| `runtime` | package-manager install hook — the local guard |
+| `pr` | GitHub Actions pull-request check |
+| `proxy` | registry pull-through fetch |
+| `publish` | pre-publish gate |
+| `deploy` | Kubernetes admission webhook |
+
+Evaluate a bundle locally, with no server, against a JSON fixture:
+
+```sh
+chainsaw policy gate proxy --bundle ./policies --input event.json
+chainsaw policy eval --bundle ./policies --input pr.json
+```
+
+Exit codes are identical across surfaces, so one CI status mapping works
+everywhere. Org policy management, monitor-mode rollout (`policy flip-to-block`
+with a would-block preview), scoped exceptions with expiry, and the audit trail
+are server-backed.
+
+A sixth surface, `promote` (environment-to-environment promotion), exists in the
+enum but has **no production caller** — it is reserved, not shipped, and is
+listed here only because you will see it in the code.
+
+---
+
+## Registry proxy
+
+Chainsaw can sit in front of your registries as a pull-through proxy, which is
+the enforcement point a shell wrapper cannot be: it applies to every client,
+including CI runners and machines you do not administer, and it cannot be
+bypassed by invoking the real binary directly.
+
+The proxy speaks the 16 ecosystems above, evaluates policy on fetch, and records
+every decision. It runs in your own network — `proxy/`, `policy/` and
+`policyengine/` in this repository are the open-core of it.
+
+---
+
+## Air-gapped operation
+
+The offline guard needs nothing. For a fully disconnected proxy, intelligence
+ships as a **signed bundle**: a manifest with per-file content hashes and a
+Sigstore signature, verified before it is trusted.
+
+```sh
+chainsaw bundle verify ./intel-bundle    # 0 fresh · 1 stale · 2 verification failed
+```
+
+Point the proxy at it with `CHAINSAW_INTEL_BUNDLE_PATH`. An unverified bundle
+never underwrites a corpus-membership exemption unless you explicitly pass
+`--allow-unverified`.
+
+---
 
 ---
 
@@ -133,9 +315,9 @@ non-interactive shell**, so CI never fetches and never sends.
 
 ---
 
-## How it works
+## How the guard works
 
-There is no daemon, no background process, and no network call on the default
+This section is about the local, offline install guard. There is no daemon, no background process, and no network call on the default
 path. `guard init` prints seven lines of shell:
 
 ```console
@@ -218,6 +400,9 @@ Override with `CHAINSAW_CONFIG_HOME` and `CHAINSAW_GUARD_DB`.
 ---
 
 ## What gets checked
+
+Still the local guard. (For the wider server-backed surfaces, see [What Chainsaw
+does](#what-chainsaw-does).)
 
 **Guarded verbs.** `npm install|i|add|ci`, `pip install`, `cargo install|add`,
 `gem install`, `go get`, `go mod download`. Every other invocation delegates
@@ -414,7 +599,8 @@ determined developer types `/usr/local/bin/npm install` and routes around it.
 Our own test suite asserts exactly that
 ([`cli/bypass_matrix_test.go`](cli/bypass_matrix_test.go)). Closing the gap is a
 registry-proxy and lockfile-pinning property, not something a local wrapper can
-promise. **Treat this as a seatbelt on your own machine, not a control you can
+promise — that is exactly what the [registry proxy](#registry-proxy) is for.
+**Treat the local guard as a seatbelt on your own machine, not a control you can
 attest to an auditor.**
 
 **It fails open.** If a signal cannot be evaluated it prints a notice and lets
