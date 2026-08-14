@@ -29,16 +29,23 @@ var credStore = func() credstore.Store { return credstore.Default() }
 var rootCmd = &cobra.Command{
 	Use:   "chainsaw",
 	Short: "Chainsaw supply chain security CLI",
-	Long: `Interact with your Chainsaw server: manage policies, audit events, and org
-settings.
+	Long: `Blocks typosquatted and known-malicious packages at install time — offline,
+on this machine, with no account and no server.
 
-New here? Run ` + "`chainsaw introduce`" + ` first — it prints the five mental models,
-two modes, vocabulary, and routing heuristics every Chainsaw surface (CLI,
-MCP, docs, landing page) shares. That framing will make the rest of the
-commands make sense.
+Start here (nothing to sign up for):
+  ` + "`chainsaw guard init --install`" + `   route npm/pip/go/cargo/gem through the guard
+  ` + "`chainsaw npm install <pkg>`" + `     check one install by hand
+  ` + "`chainsaw why npm <pkg>`" + `         explain any verdict
+  ` + "`chainsaw doctor`" + `                read-only: what's wired, what isn't
 
-Then: ` + "`chainsaw setup`" + ` for an interactive first-time wizard, or
-` + "`chainsaw auth login --device`" + ` for the headless / CI / AI-agent path.`,
+Everything under GUARD, plus doctor / why / pr-scan / scan-repo / scan-actions,
+runs entirely locally. The other groups are clients for a Chainsaw control plane
+— policies, audit events, org settings, org-wide intelligence — and each says so
+when none is configured. Connect one with ` + "`chainsaw setup`" + `, or
+` + "`chainsaw auth login --device`" + ` for the headless / CI / AI-agent path.
+
+New here? ` + "`chainsaw introduce`" + ` prints the mental models, modes and
+vocabulary every Chainsaw surface (CLI, MCP, docs, landing page) shares.`,
 	Version:       fmt.Sprintf("%s (commit: %s, built: %s)", Version, Commit, BuildDate),
 	SilenceUsage:  true,
 	SilenceErrors: true,
