@@ -57,7 +57,25 @@ var sbomDiffCmd = &cobra.Command{
 	Long: `Diff two SBOM files. The format of each input is auto-detected: CycloneDX
 documents (bomFormat="CycloneDX") and in-toto Statements wrapping a CycloneDX
 predicate are both accepted. Both inputs must be the same format — mixing
-CycloneDX and in-toto in a single diff is not supported in this iteration.`,
+CycloneDX and in-toto in a single diff is not supported in this iteration.
+
+JSON output (--format json) is a versioned envelope:
+
+  {
+    "schemaVersion": "chainsaw.sbomdiff/v1",
+    "added":   [ {"name","version","type","ecosystem","purl"}, ... ],
+    "removed": [ ... same shape ... ],
+    "changed": [ {"name","type","ecosystem","oldVersion","newVersion"}, ... ]
+  }
+
+The three arrays are always present and always arrays — an empty diff emits
+[] , never null, so a consumer can iterate unconditionally. Pin on
+schemaVersion: it is bumped only for a backward-incompatible change, and
+additive fields keep the same version.
+
+Changed in v0.20.3: keys were previously the Go field names ("Added",
+"Name", "OldVersion") and an empty diff emitted null. Scripts written
+against a pre-0.20.3 binary need updating.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runSBOMDiff,
 }
