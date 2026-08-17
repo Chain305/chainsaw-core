@@ -259,6 +259,10 @@ func runTokenRotate(cmd *cobra.Command, args []string) error {
 	if id == "" {
 		return fmt.Errorf("token id is required")
 	}
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go).
+	if err := requireAuth(cmd); err != nil {
+		return err
+	}
 
 	// N1: rotate is destructive and was the ONE hole in the confirmation
 	// gate every sibling has (token revoke below, auth client rotate /
@@ -329,6 +333,10 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	id := strings.TrimSpace(args[0])
 	if id == "" {
 		return fmt.Errorf("token id is required")
+	}
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go).
+	if err := requireAuth(cmd); err != nil {
+		return err
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")

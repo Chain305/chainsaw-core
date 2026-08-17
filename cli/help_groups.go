@@ -8,13 +8,17 @@ package cli
 // The group IDs/titles are exported constants so any command file can set
 // cmd.GroupID = GrpGuard (etc.) directly.
 //
-// Most command files don't set GroupID themselves; assignment happens by
-// command name from one map (applied in Execute, after every package init()
-// has registered its commands) so ~30 files don't each need a GroupID line.
-// Commands that DO set GroupID at definition time (the guard wrappers in
-// guard_install.go) keep their value — the map only fills in commands that are
-// still ungrouped. Any command in neither falls under cobra's default
-// "Additional Commands" heading.
+// Two mechanisms assign a command to a group, in this precedence:
+//
+//  1. GroupID set on the command literal in its own file. This is what every
+//     root command actually uses today, so it is THE source of truth.
+//  2. commandGroupByName below, applied by assignCommandGroups in Execute
+//     (after every package init() has registered its commands) — but only to
+//     commands that are still ungrouped, so (1) is never overwritten.
+//
+// The map was originally the primary mechanism and is now entirely inert; see
+// the note on commandGroupByName. Any command in neither falls under cobra's
+// default "Additional Commands" heading.
 
 import "github.com/spf13/cobra"
 
@@ -42,22 +46,35 @@ var helpGroups = []*cobra.Group{
 	{ID: GrpDebug, Title: "DEBUG & DIAGNOSTICS:"},
 }
 
-// commandGroupByName maps a command's Name() to its help group. Guard commands
-// (npm/pip/go/cargo/gem) set GroupID at definition time in guard_install.go and
-// are intentionally NOT listed here; assignCommandGroups only fills commands
-// that are still ungrouped, so an explicit GroupID is never overwritten.
+// commandGroupByName maps a command's Name() to its help group, for commands
+// that do NOT set GroupID at definition time. assignCommandGroups only fills
+// commands that are still ungrouped, so an explicit GroupID always wins.
+//
+// AS OF NOW EVERY ENTRY HERE IS INERT: every root command listed below sets
+// GroupID in its own file, so the map never assigns anything. It is kept as a
+// fallback so a future command that forgets its GroupID still lands in a
+// section instead of "Additional Commands" — but the entries are NOT the
+// source of truth, and reading a grouping off this map will mislead you.
+//
+// Because the entries never execute, drift here is silent. Seven of them had
+// already drifted to contradict the real definition-time group (bundle, logs,
+// undo, verify, exception, coverage, status), and two named commands that do
+// not exist on the root at all (harden, completion — the auto-generated
+// completion command is grouped by SetCompletionCommandGroupID below, and is
+// not even attached to rootCmd when assignCommandGroups runs). Those are
+// corrected/removed here, and TestCommandGroupMapMatchesDefinitions keeps them
+// honest from now on.
 var commandGroupByName = map[string]string{
 	// TARGET & SCAN — point chainsaw at code/artifacts and scan them.
 	"scan": GrpScan, "scan-repo": GrpScan, "scan-remote": GrpScan,
 	"scan-actions": GrpScan, "pr-scan": GrpScan, "sbom": GrpScan,
-	"bundle": GrpScan, "verify": GrpScan, "why": GrpScan,
+	"why": GrpScan,
 
 	// POLICY & ENFORCEMENT.
-	"policy": GrpPolicy, "exception": GrpPolicy, "admission": GrpPolicy,
-	"harden": GrpPolicy, "risk-weights": GrpPolicy, "coverage": GrpPolicy,
+	"policy": GrpPolicy, "admission": GrpPolicy, "risk-weights": GrpPolicy,
 
 	// INTELLIGENCE.
-	"intel": GrpIntel,
+	"intel": GrpIntel, "verify": GrpIntel,
 
 	// GUARD (install-time). Guard wrappers set GroupID directly; "guard"
 	// (the umbrella feed/update command) is grouped here by name.
@@ -65,17 +82,18 @@ var commandGroupByName = map[string]string{
 
 	// AUDIT & FINDINGS.
 	"audit": GrpAudit, "finding": GrpAudit, "report": GrpAudit,
-	"logs": GrpAudit, "undo": GrpAudit,
+	"exception": GrpAudit,
 
 	// CONFIG & AUTH.
 	"auth": GrpConfig, "token": GrpConfig, "org": GrpConfig,
 	"team": GrpConfig, "repo": GrpConfig, "codeowners": GrpConfig,
 	"setup": GrpConfig, "onboard": GrpConfig, "onboarding": GrpConfig,
-	"introduce": GrpConfig,
+	"introduce": GrpConfig, "bundle": GrpConfig, "undo": GrpConfig,
+	"status": GrpConfig,
 
 	// DEBUG & DIAGNOSTICS.
-	"doctor": GrpDebug, "status": GrpDebug, "version": GrpDebug,
-	"features": GrpDebug, "telemetry": GrpDebug, "completion": GrpDebug,
+	"doctor": GrpDebug, "version": GrpDebug, "features": GrpDebug,
+	"telemetry": GrpDebug, "coverage": GrpDebug,
 }
 
 // init registers the help groups on rootCmd as early as possible. This MUST

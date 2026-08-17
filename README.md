@@ -234,8 +234,15 @@ chainsaw guard init --install
 
 That appends a single `eval` line to your shell rc file. Use `--dry-run` to see
 the exact file and line first, or skip it entirely and put
-`eval "$(chainsaw guard init zsh)"` in your rc yourself. `bash`, `zsh` and
-`fish` are supported.
+`eval "$(chainsaw guard init zsh)"` in your rc yourself. `bash`, `zsh`, `fish`,
+`powershell` and `pwsh` are supported; on PowerShell the activation line is
+`chainsaw guard init powershell | Invoke-Expression` and `--install` writes to
+your PowerShell profile.
+
+`cmd` is print-only. cmd.exe has no startup file, and doskey macros are not
+expanded inside `.bat`/`.cmd` scripts — so `--install cmd` refuses instead of
+persisting a wiring that would miss every scripted install. On Windows, either
+use PowerShell or call the guard explicitly: `chainsaw npm install <package>`.
 
 Then just use your package manager normally:
 

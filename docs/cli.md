@@ -18,9 +18,12 @@ open-source clients for a closed server, which is why they ship here.
 | `install-hook` / `uninstall-hook` | Wire chainsaw into a package manager's own config, or remove it |
 | `cargo-credentials` | Cargo credential-provider helper |
 
-`guard init` supports `bash`, `zsh` and `fish`. `--install` appends the
-activation line to your shell rc file idempotently; `--dry-run` shows the target
-file and the exact line without writing.
+`guard init` supports `bash`, `zsh`, `fish`, `powershell`, `pwsh` and `cmd`.
+`--install` appends the activation line to your shell rc file (or PowerShell
+profile) idempotently; `--dry-run` shows the target file and the exact line
+without writing. `cmd` is print-only: cmd.exe has no startup file, and doskey
+macros are not expanded inside `.bat`/`.cmd` scripts, so `--install cmd` refuses
+rather than persisting a wiring that would not cover scripted installs.
 
 ## Target and scan
 

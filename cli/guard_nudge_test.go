@@ -331,8 +331,7 @@ func TestEnsureGuardConsent_NonTTYNeverGrants(t *testing.T) {
 	prev := stdinIsTerminal
 	stdinIsTerminal = func() bool { return false }
 	defer func() { stdinIsTerminal = prev }()
-	t.Setenv("CHAINSAW_TELEMETRY_DISABLED", "")
-	t.Setenv("CHAINSAW_OFFLINE", "")
+	clearTelemetryEnvForConsent(t)
 
 	st := &guardState{}
 	if got := ensureGuardConsent(st, true); got != "" {
@@ -343,12 +342,26 @@ func TestEnsureGuardConsent_NonTTYNeverGrants(t *testing.T) {
 	}
 }
 
+// clearTelemetryEnvForConsent neutralizes every variable ResolveMode consults,
+// so a consent test exercises only the one it sets and cannot be flipped by an
+// ambient DO_NOT_TRACK / CHAINSAW_OFFLINE in the developer's or CI's shell.
+func clearTelemetryEnvForConsent(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"CHAINSAW_TELEMETRY_DEBUG", "CHAINSAW_TELEMETRY_DISABLED", "CHAINSAW_TELEMETRY_ENABLED",
+		"CHAINSAW_OFFLINE", "CHAINSAW_SELF_HOSTED", "DO_NOT_TRACK",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
 // TestEnsureGuardConsent_EnvKillSwitchDeclines verifies an explicit env kill
 // switch declines even on a TTY, and does not persist (it's a per-run override).
 func TestEnsureGuardConsent_EnvKillSwitchDeclines(t *testing.T) {
 	prev := stdinIsTerminal
 	stdinIsTerminal = func() bool { return true }
 	defer func() { stdinIsTerminal = prev }()
+	clearTelemetryEnvForConsent(t)
 	t.Setenv("CHAINSAW_TELEMETRY_DISABLED", "1")
 
 	st := &guardState{}
@@ -357,6 +370,48 @@ func TestEnsureGuardConsent_EnvKillSwitchDeclines(t *testing.T) {
 	}
 	if st.Consent != "" {
 		t.Fatalf("env kill switch is per-run; must not persist, got %q", st.Consent)
+	}
+}
+
+// TestEnsureGuardConsent_HonorsEveryEnvKillSwitch pins the third copy of the
+// hand-rolled env list. ensureGuardConsent checked exactly two variables
+// (CHAINSAW_TELEMETRY_DISABLED, CHAINSAW_OFFLINE), so the other two routes to
+// ModeDisabled were invisible to it: an operator who had set DO_NOT_TRACK, and
+// every self-hosted build without CHAINSAW_TELEMETRY_ENABLED, still got the
+// first-run consent prompt — asked to agree to collection the SDK had already
+// made impossible. Nothing leaked; the prompt itself was the defect. It now
+// defers to telemetry.ResolveMode() through one shared predicate.
+func TestEnsureGuardConsent_HonorsEveryEnvKillSwitch(t *testing.T) {
+	for _, env := range []string{
+		"CHAINSAW_TELEMETRY_DISABLED",
+		"CHAINSAW_OFFLINE",
+		"DO_NOT_TRACK",
+		// A self-hosted build is opt-IN: no CHAINSAW_TELEMETRY_ENABLED means
+		// ResolveMode is already disabled, so there is nothing to ask about.
+		"CHAINSAW_SELF_HOSTED",
+	} {
+		t.Run(env, func(t *testing.T) {
+			// A terminal, so the prompt WOULD fire if the kill switch were
+			// missed — that is what makes this test meaningful.
+			prev := stdinIsTerminal
+			stdinIsTerminal = func() bool { return true }
+			defer func() { stdinIsTerminal = prev }()
+			clearTelemetryEnvForConsent(t)
+			t.Setenv(env, "1")
+
+			st := &guardState{}
+			if got := ensureGuardConsent(st, true); got != consentDeclined {
+				t.Fatalf("%s=1 must decline without prompting, got %q", env, got)
+			}
+			if st.Consent != "" {
+				t.Fatalf("%s=1 is a per-run override; it must not persist a decision, got %q", env, st.Consent)
+			}
+			// Sanity: the predicate and the SDK agree, so this can never
+			// drift back into a private list of variable names.
+			if !telemetryDisabledByEnv() || telemetry.ResolveMode() != telemetry.ModeDisabled {
+				t.Fatalf("%s=1 should resolve to ModeDisabled", env)
+			}
+		})
 	}
 }
 
@@ -381,8 +436,7 @@ func TestEnsureGuardConsent_InteractiveDefaultsYes(t *testing.T) {
 	prev := stdinIsTerminal
 	stdinIsTerminal = func() bool { return true }
 	defer func() { stdinIsTerminal = prev }()
-	t.Setenv("CHAINSAW_TELEMETRY_DISABLED", "")
-	t.Setenv("CHAINSAW_OFFLINE", "")
+	clearTelemetryEnvForConsent(t)
 
 	answer := func(input string) string {
 		r, w, err := os.Pipe()

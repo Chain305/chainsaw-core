@@ -121,14 +121,19 @@ func runTeamAdd(cmd *cobra.Command, args []string) error {
 // ── remove ────────────────────────────────────────────────────────────────────
 
 var teamRemoveCmd = &cobra.Command{
-	Use:          "remove <pattern>",
-	Short:        "Remove the mapping for an exact pattern",
+	Use:   "remove <pattern>",
+	Short: "Remove the mapping for an exact pattern",
+	Long: "Removes the repo→team mapping whose pattern matches EXACTLY. " +
+		"Routing for every repository the pattern covered falls back to the " +
+		"org default until a replacement mapping is added. Prompts for " +
+		"confirmation; use --yes to skip it in scripts.",
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runTeamRemove,
 }
 
 func init() {
+	teamRemoveCmd.Flags().Bool("yes", false, "Skip confirmation prompt (required on non-TTY)")
 	teamCmd.AddCommand(teamRemoveCmd)
 }
 
@@ -136,6 +141,10 @@ func runTeamRemove(cmd *cobra.Command, args []string) error {
 	client := newClient()
 	if client.baseURL == "" {
 		return errServerNotConfigured(cmd)
+	}
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go).
+	if err := requireAuth(cmd); err != nil {
+		return err
 	}
 	pattern := strings.TrimSpace(args[0])
 	if pattern == "" {
@@ -150,16 +159,39 @@ func runTeamRemove(cmd *cobra.Command, args []string) error {
 	if err := client.Get("/api/repo-team-mappings", &listResp); err != nil {
 		return err
 	}
-	var matchID string
+	var matchID, matchTeam string
 	for _, m := range listResp.Mappings {
 		if m.RepoPattern == pattern {
-			matchID = m.ID
+			matchID, matchTeam = m.ID, m.Team
 			break
 		}
 	}
 	if matchID == "" {
 		return fmt.Errorf("no mapping found for pattern %q — run `chainsaw team list` to see configured patterns", pattern)
 	}
+
+	// Z3: this deleted a server-side row with no prompt and no --yes at all —
+	// the opposite failure from the A5 class. It was classified exempt from
+	// the confirmation doctrine on the grounds that `team add` restores the
+	// mapping, but `team add` needs BOTH halves and the delete destroys one of
+	// them: the operator supplies the pattern, and the team name they would
+	// have to type back is exactly what this row was holding. Name the team in
+	// the prompt so the confirmation doubles as the record of what to restore.
+	//
+	// Non-TTY behaviour matches every sibling (token revoke, exception delete,
+	// undo): PromptConfirm returns false off a terminal, so prompting there
+	// would print "Aborted." at rc=0 and hide the no-op. Refuse instead.
+	yes, _ := cmd.Flags().GetBool("yes")
+	if !yes {
+		if !stdinIsTerminal() {
+			return fmt.Errorf("refusing to remove team mapping %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", pattern)
+		}
+		if !PromptConfirm(fmt.Sprintf("Remove mapping %s → %s? Repositories it covered fall back to the org default until it is re-added.", pattern, matchTeam)) {
+			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			return nil
+		}
+	}
+
 	if err := client.Delete("/api/repo-team-mappings/" + matchID); err != nil {
 		return err
 	}

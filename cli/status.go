@@ -91,9 +91,10 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		return PrintJSONTo(cmd, report)
 	}
 
+	g := glyphs()
 	printStatusLine := func(label, val, errVal string, ok bool) {
-		tick := "✓"
-		cross := "✗"
+		tick := g.ok
+		cross := g.fail
 		if ok {
 			fmt.Printf("  %s  %-18s %s\n", tick, label+":", val)
 		} else {

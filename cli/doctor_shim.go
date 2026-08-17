@@ -11,6 +11,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -27,7 +28,19 @@ var shellRCCandidates = func() []string {
 	if err != nil || home == "" {
 		return nil
 	}
-	return []string{
+	return shellRCCandidatesFor(runtime.GOOS, home)
+}
+
+// shellRCCandidatesFor is the pure, GOOS-parameterised core of
+// shellRCCandidates, split out so the Windows list is testable without a
+// Windows runner.
+//
+// The POSIX files are scanned everywhere — Git Bash and WSL users on Windows do
+// have a ~/.bashrc, and a Windows-only list would report them unprotected. On
+// top of that we add the PowerShell profiles, without which `chainsaw doctor`
+// could never see an installed shim on Windows at all (the bug this fixes).
+func shellRCCandidatesFor(goos, home string) []string {
+	c := []string{
 		filepath.Join(home, ".zshrc"),
 		filepath.Join(home, ".zshenv"),
 		filepath.Join(home, ".zprofile"),
@@ -36,6 +49,31 @@ var shellRCCandidates = func() []string {
 		filepath.Join(home, ".profile"),
 		filepath.Join(home, ".config", "fish", "config.fish"),
 	}
+	if goos != "windows" {
+		// PowerShell 7+ is cross-platform; its profiles live under XDG on
+		// macOS/Linux.
+		return append(c,
+			filepath.Join(home, ".config", "powershell", "profile.ps1"),
+			filepath.Join(home, ".config", "powershell", "Microsoft.PowerShell_profile.ps1"),
+		)
+	}
+	// Windows: both the all-hosts (profile.ps1) and console-host
+	// (Microsoft.PowerShell_profile.ps1) profiles, for PowerShell 7+
+	// (Documents\PowerShell) and Windows PowerShell 5.1
+	// (Documents\WindowsPowerShell). The OneDrive variants cover Known Folder
+	// Move, which silently relocates Documents on most modern Windows installs.
+	for _, docs := range []string{
+		filepath.Join(home, "Documents"),
+		filepath.Join(home, "OneDrive", "Documents"),
+	} {
+		for _, host := range []string{"PowerShell", "WindowsPowerShell"} {
+			c = append(c,
+				filepath.Join(docs, host, "profile.ps1"),
+				filepath.Join(docs, host, "Microsoft.PowerShell_profile.ps1"),
+			)
+		}
+	}
+	return c
 }
 
 // detectGuardShim reports whether the guard shell-shim is sourced in any of the

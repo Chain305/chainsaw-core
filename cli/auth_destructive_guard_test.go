@@ -133,11 +133,21 @@ func TestTokenRotate_NonTTYWithoutYes_FailsLoudly(t *testing.T) {
 // than a pure heuristic):
 //
 //	A command requires a --yes gate when running it DESTROYS OR REPLACES
-//	durable state that the CLI offers no verb to restore — a credential
-//	secret, a policy, an exception, a tenant, or an enforcement posture.
-//	"No verb to restore" is the load-bearing half: `token rotate` qualifies
-//	because there is no un-rotate, while `team remove` does not because
-//	`team add` puts the mapping back.
+//	durable state that the CLI offers no verb to restore FROM THE ARGUMENTS
+//	THE OPERATOR STILL HAS — a credential secret, a policy, an exception, a
+//	tenant, an enforcement posture, or a row whose restoring verb needs a
+//	field only that row was holding.
+//
+// Z3 sharpened the second half. It used to read "no verb to restore", full
+// stop, and on that reading `team remove` and `coverage expected remove` were
+// filed exempt because `team add` / `coverage expected add` exist. That
+// misses which ARGUMENTS those verbs need. `team remove <pattern>` takes the
+// pattern and destroys the team name; `coverage expected remove <id>` takes an
+// opaque id and destroys the client pattern. In both cases the restoring verb
+// requires the half the deletion just consumed, and nothing in the operator's
+// scrollback holds it. A restoring verb you cannot supply arguments to is not
+// a restore path, so both moved into requiresYesGate — and their prompts now
+// name the destroyed field, which makes the confirmation itself the record.
 //
 // A pure heuristic cannot decide that (it cannot tell `admission soak clear`,
 // which computes a gate verdict and mutates nothing, from `policy delete`), and
@@ -150,16 +160,18 @@ func TestTokenRotate_NonTTYWithoutYes_FailsLoudly(t *testing.T) {
 //     added, and the author must classify it rather than default into
 //     silence.
 var requiresYesGate = map[string]string{
-	"chainsaw token revoke":         "revokes a live PAT; no un-revoke verb",
-	"chainsaw token rotate":         "replaces a live PAT secret in place; no un-rotate verb (N1)",
-	"chainsaw auth client rotate":   "deletes + recreates a registry credential; the old secret is gone",
-	"chainsaw auth client delete":   "removes a registry credential; clients using it start failing",
-	"chainsaw policy delete":        "removes an enforcement policy; packages it blocked stop being blocked",
-	"chainsaw policy flip-to-block": "flips monitor → block org-wide; can wedge every install in CI",
-	"chainsaw exception delete":     "removes an exception; installs it allowed start being blocked",
-	"chainsaw finding suppress":     "permanently exempts a package@version from enforcement",
-	"chainsaw org delete":           "hard-deletes a tenant and every artifact it owns",
-	"chainsaw undo":                 "reverses a prior action; the reversal is itself a mutation",
+	"chainsaw token revoke":             "revokes a live PAT; no un-revoke verb",
+	"chainsaw token rotate":             "replaces a live PAT secret in place; no un-rotate verb (N1)",
+	"chainsaw auth client rotate":       "deletes + recreates a registry credential; the old secret is gone",
+	"chainsaw auth client delete":       "removes a registry credential; clients using it start failing",
+	"chainsaw policy delete":            "removes an enforcement policy; packages it blocked stop being blocked",
+	"chainsaw policy flip-to-block":     "flips monitor → block org-wide; can wedge every install in CI",
+	"chainsaw exception delete":         "removes an exception; installs it allowed start being blocked",
+	"chainsaw finding suppress":         "permanently exempts a package@version from enforcement",
+	"chainsaw org delete":               "hard-deletes a tenant and every artifact it owns",
+	"chainsaw undo":                     "reverses a prior action; the reversal is itself a mutation",
+	"chainsaw team remove":              "deletes the routing row; `team add` needs the team name this row was the only record of (Z3)",
+	"chainsaw coverage expected remove": "deletes a declared source by id; `coverage expected add` needs the client pattern the id hid (Z3)",
 }
 
 // destructiveVerbExempt lists commands whose verb matches the vocabulary but
@@ -167,11 +179,9 @@ var requiresYesGate = map[string]string{
 // if you cannot write the justification, the command belongs in
 // requiresYesGate instead.
 var destructiveVerbExempt = map[string]string{
-	"chainsaw admission soak clear":     "read-only: evaluates the soak gate and prints a kubectl patch; never applies it",
-	"chainsaw coverage expected remove": "removes a declared expected-source row; `coverage expected add` restores it",
-	"chainsaw team remove":              "removes a team mapping; `team add` restores it",
-	"chainsaw telemetry reset":          "resets local telemetry consent; `telemetry on/off` restores it, no server state",
-	"chainsaw uninstall-hook":           "removes the local package-manager hook; `install-hook` restores it, and refusing to let someone turn the guard off is worse than the fat-finger risk",
+	"chainsaw admission soak clear": "read-only: evaluates the soak gate and prints a kubectl patch; never applies it",
+	"chainsaw telemetry reset":      "resets local telemetry consent; `telemetry on/off` restores it, no server state — and the operator supplies no argument that the reset destroys",
+	"chainsaw uninstall-hook":       "removes the local package-manager hook; `install-hook` restores it, and refusing to let someone turn the guard off is worse than the fat-finger risk",
 }
 
 // destructiveVerbVocabulary is the trigger set for rule (2). Matched against

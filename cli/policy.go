@@ -341,6 +341,12 @@ func runPolicyDelete(cmd *cobra.Command, args []string) error {
 		return errServerNotConfigured(cmd)
 	}
 	id := args[0]
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go). This
+	// path already checked auth incidentally, via the display-name fetch
+	// below — make the ordering a property of the command, not of the fetch.
+	if err := requireAuth(cmd); err != nil {
+		return err
+	}
 
 	// Fetch the policy name to make the confirmation message meaningful.
 	var getResp struct {
@@ -1149,6 +1155,12 @@ func runPolicyFlipToBlock(cmd *cobra.Command, args []string) error {
 	}
 	id := args[0]
 	out := cmd.OutOrStdout()
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go). This
+	// path already checked auth incidentally, via the rollout preview below —
+	// make the ordering a property of the command, not of the preview.
+	if err := requireAuth(cmd); err != nil {
+		return err
+	}
 
 	// Fetch the preview stats first so the operator sees the would-block
 	// count BEFORE confirming. This is the same number the dashboard

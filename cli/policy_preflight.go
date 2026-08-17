@@ -23,6 +23,9 @@ package cli
 //	1 — a condition one of your --policy rules USES is "none" on a
 //	    printed ecosystem (CI signal)
 //	2 — usage / network / other errors (cobra/RunE default)
+//	12 — the --policy tree could not be fully read, so the gate did not
+//	    cover the whole policy set (policyScanIncompleteExitCode, shared
+//	    with `policy lint`)
 //
 // The "none" gate matters because the UI treats partial as supported (the
 // signal is wired, it just may be empty in practice) — preflight does the
@@ -43,7 +46,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -89,6 +91,11 @@ Use this in CI to catch policies that reference conditions silently inert
 on the target ecosystem before applying them. Pass --policy <file-or-dir>
 and the command exits 1 when a condition YOUR rules use is unsupported on
 a printed ecosystem — and names the rule, the condition and the ecosystem.
+
+When --policy names a DIRECTORY, the sweep skips .git/node_modules/vendor
+and friends and ignores JSON/YAML that is not a policy document; anything it
+could not READ is listed and exits 12 (the gate covered only part of your
+policy set). Naming a single file keeps the strict reading: it must parse.
 
 Without --policy it is a pure informational dump of the compatibility
 matrix and exits 0. (Every ecosystem has at least one unsupported
@@ -143,9 +150,12 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 	// file is an operational error, and emitting a matrix followed by a
 	// parse failure would read as "the gate passed, then something else
 	// broke".
-	var usage []preflightConditionUse
+	var (
+		usage   []preflightConditionUse
+		skipped []policySkip
+	)
 	if policyPath != "" {
-		usage, err = collectPreflightConditionUsage(policyPath)
+		usage, skipped, err = collectPreflightConditionUsage(policyPath)
 		if err != nil {
 			return err
 		}
@@ -187,8 +197,31 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 		out = cmd.ErrOrStderr()
 	}
 
+	// SURFACE what the sweep declined, before the verdict. This command's own
+	// contract (see collectPreflightConditionUsage) is that gating on a
+	// partially-parsed policy set silently under-reports — so the paths that
+	// were not parsed have to appear in the operator's output, not just in the
+	// walker's head.
+	if len(skipped) > 0 {
+		fmt.Fprintln(out)
+		printPolicySkips(out, skipped)
+	}
+	lost := unreadablePolicySkips(skipped)
+
 	inert := inertPolicyConditions(rows, usage)
 	if len(inert) == 0 {
+		if len(lost) > 0 {
+			// Never "✓ every condition is supported" over a policy set we
+			// only half read — that sentence is the gate's answer, and it
+			// would be an answer about files we never opened.
+			fmt.Fprintf(out, "\n✗ no unsupported condition found in what could be read, but %d path(s) under %s were unreadable — this gate is INCOMPLETE.\n",
+				len(lost), policyPath)
+			return &ExitCodeError{
+				Code: policyScanIncompleteExitCode,
+				Err: fmt.Errorf("policy preflight: %d path(s) under %s could not be read; the gate did not cover the whole policy set",
+					len(lost), policyPath),
+			}
+		}
 		fmt.Fprintf(out, "\n✓ every condition used by %s is supported on the printed ecosystem(s).\n", policyPath)
 		return nil
 	}
@@ -229,34 +262,48 @@ type preflightInertCondition struct {
 // collection and parser so both commands accept exactly the same inputs —
 // an operator who can lint a directory can preflight it.
 //
-// A parse error is fatal here (unlike in lint, which reports it as a
-// finding and continues): preflight's answer is a GATE, and gating on a
-// partially-parsed policy set would silently under-report.
-func collectPreflightConditionUsage(path string) ([]preflightConditionUse, error) {
-	files, err := collectPolicyFiles(path)
+// A parse error on an EXPLICITLY NAMED file is fatal here (unlike in lint,
+// which reports it as a finding and continues): preflight's answer is a GATE,
+// and gating on a partially-parsed policy set would silently under-report.
+//
+// That reasoning is exactly why a DIRECTORY SWEEP cannot be fatal and cannot
+// be silent either. `--policy ./policies` inside a repo used to die on the
+// first tsconfig.json it walked past, and (before that) on the first
+// unreadable directory. Now the sweep tolerates both and returns the skip list
+// as a second value — the caller must render it, and unreadable paths escalate
+// the exit code, so "gating on a partially-parsed policy set" stays impossible
+// by construction rather than by aborting.
+func collectPreflightConditionUsage(path string) ([]preflightConditionUse, []policySkip, error) {
+	set, err := collectPolicyFiles(path)
 	if err != nil {
-		return nil, fmt.Errorf("--policy %s: %w", path, err)
+		return nil, nil, fmt.Errorf("--policy %s: %w", path, err)
 	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("--policy %s: no .json/.yaml/.yml policy files found", path)
+	skipped := append([]policySkip(nil), set.Skipped...)
+	if len(set.Files) == 0 {
+		if len(skipped) > 0 {
+			return nil, skipped, fmt.Errorf("--policy %s: no .json/.yaml/.yml policy files found (%d path(s) skipped or unreadable)",
+				path, len(skipped))
+		}
+		return nil, skipped, fmt.Errorf("--policy %s: no .json/.yaml/.yml policy files found", path)
 	}
+	explicit := !set.Swept
 	var out []preflightConditionUse
-	for _, f := range files {
-		data, rerr := os.ReadFile(f)
-		if rerr != nil {
-			return nil, fmt.Errorf("--policy: read %s: %w", f, rerr)
+	for _, f := range set.Files {
+		entries, skip, lerr := loadPolicyEntries(f, explicit)
+		if lerr != nil {
+			return nil, skipped, fmt.Errorf("--policy: %w", lerr)
 		}
-		doc, perr := parsePolicyDoc(data, f)
-		if perr != nil {
-			return nil, fmt.Errorf("--policy: %w", perr)
+		if skip != nil {
+			skipped = append(skipped, *skip)
 		}
-		for _, e := range doc.policies {
+		for _, e := range entries {
 			for _, c := range policy.ConditionsUsedBy(e.policy.Conditions) {
 				out = append(out, preflightConditionUse{File: f, Line: e.line, Rule: e.name, Condition: c})
 			}
 		}
 	}
-	return out, nil
+	sort.SliceStable(skipped, func(i, j int) bool { return skipped[i].Path < skipped[j].Path })
+	return out, skipped, nil
 }
 
 // inertPolicyConditions intersects "conditions your rules use" with

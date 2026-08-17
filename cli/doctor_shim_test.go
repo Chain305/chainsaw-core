@@ -41,6 +41,69 @@ func TestDetectGuardShim(t *testing.T) {
 	})
 }
 
+// TestShellRCCandidatesFor covers the platform split. The Windows list used to
+// be POSIX-only, so `chainsaw doctor` could never see an installed shim on
+// Windows and reported every manager unprotected.
+func TestShellRCCandidatesFor(t *testing.T) {
+	home := filepath.Join("home", "u")
+
+	t.Run("posix keeps the dotfiles and adds cross-platform pwsh", func(t *testing.T) {
+		got := shellRCCandidatesFor("linux", home)
+		for _, want := range []string{
+			filepath.Join(home, ".zshrc"),
+			filepath.Join(home, ".bashrc"),
+			filepath.Join(home, ".profile"),
+			filepath.Join(home, ".config", "fish", "config.fish"),
+			filepath.Join(home, ".config", "powershell", "profile.ps1"),
+		} {
+			if !containsPath(got, want) {
+				t.Errorf("linux candidates missing %q:\n%v", want, got)
+			}
+		}
+	})
+
+	t.Run("windows adds every PowerShell profile", func(t *testing.T) {
+		got := shellRCCandidatesFor("windows", home)
+		for _, want := range []string{
+			// PowerShell 7+ and Windows PowerShell 5.1, all-hosts and console-host.
+			filepath.Join(home, "Documents", "PowerShell", "profile.ps1"),
+			filepath.Join(home, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1"),
+			filepath.Join(home, "Documents", "WindowsPowerShell", "profile.ps1"),
+			filepath.Join(home, "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1"),
+			// OneDrive Known Folder Move relocates Documents on most modern installs.
+			filepath.Join(home, "OneDrive", "Documents", "PowerShell", "profile.ps1"),
+			filepath.Join(home, "OneDrive", "Documents", "WindowsPowerShell", "profile.ps1"),
+			// Git Bash / WSL users on Windows still have POSIX dotfiles.
+			filepath.Join(home, ".bashrc"),
+		} {
+			if !containsPath(got, want) {
+				t.Errorf("windows candidates missing %q:\n%v", want, got)
+			}
+		}
+	})
+
+	t.Run("detects a shim in a PowerShell profile", func(t *testing.T) {
+		dir := t.TempDir()
+		profile := filepath.Join(dir, "profile.ps1")
+		if err := os.WriteFile(profile, []byte("# chainsaw install guard\nchainsaw guard init pwsh | Invoke-Expression\n"), 0o644); err != nil {
+			t.Fatalf("write profile: %v", err)
+		}
+		ok, src := detectGuardShim([]string{profile})
+		if !ok || src != profile {
+			t.Fatalf("want detected at %s, got ok=%v src=%s", profile, ok, src)
+		}
+	})
+}
+
+func containsPath(list []string, want string) bool {
+	for _, p := range list {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestGuardedManagerSet(t *testing.T) {
 	set := guardedManagerSet()
 	// cargo and gem are now shell-shimmed too (guardedTools), so the shim

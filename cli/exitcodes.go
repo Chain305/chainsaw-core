@@ -15,6 +15,22 @@ package cli
 // reserved for command-specific outcomes that need to be told apart from the
 // generic buckets (e.g. `admission soak clear` returning ExitSoakNotCleared so
 // "gate not cleared" never collides with "config/auth failure").
+//
+// IMPORTANT — what ">=10 is reserved" does and does NOT mean. It was only ever
+// reserved AGAINST the 0–4 buckets. It was never partitioned BETWEEN commands,
+// so several numbers already carry more than one meaning depending on which
+// command returned them (10 is "soak gate not cleared" for `admission soak
+// clear`, "warning-level findings" for `pr-scan`, and "drift/bypass found" for
+// `scan-repo` and `doctor --strict`; 30 is "manifests failed to parse" for
+// `scan`/`pr-scan` and "direct egress reachable" for `doctor --strict`). Two
+// commands also violate invariant B by reusing 1 and 2 for command-specific
+// outcomes (`doctor --upgrade-check`, `policy lint`).
+//
+// These numbers are NOT renumbered: customers have them wired into CI gates and
+// into the enforcement GitHub Action and MDM scripts under enforcement/, so
+// changing a value is a breaking change. The divergence is documented instead —
+// see exitCodeAllocations below, which is the single ledger of who owns which
+// number and is also what the published reference table is generated from.
 const (
 	// ExitOK — success.
 	ExitOK = 0
@@ -66,6 +82,183 @@ const (
 	// gate fires and 30 only when it did not.
 	ExitManifestParseError = 30
 )
+
+// exitCodeAllocation is one claim on a number in the process exit-code space.
+//
+// It is the ledger entry for "who owns this number and what does it mean there",
+// and it is ALSO the row the published reference table is generated from (see
+// ExitCodesForDocs in docs_export.go). One table, not two, so the ledger cannot
+// drift from what customers read.
+type exitCodeAllocation struct {
+	// Code is the number itself, always written as one of the package's exit
+	// constants rather than a literal — so a renumber anywhere in package cli
+	// moves this row with it instead of leaving a stale copy behind.
+	Code int
+	// Consts names every constant in package cli that evaluates to Code for
+	// this meaning. More than one name means they are deliberate aliases of a
+	// single meaning (prScanExitParseError aliases ExitManifestParseError).
+	// Constants for a DIFFERENT meaning that happen to land on the same number
+	// are listed here too — that is the overload, and Desc must say so.
+	//
+	// TestExitCodeAllocationsCoverEveryConstant AST-parses package cli and
+	// fails if any exit-code constant is missing from this column or resolves
+	// to a different value, so the ledger cannot rot.
+	Consts []string
+	// Owner is the operator-facing label for who returns this code: the
+	// command(s), or "(every command)" for the cross-cutting buckets.
+	//
+	// Written WITHOUT backticks. It lands in the generated reference's Name
+	// column, and cmd/gen-cli-docs wraps that column in backticks itself —
+	// a label that carried its own would render as a nested code span.
+	Owner string
+	// Kind selects which published table the row lands in: "shared" for the
+	// 0–4 buckets, "command" for the command-specific space. Every allocation
+	// at Code >= 5 must be published (see the completeness test) — a number in
+	// the command space that nobody documents is exactly how 10 acquired three
+	// meanings.
+	Kind string
+	// Desc is the operator-facing meaning, rendered verbatim into the
+	// generated reference. Where a number is overloaded, Desc says so and
+	// points at the owning command's --help.
+	Desc string
+}
+
+// exitCodeAllocations is the allocation table for the whole exit-code space:
+// every number any chainsaw command can exit with, who owns it, and what it
+// means there.
+//
+// Why this exists: >=10 was reserved against 0–4 but never partitioned between
+// commands, so 10, 20, 30 and 40 were claimed independently by `admission soak
+// clear`, `pr-scan`, `scan-repo`, `doctor --strict`, `policy lint` and `scan`
+// with no shared list to consult. A sixth command picking "10" for a fourth
+// meaning would have been invisible. Adding a row here is the cheap step that
+// makes the next claim visible.
+//
+// Cheap to keep true, by construction:
+//   - Code is a constant reference, so values track the source of truth.
+//   - Consts is checked against an AST parse of package cli, so a new
+//     exit-code constant that is not listed here fails the test.
+//   - ExitCodesForDocs projects this slice, so the published table cannot
+//     disagree with it.
+//
+// Adding a new command-specific code is one line: declare the constant in the
+// owning command's file (or here, if it is shared), then add one row below.
+//
+// Rules for a new claim, in order of preference:
+//  1. Reuse an existing constant if the meaning is genuinely the same
+//     (prScanExitParseError does this).
+//  2. Otherwise take the next FREE number >= 10 — free means absent from the
+//     Code column below. Do not reuse 10/20/30/40.
+//  3. Never take 5–9: the generated reference states that command-specific
+//     outcomes start at 10, and a row below that would make it false.
+//  4. Never take 0–4 for a command-specific meaning. `doctor --upgrade-check`
+//     and `policy lint` already do and it violates invariant B — a
+//     `doctor --upgrade-check` that finds breaking changes is indistinguishable
+//     from a network failure. They are grandfathered, not precedent.
+var exitCodeAllocations = []exitCodeAllocation{
+	{
+		Code:   ExitOK,
+		Consts: []string{"ExitOK", "doctorExitOK", "prScanExitOK", "lintExitClean"},
+		Owner:  "(every command)",
+		Kind:   "shared",
+		Desc:   "Success.",
+	},
+	{
+		Code:   ExitBlocked,
+		Consts: []string{"ExitBlocked", "doctorExitEgressUnknown", "preflightUnsupportedExitCode", "lintExitWarning"},
+		Owner:  "(every command)",
+		Kind:   "shared",
+		Desc: "The expected enforcement outcome: a policy block, a failed gate, or findings at or above the configured threshold. Stays 1 so existing block-gating scripts keep working. " +
+			"Three commands also return 1 for a softer command-specific outcome — `doctor --strict` (egress probe inconclusive), `doctor --upgrade-check` (warnings) and `policy lint` (warnings only) — so on those, check the command's `--help` before reading 1 as a block.",
+	},
+	{
+		Code:   ExitOpError,
+		Consts: []string{"ExitOpError", "lintExitError"},
+		Owner:  "(every command)",
+		Kind:   "shared",
+		Desc: "Operational failure: network, server, IO, or internal error. Distinct from a block so CI can tell infrastructure trouble apart from enforcement. " +
+			"Two commands overload it: `doctor --upgrade-check` returns 2 for breaking changes and `policy lint` returns 2 for lint errors, so on those a 2 is a finding rather than a failure. Check the command's `--help`.",
+	},
+	{
+		Code:   ExitConfigAuth,
+		Consts: []string{"ExitConfigAuth"},
+		Owner:  "(every command)",
+		Kind:   "shared",
+		Desc:   "Configuration or authentication problem (no server configured, unauthorized, forbidden).",
+	},
+	{
+		Code:   ExitUsage,
+		Consts: []string{"ExitUsage"},
+		Owner:  "(every command)",
+		Kind:   "shared",
+		Desc:   "The invocation itself was wrong: unknown command, unknown flag, or bad argument shape.",
+	},
+	{
+		Code:   ExitSoakNotCleared,
+		Consts: []string{"ExitSoakNotCleared"},
+		Owner:  "admission soak clear",
+		Kind:   "command",
+		Desc: "`admission soak clear` ran successfully but the shadow-mode soak gate is not yet cleared. " +
+			"**10 is not unique** — see the two rows below for what it means on other commands.",
+	},
+	{
+		Code:   prScanExitWarning,
+		Consts: []string{"prScanExitWarning"},
+		Owner:  "pr-scan",
+		Kind:   "command",
+		Desc:   "`pr-scan` found one or more warning-level findings. With `--strict` these escalate to 20 instead.",
+	},
+	{
+		Code:   doctorExitDrift,
+		Consts: []string{"doctorExitDrift"},
+		Owner:  "scan-repo, doctor --strict",
+		Kind:   "command",
+		Desc:   "`scan-repo` found at least one bypass file, or `doctor --strict` found drift (project config, env override, or a lockfile pointing at a public registry). The two share the number deliberately so one CI step combining both gets a predictable non-zero.",
+	},
+	{
+		Code:   ExitIntelBlock,
+		Consts: []string{"ExitIntelBlock"},
+		Owner:  "intel scan",
+		Kind:   "command",
+		Desc:   "`intel scan` found at least one Quarantine or Replace node — the strongest block the command emits. Weaker Warn/UpgradeAvailable trees still exit 1.",
+	},
+	{
+		Code:   policyScanIncompleteExitCode,
+		Consts: []string{"policyScanIncompleteExitCode"},
+		Owner:  "policy lint`, `policy preflight",
+		Kind:   "command",
+		Desc:   "`policy lint` or `policy preflight` could not read part of the tree, so the result is not provably clean. Both walk the same tree with the same collector, so they share one number with one meaning. Outranks warnings-only — exit 1 reads as \"warnings, carry on\", which is the green light a half-read tree must not get. A genuine policy error still outranks it.",
+	},
+	{
+		Code:   prScanExitBlocking,
+		Consts: []string{"prScanExitBlocking"},
+		Owner:  "pr-scan",
+		Kind:   "command",
+		Desc:   "`pr-scan` found one or more blocking findings (also 20 with `--strict` and any warning).",
+	},
+	{
+		Code:   ExitManifestParseError,
+		Consts: []string{"ExitManifestParseError", "prScanExitParseError"},
+		Owner:  "scan, pr-scan",
+		Kind:   "command",
+		Desc: "One or more manifests/lockfiles failed to parse, so dependencies were dropped and the result set is incomplete. Everything that did parse was still scanned; the exit code is what stops CI reading an incomplete scan as a clean one. A real block outranks it. " +
+			"**30 is not unique** — see the row below for `doctor --strict`.",
+	},
+	{
+		Code:   doctorExitDirectReachable,
+		Consts: []string{"doctorExitDirectReachable"},
+		Owner:  "doctor --strict",
+		Kind:   "command",
+		Desc:   "`doctor --strict` reached a public registry directly, which fails enforcement intent even when all local config points at Chainsaw.",
+	},
+	{
+		Code:   doctorExitUnsupported,
+		Consts: []string{"doctorExitUnsupported"},
+		Owner:  "doctor --strict",
+		Kind:   "command",
+		Desc:   "`doctor --strict` found an installed package manager Chainsaw has no enforcer for yet.",
+	},
+}
 
 // ExitCodeError lets a Cobra RunE bubble up a specific process exit code
 // without losing the error message. Execute() (see root.go) inspects the type

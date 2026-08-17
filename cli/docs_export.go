@@ -11,7 +11,11 @@ package cli
 // read-only use, and it is the only place that documents the two setup steps a
 // caller must not skip.
 
-import "github.com/spf13/cobra"
+import (
+	"strings"
+
+	"github.com/spf13/cobra"
+)
 
 // RootCommandForDocs returns the fully assembled root command with help groups
 // applied, for read-only introspection by documentation generators.
@@ -64,17 +68,51 @@ type ExitCodeForDocs struct {
 
 // ExitCodesForDocs returns the process exit-code contract from exitcodes.go so
 // the generated reference publishes the real constants rather than a
-// hand-copied table. The Desc text is the operator-facing summary of each
-// constant's doc comment; the Code values are the constants themselves, so a
-// renumber cannot silently desync the published table from the binary.
+// hand-copied table.
+//
+// It is a projection of exitCodeAllocations — the single allocation ledger in
+// exitcodes.go — rather than a second hand-maintained list. That matters
+// because this function used to be BOTH incomplete and misleading: it omitted
+// ExitManifestParseError(30) entirely, and it published 10 as though
+// "ExitSoakNotCleared" were its only meaning while `pr-scan --help`,
+// `scan-repo --help` and `doctor --strict` told other readers that 10 meant
+// warning-level findings and drift. `make check-cli-docs-sync` could not catch
+// either, because it only diffs the generated file against this function.
+// TestExitCodesForDocsIsComplete now asserts the reverse direction against an
+// AST parse of exitcodes.go, so an added or renumbered constant fails the build
+// instead of silently vanishing from the published contract.
+//
+// Name carries the Go constant for the exported Exit* codes (what a reader
+// greps for) and the owning command for the rest, which are unexported
+// per-command constants no customer can reference. Code values are the
+// constants themselves, so a renumber cannot desync the table from the binary.
 func ExitCodesForDocs() []ExitCodeForDocs {
-	return []ExitCodeForDocs{
-		{ExitOK, "ExitOK", "shared", "Success."},
-		{ExitBlocked, "ExitBlocked", "shared", "The expected enforcement outcome: a policy block, a failed gate, or findings at or above the configured threshold. Stays 1 so existing block-gating scripts keep working."},
-		{ExitOpError, "ExitOpError", "shared", "Operational failure: network, server, IO, or internal error. Distinct from a block so CI can tell infrastructure trouble apart from enforcement."},
-		{ExitConfigAuth, "ExitConfigAuth", "shared", "Configuration or authentication problem (no server configured, unauthorized, forbidden)."},
-		{ExitUsage, "ExitUsage", "shared", "The invocation itself was wrong: unknown command, unknown flag, or bad argument shape."},
-		{ExitSoakNotCleared, "ExitSoakNotCleared", "command", "`admission soak clear` ran successfully but the shadow-mode soak gate is not yet cleared."},
-		{ExitIntelBlock, "ExitIntelBlock", "command", "`intel scan` found at least one Quarantine or Replace node — the strongest block the command emits. Weaker Warn/UpgradeAvailable trees still exit 1."},
+	out := make([]ExitCodeForDocs, 0, len(exitCodeAllocations))
+	for _, a := range exitCodeAllocations {
+		if a.Kind == "" {
+			continue
+		}
+		out = append(out, ExitCodeForDocs{
+			Code: a.Code,
+			Name: exitCodeDocsName(a),
+			Kind: a.Kind,
+			Desc: a.Desc,
+		})
 	}
+	return out
+}
+
+// exitCodeDocsName picks the Name column for one allocation: the exported
+// constant when there is one, otherwise the owning command. Every exported
+// exit-code constant in this package is named Exit*, and the unexported
+// per-command ones (prScanExitWarning, doctorExitDrift, …) are not part of any
+// public API, so printing them in customer docs would send readers looking for
+// an identifier they cannot use.
+func exitCodeDocsName(a exitCodeAllocation) string {
+	for _, c := range a.Consts {
+		if strings.HasPrefix(c, "Exit") {
+			return c
+		}
+	}
+	return a.Owner
 }

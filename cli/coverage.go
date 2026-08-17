@@ -73,8 +73,12 @@ var coverageExpectedAddCmd = &cobra.Command{
 }
 
 var coverageExpectedRemoveCmd = &cobra.Command{
-	Use:          "remove <id>",
-	Short:        "Remove a declared expected source by id",
+	Use:   "remove <id>",
+	Short: "Remove a declared expected source by id",
+	Long: "Removes a declared expected install source. Coverage stops counting " +
+		"it as expected, so it can no longer be reported silent. Prompts for " +
+		"confirmation (naming the client pattern, which is what `coverage " +
+		"expected add` needs to restore it); use --yes to skip the prompt.",
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runCoverageExpectedRemove,
@@ -123,6 +127,7 @@ func init() {
 	coverageSilentCmd.Flags().Bool("json", false, "Output as JSON")
 	coverageExpectedListCmd.Flags().Bool("json", false, "Output as JSON")
 	coverageExpectedAddCmd.Flags().Int("active-within-days", 7, "Expected active window for this source")
+	coverageExpectedRemoveCmd.Flags().Bool("yes", false, "Skip confirmation prompt (required on non-TTY)")
 	coverageBypassListCmd.Flags().Float64("min-confidence", 0.7, "Confidence threshold (0..1)")
 	coverageBypassListCmd.Flags().Bool("include-dismissed", false, "Include dismissed-and-still-suppressed rows")
 	coverageBypassListCmd.Flags().Bool("json", false, "Output as JSON")
@@ -284,10 +289,54 @@ func runCoverageExpectedRemove(cmd *cobra.Command, args []string) error {
 	if client.baseURL == "" {
 		return errServerNotConfigured(cmd)
 	}
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go).
+	if err := requireAuth(cmd); err != nil {
+		return err
+	}
 	id, err := strconv.ParseInt(strings.TrimSpace(args[0]), 10, 64)
 	if err != nil || id <= 0 {
 		return fmt.Errorf("invalid id %q", args[0])
 	}
+
+	// Z3: this deleted a declared expected-source row with no prompt and no
+	// --yes at all. It was classified exempt on the grounds that `coverage
+	// expected add` restores the row, but the restoring verb takes a CLIENT
+	// PATTERN while this one takes an opaque numeric ID — so the argument the
+	// operator would need in order to undo the removal is precisely the field
+	// the removal destroys, and nothing in the transcript records it. Resolve
+	// the row and name it in the prompt, which makes the confirmation itself
+	// the record of what to re-add.
+	//
+	// The lookup runs only on the confirm path, so --yes stays one round trip.
+	// If the lookup fails we ABORT rather than prompt: confirming the deletion
+	// of a row we could not describe is the same defect Z1 fixed in `undo`.
+	yes, _ := cmd.Flags().GetBool("yes")
+	if !yes {
+		var listResp struct {
+			Expected []coverageExpected `json:"expected"`
+		}
+		if lerr := client.Get("/api/coverage/expected", &listResp); lerr != nil {
+			return translateCoverageCollectionErr(lerr)
+		}
+		var target *coverageExpected
+		for i := range listResp.Expected {
+			if listResp.Expected[i].ID == id {
+				target = &listResp.Expected[i]
+				break
+			}
+		}
+		if target == nil {
+			return fmt.Errorf("no expected source with id=%d — run `chainsaw coverage expected list` to see declared sources", id)
+		}
+		if !stdinIsTerminal() {
+			return fmt.Errorf("refusing to remove expected source %d (%s) without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id, target.ClientPattern)
+		}
+		if !PromptConfirm(fmt.Sprintf("Remove expected source %q (id=%d)? Coverage will stop counting it as declared; re-add with `chainsaw coverage expected add %s`.", target.ClientPattern, id, target.ClientPattern)) {
+			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			return nil
+		}
+	}
+
 	// C11: per-id endpoint — a 404 here means THIS id does not exist, not that
 	// the feature is disabled. Pass it through untranslated.
 	if err := client.Delete(fmt.Sprintf("/api/coverage/expected/%d", id)); err != nil {

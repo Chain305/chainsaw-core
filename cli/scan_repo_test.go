@@ -211,6 +211,12 @@ func TestRunScanRepo_UnreadableCandidateEscalates(t *testing.T) {
 // TestRunScanRepo_CleanTreeJSONHasNoUnreadableKey pins the omitempty
 // contract: a clean repo's JSON stays byte-identical to the pre-X2 shape, so
 // existing consumers see no new key.
+//
+// It also pins the N1 fix in the same place, because both statements are about
+// the SHAPE of a clean tree's envelope: `findings` is an empty ARRAY, never
+// null. The nil slice used to marshal as `"findings": null`, so
+// `report.findings.map(...)` threw TypeError and `jq '.findings[]'` failed with
+// "Cannot iterate over null" — on a CI-gating command's most common outcome.
 func TestRunScanRepo_CleanTreeJSONHasNoUnreadableKey(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hi\n"), 0o600); err != nil {
@@ -232,6 +238,77 @@ func TestRunScanRepo_CleanTreeJSONHasNoUnreadableKey(t *testing.T) {
 	}
 	if len(generic) != 2 {
 		t.Errorf("clean-tree envelope should stay {root, findings}, got %v", generic)
+	}
+
+	// N1 — the key is present AND it is an array. Asserted through the decoded
+	// value rather than a substring so it holds whatever the encoder's
+	// whitespace does.
+	raw, present := generic["findings"]
+	if !present {
+		t.Fatalf("`findings` key is missing — omitempty is NOT the fix for the null: %s", out.String())
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("`findings` must be a JSON array on a clean tree, got %T (%v) — a nil slice marshals as null and breaks .map()/jq: %s",
+			raw, raw, out.String())
+	}
+	if len(arr) != 0 {
+		t.Errorf("clean tree reported %d findings", len(arr))
+	}
+	if !strings.Contains(out.String(), `"findings": []`) {
+		t.Errorf("clean-tree JSON should render `\"findings\": []`, got:\n%s", out.String())
+	}
+}
+
+// TestRunScanRepo_JSONFindingsShapeIsUnchangedWhenNonEmpty is the other half of
+// the N1 fix: initialising the slice must not perturb the populated case. The
+// envelope, the key order, and every finding object stay exactly as before, and
+// two runs over the same tree are byte-identical (the determinism the file's own
+// comment requires).
+func TestRunScanRepo_JSONFindingsShapeIsUnchangedWhenNonEmpty(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM ghcr.io/o/r:1\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	run := func(t *testing.T) string {
+		t.Helper()
+		var out, errOut strings.Builder
+		cmd := newScanRepoTestCmd(&out, &errOut)
+		_ = cmd.Flags().Set("json", "true")
+		err := runScanRepo(cmd, []string{dir})
+		if code := scanRepoExitCode(t, err); code != doctorExitDrift {
+			t.Fatalf("exit = %d, want doctorExitDrift(%d)", code, doctorExitDrift)
+		}
+		return out.String()
+	}
+
+	body := run(t)
+	if body != run(t) {
+		t.Errorf("scan-repo --json is not byte-identical across runs:\n%s", body)
+	}
+
+	var report scanReport
+	if err := json.Unmarshal([]byte(body), &report); err != nil {
+		t.Fatalf("json: %v\n%s", err, body)
+	}
+	if len(report.Findings) != 1 {
+		t.Fatalf("want 1 finding, got %d (%+v)", len(report.Findings), report.Findings)
+	}
+	f := report.Findings[0]
+	if f.File != "Dockerfile" || f.Category != "docker" || f.Rule != "dockerfile-unprefixed-from" {
+		t.Errorf("finding shape changed: %+v", f)
+	}
+	if !strings.Contains(f.Detail, "ghcr.io/o/r:1") {
+		t.Errorf("finding detail = %q", f.Detail)
+	}
+	// The populated envelope is still {root, findings} with no `unreadable`.
+	var generic map[string]any
+	if err := json.Unmarshal([]byte(body), &generic); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(generic) != 2 {
+		t.Errorf("non-empty envelope should stay {root, findings}, got %v", generic)
 	}
 }
 

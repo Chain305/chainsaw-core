@@ -437,6 +437,11 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	// "chainsaw:"-on-every-line clutter; status words carry severity color.
 	// guardColorEnabled gates ANSI (NO_COLOR + stderr-is-a-terminal), so piped
 	// output stays plain.
+	//
+	// c() gates the ANSI WRAPPER only. It does nothing for the marker glyph,
+	// which is part of the wrapped string and is therefore emitted on every
+	// path including --no-color — so the refusal line needs glyphs() as well,
+	// and for a different reason. See glyphSet in output.go.
 	col := guardColorEnabled()
 	c := func(code, s string) string {
 		if col {
@@ -445,6 +450,7 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 		return s
 	}
 	tag := c(ansiDim, "chainsaw")
+	g := glyphs()
 
 	// INVARIANT D: --quiet suppresses guard CHATTER (notices, the lockfile
 	// "scanning N" line, preflight-unavailable notes, medium-confidence "!
@@ -505,7 +511,7 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	printGuardVerdicts(os.Stderr, tag, verdicts, isQuiet)
 
 	if blocked {
-		fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiRed+ansiBold, "✗ refused at the install path — nothing was installed"))
+		fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiRed+ansiBold, guardRefusalLine(g)))
 	}
 
 	// D-NUDGE: disclosure + counters + telemetry (emitted AND flushed here,
@@ -1028,6 +1034,21 @@ func execPassthrough(bin string, args []string) error {
 // about one, never a verdict the GATE downgraded (see
 // guardSeverityTyposquatDemoted), and never a verdict a local ALLOWLIST entry
 // waived (guardVerdict.WaivedSeverity).
+// guardRefusalLine builds the guard's summary refusal — THE headline moment,
+// the one line the whole product exists to print. It is a function rather than
+// an inline literal so a test can assert the ASCII fallback directly: the
+// emitting site sits behind an os.Exit(ExitBlocked) and a real npm/pip
+// invocation, which is not something a unit test can drive.
+//
+// On a legacy Windows console the hard-coded ✗ rendered as a replacement box,
+// so a blocked malicious install read as "▯ refused at the install path".
+// Hence the marker comes from glyphs(). The em dash comes from there too — it
+// is equally absent from CP437, and this is the one line where a boxed dash is
+// not merely cosmetic. Prose em dashes elsewhere are a separate sweep.
+func guardRefusalLine(g glyphSet) string {
+	return g.fail + " refused at the install path " + g.dash + " nothing was installed"
+}
+
 func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQuiet bool) {
 	col := guardColorEnabled()
 	c := func(code, s string) string {
@@ -1036,6 +1057,7 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 		}
 		return s
 	}
+	g := glyphs()
 	for _, v := range verdicts {
 		// THE WAIVER NOTICE, printed BESIDE whatever the verdict turned out to
 		// be rather than as one of its arms — a coordinate can be both waived by
@@ -1062,7 +1084,7 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 			// untrusted text (a crafted install arg or a lockfile name), so scrub
 			// terminal control sequences before echoing — see sanitizeForTerminal.
 			fmt.Fprintf(out, "%s  %s  %s — %s\n",
-				tag, c(ansiRed+ansiBold, "✗ blocked"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))), sanitizeForTerminal(v.Reason))
+				tag, c(ansiRed+ansiBold, g.fail+" blocked"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))), sanitizeForTerminal(v.Reason))
 			// The escape hatch, named at the only moment it matters. A user who
 			// cannot get past a false block uninstalls the guard, so a refusal
 			// that offers no way forward costs more coverage than it buys.

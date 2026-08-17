@@ -449,6 +449,12 @@ func runFindingSuppress(cmd *cobra.Command, args []string) error {
 	if client.baseURL == "" {
 		return errServerNotConfigured(cmd)
 	}
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go).
+	// runFindingSuppress makes no read call, so the only auth check used to be
+	// the transport preflight on the POST *after* the operator answered y.
+	if err := requireAuth(cmd); err != nil {
+		return err
+	}
 	id := strings.TrimSpace(args[0])
 	if id == "" {
 		return fmt.Errorf("finding id is required")

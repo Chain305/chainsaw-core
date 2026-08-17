@@ -38,7 +38,10 @@ type scanFinding struct {
 }
 
 type scanReport struct {
-	Root     string        `json:"root"`
+	Root string `json:"root"`
+	// Findings must be non-nil whenever this struct is marshalled: `findings`
+	// is an ARRAY in every case, including the clean one. See runScanRepo's
+	// initialiser. No `omitempty` — the key is part of the contract.
 	Findings []scanFinding `json:"findings"`
 	// Unreadable lists candidate files the walk could not read (permissions,
 	// a broken symlink, an IO error). X2: these used to be swallowed by a bare
@@ -148,7 +151,15 @@ func runScanRepo(cmd *cobra.Command, args []string) error {
 	if _, statErr := os.Stat(abs); statErr != nil {
 		return &ExitCodeError{Code: ExitOpError, Err: fmt.Errorf("scan-repo path %q: %w", root, statErr)}
 	}
-	report := scanReport{Root: abs}
+	// Findings starts as an EMPTY slice, not nil. A clean tree is the common
+	// case for a command built to gate CI, and a nil slice marshals as
+	// `"findings": null` — `report.findings.map(...)` throws TypeError and
+	// `jq '.findings[]'` errors with "Cannot iterate over null", so the JSON
+	// broke on exactly the automated path scan-repo exists for. `omitempty` is
+	// deliberately NOT the fix: dropping the key breaks the same consumers a
+	// different way. The non-empty shape is untouched — append to an empty
+	// slice produces the identical array.
+	report := scanReport{Root: abs, Findings: []scanFinding{}}
 	errOut := cmd.ErrOrStderr()
 
 	err = filepath.WalkDir(abs, func(path string, d fs.DirEntry, werr error) error {

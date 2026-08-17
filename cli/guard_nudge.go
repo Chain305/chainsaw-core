@@ -324,8 +324,8 @@ func guardEcosystem(verdicts []guardVerdict) string {
 }
 
 // ensureGuardConsent resolves the telemetry decision. Already-decided returns
-// the stored value. An explicit telemetry kill switch (CHAINSAW_TELEMETRY_DISABLED
-// / CHAINSAW_OFFLINE) is treated as declined without persisting. Otherwise, on an
+// the stored value. An environment that already silences telemetry is treated as
+// declined without persisting. Otherwise, on an
 // interactive terminal we ask once (default Yes, with a disclaimer naming what is
 // shared) and persist the answer. When we can't ask (CI / non-TTY), we collect
 // NOTHING and, on the first run only, print a one-line notice telling the user
@@ -335,8 +335,18 @@ func ensureGuardConsent(st *guardState, firstRun bool) string {
 	if st.Consent == consentGranted || st.Consent == consentDeclined {
 		return st.Consent
 	}
-	if envTruthy(os.Getenv("CHAINSAW_TELEMETRY_DISABLED")) || envTruthy(os.Getenv("CHAINSAW_OFFLINE")) {
-		return consentDeclined // env is authoritative per-run; don't persist
+	// Env is authoritative per-run; don't persist.
+	//
+	// This hand-rolled the same two-variable check (CHAINSAW_TELEMETRY_DISABLED,
+	// CHAINSAW_OFFLINE) that two other surfaces had, so it missed DO_NOT_TRACK
+	// and self-hosted builds: an operator who had already opted out at the env
+	// level was still interrupted by the first-run consent prompt, asked to
+	// agree to collection that could not happen either way. Nothing leaked —
+	// answering yes here would still send nothing, because ResolveMode gates
+	// the client — but "we ignored your DO_NOT_TRACK long enough to ask again"
+	// is the wrong first impression. One shared predicate now (telemetry.go).
+	if telemetryDisabledByEnv() {
+		return consentDeclined
 	}
 	if !stdinIsTerminal() {
 		if firstRun {

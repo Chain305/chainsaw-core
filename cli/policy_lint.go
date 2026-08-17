@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -37,6 +38,23 @@ const (
 	lintExitError   = 2
 )
 
+// policyScanIncompleteExitCode — the policy tree could not be fully inspected:
+// a directory or a candidate policy file could not be read, so the result set
+// is incomplete and a clean report would be a lie.
+//
+// It has to be its OWN number. `policy lint` publishes 2 for "your policies
+// have errors", and root.go's classifyCLIError maps every unclassified
+// operational failure to ExitOpError(2) as well — so before this existed, a CI
+// gate wired per docs/policy-audit.md could not tell "your policies are bad"
+// from "the scan never ran". 12 follows exitcodes.go's contract that codes >=10
+// are command-specific outcomes; it is deliberately NOT one of the shared
+// >=10 constants (ExitSoakNotCleared 10, ExitIntelBlock 11,
+// ExitManifestParseError 30), which carry unrelated meanings.
+//
+// Shared by `policy lint` and `policy preflight`: both walk the same tree with
+// the same collector, so one number means one thing on both surfaces.
+const policyScanIncompleteExitCode = 12
+
 // lintFinding describes one issue found in one rule. The shape is
 // stable so `--format json` consumers (CI gates, dashboards) can
 // depend on it.
@@ -51,12 +69,44 @@ type lintFinding struct {
 }
 
 // lintReport is the top-level JSON shape emitted by --format json.
+//
+// Files counts the files actually LINTED, not the files the walker saw —
+// anything the sweep declined lands in Skipped with a reason, so the two
+// numbers always reconcile.
 type lintReport struct {
 	Files    int           `json:"files"`
 	Rules    int           `json:"rules"`
 	Errors   int           `json:"errors"`
 	Warnings int           `json:"warnings"`
+	Skipped  []policySkip  `json:"skipped,omitempty"`
 	Findings []lintFinding `json:"findings"`
+}
+
+// policySkip records one path the collector or the parser declined to lint,
+// and why. The list is emitted in both renderings: a lint that could not read
+// part of the tree has to SAY so — reporting clean would be the same silent
+// under-report scan_repo.go's report.Unreadable exists to prevent.
+type policySkip struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+	// Unreadable separates COVERAGE LOSS from deliberate filtering. True: the
+	// path might have held policies and we could not tell (permission denied,
+	// IO error) — this escalates the exit code. False: we read it and it is
+	// simply not a policy document (a tsconfig.json a directory sweep walked
+	// past) — informational only.
+	Unreadable bool `json:"unreadable"`
+}
+
+// unreadablePolicySkips returns only the coverage-loss subset — the skips that
+// mean "we could not tell what was there", not "we looked and it wasn't ours".
+func unreadablePolicySkips(skips []policySkip) []policySkip {
+	var out []policySkip
+	for _, s := range skips {
+		if s.Unreadable {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 var policyLintCmd = &cobra.Command{
@@ -80,7 +130,22 @@ Two checks run today:
      intended either reading; lint flags the call site so they can
      verify intent.
 
-Exit codes: 0 clean, 1 warnings only, 2 any errors.`,
+Pointing --input at a DIRECTORY is a sweep: the walker skips .git,
+node_modules, vendor, .gradle, target, build, dist and .venv/venv, and any
+JSON/YAML it picks up that is not a policy document (package.json,
+tsconfig.json, .github/workflows/*.yml) is reported as skipped rather than
+as a malformed policy — and does not count toward the rule total. Naming a
+file explicitly keeps the strict reading: an unparseable file you asked for
+is an error.
+
+Exit codes:
+  0  clean
+  1  warnings only
+  2  any errors — your policies have problems
+  12 the tree could not be fully inspected (a directory or a candidate
+     policy file could not be read), so the result is INCOMPLETE and must
+     not be read as clean. Distinct from 2 on purpose: a CI gate has to be
+     able to tell "your policies are bad" from "the scan never ran".`,
 	RunE: runPolicyLint,
 }
 
@@ -97,7 +162,7 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 		return errors.New("--input <file-or-dir> is required")
 	}
 
-	files, err := collectPolicyFiles(input)
+	set, err := collectPolicyFiles(input)
 	if err != nil {
 		return err
 	}
@@ -105,13 +170,21 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 	var (
 		findings []lintFinding
 		ruleCnt  int
+		linted   int
 	)
-	for _, f := range files {
-		fres, rules, ferr := lintPolicyFile(f)
+	skipped := append([]policySkip(nil), set.Skipped...)
+	// A file the operator NAMED is read strictly; a file a directory sweep
+	// merely walked past is not. That distinction is the whole fix for the
+	// false-positive gate break: `--input tsconfig.json` is still an error,
+	// `--input .` over a repo containing one is not.
+	explicit := !set.Swept
+	for _, f := range set.Files {
+		res, ferr := lintOnePolicyFile(f, explicit)
 		if ferr != nil {
 			// Parse errors surface as findings rather than aborting
 			// the whole scan — one malformed file shouldn't hide
-			// findings in the rest.
+			// findings in the rest. Only reachable for an explicitly
+			// named file; a sweep routes the same failure to res.skip.
 			findings = append(findings, lintFinding{
 				File:     f,
 				Line:     1,
@@ -120,11 +193,20 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 				Type:     "parse-error",
 				Message:  ferr.Error(),
 			})
+			linted++
 			continue
 		}
-		ruleCnt += rules
-		findings = append(findings, fres...)
+		if res.skip != nil {
+			skipped = append(skipped, *res.skip)
+		}
+		if res.rules == 0 && res.skip != nil {
+			continue
+		}
+		linted++
+		ruleCnt += res.rules
+		findings = append(findings, res.findings...)
 	}
+	sort.SliceStable(skipped, func(i, j int) bool { return skipped[i].Path < skipped[j].Path })
 
 	sort.SliceStable(findings, func(i, j int) bool {
 		if findings[i].File != findings[j].File {
@@ -137,8 +219,9 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 	})
 
 	report := lintReport{
-		Files:    len(files),
+		Files:    linted,
 		Rules:    ruleCnt,
+		Skipped:  skipped,
 		Findings: findings,
 	}
 	for _, f := range findings {
@@ -177,9 +260,18 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 	// `policy lint --help` publishes "0 clean, 1 warnings only, 2 any errors".
 	// Err stays nil so renderError adds nothing to the findings list already
 	// printed.
+	//
+	// The ladder's middle rung is new. Precedence mirrors pr-scan's
+	// (exitcodes.go: "a real BLOCK outranks it"): a genuine policy ERROR still
+	// wins, because it is true and actionable and the skipped paths are named
+	// in the report either way. But INCOMPLETE outranks warnings-only — exit 1
+	// tells a CI gate "warnings, carry on", which is exactly the green light a
+	// half-read tree must not get.
 	switch {
 	case report.Errors > 0:
 		return &ExitCodeError{Code: lintExitError}
+	case len(unreadablePolicySkips(report.Skipped)) > 0:
+		return &ExitCodeError{Code: policyScanIncompleteExitCode}
 	case report.Warnings > 0:
 		return &ExitCodeError{Code: lintExitWarning}
 	}
@@ -189,7 +281,14 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 func printLintText(out interface{ Write(p []byte) (int, error) }, r lintReport) {
 	fmt.Fprintf(out, "Scanned %d file(s), %d rule(s)\n", r.Files, r.Rules)
 	fmt.Fprintf(out, "Findings: %d error(s), %d warning(s)\n\n", r.Errors, r.Warnings)
+	printPolicySkips(out, r.Skipped)
 	if len(r.Findings) == 0 {
+		if len(unreadablePolicySkips(r.Skipped)) > 0 {
+			// Never the bare "clean" line when part of the tree was
+			// unreadable — that sentence is what a CI gate quotes back.
+			fmt.Fprintln(out, "No findings in what could be read — but the scan is INCOMPLETE (see above).")
+			return
+		}
 		fmt.Fprintln(out, "No findings — policies are clean against the current rule set.")
 		return
 	}
@@ -201,37 +300,136 @@ func printLintText(out interface{ Write(p []byte) (int, error) }, r lintReport) 
 	}
 }
 
+// printPolicySkips renders the skip list: the deliberate filtering first
+// (short, informational), then the coverage loss (always fully listed —
+// that is the part a gate has to see).
+func printPolicySkips(out io.Writer, skips []policySkip) {
+	if len(skips) == 0 {
+		return
+	}
+	unreadable := unreadablePolicySkips(skips)
+	if n := len(skips) - len(unreadable); n > 0 {
+		fmt.Fprintf(out, "Not policy documents, skipped: %d\n", n)
+		shown := 0
+		for _, s := range skips {
+			if s.Unreadable {
+				continue
+			}
+			if shown == policySkipListCap {
+				fmt.Fprintf(out, "    ... and %d more\n", n-shown)
+				break
+			}
+			fmt.Fprintf(out, "    %s — %s\n", s.Path, s.Reason)
+			shown++
+		}
+	}
+	if len(unreadable) > 0 {
+		fmt.Fprintf(out, "Could not be read — this scan is INCOMPLETE: %d path(s)\n", len(unreadable))
+		for _, s := range unreadable {
+			fmt.Fprintf(out, "    %s — %s\n", s.Path, s.Reason)
+		}
+	}
+	fmt.Fprintln(out)
+}
+
+// policySkipListCap bounds the informational half of the skip list. A repo
+// sweep can walk past a lot of stray JSON; the coverage-loss half is never
+// capped.
+const policySkipListCap = 10
+
+// policyFileSet is what collectPolicyFiles returns: the candidate files, the
+// paths it declined and why, and whether the input was a directory SWEEP or an
+// explicitly named file. Callers key strictness off Swept — see
+// loadPolicyEntries.
+type policyFileSet struct {
+	Files   []string
+	Skipped []policySkip
+	Swept   bool
+}
+
+// policyScanSkipDir mirrors the exclusion list in scan_repo.go's walker (see
+// core/cli/scan_repo.go, the `d.IsDir()` branch). Without it a sweep of an
+// ordinary project descends into node_modules and reads thousands of
+// package.json files as policy bundles.
+func policyScanSkipDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", ".gradle", "target", "build", "dist", ".venv", "venv":
+		return true
+	}
+	return false
+}
+
+// policySkipReason turns a walk/read error into a one-line human reason.
+// Permission denial is the common case on Windows home directories
+// (AppData\Local\...) and root-owned caches on POSIX, and it used to abort the
+// entire command on the first hit.
+func policySkipReason(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	case errors.Is(err, fs.ErrNotExist):
+		return "disappeared during the scan"
+	default:
+		return flattenErr(err)
+	}
+}
+
+// flattenErr collapses a multi-line parser error into one line so the skip
+// list stays one-path-per-row.
+func flattenErr(err error) string {
+	return strings.Join(strings.Fields(err.Error()), " ")
+}
+
 // collectPolicyFiles enumerates JSON/YAML files under the given path.
-// A single file is returned as-is; a directory is walked recursively
-// and filtered by extension. Output is sorted so the scan order is
-// deterministic.
-func collectPolicyFiles(input string) ([]string, error) {
+// A single file is returned as-is; a directory is walked recursively,
+// filtered by extension, and pruned by policyScanSkipDir. Output is sorted so
+// the scan order is deterministic.
+//
+// The walk TOLERATES errors instead of returning them verbatim. It used to
+// `return err` from the WalkDir callback, so the first unreadable directory —
+// one Razer folder under a Windows AppData tree — killed the whole command and
+// produced no partial results at all. Every tolerated entry is RECORDED as an
+// unreadable skip, which is what escalates the exit code; the failure mode we
+// are replacing must not be swapped for a silent one.
+//
+// The only remaining hard error is a bad --input itself (same reasoning as
+// scan_repo.go's pre-walk Stat: a typo must not read as "nothing to lint").
+func collectPolicyFiles(input string) (policyFileSet, error) {
 	info, err := os.Stat(input)
 	if err != nil {
-		return nil, fmt.Errorf("stat %s: %w", input, err)
+		return policyFileSet{}, fmt.Errorf("stat %s: %w", input, err)
 	}
 	if !info.IsDir() {
-		return []string{input}, nil
+		return policyFileSet{Files: []string{input}}, nil
 	}
-	var files []string
-	werr := filepath.WalkDir(input, func(path string, d fs.DirEntry, err error) error {
+	set := policyFileSet{Swept: true}
+	_ = filepath.WalkDir(input, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			set.Skipped = append(set.Skipped, policySkip{
+				Path:       path,
+				Reason:     policySkipReason(err),
+				Unreadable: true,
+			})
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
+			if path != input && policyScanSkipDir(d.Name()) {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext == ".json" || ext == ".yaml" || ext == ".yml" {
-			files = append(files, path)
+			set.Files = append(set.Files, path)
 		}
 		return nil
 	})
-	if werr != nil {
-		return nil, werr
-	}
-	sort.Strings(files)
-	return files, nil
+	sort.Strings(set.Files)
+	sort.SliceStable(set.Skipped, func(i, j int) bool { return set.Skipped[i].Path < set.Skipped[j].Path })
+	return set, nil
 }
 
 // rawPolicyDoc is the on-disk shape we accept: either a single policy
@@ -253,20 +451,119 @@ type rawPolicyEntry struct {
 	name string
 }
 
-func lintPolicyFile(path string) ([]lintFinding, int, error) {
+// policyShapeKeys are the JSON keys that mark a document as a POLICY rather
+// than some other JSON/YAML a directory sweep happened to walk past. A
+// document carrying none of them is not linted and does not count toward the
+// rule total.
+//
+// The list is deliberately generous: a false accept costs one over-counted
+// rule with no conditions (checkStandaloneCodesmell needs a decoded condition
+// set to fire, and rawHasField needs a literal repoArchived key, so neither
+// can invent a finding), while a false REJECT would hide a real policy. Erring
+// toward accepting is the safe direction here.
+var policyShapeKeys = []string{"conditions", "mode", "routing", "identifier", "precedence"}
+
+// looksLikePolicyEntry tests the entry's ORIGINAL JSON bytes — the same bytes
+// rawHasField reads, before typing drops unknown keys.
+func looksLikePolicyEntry(raw []byte) bool {
+	s := string(raw)
+	for _, k := range policyShapeKeys {
+		if strings.Contains(s, `"`+k+`":`) {
+			return true
+		}
+	}
+	return false
+}
+
+// loadPolicyEntries reads and parses one file into policy entries. It is the
+// single seam `policy lint` and `policy preflight` share, so the two commands
+// cannot drift on what counts as a policy.
+//
+// explicit=true (the operator NAMED this file): every failure is an error. An
+// unparseable file you asked for is a real problem and must stay one.
+//
+// explicit=false (a directory sweep walked past it): an unreadable or
+// unparseable or non-policy file is a *policySkip, not an error. This is the
+// bigger of the two defects being fixed — a sweep of an ordinary project
+// counted package.json as a policy, inflated the rule total with it, and
+// emitted a hard ERROR (exit 2) on tsconfig.json, breaking the CI gate
+// docs/policy-audit.md tells operators to wire up.
+//
+// A non-nil skip and a non-empty entry list can be returned together: that is
+// a real policy bundle with some non-policy entries in it.
+func loadPolicyEntries(path string, explicit bool) ([]rawPolicyEntry, *policySkip, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read: %w", err)
+		if explicit {
+			return nil, nil, fmt.Errorf("read: %w", err)
+		}
+		// Coverage LOSS, not filtering: this file matched the policy
+		// extension filter, so it is a CANDIDATE we could not evaluate.
+		// Same rule as scan_repo.go — only candidates escalate, which
+		// keeps ordinary permission noise elsewhere in the tree quiet.
+		return nil, &policySkip{Path: path, Reason: policySkipReason(err), Unreadable: true}, nil
 	}
 	doc, err := parsePolicyDoc(data, path)
 	if err != nil {
+		if explicit {
+			return nil, nil, err
+		}
+		// The skip row already names the path; parsePolicyDoc repeats it in
+		// the message, so trim it back out rather than printing it twice.
+		detail := strings.TrimPrefix(flattenErr(err), "parse "+path+": ")
+		return nil, &policySkip{
+			Path:   path,
+			Reason: "not a policy document (" + detail + ")",
+		}, nil
+	}
+	if explicit {
+		return doc.policies, nil, nil
+	}
+	kept := make([]rawPolicyEntry, 0, len(doc.policies))
+	for _, e := range doc.policies {
+		if looksLikePolicyEntry(e.raw) {
+			kept = append(kept, e)
+		}
+	}
+	switch {
+	case len(kept) == 0:
+		return nil, &policySkip{Path: path, Reason: "not a policy document (no policy fields)"}, nil
+	case len(kept) < len(doc.policies):
+		return kept, &policySkip{
+			Path: path,
+			Reason: fmt.Sprintf("%d of %d entries are not policy documents",
+				len(doc.policies)-len(kept), len(doc.policies)),
+		}, nil
+	}
+	return kept, nil, nil
+}
+
+// lintFileResult is one file's contribution to the report.
+type lintFileResult struct {
+	findings []lintFinding
+	rules    int
+	skip     *policySkip
+}
+
+func lintOnePolicyFile(path string, explicit bool) (lintFileResult, error) {
+	entries, skip, err := loadPolicyEntries(path, explicit)
+	if err != nil {
+		return lintFileResult{}, err
+	}
+	res := lintFileResult{skip: skip, rules: len(entries)}
+	for _, e := range entries {
+		res.findings = append(res.findings, lintPolicy(path, e)...)
+	}
+	return res, nil
+}
+
+// lintPolicyFile is the strict (explicitly-named-file) entry point.
+func lintPolicyFile(path string) ([]lintFinding, int, error) {
+	res, err := lintOnePolicyFile(path, true)
+	if err != nil {
 		return nil, 0, err
 	}
-	var findings []lintFinding
-	for _, e := range doc.policies {
-		findings = append(findings, lintPolicy(path, e)...)
-	}
-	return findings, len(doc.policies), nil
+	return res.findings, res.rules, nil
 }
 
 // parsePolicyDoc decodes a policy bundle as YAML (which is a strict

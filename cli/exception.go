@@ -440,6 +440,12 @@ func runExceptionDelete(cmd *cobra.Command, args []string) error {
 	if id == "" {
 		return fmt.Errorf("exception id is required")
 	}
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go). The
+	// delete path makes no read call first, so an unauthenticated run used to
+	// prompt, wait for y, and only then fail at the transport.
+	if err := requireAuth(cmd); err != nil {
+		return err
+	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	out := cmd.OutOrStdout()

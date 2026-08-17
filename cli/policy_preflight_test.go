@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -399,5 +400,99 @@ func TestRunPolicyPreflight_UnreadablePolicyIsAnError(t *testing.T) {
 	var coded *ExitCodeError
 	if errors.As(err, &coded) && coded.Code == preflightUnsupportedExitCode {
 		t.Errorf("an unreadable policy is an operational error, not a gate failure: %v", err)
+	}
+}
+
+// TestRunPolicyPreflight_SurfacesSkippedPaths: preflight's answer is a GATE,
+// and this file's own header says gating on a partially-parsed policy set
+// silently under-reports. So a --policy DIRECTORY whose tree could not be
+// fully read must (a) name the unreadable paths in the operator's output and
+// (b) refuse to print the all-clear — it exits with the shared
+// policyScanIncompleteExitCode instead.
+func TestRunPolicyPreflight_SurfacesSkippedPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-000 does not model Windows ACL denial")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode bits do not deny access")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "policy.json"), []byte(`{
+		"id":"p1","name":"block-criticals","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"cvssMin":9.0}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(dir, "more-policies")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "extra.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, realConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "maven")
+
+	err := runPolicyPreflight(cmd, nil)
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) || coded.Code != policyScanIncompleteExitCode {
+		t.Fatalf("expected ExitCodeError{%d} for a half-read policy tree, got %v\n%s",
+			policyScanIncompleteExitCode, err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "more-policies") || !strings.Contains(out, "permission denied") {
+		t.Errorf("the skipped path and its reason must be surfaced, got:\n%s", out)
+	}
+	if strings.Contains(out, "✓ every condition used by") {
+		t.Errorf("must not print the all-clear over a policy set it only half read, got:\n%s", out)
+	}
+}
+
+// TestRunPolicyPreflight_SweepIgnoresNonPolicyFiles: `--policy .` inside a
+// repo used to die on the first tsconfig.json it walked past. The sweep now
+// skips it (and node_modules entirely) and gates on the real policy only.
+func TestRunPolicyPreflight_SweepIgnoresNonPolicyFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"),
+		[]byte("{\n  // a comment, legal in tsconfig, fatal to a YAML parser\n  \"compilerOptions\": {}\n}"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"),
+		[]byte(`{"name":"my-app","version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "policy.json"), []byte(`{
+		"id":"p1","name":"block-install-scripts","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"hasInstallScript":true}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, realConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "maven")
+
+	// The real policy still drives the gate: hasInstallScript is "none" on
+	// maven, so this is exit 1 — the honest answer, not a parse crash.
+	err := runPolicyPreflight(cmd, nil)
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) || coded.Code != preflightUnsupportedExitCode {
+		t.Fatalf("expected the real policy to drive the gate (exit %d), got %v\n%s",
+			preflightUnsupportedExitCode, err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "block-install-scripts") {
+		t.Errorf("gate must name the real rule, got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "tsconfig.json") {
+		t.Errorf("the skipped non-policy files must still be surfaced, got:\n%s", buf.String())
 	}
 }

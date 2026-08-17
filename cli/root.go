@@ -792,6 +792,35 @@ func newClient() *APIClient {
 	return c
 }
 
+// requireAuth fails a command BEFORE it does anything irreversible-looking —
+// in practice, before it prints a confirmation prompt — when no credential is
+// resolvable.
+//
+// Why this exists: there is no PersistentPreRunE and no middleware, so the only
+// authentication check in the CLI lives inside the transport (APIClient.do,
+// client.go: requireToken && token == "" → ExitConfigAuth). A command therefore
+// inherits an auth check only if it happens to make a server call before it
+// prompts. `policy delete` does (it fetches a display name); `token revoke`
+// does not. The result was a fleet of destructive verbs that asked an
+// unauthenticated operator "Delete X? [y/N]", waited for them to type y, and
+// only THEN reported "not authenticated". Calling this immediately after the
+// baseURL check makes correct ordering a property of the command instead of an
+// accident of whether it needed a display name.
+//
+// The code and message are deliberately IDENTICAL to the transport's preflight:
+// this moves the existing failure earlier, it does not add a new contract.
+// cmd is accepted for symmetry with errServerNotConfigured (and so a future
+// version can name the command path) but is not needed for the message today.
+func requireAuth(_ *cobra.Command) error {
+	if strings.TrimSpace(cfgToken()) != "" {
+		return nil
+	}
+	return &ExitCodeError{
+		Code: ExitConfigAuth,
+		Err:  errors.New("not authenticated — run 'chainsaw auth login' first"),
+	}
+}
+
 // newClientWithTimeout is newClient with a caller-supplied overall HTTP
 // timeout, for the few commands whose server call is legitimately long
 // (scan can POST up to 10,000 packages and blocks while they are evaluated

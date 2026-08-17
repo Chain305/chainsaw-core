@@ -32,7 +32,10 @@ func TestGuardStatusEmptyState(t *testing.T) {
 		"never", // FirstRunUnix == 0 on empty state
 		"Privacy",
 		"Telemetry",
-		"Device id",
+		// One id, one name: `telemetry status` prints the same value under
+		// install_id, so this used to read "Device id" and made the two
+		// commands look like they were reporting different identifiers.
+		"Install id",
 		"chain305.com", // a CTA link is always present
 	} {
 		if !strings.Contains(out, want) {

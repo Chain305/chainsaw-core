@@ -136,8 +136,14 @@ func runBrowserAuth(ctx context.Context, out io.Writer, server string) (string, 
 	// install_id lets the server bake ?cli_install=<id> into the login URL so
 	// the web UI can echo it back on the session-mint POST, stitching this
 	// CLI's pre-auth (install:<id>) events into the user's PostHog Person —
-	// the browser-flow equivalent of the device-code Alias. Empty when
-	// telemetry is disabled; the server treats "no install_id" as "no alias".
+	// the browser-flow equivalent of the device-code Alias.
+	//
+	// Empty unless the operator has EXPLICITLY consented to telemetry
+	// (cliInstallID now gates on the stored decision, not just the env kill
+	// switches — it used to hand a stable machine identifier to the server on
+	// every login by someone who had run `chainsaw telemetry off`). The server
+	// treats "no install_id" as "no alias" and the login completes either way:
+	// handleCLISession mints the key before it ever reads the field.
 	if err := unauth.Post("/api/auth/cli/init", map[string]any{
 		"nonce":      nonce,
 		"port":       port,
@@ -202,8 +208,11 @@ func runDeviceAuth(ctx context.Context, out io.Writer, server, hostname string) 
 	}
 	// install_id stitches this CLI's pre-auth events into the user's
 	// PostHog Person on device-code approval. See internal/telemetry.
-	// An empty string when telemetry is disabled or install_id unavailable
-	// — the server treats "no install_id" as "don't emit an alias".
+	//
+	// Empty unless the operator has EXPLICITLY consented to telemetry (see
+	// cliInstallID) — the server treats "no install_id" as "don't emit an
+	// alias" and handleCLIDeviceApprove mints the key and returns approved
+	// before it reads the field, so approval is unaffected.
 	installID := cliInstallID()
 	if err := unauth.Post("/api/auth/cli/device", map[string]string{
 		"hostname":   hostname,

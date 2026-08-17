@@ -13,10 +13,21 @@ package cli
 //   chainsaw intel signals
 //   chainsaw intel health
 //
-// Exit codes (also documented in each command's Long help):
-//   0  success / all-Allow
-//   1  at least one Warn/UpgradeAvailable on a tree scan
-//   2  at least one Quarantine or Replace on a tree scan, or a usage/HTTP error
+// Exit codes (also documented in each command's Long help). The canonical
+// table for the tree scan lives in intel_scan.go; the constants are in
+// exitcodes.go. Keep all three in step.
+//
+//	0   success / every node Allow
+//	1   at least one Warn or UpgradeAvailable on a tree scan (ExitBlocked)
+//	11  at least one Quarantine or Replace on a tree scan — the hard
+//	    enforcement block (ExitIntelBlock). Deliberately NOT 2: invariant B
+//	    says a CI gate must never confuse a malicious package with an
+//	    operational failure.
+//	2   operational error (HTTP / server / IO), OR the server could not
+//	    evaluate one or more packages — an incomplete scan is not a pass
+//	    (ExitOpError)
+//	3   configuration / authentication problem (ExitConfigAuth)
+//	4   bad invocation (ExitUsage)
 //
 // The v1 API is feature-flagged on the server side; when disabled the
 // server returns 404 CHW-IntelFeatureDisabled which we surface verbatim.

@@ -253,6 +253,21 @@ func init() {
 		Use:     "logs",
 		GroupID: GrpDebug,
 		Short:   "Inspect chainsaw-proxy logs (kubectl; --stdin for non-k8s)",
+		// Hidden: this is an OPERATOR command, not a developer one. The
+		// default path shells out to a real `kubectl` subprocess against the
+		// ambient kubeconfig, so a developer who merely has a kubecontext and
+		// reads it off `chainsaw --help` makes a live call into whatever
+		// cluster their current context points at. Listing it under DEBUG &
+		// DIAGNOSTICS in a developer CLI advertises that as a diagnostic.
+		//
+		// Hiding removes it from `--help` and from the generated public
+		// reference (cmd/gen-cli-docs skips Hidden), while leaving it fully
+		// registered and runnable — `chainsaw logs tail --stdin` and the
+		// kubectl path both still work for operators who know it exists.
+		// Same posture as the hidden `login` alias (auth.go) and `bundle
+		// apply` (bundle.go): registered, documented in the runbook, not
+		// advertised in help.
+		Hidden: true,
 	}
 	logs.AddCommand(newLogsTailCmd())
 	rootCmd.AddCommand(logs)

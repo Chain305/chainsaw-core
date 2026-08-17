@@ -168,11 +168,18 @@ func runFeatures(cmd *cobra.Command, _ []string) error {
 	}
 
 	out := cmd.OutOrStdout()
+	// The active/inactive marker is the ONLY thing distinguishing two
+	// capability rows here — the labels are otherwise identical in shape. When
+	// both glyphs rendered as the same replacement box on a legacy Windows
+	// console, `chainsaw features` became unreadable: --json said one
+	// capability was on and one was off, and the human output said nothing at
+	// all. Hence glyphs() rather than literals.
+	g := glyphs()
 	mark := func(active bool) string {
 		if active {
-			return "✓"
+			return g.ok
 		}
-		return "✗"
+		return g.fail
 	}
 
 	fmt.Fprintln(out, "=== Chainsaw Features ===")

@@ -20,6 +20,96 @@ import (
 	"time"
 )
 
+// ── install_id must not reach the wire without consent ───────────────────────
+
+// deviceAuthInstallID runs the real runDeviceAuth against a stub server and
+// returns the install_id the CLI actually put in the /api/auth/cli/device
+// request body. The stub approves on the first poll so the flow never sleeps.
+func deviceAuthInstallID(t *testing.T) string {
+	t.Helper()
+
+	var sentInstallID string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/api/auth/cli/device", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Hostname  string `json:"hostname"`
+			InstallID string `json:"install_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode device init body: %v", err)
+		}
+		sentInstallID = body.InstallID
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"device_code":"dc-1","user_code":"ABCD-EFGH",`+
+			`"verification_uri":"https://example.invalid/device","interval":1,"expires_in":600}`)
+	})
+	mux.HandleFunc("/api/auth/cli/device/poll", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"approved","token":"minted-token"}`)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var out bytes.Buffer
+	tok, err := runDeviceAuth(ctx, &out, srv.URL, "test-host")
+	if err != nil {
+		t.Fatalf("runDeviceAuth: %v\noutput:\n%s", err, out.String())
+	}
+	if tok != "minted-token" {
+		t.Fatalf("token = %q, want the minted token", tok)
+	}
+	return sentInstallID
+}
+
+// The device-code init body is one of the two places the install_id leaves
+// the machine. cliInstallID() gated on env vars only, so a user who had run
+// `chainsaw telemetry off` still shipped a stable machine identifier here on
+// every `chainsaw auth login`.
+//
+// The login itself must keep working with an empty value: server-side,
+// handleCLIDeviceApprove mints the key and returns "approved" before it ever
+// reads install_id, and the Alias is wrapped in `installID != ""`.
+func TestRunDeviceAuth_OptedOut_SendsNoInstallID(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T)
+	}{
+		{"never asked", func(*testing.T) {}},
+		{"telemetry off", func(*testing.T) { setGuardConsent(false) }},
+		{"do not track", func(t *testing.T) { setGuardConsent(true); t.Setenv("DO_NOT_TRACK", "1") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTelemetrySandbox(t, "http://127.0.0.1:1/ingest")
+			tc.setup(t)
+
+			if got := deviceAuthInstallID(t); got != "" {
+				t.Errorf("device init sent install_id %q; an opted-out user must not "+
+					"hand a persistent machine identifier to the server at login", got)
+			}
+		})
+	}
+}
+
+// Positive control: consent granted, so the attribution value IS sent and
+// the alias still works for users who opted in.
+func TestRunDeviceAuth_Consented_SendsInstallID(t *testing.T) {
+	withTelemetrySandbox(t, "http://127.0.0.1:1/ingest")
+	setGuardConsent(true)
+
+	got := deviceAuthInstallID(t)
+	if got == "" {
+		t.Fatal("device init sent no install_id for a consenting user; the " +
+			"install:<id> → user:<id> alias would never fire")
+	}
+	if got != cliInstallID() {
+		t.Errorf("device init sent %q, want the machine's install_id %q", got, cliInstallID())
+	}
+}
+
 // TestNewAuthNonce guards entropy/format so the server's isHexString
 // check on /api/auth/cli/session accepts what we produce.
 func TestNewAuthNonce(t *testing.T) {

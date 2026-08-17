@@ -138,6 +138,149 @@ func TestLoadInstall_ExistingIDIsReturnedEvenWhileDisabled(t *testing.T) {
 	}
 }
 
+// ── Peek: reading the install state must never create it ──────────────────────
+
+// A user who has never been asked for consent gets a permanent machine
+// identifier written to disk merely by RUNNING `chainsaw telemetry status`.
+// Peek is the read-only path those status commands use; it must leave the
+// directory untouched.
+func TestPeekInstall_DoesNotMint(t *testing.T) {
+	clearTelemetryEnv(t)
+	dir := t.TempDir()
+
+	got, found, err := PeekInstall(dir)
+	if err != nil {
+		t.Fatalf("PeekInstall: %v", err)
+	}
+	if found {
+		t.Fatalf("PeekInstall reported found on a fresh dir: %+v", got)
+	}
+	if got.ID != "" || got.Disabled {
+		t.Fatalf("PeekInstall = %+v, want the zero value when nothing exists", got)
+	}
+	if _, err := os.Stat(installPath(dir)); !os.IsNotExist(err) {
+		data, _ := os.ReadFile(installPath(dir))
+		t.Fatalf("PeekInstall minted an install file (%q); reading a privacy readout "+
+			"must not create the identifier it reports on", data)
+	}
+	// Nothing was minted, so telemetry was NOT disabled here — prove the
+	// mint path is still reachable and this is a peek property, not an
+	// accidentally-disabled environment.
+	if _, err := LoadInstall(dir); err != nil {
+		t.Fatalf("LoadInstall after peek: %v", err)
+	}
+	if _, err := os.Stat(installPath(dir)); err != nil {
+		t.Fatalf("control: LoadInstall should still mint here: %v", err)
+	}
+}
+
+// Once an id exists, peek reports exactly it — reading is not a reset.
+func TestPeekInstall_ReadsTheExistingID(t *testing.T) {
+	clearTelemetryEnv(t)
+	dir := t.TempDir()
+
+	minted, err := LoadInstall(dir)
+	if err != nil || minted.ID == "" {
+		t.Fatalf("LoadInstall = %+v, %v", minted, err)
+	}
+	for i := 0; i < 3; i++ {
+		got, found, err := PeekInstall(dir)
+		if err != nil {
+			t.Fatalf("PeekInstall #%d: %v", i, err)
+		}
+		if !found || got.ID != minted.ID {
+			t.Fatalf("PeekInstall #%d = %+v (found=%v), want the minted id %q", i, got, found, minted.ID)
+		}
+	}
+}
+
+// The sticky opt-out sentinel is a real record: peek must report Disabled
+// rather than "nothing here", or a status command would offer to mint.
+func TestPeekInstall_ReportsTheDisabledSentinel(t *testing.T) {
+	clearTelemetryEnv(t)
+	dir := t.TempDir()
+	if err := writeInstallFile(dir, installPath(dir), installIDDisabled); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, found, err := PeekInstall(dir)
+	if err != nil {
+		t.Fatalf("PeekInstall: %v", err)
+	}
+	if !found || !got.Disabled || got.ID != "" {
+		t.Fatalf("PeekInstall = %+v (found=%v), want the disabled record", got, found)
+	}
+}
+
+// An empty file is "first run" to LoadInstall; peek must agree, otherwise a
+// truncated file would be reported as an id.
+func TestPeekInstall_EmptyFileIsNotFound(t *testing.T) {
+	clearTelemetryEnv(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(installPath(dir), []byte("  \n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, found, err := PeekInstall(dir)
+	if err != nil {
+		t.Fatalf("PeekInstall: %v", err)
+	}
+	if found || got.ID != "" {
+		t.Fatalf("PeekInstall on an empty file = %+v (found=%v), want not-found", got, found)
+	}
+}
+
+// STABILITY. Lazy minting must not become per-invocation minting: once an id
+// exists it has to survive the process cache being dropped (a new `chainsaw`
+// run) and any number of peeks in between.
+func TestPeekAndLoadInstall_IDIsStableAcrossCalls(t *testing.T) {
+	clearTelemetryEnv(t)
+	dir := t.TempDir()
+	t.Setenv(envConfigHome, dir)
+	ResetProcessInstall()
+	t.Cleanup(ResetProcessInstall)
+
+	first, err := ProcessInstall()
+	if err != nil || first.ID == "" {
+		t.Fatalf("ProcessInstall = %+v, %v", first, err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, _, err := PeekProcessInstall(); err != nil {
+			t.Fatalf("PeekProcessInstall #%d: %v", i, err)
+		}
+		// Simulate a fresh process: the on-disk file is the only thing
+		// carrying the id across invocations.
+		ResetProcessInstall()
+		again, err := ProcessInstall()
+		if err != nil {
+			t.Fatalf("ProcessInstall #%d: %v", i, err)
+		}
+		if again.ID != first.ID {
+			t.Fatalf("install_id changed between invocations: %q then %q; "+
+				"lazy minting must not mint per run", first.ID, again.ID)
+		}
+	}
+}
+
+// PeekProcessInstall must not populate the process cache — a status read
+// deciding what a later emit() sees would be a nasty ordering coupling.
+func TestPeekProcessInstall_DoesNotPoisonTheProcessCache(t *testing.T) {
+	clearTelemetryEnv(t)
+	dir := t.TempDir()
+	t.Setenv(envConfigHome, dir)
+	ResetProcessInstall()
+	t.Cleanup(ResetProcessInstall)
+
+	if _, found, err := PeekProcessInstall(); err != nil || found {
+		t.Fatalf("PeekProcessInstall = found %v, %v; want nothing on a fresh dir", found, err)
+	}
+	got, err := ProcessInstall()
+	if err != nil || got.ID == "" {
+		t.Fatalf("ProcessInstall after a peek = %+v, %v; the peek must not have "+
+			"cached an empty record", got, err)
+	}
+}
+
 // ── R12: DO_NOT_TRACK ─────────────────────────────────────────────────────────
 
 func TestResolveMode_HonorsDoNotTrack(t *testing.T) {

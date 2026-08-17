@@ -333,7 +333,16 @@ func renderWhyLocal(cmd *cobra.Command, rec *guardBlockRecord) error {
 	fmt.Fprintln(w, "Source:     this machine's offline guard (known-malicious floor + typosquat)")
 	fmt.Fprintln(w, "\nNext steps:")
 	fmt.Fprintf(w, "  • Install a trusted package instead (check the name for typos).\n")
-	fmt.Fprintln(w, "  • Full known-malicious feed + team-wide history → sign up free:")
+	// Two DISTINCT calls to action, deliberately not merged: the full OpenSSF
+	// malicious-packages set is a public download that needs no account (see
+	// TestGuardUpdateNudgePublicFeedNoAuth), so bundling it into the signup
+	// pitch would sell a gate that does not exist. Signing in syncs this
+	// device's guard activity to an account — that, and team-wide history,
+	// is the honest reason to sign up.
+	fmt.Fprintln(w, "  • Pull the full OpenSSF malicious-packages set (free, no account):")
+	fmt.Fprintln(w, "    chainsaw guard update")
+	fmt.Fprintln(w, "  • Sync this device's guard activity to your account for team-wide")
+	fmt.Fprintln(w, "    history → sign up free:")
 	fmt.Fprintln(w, "    https://chain305.com/chainsaw/signup")
 	return nil
 }

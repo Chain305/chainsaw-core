@@ -8,18 +8,32 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/chain305/chainsaw-core/telemetry"
 )
 
-// telemetryConsentLabel renders the guard's telemetry consent for `status`.
-// An explicit env kill switch is shown as the authoritative state.
+// telemetryConsentLabel renders the telemetry state for `guard status` AND
+// for `telemetry status`, so the two can never word it differently.
+//
+// An environment kill switch is the authoritative state and is shown first.
+// The check used to hand-roll two env vars (CHAINSAW_TELEMETRY_DISABLED,
+// CHAINSAW_OFFLINE), which missed the other two routes to ModeDisabled —
+// DO_NOT_TRACK=1 and a self-hosted build without CHAINSAW_TELEMETRY_ENABLED
+// both silenced the SDK while this label still said "on". Defer to
+// telemetry.ResolveMode so the env list has exactly one definition.
+//
+// Debug is reported as off because it is: the client prints events to
+// stderr and sends none.
 func telemetryConsentLabel(st *guardState) string {
-	if envTruthy(os.Getenv("CHAINSAW_TELEMETRY_DISABLED")) || envTruthy(os.Getenv("CHAINSAW_OFFLINE")) {
+	switch telemetry.ResolveMode() {
+	case telemetry.ModeDisabled:
 		return "off (disabled by env)"
+	case telemetry.ModeDebug:
+		return "off (debug mode: events printed, never sent)"
 	}
 	switch st.Consent {
 	case consentGranted:
@@ -73,6 +87,16 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	// emits SHELL TEXT, not JSON. Its output is meant to be consumed by
 	// `eval "$(chainsaw guard init)"`; emitting JSON there would break the
 	// documented invocation. That is a correct exemption, not an oversight.
+	//
+	// RENAME (device_id -> install_id): the id below is the SAME value
+	// `telemetry status` prints as install_id — one id, one minting site
+	// (telemetry.ProcessInstall), one file (install_id in the config dir).
+	// Two names for it made reviewers believe there were two identifiers.
+	// `install_id` wins because it matches the on-disk filename, the
+	// function, the event property, and the sibling command. It also stops
+	// colliding with the UNRELATED `device_id` on the compliance-attestation
+	// surface (internal/server/compliance.go), which is a hostname/USER
+	// string, not this UUID.
 	if useJSON(cmd) {
 		return PrintJSONTo(cmd, map[string]any{
 			"installs_checked":  st.InstallsChecked,
@@ -83,7 +107,7 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 			"first_run_unix":    st.FirstRunUnix,
 			"telemetry_consent": st.Consent,
 			"telemetry_label":   telemetryConsentLabel(st),
-			"device_id":         cliInstallID(),
+			"install_id":        displayInstallID(),
 			"signed_in":         cfgToken() != "",
 		})
 	}
@@ -119,7 +143,7 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out, "Privacy")
 	pw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(pw, "  Telemetry\t%s\n", telemetryConsentLabel(st))
-	fmt.Fprintf(pw, "  Device id\t%s\n", cliInstallID())
+	fmt.Fprintf(pw, "  Install id\t%s\n", displayInstallID())
 	_ = pw.Flush()
 	fmt.Fprintln(out, "  Change with: chainsaw telemetry on | off")
 

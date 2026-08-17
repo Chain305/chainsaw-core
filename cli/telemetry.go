@@ -178,6 +178,129 @@ func newTelemetryResetCmd() *cobra.Command {
 	}
 }
 
+// effectiveTelemetryMode is what ACTUALLY happens on this machine, as
+// opposed to what the environment alone would allow.
+//
+// PRIVACY BUG (this is the fix): `telemetry status` used to print
+// telemetry.ResolveMode() verbatim. ResolveMode consults ENV VARS ONLY
+// (CHAINSAW_TELEMETRY_DEBUG / DO_NOT_TRACK / CHAINSAW_OFFLINE /
+// CHAINSAW_TELEMETRY_DISABLED / self-hosted), so with none of them set it
+// returns ModeEnabled — including on a fresh machine that has never been
+// asked, and on a machine where the operator ran `chainsaw telemetry off`.
+// The real send gate is cliTelemetryConsented() (telemetry_runtime.go),
+// which emit() checks BEFORE anything else. So `telemetry status` reported
+// "enabled" on a box that sends nothing, while `guard status` truthfully
+// reported "off" — the worst possible direction for a privacy readout.
+//
+// Precedence is unchanged and deliberately one-directional:
+//   - an env kill switch (DO_NOT_TRACK, CHAINSAW_OFFLINE,
+//     CHAINSAW_TELEMETRY_DISABLED, self-hosted without
+//     CHAINSAW_TELEMETRY_ENABLED) still forces disabled, and consent cannot
+//     re-enable it;
+//   - absent a kill switch, missing consent downgrades to disabled.
+//
+// ModeDebug collapses to disabled without consent because that is the
+// truth: emit() returns at the consent gate before the debug sink ever
+// runs, so a non-consenting debug run prints nothing and sends nothing.
+func effectiveTelemetryMode() telemetry.Mode {
+	if telemetryDisabledByEnv() {
+		return telemetry.ModeDisabled
+	}
+	if !cliTelemetryConsented() {
+		return telemetry.ModeDisabled
+	}
+	return telemetry.ResolveMode()
+}
+
+// telemetryDisabledByEnv reports whether the ENVIRONMENT alone silences
+// telemetry, independent of any stored consent decision.
+//
+// This exists so the env kill-switch list has ONE definition on the CLI
+// side. It had grown to three hand-rolled copies, each a different subset:
+// guard_status.go's label checked two variables, guard_nudge.go's consent
+// prompt checked the same two, and only telemetry.ResolveMode() knew about
+// all four routes (DO_NOT_TRACK, CHAINSAW_OFFLINE,
+// CHAINSAW_TELEMETRY_DISABLED, and a self-hosted build without
+// CHAINSAW_TELEMETRY_ENABLED). Every copy therefore disagreed with the SDK
+// it was describing: `DO_NOT_TRACK=1` printed "Telemetry: on" and still
+// raised the first-run consent prompt on a box where the SDK was already
+// mute. Add a fifth caller here, not a fourth list.
+//
+// ModeDebug is deliberately NOT env-disabled: nothing is SENT in debug, but
+// the mode is a developer tool rather than an opt-out, and the surfaces that
+// care (telemetryConsentLabel, effectiveTelemetryMode) report it explicitly
+// instead of folding it into "off by env".
+func telemetryDisabledByEnv() bool {
+	return telemetry.ResolveMode() == telemetry.ModeDisabled
+}
+
+// telemetryConsentValue normalizes the persisted consent decision for
+// machine-readable output. guardState.Consent is "granted", "declined", or
+// "" (never asked / unreadable / corrupt — all of which deny). The empty
+// case is spelled out as "not_asked" so a `--json` consumer does not have
+// to special-case an empty string, and so the human line is not blank.
+func telemetryConsentValue(st *guardState) string {
+	switch st.Consent {
+	case consentGranted, consentDeclined:
+		return st.Consent
+	default:
+		return "not_asked"
+	}
+}
+
+// installIDNoneYet is what both status commands print when this machine has
+// no install_id at all. Spelled out rather than left blank so the human
+// table has a value and a --json consumer can tell "not minted" apart from
+// "we failed to read it" (which reports install_error alongside).
+const installIDNoneYet = "none yet"
+
+// displayInstallID renders THE install_id — the single identifier stored in
+// <config-dir>/install_id — for both `telemetry status` and `guard status`,
+// so the two can never print different things for the same machine.
+//
+// PRIVACY BUG (this is the fix): this read through telemetry.ProcessInstall,
+// which MINTS. So `chainsaw telemetry status` and `chainsaw guard status` —
+// the two commands a privacy-conscious user runs FIRST, precisely to find
+// out what is being collected — created the permanent machine identifier
+// they were asked to report on. Nothing was transmitted (emit() is
+// consent-gated), but the id existed on disk before the user had agreed to
+// anything, and survived until they found `telemetry reset`. Peek instead:
+// reporting state must never create it.
+//
+// The three renderings:
+//   - a real id, when one has been minted;
+//   - "disabled", when no id will be minted for reasons outside the consent
+//     decision — the sticky opt-out sentinel on disk, or an environment kill
+//     switch. "no identifier, and none is coming";
+//   - "none yet", when no id exists but one could be. This is the reading a
+//     never-asked machine gets, and it is the whole point of the peek: the
+//     command can now say "none yet" instead of manufacturing one to print.
+//
+// The env-only check (rather than effectiveTelemetryMode) is deliberate: it
+// keeps "disabled" meaning the ENVIRONMENT forbids an id, so it does not
+// collide with the consent state that the Telemetry row directly above
+// already reports in words.
+//
+// "disabled" is the sentinel `telemetry status` has always used; `guard
+// status` used to render that same state as an empty field via
+// cliInstallID(), which read like a bug.
+func displayInstallID() string {
+	install, found, err := telemetry.PeekProcessInstall()
+	if err != nil {
+		return ""
+	}
+	if install.Disabled {
+		return "disabled"
+	}
+	if found && install.ID != "" {
+		return install.ID
+	}
+	if telemetryDisabledByEnv() {
+		return "disabled"
+	}
+	return installIDNoneYet
+}
+
 // runTelemetryStatus prints a concise diagnostic.
 //
 // R15: this UNCONDITIONALLY encoded JSON while its own doc comment claimed
@@ -191,12 +314,24 @@ func newTelemetryResetCmd() *cobra.Command {
 // Scripts piping it to jq must add --json (which worked before and still
 // works).
 func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
-	mode := telemetry.ResolveMode()
+	st := loadGuardState()
 	dir, dirErr := telemetry.ConfigDir()
-	install, installErr := telemetry.ProcessInstall()
+	// Peek, never mint — printing a privacy readout must not create the
+	// identifier it reports. See displayInstallID.
+	install, _, installErr := telemetry.PeekProcessInstall()
 
+	// Both the mode a reader acts on AND the two inputs that produced it,
+	// so nothing is conflated: `mode` is what happens, `env_mode` is what
+	// the environment alone would allow, `consent` is the stored decision.
+	// The human rendering below prints this same map, so the two views
+	// cannot drift. `consent_label` is the exact string `guard status`
+	// prints for Telemetry (shared helper), so the two commands agree
+	// word for word.
 	payload := map[string]any{
-		"mode":          mode.String(),
+		"mode":          effectiveTelemetryMode().String(),
+		"env_mode":      telemetry.ResolveMode().String(),
+		"consent":       telemetryConsentValue(st),
+		"consent_label": telemetryConsentLabel(st),
 		"self_hosted":   telemetry.IsSelfHosted(),
 		"config_dir":    dir,
 		"install_id":    "",
@@ -204,10 +339,8 @@ func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
 		"event_version": telemetry.EventVersion,
 		"events_known":  len(telemetry.KnownEvents()),
 	}
-	if install.Disabled {
-		payload["install_id"] = "disabled"
-	} else if install.ID != "" {
-		payload["install_id"] = install.ID
+	payload["install_id"] = displayInstallID()
+	if !install.Disabled && install.ID != "" {
 		payload["distinct_id"] = telemetry.DistinctID(install)
 	}
 	if dirErr != nil {
@@ -240,12 +373,36 @@ func init() {
 	rootCmd.AddCommand(newTelemetryCmd())
 }
 
-// cliInstallID returns the install_id suitable for embedding in the
-// device-code init request, honoring the mode. Empty string when the
-// user is opted out — the server accepts missing install_id as "do not
-// alias".
+// cliInstallID returns the install_id to embed in the login init requests
+// (device-code and browser-redirect), or empty when this machine has no
+// identifier it is allowed to share. The server accepts a missing
+// install_id as "do not alias".
+//
+// PRIVACY BUG (this is the fix): the gate was telemetry.ResolveMode() alone
+// — ENV VARS ONLY — while this function's own doc comment promised "Empty
+// string when the user is opted out". Both were false for the same user: a
+// person who ran `chainsaw telemetry off`, or who had never been asked, kept
+// getting a non-empty id here, and auth_browser.go puts it in the request
+// body of BOTH login init calls. That was the last place the
+// ResolveMode/consent gap still reached the network. Gate on
+// effectiveTelemetryMode(), which folds the stored consent decision in, so
+// the doc comment above is now true.
+//
+// LOAD-BEARING? No — checked before changing it, because a login that
+// silently broke would be worse than the leak. In internal/server/auth_cli.go
+// the API key is minted and the approved/session response is written BEFORE
+// install_id is looked at, and both stitching sites
+// (handleCLIDeviceApprove, handleCLISession) guard on `installID != ""`,
+// with handleCLIInit likewise omitting ?cli_install= when it is absent.
+// Sending nothing costs the PostHog Alias(install:<id> → user:<user_id>)
+// that merges pre-signup events into the new account. Login itself is
+// unaffected.
+//
+// This still MINTS on first use, and that is the intended lazy-mint site:
+// by the time we are here, consent has been granted and the value is about
+// to be sent for the purpose the user agreed to.
 func cliInstallID() string {
-	if telemetry.ResolveMode() == telemetry.ModeDisabled {
+	if effectiveTelemetryMode() == telemetry.ModeDisabled {
 		return ""
 	}
 	install, err := telemetry.ProcessInstall()

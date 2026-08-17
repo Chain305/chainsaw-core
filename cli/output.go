@@ -238,6 +238,140 @@ func IsColorEnabled(cmd *cobra.Command) bool {
 	return !noColor(cmd)
 }
 
+// glyphSet is the CLI's status-marker vocabulary. Every human-facing status
+// marker must come from here rather than a string literal, so a terminal that
+// cannot render the Unicode set degrades to a legible ASCII one instead of a
+// column of identical replacement boxes.
+//
+// WHY THIS EXISTS. The Unicode markers we print — ✓ U+2713, ✗ U+2717,
+// ↻ U+21BB, ⚠ U+26A0, ℹ U+2139 — are NOT in CP437, the legacy Windows console
+// codepage. A console still on CP437 renders each of them as the same
+// replacement box, so `chainsaw features` showed two capability rows as
+// visually IDENTICAL when one was active and one was not, and the
+// `doctor --offline` matrix collapsed five distinct states into one. ○ U+25CB
+// IS in CP437 (0x09) and rendered correctly, which is what pinned the
+// diagnosis: a tester's screenshot boxed every marker EXCEPT ○.
+//
+// This is a CODEPAGE problem, not a color problem. ansi_windows.go enables
+// ENABLE_VIRTUAL_TERMINAL_PROCESSING, which makes ANSI ESCAPES work and does
+// nothing whatsoever for glyph encoding; and NO_COLOR / TERM=dumb still
+// emitted the full Unicode legend. Hence a predicate of its own
+// (unicodeEnabled) rather than a branch off noColor — a user can legitimately
+// want color without Unicode, and vice versa.
+type glyphSet struct {
+	ok      string // success / present / runs offline
+	fail    string // refusal / blocked / absent
+	warn    string // degraded, still running
+	refresh string // stale, refresh recommended
+	none    string // inert: no coverage at all
+	info    string // reported, deliberately not graded
+
+	// dash is the em dash used as a clause separator in status PROSE, not a
+	// marker. U+2014 is absent from CP437 like the markers above, but a boxed
+	// dash mid-sentence only looks wrong, whereas a boxed marker destroys
+	// information — so the general em-dash sweep is deliberately NOT part of
+	// this set's remit. It is carried here for the one line where prose and
+	// headline coincide: the guard's refusal (guardRefusalLine). Do not reach
+	// for it elsewhere without converting that call site's whole string.
+	dash string
+}
+
+// unicodeGlyphs is the default set — unchanged from the literals these
+// replaced, so every existing terminal renders byte-for-byte what it did
+// before.
+var unicodeGlyphs = glyphSet{
+	ok:      "✓",
+	fail:    "✗",
+	warn:    "⚠",
+	refresh: "↻",
+	none:    "○",
+	info:    "ℹ",
+	dash:    "—",
+}
+
+// asciiGlyphs is the fallback. Three constraints drove the choices:
+//
+//  1. EVERY marker is exactly ONE rune AND one byte. The doctor --offline
+//     matrix is a 25-row tabwriter table and PrintTable measures display width
+//     in runes, so a same-width swap keeps every column aligned in both modes.
+//     Multi-character markers ("[OK]", "OK", "WARN") would have re-flowed the
+//     STATUS column and, worse, re-flowed it by a DIFFERENT amount per row.
+//  2. Pure ASCII (0x20–0x7E), which is present in CP437, CP850, CP1252, every
+//     other OEM codepage, and UTF-8 alike — so the fallback cannot itself
+//     become an unrenderable glyph on some codepage we did not anticipate.
+//  3. Mutually distinguishable at a glance and semantically suggestive:
+//     + present, X refused, ! degraded-but-running, ~ stale/approximate,
+//     - inert/nothing there, i informational. X is upper-case deliberately:
+//     it is the block marker, it leads the product's headline refusal line
+//     ("X refused at the install path"), and a lower-case x there reads as
+//     the first letter of a word rather than as a mark.
+var asciiGlyphs = glyphSet{
+	ok:      "+",
+	fail:    "X",
+	warn:    "!",
+	refresh: "~",
+	none:    "-",
+	info:    "i",
+	// Two hyphens, not one: a lone "-" is already the `none` marker, and the
+	// refusal line would otherwise read "X refused ... - nothing was installed",
+	// where the separator is indistinguishable from a status glyph.
+	dash: "--",
+}
+
+// glyphs returns the status-marker set appropriate for the current terminal.
+//
+// Deliberately takes no *cobra.Command: the guard wrappers run with
+// DisableFlagParsing and have no bound flag set to consult, and this decision
+// is a property of the CONSOLE, not of the invocation. Cheap enough to call
+// per line, but call sites hoist it out of loops out of habit.
+func glyphs() glyphSet {
+	if unicodeEnabled() {
+		return unicodeGlyphs
+	}
+	return asciiGlyphs
+}
+
+// unicodeEnabled reports whether the terminal can render the Unicode glyph set.
+//
+// False when either:
+//   - CHAINSAW_NO_UNICODE is set to anything but an explicit falsey value, or
+//   - the platform probe says the console cannot encode them (on Windows: the
+//     console output codepage is not 65001/UTF-8; everywhere else: always
+//     capable, since modern Unix terminals are UTF-8).
+//
+// The env var is checked as "set, unless explicitly turned off" rather than as
+// bare presence. R7 (see verboseEnabled) recorded that presence tests on
+// CHAINSAW_* vars make `FOO=0` mean ON, the opposite of what an operator
+// writing =0 intends. NO_COLOR's presence-only rule is a cross-vendor spec for
+// a var we do not own; this is our own var, so it follows our own convention.
+// Note that CHAINSAW_NO_UNICODE=0 does not FORCE Unicode on — it only declines
+// to be the reason it is off; the console probe still has the final say.
+func unicodeEnabled() bool {
+	if v, ok := os.LookupEnv("CHAINSAW_NO_UNICODE"); ok && !envFalsey(v) {
+		return false
+	}
+	return consoleSupportsUnicode()
+}
+
+// envFalsey reports whether v is an explicit "off". Mirrors envTruthy's
+// vocabulary (guard_nudge.go) from the other side.
+func envFalsey(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
+		return true
+	}
+	return false
+}
+
+// consoleSupportsUnicode probes the platform for glyph-encoding capability.
+// It is a var, not a plain func, for exactly one reason: the failure it guards
+// is Windows-only, and a bug that can only be tested on a runner we do not
+// have is a bug that stops being tested. Overriding this in a test reproduces
+// a CP437 console on macOS/Linux, so the ASCII path is exercised on every CI
+// run rather than never. See unicode_windows.go / unicode_other.go for the
+// real probes.
+var consoleSupportsUnicode = func() bool { return nativeConsoleSupportsUnicode() }
+
 // resolveFormat returns the active result format, honoring --format with --json
 // as sugar for "json". Precedence: an explicit --json (or --format=json) wins
 // and yields "json"; otherwise the --format value is returned (defaulting to
@@ -384,11 +518,18 @@ func noColorFlagInArgs(argv []string) bool {
 	return false
 }
 
+// printSuccess is the precedent this whole glyph mechanism generalizes: it
+// already degraded to "OK: " when color was off. The remaining gap was the
+// COLORED branch, whose ✓ was a literal — so a Windows console with VT
+// processing on but a CP437 codepage (a real and common combination) got a
+// green replacement box. The glyph now comes from glyphs(); the no-color
+// branch is unchanged, since "OK: " is strictly clearer than any marker and
+// several tests pin that exact prefix.
 func printSuccess(w io.Writer, cmd *cobra.Command, msg string) {
 	if noColor(cmd) {
 		fmt.Fprintln(w, "OK: "+msg)
 	} else {
-		fmt.Fprintf(w, "%s✓%s %s\n", ansiGreen, ansiReset, msg)
+		fmt.Fprintf(w, "%s%s%s %s\n", ansiGreen, glyphs().ok, ansiReset, msg)
 	}
 }
 

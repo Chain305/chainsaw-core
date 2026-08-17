@@ -958,6 +958,106 @@ func TestGuardAllowJSONNeverWeakensTheRefusal(t *testing.T) {
 	}
 }
 
+// TestGuardAllowListJSONEntriesIsAlwaysAnArray — `guard allow --list --json`
+// emitted `"entries": null` whenever the store was empty, which is its most
+// common state: nothing has been allowed yet. A consumer doing
+// `.entries.length` throws TypeError and `jq '.entries[]'` fails with "Cannot
+// iterate over null". The key must stay present (so `omitempty` is not the
+// fix) and must always decode as an array — including on the degraded paths,
+// where loadGuardAllowlist returns early with a Problem set.
+func TestGuardAllowListJSONEntriesIsAlwaysAnArray(t *testing.T) {
+	listJSON := func(t *testing.T) (map[string]any, string) {
+		t.Helper()
+		cmd, _ := newGuardAllowTestCmd(t)
+		for _, f := range []string{"list", "json"} {
+			if err := cmd.Flags().Set(f, "true"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stdout := captureStdout(t, func() {
+			if err := runGuardAllow(cmd, nil); err != nil {
+				t.Errorf("guard allow --list --json: %v", err)
+			}
+		})
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+			t.Fatalf("--list --json did not emit a JSON object (%v):\n%s", err, stdout)
+		}
+		return payload, stdout
+	}
+
+	assertEntriesArray := func(t *testing.T, payload map[string]any, stdout string, want int) {
+		t.Helper()
+		raw, present := payload["entries"]
+		if !present {
+			t.Fatalf("`entries` key is missing — omitempty is NOT the fix for the null:\n%s", stdout)
+		}
+		arr, ok := raw.([]any)
+		if !ok {
+			t.Fatalf("`entries` must be a JSON array, got %T (%v) — a nil slice marshals as null:\n%s",
+				raw, raw, stdout)
+		}
+		if len(arr) != want {
+			t.Errorf("entries = %d rows, want %d:\n%s", len(arr), want, stdout)
+		}
+	}
+
+	t.Run("empty store", func(t *testing.T) {
+		withGuardAllowlistStore(t)
+		payload, stdout := listJSON(t)
+		assertEntriesArray(t, payload, stdout, 0)
+		if !strings.Contains(stdout, `"entries": []`) {
+			t.Errorf("empty --list --json should render `\"entries\": []`:\n%s", stdout)
+		}
+	})
+
+	t.Run("present but empty store", func(t *testing.T) {
+		path := withGuardAllowlistStore(t)
+		seedGuardAllowlist(t, path)
+		payload, stdout := listJSON(t)
+		assertEntriesArray(t, payload, stdout, 0)
+		// Belt and braces: the on-disk store takes the same rule, since users
+		// jq that file as readily as they jq the command output.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read store: %v", err)
+		}
+		if !strings.Contains(string(data), `"entries": []`) {
+			t.Errorf("the on-disk store should carry an empty array, not null:\n%s", data)
+		}
+	})
+
+	t.Run("unusable store degrades to an array", func(t *testing.T) {
+		path := withGuardAllowlistStore(t)
+		mustWrite(t, path, "{{{ not json")
+		invalidateGuardAllowlistCache()
+		payload, stdout := listJSON(t)
+		assertEntriesArray(t, payload, stdout, 0)
+		if problem, _ := payload["problem"].(string); problem == "" {
+			t.Errorf("a corrupt store should still be reported in `problem`:\n%s", stdout)
+		}
+	})
+
+	t.Run("non-empty store is unchanged", func(t *testing.T) {
+		path := withGuardAllowlistStore(t)
+		seedGuardAllowlist(t, path, "npm:lodahs")
+		payload, stdout := listJSON(t)
+		assertEntriesArray(t, payload, stdout, 1)
+		row, ok := payload["entries"].([]any)[0].(map[string]any)
+		if !ok {
+			t.Fatalf("entry row is not an object:\n%s", stdout)
+		}
+		for _, key := range []string{"ecosystem", "name", "reason", "allowed_at"} {
+			if _, ok := row[key]; !ok {
+				t.Errorf("entry row missing %q: %v", key, row)
+			}
+		}
+		if row["ecosystem"] != "npm" || row["name"] != "lodahs" {
+			t.Errorf("entry row coordinate changed: %v", row)
+		}
+	})
+}
+
 func TestGuardAllowJSONAddPayload(t *testing.T) {
 	withGuardAllowlistStore(t)
 	cmd, _ := newGuardAllowTestCmd(t)

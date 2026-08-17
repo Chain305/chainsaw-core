@@ -215,6 +215,13 @@ func runOrgDelete(cmd *cobra.Command, _ []string) error {
 		return errServerNotConfigured(cmd)
 	}
 
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go). This
+	// path already checked auth incidentally, via resolveOrgIdentifier below —
+	// make the ordering a property of the command, not of the resolve.
+	if err := requireAuth(cmd); err != nil {
+		return err
+	}
+
 	ident := strings.TrimSpace(viper.GetString("org_id"))
 	if slug, _ := cmd.Flags().GetString("slug"); strings.TrimSpace(slug) != "" {
 		ident = strings.TrimSpace(slug)

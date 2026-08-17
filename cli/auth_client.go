@@ -315,6 +315,10 @@ func runAuthClientDelete(cmd *cobra.Command, args []string) error {
 	if id == "" {
 		return fmt.Errorf("client_id is required")
 	}
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go).
+	if err := requireAuth(cmd); err != nil {
+		return err
+	}
 
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
@@ -390,6 +394,12 @@ func runAuthClientRotate(cmd *cobra.Command, args []string) error {
 	id := strings.TrimSpace(args[0])
 	if id == "" {
 		return fmt.Errorf("client_id is required")
+	}
+	// Auth BEFORE the confirmation prompt (see requireAuth, root.go). This
+	// path already checked auth incidentally, via the metadata fetch below —
+	// make the ordering a property of the command, not of the fetch.
+	if err := requireAuth(cmd); err != nil {
+		return err
 	}
 
 	// Step 1: fetch existing metadata so the recreated credential keeps

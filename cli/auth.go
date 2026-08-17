@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"golang.org/x/term"
 
 	"github.com/chain305/chainsaw-core/cli/credstore"
@@ -46,16 +47,37 @@ var authLogoutCmd = &cobra.Command{
 	Short:        "Remove saved credentials",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Delete credential first so a failure to remove the YAML doesn't
-		// leave a dangling secret in the keyring.
 		server := cfgServerURL()
+		// Z4: record whether a credential was actually stored BEFORE touching
+		// anything. The old code reported "Logged out" unconditionally, so a
+		// fresh install that had never logged in was told it had just been
+		// signed out — and, because saveConfig("","","") routes to clearConfig
+		// (root.go), that reassuring no-op ALSO deleted config.yaml outright,
+		// taking server_url and org_id with it. Someone running `auth logout`
+		// to check their state lost their server configuration to a command
+		// that told them everything was fine.
+		hadCredential := storedCredentialExists(server)
+
+		// Delete credential first so a failure to remove the YAML doesn't
+		// leave a dangling secret in the keyring. This stays UNCONDITIONAL and
+		// idempotent (ErrNotFound is not an error): logout must be safe to run
+		// twice, and it must still clean up a credstore entry even in the
+		// states where storedCredentialExists could not see one.
 		if server != "" {
 			if err := credStore().Delete(credService, server); err != nil && !errors.Is(err, credstore.ErrNotFound) {
 				return fmt.Errorf("delete credential: %w", err)
 			}
 		}
-		if err := saveConfig("", "", ""); err != nil {
-			return fmt.Errorf("clearing credentials: %w", err)
+		if hadCredential {
+			if err := saveConfig("", "", ""); err != nil {
+				return fmt.Errorf("clearing credentials: %w", err)
+			}
+		} else {
+			// Nothing was stored, so there is no credential to clear — and
+			// clearConfig's blast radius (the whole config file) is not a
+			// price to charge for a command that did nothing. Blank only the
+			// in-memory token so later cfg* reads in this process agree.
+			viper.Set("token", "")
 		}
 		emit("cli.auth.logout", nil)
 		// Y8: the clears above only reach the credstore and the YAML — tiers 3
@@ -68,11 +90,22 @@ var authLogoutCmd = &cobra.Command{
 		// X8: `auth logout --json` printed "OK: Logged out" — human prose on
 		// stdout at rc=0, straight into whatever was parsing it.
 		if useJSON(cmd) {
+			// logged_out now reports what HAPPENED rather than that the command
+			// ran. A script polling this can tell "I removed a session" from
+			// "there was nothing to remove"; both stay rc=0 because both leave
+			// the machine signed out, which is what was asked for.
 			return PrintJSONTo(cmd, map[string]any{
-				"logged_out":       true,
+				"logged_out":       hadCredential,
 				"server":           server,
 				"env_token_active": override != "",
 			})
+		}
+		if !hadCredential {
+			fmt.Fprintln(cmd.OutOrStdout(), "Not logged in — nothing to do.")
+			if override != "" {
+				warnTokenOverrideWithoutStored(cmd.ErrOrStderr(), override)
+			}
+			return nil
 		}
 		printSuccess(cmd.OutOrStdout(), cmd, "Logged out")
 		if override != "" {
@@ -80,6 +113,43 @@ var authLogoutCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// storedCredentialExists reports whether `auth logout` actually has something
+// to remove: a credstore entry for this server (tier 4 of cfgToken), or the
+// legacy plaintext `token:` key in config.yaml (tier 3).
+//
+// The two higher tiers — the --token flag and CHAINSAW_TOKEN — are deliberately
+// NOT counted. They authenticate the current process but nothing stored them,
+// logout cannot remove them, and warnTokenOverrideRemains already exists to say
+// so. Counting them would put us right back to claiming a logout that never
+// happened.
+//
+// The YAML tier is gated on viper.InConfig for the same reason
+// migrateTokenToKeychain is: viper.GetString("token") also returns the flag and
+// the env var, so an unauthenticated `chainsaw --token X auth logout` would
+// otherwise look like it had a stored credential and nuke config.yaml.
+func storedCredentialExists(server string) bool {
+	if server != "" {
+		if tok, err := credStore().Get(credService, server); err == nil && strings.TrimSpace(tok) != "" {
+			return true
+		}
+	}
+	return viper.InConfig("token") && strings.TrimSpace(viper.GetString("token")) != ""
+}
+
+// warnTokenOverrideWithoutStored is warnTokenOverrideRemains for the case where
+// there was no stored credential to remove. Same purpose — never let the user
+// walk away believing they are signed out when they are not — but it must not
+// claim a removal that did not occur.
+func warnTokenOverrideWithoutStored(w io.Writer, source string) {
+	if source == "CHAINSAW_TOKEN" {
+		fmt.Fprintln(w, "Warning: CHAINSAW_TOKEN is still set in this environment, so commands remain authenticated.")
+		fmt.Fprintln(w, "  There were no saved credentials to remove. To sign out:  unset CHAINSAW_TOKEN")
+		return
+	}
+	fmt.Fprintln(w, "Warning: --token was passed on this command line, so commands on it remain authenticated.")
+	fmt.Fprintln(w, "  There were no saved credentials to remove. Re-run without --token to see the signed-out state.")
 }
 
 // activeTokenOverride names the credential source that still outranks the

@@ -1,16 +1,32 @@
 package telemetry
 
 // install_id is the cross-channel identity anchor. A UUIDv7 is generated
-// on first run and persisted under the XDG config directory. The ID is
-// emitted as the PostHog distinct_id (prefixed "install:") until a
-// user-authenticated request arrives — at that point the server issues an
-// Alias(install:<id> → user:<user_id>) so the pre-auth events merge into
-// the authenticated person.
+// the first time one is actually needed and persisted under the XDG config
+// directory. The ID is emitted as the PostHog distinct_id (prefixed
+// "install:") until a user-authenticated request arrives — at that point
+// the server issues an Alias(install:<id> → user:<user_id>) so the pre-auth
+// events merge into the authenticated person.
 //
 // We intentionally do NOT hash or derive from hardware identifiers: the
 // file is the record, and users can blow it away with
 // `chainsaw telemetry reset` (or their own `rm`) if they want to be
 // counted as a fresh install.
+//
+// READ vs MINT — the distinction this file draws, and why:
+//
+// LoadInstall/ProcessInstall MINT. They are the write path and must only be
+// reached when an identifier is legitimately about to be used (the CLI calls
+// them from emit(), AFTER its explicit-consent gate, and from the login init
+// request, likewise consent-gated).
+//
+// PeekInstall/PeekProcessInstall READ ONLY. Anything that merely REPORTS the
+// install state — `chainsaw telemetry status`, `chainsaw guard status` — must
+// use these. Reading a privacy readout is not consent to create the very
+// identifier being inspected, and a user who has never been asked ran
+// `telemetry status` and got a permanent machine id written to disk for their
+// trouble. ResolveMode() cannot close that hole: it consults ENV VARS ONLY, so
+// on a box with no kill switch set it returns ModeEnabled for a user who has
+// consented to nothing.
 
 import (
 	"errors"
@@ -48,25 +64,55 @@ type Install struct {
 	Disabled bool
 }
 
+// PeekInstall reads the persisted install record WITHOUT creating one.
+// found reports whether this machine has a record at all; on false the
+// returned Install is the zero value and NOTHING was written to dir — the
+// property `telemetry status` depends on.
+//
+// A missing file and an empty one are both reported as not-found, matching
+// LoadInstall's own treatment of an empty file as "first run".
+//
+// A non-nil error is a filesystem problem (permissions, unreadable file);
+// callers reporting status should render that as "unknown", not as "none".
+func PeekInstall(dir string) (Install, bool, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, installFilename))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Install{}, false, nil
+		}
+		return Install{}, false, err
+	}
+	switch val := strings.TrimSpace(string(raw)); {
+	case val == installIDDisabled:
+		return Install{Disabled: true}, true, nil
+	case val != "":
+		return Install{ID: val}, true, nil
+	default:
+		return Install{}, false, nil
+	}
+}
+
 // LoadInstall resolves the install_id for this binary, creating and
 // persisting one on first call. dir is the config directory (typically
 // from ConfigDir()). A non-nil error indicates a filesystem problem
 // (permissions, disk full); callers may treat that as telemetry-off
 // rather than hard-failing the process.
+//
+// THIS MINTS. Call it only when an identifier is about to be used for its
+// stated purpose (an event that will be sent, a login init that will be
+// aliased) — never to answer a question about the current state. Use
+// PeekInstall for that. Note that the ENV-derived ResolveMode() check below
+// is a floor, not the consent gate: consent lives above this package (the
+// CLI's guard_state.json, which core/telemetry deliberately cannot see), so
+// the CALLER owns it. Nothing here can tell a consenting user from a user
+// who was never asked.
 func LoadInstall(dir string) (Install, error) {
-	path := filepath.Join(dir, installFilename)
-	raw, err := os.ReadFile(path)
-	if err == nil {
-		val := strings.TrimSpace(string(raw))
-		if val == installIDDisabled {
-			return Install{Disabled: true}, nil
-		}
-		if val != "" {
-			return Install{ID: val}, nil
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if install, found, err := PeekInstall(dir); err != nil {
 		return Install{}, err
+	} else if found {
+		return install, nil
 	}
+	path := filepath.Join(dir, installFilename)
 
 	// First run — either the file is missing or it was empty. Respect
 	// CHAINSAW_TELEMETRY_DISABLED at first run so opted-out users never
@@ -184,10 +230,34 @@ var (
 	processInstallErr  error
 )
 
+// PeekProcessInstall is PeekInstall against the resolved config dir: the
+// read-only answer to "does this machine have an install_id, and what is
+// it?" with no chance of minting one as a side effect.
+//
+// Deliberately NOT wired to the processInstall cache. The cache exists to
+// make repeated MINTING calls cheap and to freeze one id per process; a peek
+// has neither need, and letting a peek populate the cache would let a status
+// read decide what a later emit sees. Two file reads in one CLI invocation
+// is not a cost worth that coupling.
+//
+// ConfigDir() still creates the config DIRECTORY (it is shared with
+// config.yaml and guard_state.json). A directory is not an identifier; the
+// install_id file is what this must not conjure.
+func PeekProcessInstall() (Install, bool, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return Install{}, false, err
+	}
+	return PeekInstall(dir)
+}
+
 // ProcessInstall returns the install record for the current process,
 // loading and persisting one on first call. Subsequent calls are a
 // map-lookup cost. Errors are sticky — a transient filesystem issue on
 // startup downgrades telemetry for the rest of the process.
+//
+// THIS MINTS — see LoadInstall. Status/reporting callers want
+// PeekProcessInstall instead.
 func ProcessInstall() (Install, error) {
 	processInstallOnce.Do(func() {
 		dir, err := ConfigDir()

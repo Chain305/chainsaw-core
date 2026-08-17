@@ -122,7 +122,14 @@ type guardAllowEntry struct {
 }
 
 type guardAllowlistFile struct {
-	Schema  int               `json:"schema"`
+	Schema int `json:"schema"`
+	// Entries must be non-nil wherever this struct (or the field alone, as in
+	// `guard allow --list --json`) is marshalled: `entries` is an ARRAY in
+	// every case, including the empty one. A nil slice emits
+	// `"entries": null`, which makes `.entries.length` throw and
+	// `jq '.entries[]'` fail on the store's most common state — nothing
+	// allowed yet. No `omitempty`: dropping the key breaks consumers the
+	// other way. loadGuardAllowlist and writeGuardAllowlist both normalise.
 	Entries []guardAllowEntry `json:"entries"`
 }
 
@@ -152,7 +159,7 @@ type guardAllowlistLoad struct {
 func loadGuardAllowlist() guardAllowlistLoad {
 	l := guardAllowlistLoad{
 		Path: guardAllowlistPath(),
-		File: guardAllowlistFile{Schema: guardAllowlistSchema},
+		File: guardAllowlistFile{Schema: guardAllowlistSchema, Entries: []guardAllowEntry{}},
 		Set:  guardAllowSet{},
 	}
 	if l.Path == "" {
@@ -196,7 +203,9 @@ func loadGuardAllowlist() guardAllowlistLoad {
 		return l
 	}
 
-	l.File = guardAllowlistFile{Schema: guardAllowlistSchema}
+	// Same non-nil rule as the initialiser above: this reassignment is the
+	// path a PRESENT-but-empty store takes, so it must not put the nil back.
+	l.File = guardAllowlistFile{Schema: guardAllowlistSchema, Entries: []guardAllowEntry{}}
 	for _, e := range f.Entries {
 		e.Ecosystem = guardCanonicalEcosystem(e.Ecosystem)
 		e.Name = strings.TrimSpace(e.Name)
@@ -290,6 +299,14 @@ func writeGuardAllowlist(path string, f guardAllowlistFile) error {
 	}
 
 	f.Schema = guardAllowlistSchema
+	// The on-disk store is a JSON file users read with jq as readily as the
+	// --json output is, so it takes the same non-nil rule: a caller that hands
+	// us a nil slice must not produce `"entries": null` on disk. Both current
+	// callers build the slice with make(), so this only ever fires for a
+	// would-be nil.
+	if f.Entries == nil {
+		f.Entries = []guardAllowEntry{}
+	}
 	sortGuardAllowEntries(f.Entries)
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
