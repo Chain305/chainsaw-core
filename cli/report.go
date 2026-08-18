@@ -163,6 +163,16 @@ func runReportMultiVersion(cmd *cobra.Command, _ []string) error {
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
+	// Empty state before the header. A bare header row with nothing under it
+	// reads as "the query failed" rather than "the answer is none", and these
+	// reports are most often run precisely to confirm a clean result. The text
+	// names what was looked for so the operator can tell an empty answer from
+	// a wrong filter.
+	if len(env.Data) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No packages installed at multiple versions.")
+		return nil
+	}
+
 	tw := reportTabWriter(cmd)
 	fmt.Fprintln(tw, "ECOSYSTEM\tPACKAGE\tVERSIONS\tREPOS")
 	for _, e := range env.Data {
@@ -224,6 +234,16 @@ func runReportProvenance(cmd *cobra.Command, _ []string) error {
 		// S9 — honor --output. encodeJSON is byte-identical to the previous
 		// MarshalIndent+Println pair (two-space indent, trailing newline).
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
+	}
+
+	// Empty state before the header. A bare header row with nothing under it
+	// reads as "the query failed" rather than "the answer is none", and these
+	// reports are most often run precisely to confirm a clean result. The text
+	// names what was looked for so the operator can tell an empty answer from
+	// a wrong filter.
+	if len(env.Data) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No install events with provenance data.")
+		return nil
 	}
 
 	tw := reportTabWriter(cmd)
@@ -291,6 +311,16 @@ func runReportExposure(cmd *cobra.Command, _ []string) error {
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
 	}
 
+	// Empty state before the header. A bare header row with nothing under it
+	// reads as "the query failed" rather than "the answer is none", and these
+	// reports are most often run precisely to confirm a clean result. The text
+	// names what was looked for so the operator can tell an empty answer from
+	// a wrong filter.
+	if len(env.Data) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No packages installed in that window.")
+		return nil
+	}
+
 	tw := reportTabWriter(cmd)
 	fmt.Fprintln(tw, "AT\tECOSYSTEM\tPACKAGE\tVERSION\tREPOSITORY")
 	for _, e := range env.Data {
@@ -347,6 +377,16 @@ func runReportSLA(cmd *cobra.Command, _ []string) error {
 		// S9 — honor --output. encodeJSON is byte-identical to the previous
 		// MarshalIndent+Println pair (two-space indent, trailing newline).
 		return encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), env.Data)
+	}
+
+	// Empty state before the header. A bare header row with nothing under it
+	// reads as "the query failed" rather than "the answer is none", and these
+	// reports are most often run precisely to confirm a clean result. The text
+	// names what was looked for so the operator can tell an empty answer from
+	// a wrong filter.
+	if len(env.Data) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No resolved violations to measure.")
+		return nil
 	}
 
 	tw := reportTabWriter(cmd)

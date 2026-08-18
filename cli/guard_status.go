@@ -26,14 +26,25 @@ import (
 // both silenced the SDK while this label still said "on". Defer to
 // telemetry.ResolveMode so the env list has exactly one definition.
 //
-// Debug is reported as off because it is: the client prints events to
-// stderr and sends none.
+// Debug is reported as off because it is: nothing is sent.
+//
+// The label deliberately does NOT promise that events are printed. emitAt
+// (telemetry_runtime.go:129-136) returns at the consent gate BEFORE the debug
+// sink is ever constructed, so on a box that has not consented, debug mode
+// prints nothing at all — the old "events printed, never sent" wording was
+// false for exactly the operator most likely to read it. Making it true
+// (letting the debug sink print without consent) is a behaviour change owned
+// by a later wave; until then the label states only the half that holds.
+//
+// ModeDebug is still checked BEFORE ModeDisabled because ResolveMode returns
+// them in that order (core/telemetry/consent.go:68-71) — swapping the arms
+// here would mislabel a debug run that also set a kill switch.
 func telemetryConsentLabel(st *guardState) string {
 	switch telemetry.ResolveMode() {
 	case telemetry.ModeDisabled:
 		return "off (disabled by env)"
 	case telemetry.ModeDebug:
-		return "off (debug mode: events printed, never sent)"
+		return "off (debug mode: nothing is sent)"
 	}
 	switch st.Consent {
 	case consentGranted:

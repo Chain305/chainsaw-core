@@ -231,7 +231,7 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 	case verifyDegraded:
 		res.Outcome = verifyDegraded
 		res.Reason = receipt.degradedReason
-		res.GrepHint = grepHintFor(sentinel)
+		applyDegradedHint(&res, receipt.cause, sentinel)
 	}
 
 	if jsonMode {
@@ -327,11 +327,46 @@ func grepHintFor(sentinel string) string {
 	return fmt.Sprintf("kubectl logs -n chainsaw -l app=chainsaw-proxy --tail=500 | grep %s", sentinel)
 }
 
+// degradedCause names WHY verify-hook could not confirm receipt. The verdict
+// is DEGRADED in every case, but the remedy is not, and printing the wrong one
+// sends the operator down a dead end: `kubectl logs` only helps when the proxy
+// IS running and its audit API is what broke. When the CLI has no server URL or
+// no token it never asked the API at all — there is nothing to correlate, and
+// the hint additionally implies a self-hosted Kubernetes deployment the user
+// may not have.
+type degradedCause string
+
+const (
+	causeNone      degradedCause = ""
+	causeNoServer  degradedCause = "no_server"
+	causeNoAuth    degradedCause = "no_auth"
+	causeTransport degradedCause = "transport"
+)
+
+// applyDegradedHint attaches the remedy matching the cause.
+//
+// grepHintFor is deliberately KEPT: for a self-hosted operator whose audit API
+// is down, grepping the proxy's own logs is the only way left to confirm the
+// sentinel arrived, and that is exactly the causeTransport case.
+func applyDegradedHint(res *verifyResult, cause degradedCause, sentinel string) {
+	switch cause {
+	case causeTransport:
+		res.GrepHint = grepHintFor(sentinel)
+	case causeNoServer:
+		res.Hint = "chainsaw auth login --server <your-chainsaw-url>"
+	case causeNoAuth:
+		res.Hint = "chainsaw auth login"
+	case causeNone:
+		// Not a degraded result; nothing to hint at.
+	}
+}
+
 // receiptResult bundles the audit-API poll outcome.
 type receiptResult struct {
 	outcome        verifyOutcome
 	matchCount     int
 	degradedReason string
+	cause          degradedCause
 }
 
 // pollAuditReceipt queries /api/events for the sentinel on a poll interval
@@ -366,10 +401,10 @@ func pollAuditReceipt(ctx context.Context, sentinel string) receiptResult {
 	server := strings.TrimSpace(cfgServerURL())
 	token := strings.TrimSpace(cfgToken())
 	if server == "" {
-		return receiptResult{outcome: verifyDegraded, degradedReason: "no server configured (set --server or run `chainsaw auth login`)"}
+		return receiptResult{outcome: verifyDegraded, cause: causeNoServer, degradedReason: "no server configured (set --server or run `chainsaw auth login`)"}
 	}
 	if token == "" {
-		return receiptResult{outcome: verifyDegraded, degradedReason: "not authenticated to query the audit log (run `chainsaw auth login`)"}
+		return receiptResult{outcome: verifyDegraded, cause: causeNoAuth, degradedReason: "not authenticated to query the audit log (run `chainsaw auth login`)"}
 	}
 	client := newClient()
 	path := "/api/events?logical_path=" + url.QueryEscape(sentinel) +
@@ -382,7 +417,7 @@ func pollAuditReceipt(ctx context.Context, sentinel string) receiptResult {
 	var resp eventsResponseEnvelope
 	firstErr := client.Get(path, &resp)
 	if firstErr != nil {
-		return receiptResult{outcome: verifyDegraded, degradedReason: fmt.Sprintf("audit API unreachable: %v", firstErr)}
+		return receiptResult{outcome: verifyDegraded, cause: causeTransport, degradedReason: fmt.Sprintf("audit API unreachable: %v", firstErr)}
 	}
 	// The CLIENT-SIDE match decides the verdict; `total` only sizes it.
 	//
@@ -421,6 +456,7 @@ func pollAuditReceipt(ctx context.Context, sentinel string) receiptResult {
 			if consecutiveErr > 0 {
 				return receiptResult{
 					outcome:        verifyDegraded,
+					cause:          causeTransport,
 					degradedReason: fmt.Sprintf("audit API became unreachable while polling for receipt: %v", lastPollErr),
 				}
 			}
@@ -537,6 +573,9 @@ func printVerifyResult(cmd *cobra.Command, res verifyResult, verbose bool, cmdOu
 	case verifyDegraded:
 		fmt.Fprintf(errOut, "DEGRADED  %s: verify ran but could not confirm proxy receipt (%s)\n", res.Manager, res.Duration)
 		fmt.Fprintf(errOut, "          reason: %s\n", res.Reason)
+		if res.Hint != "" {
+			fmt.Fprintf(errOut, "          fix:    %s\n", res.Hint)
+		}
 		if res.GrepHint != "" {
 			fmt.Fprintf(errOut, "          to confirm manually: %s\n", res.GrepHint)
 		}

@@ -132,7 +132,7 @@ func runDepsTree(cmd *cobra.Command, args []string) error {
 			Root  *sbomComponent  `json:"root,omitempty"`
 			Peers []sbomComponent `json:"peers"`
 		}
-		return PrintJSONTo(cmd, treeOutput{Root: root, Peers: peers})
+		return PrintJSONTo(cmd, treeOutput{Root: root, Peers: jsonArray(peers)})
 	}
 
 	// Tree output. Both the connectors and the CVE marker come from the glyph

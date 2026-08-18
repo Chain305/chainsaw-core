@@ -167,8 +167,8 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 		// server, just trimmed by the filter flags.
 		filtered := supportMatrixResponseDTO{
 			Ecosystems: make([]string, 0, len(rows)),
-			Conditions: append([]string(nil), resp.Conditions...),
-			Matrix:     rows,
+			Conditions: jsonArray(append([]string(nil), resp.Conditions...)),
+			Matrix:     jsonArray(rows),
 		}
 		for _, r := range rows {
 			filtered.Ecosystems = append(filtered.Ecosystems, r.Ecosystem)

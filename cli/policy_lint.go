@@ -167,8 +167,18 @@ func runPolicyLint(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	// Findings starts as an EMPTY slice, not nil. A clean tree is the common
+	// case for a command built to gate CI, and a nil slice marshals as
+	// `"findings": null` — `report.findings.map(...)` throws TypeError and
+	// `jq '.findings[]'` errors with "Cannot iterate over null", so the JSON
+	// broke on exactly the automated path `policy lint --format json` exists
+	// for. `omitempty` is deliberately NOT the fix: dropping the key breaks
+	// the same consumers a different way. The non-empty shape is untouched —
+	// append to an empty slice produces the identical array. (Skipped is a
+	// different case and stays nil: it is `json:"skipped,omitempty"`, so nil
+	// is OMITTED rather than rendered as null.)
 	var (
-		findings []lintFinding
+		findings = []lintFinding{}
 		ruleCnt  int
 		linted   int
 	)

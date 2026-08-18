@@ -159,8 +159,19 @@ func runBrowserAuth(ctx context.Context, out io.Writer, server string) (string, 
 		return "", fmt.Errorf("cli init: server returned empty login_url")
 	}
 	loginURL := initResp.LoginURL
-	fmt.Fprintf(out, "Opening browser to sign in…\nIf your browser doesn't open, visit:\n  %s\n\n", loginURL)
-	_ = openBrowser(loginURL)
+	// Launch FIRST, then report what actually happened. The announcement used
+	// to be printed before the call with the error discarded, so on a headless
+	// box (no DISPLAY, no xdg-open) the CLI claimed a browser was opening and
+	// then sat on "Waiting for sign-in…" until the timeout with nothing to
+	// click. openBrowser is a package var (auth_sso.go:94), so tests inject
+	// the failure without shelling out.
+	if openErr := openBrowser(loginURL); openErr != nil {
+		fmt.Fprintf(out, "Couldn't open a browser (%v).\nOpen this URL to sign in:\n  %s\n\n"+
+			"On a machine with no browser, `chainsaw auth login --device` prints a code to enter elsewhere.\n\n",
+			openErr, loginURL)
+	} else {
+		fmt.Fprintf(out, "Opening browser to sign in…\nIf your browser doesn't open, visit:\n  %s\n\n", loginURL)
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, browserAuthTimeout)
 	defer cancel()

@@ -778,14 +778,21 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 			fmt.Printf("\n%d finding(s) hidden by --severity %s.\n", hiddenBySeverity, severityFilter)
 		}
 	}()
+	// Class-A glyph: these em dashes are not prose, they are the "no score" /
+	// "no CVEs" / "no signals" VALUE in a table cell. A raw U+2014 is absent
+	// from CP437, so on a legacy Windows console the cell renders as a box and
+	// a package with no CVSS becomes indistinguishable from a rendering fault.
+	// glyphs().none is the marker for "inert: nothing there" and degrades to
+	// ASCII "-" on a console that cannot draw it.
+	g := glyphs()
 	rows := make([][]string, len(results))
 	anySignals := false
 	for i, r := range results {
-		cvss := "—"
+		cvss := g.none
 		if r.CVSSScore != nil {
 			cvss = fmt.Sprintf("%.1f", *r.CVSSScore)
 		}
-		cves := "—"
+		cves := g.none
 		if len(r.CVEs) > 0 {
 			cves = strings.Join(r.CVEs, ", ")
 		}
@@ -793,7 +800,7 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 		if severity == "" {
 			severity = r.Status
 		}
-		signals := "—"
+		signals := g.none
 		if len(r.TriggeredConditions) > 0 {
 			signals = strings.Join(r.TriggeredConditions, ", ")
 			anySignals = true
@@ -848,7 +855,7 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 			}
 			if r.ChecksumDeclared != "" || r.ChecksumActual != "" {
 				fmt.Printf("  checksum:             declared=%s actual=%s\n",
-					truncateHash(r.ChecksumDeclared), truncateHash(r.ChecksumActual))
+					truncateHash(r.ChecksumDeclared, glyphs()), truncateHash(r.ChecksumActual, glyphs()))
 			}
 			if r.ChecksumUnavailableReason != "" {
 				fmt.Printf("  checksum-unavailable: %s\n", r.ChecksumUnavailableReason)
@@ -890,10 +897,14 @@ func hasNonDefaultSupplyChainSignal(r scanResultItem) bool {
 
 // truncateHash renders a potentially-long checksum string for the
 // text table: keeps the first 12 hex chars, collapses the rest.
-// Empty input returns an em dash.
-func truncateHash(s string) string {
+//
+// Empty input returns the glyph set's `none` marker rather than a raw em dash:
+// "no checksum recorded" is information, and U+2014 boxes on a CP437 console,
+// which would make an absent checksum look like a corrupt one. The set is
+// passed in rather than resolved here so a whole table renders in one alphabet.
+func truncateHash(s string, g glyphSet) string {
 	if s == "" {
-		return "—"
+		return g.none
 	}
 	if len(s) <= 16 {
 		return s

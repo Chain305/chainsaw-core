@@ -159,7 +159,7 @@ func runPkgList(cmd *cobra.Command, _ []string) error {
 		}
 
 		if asJSON {
-			return PrintJSONTo(cmd, filtered)
+			return PrintJSONTo(cmd, jsonArray(filtered))
 		}
 
 		if len(filtered) == 0 {
@@ -199,7 +199,7 @@ func runPkgList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if asJSON {
-		return PrintJSONTo(cmd, resp.Packages)
+		return PrintJSONTo(cmd, jsonArray(resp.Packages))
 	}
 
 	if len(resp.Packages) == 0 {
@@ -228,9 +228,17 @@ func runPkgList(cmd *cobra.Command, _ []string) error {
 
 var pkgSearchCmd = &cobra.Command{
 	Use:   "search <query>",
-	Short: "Search packages across all repositories",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runPkgSearch,
+	Short: "Search your org's package inventory by name",
+	Long: `Search the packages your org has already pulled through chainsaw.
+
+This queries YOUR inventory (/api/packages) across every repository the org
+has configured. It does NOT search upstream registries — a package nobody
+here has installed will not appear, however popular it is on npm or PyPI.
+
+To look up a package that is not in your inventory yet, use
+` + "`chainsaw intel package <ecosystem> <name> <version>`" + `.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPkgSearch,
 }
 
 func init() {
@@ -256,11 +264,19 @@ func runPkgSearch(cmd *cobra.Command, args []string) error {
 
 	asJSON := useJSON(cmd)
 	if asJSON {
-		return PrintJSONTo(cmd, resp.Packages)
+		return PrintJSONTo(cmd, jsonArray(resp.Packages))
 	}
 
 	if len(resp.Packages) == 0 {
-		fmt.Printf("No packages found matching %q.\n", args[0])
+		// Name the SCOPE, not just the miss: the common cause of an empty
+		// result is that the package exists upstream but nobody in this org has
+		// pulled it, which "no packages found" alone reads as "it does not
+		// exist". Stderr (not stdout) matches the sibling empty states at
+		// runPkgList so a piped run gets an empty result body, not prose.
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"No packages matching %q in this org's inventory (searches packages already pulled through chainsaw, not upstream registries).\n"+
+				"To look up a package you have not installed yet: chainsaw intel package <ecosystem> <name> <version>\n",
+			args[0])
 		return nil
 	}
 

@@ -31,42 +31,61 @@ var coverageCmd = &cobra.Command{
 	Short:   "Inspect install-coverage measurements (opt-in)",
 	Long: `View tracked install sources, ecosystem breakdown, and clients that have
 gone silent. Coverage is an opt-in measurement feature — it is purely
-informational and never blocks installs. When the server hasn't enabled
-coverage, every subcommand prints "coverage is not enabled" and exits
-without contacting the API further.`,
+informational and never blocks installs.
+
+The coverage gate applies to summary, silent and expected: those read
+/api/coverage/*, so when the server has not enabled coverage they print
+"coverage is not enabled" and stop. "coverage bypass" is NOT behind that gate —
+it reads /api/bypass/*, which is always served, so bypass triage works on a
+deployment with coverage switched off.`,
 	SilenceUsage: true,
 }
 
 var coverageSummaryCmd = &cobra.Command{
-	Use:          "summary",
-	Short:        "Show tracked install sources for a window (default 7d)",
+	Use:   "summary",
+	Short: "Show tracked install sources for a window (default 7d)",
+	Long: "Reads /api/coverage/summary: the install sources seen in the window " +
+		"and their ecosystem breakdown. Subject to the coverage gate — prints " +
+		"\"coverage is not enabled\" when the server has coverage off.",
 	SilenceUsage: true,
 	RunE:         runCoverageSummary,
 }
 
 var coverageSilentCmd = &cobra.Command{
-	Use:          "silent",
-	Short:        "List declared sources with no traffic in the window",
+	Use:   "silent",
+	Short: "List declared sources with no traffic in the window",
+	Long: "Reads /api/coverage/silent: declared expected sources that sent no " +
+		"traffic inside the window. Subject to the coverage gate — prints " +
+		"\"coverage is not enabled\" when the server has coverage off.",
 	SilenceUsage: true,
 	RunE:         runCoverageSilent,
 }
 
 var coverageExpectedCmd = &cobra.Command{
-	Use:          "expected",
-	Short:        "Manage the admin-declared expected install surface",
+	Use:   "expected",
+	Short: "Manage the admin-declared expected install surface",
+	Long: "Reads and writes /api/coverage/expected, the admin-declared list of " +
+		"client patterns that SHOULD be installing through chainsaw. Declarative " +
+		"metadata only: nothing here blocks an install. Subject to the coverage " +
+		"gate — prints \"coverage is not enabled\" when the server has coverage off.",
 	SilenceUsage: true,
 }
 
 var coverageExpectedListCmd = &cobra.Command{
-	Use:          "list",
-	Short:        "List declared expected install sources",
+	Use:   "list",
+	Short: "List declared expected install sources",
+	Long: "Reads /api/coverage/expected. Subject to the coverage gate — prints " +
+		"\"coverage is not enabled\" when the server has coverage off.",
 	SilenceUsage: true,
 	RunE:         runCoverageExpectedList,
 }
 
 var coverageExpectedAddCmd = &cobra.Command{
-	Use:          "add <client-pattern>",
-	Short:        "Declare a client as part of the expected install surface",
+	Use:   "add <client-pattern>",
+	Short: "Declare a client as part of the expected install surface",
+	Long: "Writes to /api/coverage/expected so the pattern can be reported " +
+		"silent when it stops sending traffic. Subject to the coverage gate — " +
+		"prints \"coverage is not enabled\" when the server has coverage off.",
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runCoverageExpectedAdd,
@@ -78,7 +97,9 @@ var coverageExpectedRemoveCmd = &cobra.Command{
 	Long: "Removes a declared expected install source. Coverage stops counting " +
 		"it as expected, so it can no longer be reported silent. Prompts for " +
 		"confirmation (naming the client pattern, which is what `coverage " +
-		"expected add` needs to restore it); use --yes to skip the prompt.",
+		"expected add` needs to restore it); use --yes to skip the prompt. " +
+		"Subject to the coverage gate — prints \"coverage is not enabled\" when " +
+		"the server has coverage off.",
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runCoverageExpectedRemove,
@@ -92,29 +113,39 @@ var coverageExpectedRemoveCmd = &cobra.Command{
 // the (deferred) decision-engine gate has a query surface. `dismiss`
 // silences a row for 30d.
 var coverageBypassCmd = &cobra.Command{
-	Use:          "bypass",
-	Short:        "Triage ingested bypass-detection reports",
+	Use:   "bypass",
+	Short: "Triage ingested bypass-detection reports",
+	Long: "Reads and writes /api/bypass/*, which sits OUTSIDE the coverage gate: " +
+		"bypass triage works even when the server has coverage disabled. Grouped " +
+		"under `coverage` because a detected bypass is the sharpest form of a " +
+		"coverage hole, not because it shares the gate.",
 	SilenceUsage: true,
 }
 
 var coverageBypassListCmd = &cobra.Command{
-	Use:          "list",
-	Short:        "List bypass reports above the confidence threshold",
+	Use:   "list",
+	Short: "List bypass reports above the confidence threshold",
+	Long: "Reads /api/bypass/reports. Not subject to the coverage gate — this " +
+		"works on a server with coverage disabled.",
 	SilenceUsage: true,
 	RunE:         runCoverageBypassList,
 }
 
 var coverageBypassConfirmCmd = &cobra.Command{
-	Use:          "confirm <id>",
-	Short:        "Confirm a bypass report (records intent; quarantine on confirm)",
+	Use:   "confirm <id>",
+	Short: "Confirm a bypass report (records intent; quarantine on confirm)",
+	Long: "Posts to /api/bypass/reports/{id}/confirm. Not subject to the " +
+		"coverage gate — this works on a server with coverage disabled.",
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runCoverageBypassConfirm,
 }
 
 var coverageBypassDismissCmd = &cobra.Command{
-	Use:          "dismiss <id>",
-	Short:        "Dismiss a bypass report as a false alarm (30d suppression)",
+	Use:   "dismiss <id>",
+	Short: "Dismiss a bypass report as a false alarm (30d suppression)",
+	Long: "Posts to /api/bypass/reports/{id}/dismiss. Not subject to the " +
+		"coverage gate — this works on a server with coverage disabled.",
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runCoverageBypassDismiss,
@@ -247,7 +278,7 @@ func runCoverageExpectedList(cmd *cobra.Command, _ []string) error {
 	if asJSON {
 		enc := json.NewEncoder(outWriterOr(cmd, cmd.OutOrStdout()))
 		enc.SetIndent("", "  ")
-		return enc.Encode(resp.Expected)
+		return enc.Encode(jsonArray(resp.Expected))
 	}
 	if len(resp.Expected) == 0 {
 		fmt.Fprintln(out, "No expected sources declared.")

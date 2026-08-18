@@ -93,7 +93,11 @@ surface find the equivalent CLI subcommand under the same name.
 
 Use ` + "`chainsaw onboarding state`" + ` to print the current persona
 and onboarding_skipped_at timestamp. The original ` + "`chainsaw onboard`" + `
-command is unchanged; this is an additive alias.`,
+command is unchanged; this is an additive alias.
+
+Requires a configured server: onboarding state is stored server-side per
+user, so these subcommands read it over the API rather than from local
+config.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
@@ -105,6 +109,9 @@ command is unchanged; this is an additive alias.`,
 		Long: `Print the current onboarding state — equivalent to running
 ` + "`chainsaw onboard`" + ` with no flags. Output mirrors the MCP
 chainsaw_onboarding_state response shape.
+
+Requires a configured server: onboarding state is stored server-side per
+user, so this reads it over the API rather than from local config.
 
 Pass --json for the machine-readable form (matches the MCP tool's
 JSON shape exactly).`,

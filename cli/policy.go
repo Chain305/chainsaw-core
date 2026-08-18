@@ -83,7 +83,7 @@ func runPolicyList(cmd *cobra.Command, _ []string) error {
 
 	asJSON := useJSON(cmd)
 	if asJSON {
-		return PrintJSONTo(cmd, resp.Policies)
+		return PrintJSONTo(cmd, jsonArray(resp.Policies))
 	}
 
 	if len(resp.Policies) == 0 {
@@ -117,7 +117,12 @@ func init() {
 	policyCreateCmd.Flags().String("name", "", "Policy name (required)")
 	policyCreateCmd.Flags().String("mode", "monitor", "Action mode: allow|monitor|block|quarantine")
 	policyCreateCmd.Flags().String("status", "enabled", "Initial status: enabled|disabled")
-	policyCreateCmd.Flags().Int("precedence", 100, "Evaluation precedence (lower = higher priority)")
+	// Default 0, not 100: the server treats a zero precedence as "assign the
+	// next free slot" (MAX+10, internal/server/server_policies.go:134-143). A
+	// hardcoded 100 sent that branch a concrete value on every create, so the
+	// second policy collided with the first on the unique precedence index and
+	// came back CHW-4604 — the auto-assign path was unreachable from the CLI.
+	policyCreateCmd.Flags().Int("precedence", 0, "Evaluation precedence (lower = higher priority; 0 auto-assigns the next free slot)")
 	policyCreateCmd.Flags().String("description", "", "Human-readable description")
 	// --condition accepts a JSON object that maps to the Conditions struct, e.g.:
 	//   '{"cvssMin": 7.0, "isKnownMalicious": true}'
@@ -273,7 +278,6 @@ func runPolicyCreate(cmd *cobra.Command, _ []string) error {
 	name, _ := cmd.Flags().GetString("name")
 	mode, _ := cmd.Flags().GetString("mode")
 	status, _ := cmd.Flags().GetString("status")
-	prec, _ := cmd.Flags().GetInt("precedence")
 	desc, _ := cmd.Flags().GetString("description")
 	condJSON, _ := cmd.Flags().GetString("condition")
 
@@ -281,8 +285,16 @@ func runPolicyCreate(cmd *cobra.Command, _ []string) error {
 		"name":        name,
 		"mode":        mode,
 		"status":      status,
-		"precedence":  prec,
 		"description": desc,
+	}
+	// Send precedence ONLY when the operator actually set it. Omitting the key
+	// (rather than sending the flag's zero value) is what reaches the server's
+	// auto-assign branch, and it keeps working if a future server stops
+	// treating 0 as the sentinel. An EXPLICIT --precedence 0 still goes on the
+	// wire — Changed() distinguishes "unset" from "set to the default".
+	if cmd.Flags().Changed("precedence") {
+		prec, _ := cmd.Flags().GetInt("precedence")
+		body["precedence"] = prec
 	}
 
 	// Build up a conditions map by first parsing --condition (JSON) and
@@ -999,7 +1011,7 @@ func runPolicyExport(cmd *cobra.Command, _ []string) error {
 	var err error
 	switch strings.ToLower(format) {
 	case "json":
-		data, err = json.MarshalIndent(listResp.Policies, "", "  ")
+		data, err = json.MarshalIndent(jsonArray(listResp.Policies), "", "  ")
 	default:
 		// Convert JSON → YAML via round-trip
 		var policies []any
@@ -1114,7 +1126,7 @@ func runPolicyRolloutStatus(cmd *cobra.Command, _ []string) error {
 
 	asJSON := useJSON(cmd)
 	if asJSON {
-		return PrintJSONTo(cmd, rows)
+		return PrintJSONTo(cmd, jsonArray(rows))
 	}
 	if len(rows) == 0 {
 		fmt.Println("No monitor-mode policies found.")

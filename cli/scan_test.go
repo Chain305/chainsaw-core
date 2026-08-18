@@ -189,16 +189,21 @@ func TestResolveHighestSeverity_PicksMaxOfCVEandCondition(t *testing.T) {
 
 // TestTruncateHash covers the display-helper's edge cases.
 func TestTruncateHash(t *testing.T) {
+	// The empty case asserts against the resolved set's `none` marker rather
+	// than a literal em dash: truncateHash now renders "no checksum" through
+	// the glyph set, so a literal would fail on a CP437 runner for the right
+	// reason and wrongly look like a regression.
+	g := glyphs()
 	tests := []struct {
 		in, want string
 	}{
-		{"", "—"},
+		{"", g.none},
 		{"abc", "abc"},
 		{"1234567890abcdef", "1234567890abcdef"},
 		{"1234567890abcdef0", "1234567890ab..."},
 	}
 	for _, tc := range tests {
-		if got := truncateHash(tc.in); got != tc.want {
+		if got := truncateHash(tc.in, g); got != tc.want {
 			t.Fatalf("truncateHash(%q)=%q, want %q", tc.in, got, tc.want)
 		}
 	}

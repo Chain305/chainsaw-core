@@ -253,7 +253,7 @@ func runAuthClientList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if useJSON(cmd) {
-		return PrintJSONTo(cmd, resp.Clients)
+		return PrintJSONTo(cmd, jsonArray(resp.Clients))
 	}
 
 	if len(resp.Clients) == 0 {

@@ -13,9 +13,37 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+// offlineCapableCommands names every subcommand that runs with no server URL
+// configured. Hoisted out of the error string so it is TESTABLE: an entry that
+// names a command which does not exist (or a real offline command missing from
+// the list) is the served-install.ps1 class of bug — documentation that drifts
+// away from the binary with nothing checking. TestOfflineCapableCommandsAllExist
+// resolves every entry through rootCmd.Find.
+//
+// `intel signals` was absent while intel.go:16-19 already documented it as the
+// one intel subcommand needing no server (offline since 078072fe), so the two
+// contradicted each other in-tree.
+//
+// `policy eval` and `policy gate` are also fully local (policy_dsl.go
+// constructs no client) but are deliberately NOT listed yet — they are gated on
+// the same verification pass, and an entry nobody checked is this defect
+// inverted.
+var offlineCapableCommands = []string{
+	"doctor",
+	"install-hook",
+	"scan-repo",
+	"scan-actions",
+	"pr-scan",
+	"bundle verify",
+	"sbom diff",
+	"intel signals",
+	"version",
+}
 
 // errServerNotConfigured returns the standard "this is a server-required
 // command and no server URL is configured" error. Pass the cobra command
@@ -41,15 +69,15 @@ func errServerNotConfigured(cmd *cobra.Command) error {
 	}
 	return &ExitCodeError{Code: ExitConfigAuth, Err: fmt.Errorf(`server URL not configured — '%s' is a server-required command.
 
-Offline-capable commands (no server needed): doctor, install-hook,
-scan-repo, scan-actions, pr-scan, bundle verify, sbom diff, version.
+Offline-capable commands (no server needed): %s.
 
 To configure a server, choose one:
   chainsaw --server <url> %s ...        # one-shot
   chainsaw auth login --device           # persistent (device-code flow)
   chainsaw setup                         # interactive wizard
 
-See '%s --help' for the command's flags.`, path, trimChainsaw(path), path)}
+See '%s --help' for the command's flags.`,
+		path, strings.Join(offlineCapableCommands, ", "), trimChainsaw(path), path)}
 }
 
 // trimChainsaw drops the leading "chainsaw " prefix from a CommandPath so

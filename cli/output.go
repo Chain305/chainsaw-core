@@ -98,6 +98,24 @@ func encodeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+// jsonArray normalises a possibly-nil slice to an empty one so it marshals as
+// `[]` rather than `null`. A nil slice breaks the automated consumers these
+// list commands exist for: `resp.items.map(...)` throws TypeError and
+// `jq '.items[]'` errors with "Cannot iterate over null". `omitempty` is
+// deliberately NOT the fix — dropping the key breaks the same consumers a
+// different way.
+//
+// This is applied at the EMIT SITE, never inside PrintJSONTo/encodeJSON: those
+// take `any`, so normalising there would mean reflecting over arbitrary shapes
+// and silently rewriting nested nils across payloads nobody audited. Here the
+// shape is known and the change is local.
+func jsonArray[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 // emitAndGate renders v in the resolved result format, then ALWAYS applies
 // gate. Choosing a machine-readable format is a rendering decision; it must
 // never weaken a verdict.

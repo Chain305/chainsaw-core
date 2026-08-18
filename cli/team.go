@@ -60,7 +60,7 @@ func runTeamList(cmd *cobra.Command, _ []string) error {
 	}
 	asJSON := useJSON(cmd)
 	if asJSON {
-		return PrintJSONTo(cmd, resp.Mappings)
+		return PrintJSONTo(cmd, jsonArray(resp.Mappings))
 	}
 	out := cmd.OutOrStdout()
 	if len(resp.Mappings) == 0 {

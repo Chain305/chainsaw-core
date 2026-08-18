@@ -67,14 +67,20 @@ exit-code → CI-status mapping at every surface.`,
 
 func init() {
 	policyEvalCmd.Flags().StringVar(&policyDSLBundle, "bundle", "", "Path to a directory or .rego file containing the policy bundle (required)")
-	policyEvalCmd.Flags().String("input", "", "Path to a JSON input fixture (matches internal/policy/schema/input.schema.json)")
+	policyEvalCmd.Flags().String("input", "", "Path to a JSON input fixture (matches internal/policy/schema/input.schema.json) (required)")
 	_ = policyEvalCmd.MarkFlagRequired("bundle")
 	_ = policyEvalCmd.MarkFlagRequired("input")
 	policyCmd.AddCommand(policyEvalCmd)
 
 	policyGateCmd.Flags().StringVar(&policyDSLBundle, "bundle", "", "Path to a directory or .rego file containing the policy bundle (required)")
-	policyGateCmd.Flags().String("input", "", "Path to a JSON input fixture (the surface stamps its own surface tag)")
-	policyGateCmd.Flags().Bool("json", false, "Emit the full decision as JSON to stdout")
+	policyGateCmd.Flags().String("input", "", "Path to a JSON input fixture (the surface stamps its own surface tag) (required)")
+	// No local --json: runPolicyGate resolves the format through useJSON(cmd),
+	// which reads the root persistent --json (root.go:624) and --format
+	// (root.go:642) alike. A local bool shadowed the persistent one with
+	// identical semantics while quietly making `--format json` a no-op on this
+	// one command. Removing it is the opposite of the repo.go:90-98 case: there
+	// the local flag changed MEANING, so it had to be renamed rather than
+	// deleted; here it means exactly the same thing, so it is just redundant.
 	_ = policyGateCmd.MarkFlagRequired("bundle")
 	_ = policyGateCmd.MarkFlagRequired("input")
 	policyCmd.AddCommand(policyGateCmd)

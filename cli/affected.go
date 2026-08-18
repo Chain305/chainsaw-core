@@ -194,6 +194,7 @@ func renderAffectedTable(query string, p *affectedPayload) {
 		return
 	}
 
+	g := glyphs()
 	rows := make([][]string, len(p.Results))
 	for i, r := range p.Results {
 		snap := ""
@@ -207,10 +208,10 @@ func renderAffectedTable(query string, p *affectedPayload) {
 		rows[i] = []string{
 			r.PackageName,
 			r.PackageVersion,
-			affectedOrDash(r.Repo),
-			affectedOrDash(r.ClientID),
-			affectedOrDash(snap),
-			affectedOrDash(first),
+			affectedOrDash(r.Repo, g),
+			affectedOrDash(r.ClientID, g),
+			affectedOrDash(snap, g),
+			affectedOrDash(first, g),
 		}
 	}
 	PrintTable([]string{"PACKAGE", "VERSION", "REPO", "CLIENT", "SNAPSHOT", "FIRST_SEEN"}, rows)
@@ -252,11 +253,18 @@ func printAffectedPaths(rows []affectedRow) {
 	}
 }
 
-// affectedOrDash renders an em-dash for an empty cell so a missing repo/client/
-// snapshot reads as "not recorded" rather than a blank column.
-func affectedOrDash(s string) string {
+// affectedOrDash renders the glyph set's `none` marker for an empty cell so a
+// missing repo/client/snapshot reads as "not recorded" rather than a blank
+// column.
+//
+// It used to emit a raw em dash. U+2014 is absent from CP437, so on a legacy
+// Windows console the cell boxed and the distinction it exists to draw — empty
+// vs not-recorded — was destroyed by the fallback rather than preserved. The
+// set is passed in rather than resolved per call so one table cannot render
+// half its cells in each alphabet.
+func affectedOrDash(s string, g glyphSet) string {
 	if strings.TrimSpace(s) == "" {
-		return "—"
+		return g.none
 	}
 	return s
 }

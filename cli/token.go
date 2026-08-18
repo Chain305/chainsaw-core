@@ -98,7 +98,7 @@ func runTokenList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if useJSON(cmd) {
-		return PrintJSONTo(cmd, resp.APIKeys)
+		return PrintJSONTo(cmd, jsonArray(resp.APIKeys))
 	}
 
 	if len(resp.APIKeys) == 0 {

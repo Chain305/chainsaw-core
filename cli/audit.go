@@ -208,6 +208,16 @@ func runAuditView(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), auditViewExportHint)
 	}
 
+	// DECISION/STATUS/SEVERITY are genuinely empty for whole action families —
+	// api_key.* rows, for instance, record no decision and no severity. Printed
+	// raw, those cells rendered as blank space and read as a truncated table or
+	// a broken query. The dash says "this row has no such field", which is the
+	// true statement.
+	//
+	// This is fixed HERE, in the renderer, deliberately: the server refuses to
+	// synthesise a status no writer recorded, and that refusal is correct — an
+	// invented "success" in an audit log is worse than an empty cell.
+	g := glyphs()
 	rows := make([][]string, len(events))
 	for i, e := range events {
 		rows[i] = []string{
@@ -215,13 +225,24 @@ func runAuditView(cmd *cobra.Command, _ []string) error {
 			e.Actor,
 			e.Action,
 			e.Resource,
-			e.Decision,
-			e.Status,
-			e.Severity,
+			auditCellOrDash(e.Decision, g),
+			auditCellOrDash(e.Status, g),
+			auditCellOrDash(e.Severity, g),
 		}
 	}
 	PrintTable([]string{"TIMESTAMP", "ACTOR", "ACTION", "RESOURCE", "DECISION", "STATUS", "SEVERITY"}, rows)
 	return nil
+}
+
+// auditCellOrDash renders an empty audit column as the glyph set's dash so a
+// field the writer never populated is visibly absent rather than blank. Takes
+// the resolved set rather than calling glyphs() so one row cannot render in a
+// different alphabet from the next.
+func auditCellOrDash(v string, g glyphSet) string {
+	if strings.TrimSpace(v) == "" {
+		return g.dash
+	}
+	return v
 }
 
 // parseDate accepts an RFC3339 timestamp or a bare YYYY-MM-DD date. The second

@@ -59,7 +59,7 @@ func runRepoList(cmd *cobra.Command, _ []string) error {
 	if asJSON {
 		enc := json.NewEncoder(outWriterOr(cmd, cmd.OutOrStdout()))
 		enc.SetIndent("", "  ")
-		return enc.Encode(resp.Repositories)
+		return enc.Encode(jsonArray(resp.Repositories))
 	}
 
 	if len(resp.Repositories) == 0 {

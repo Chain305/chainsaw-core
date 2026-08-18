@@ -195,7 +195,9 @@ func LoadBundle(ctx context.Context, path string, opts BundleVerifyOptions) (*Bu
 	}
 	f, err := os.Open(abs)
 	if err != nil {
-		return nil, fmt.Errorf("intel bundle: open %s: %w", abs, err)
+		// No %s for the path: os.Open fails with an *os.PathError, which
+		// already carries "open <abs>", so naming it here printed it twice.
+		return nil, fmt.Errorf("intel bundle: %w", err)
 	}
 	defer f.Close()
 
@@ -211,7 +213,9 @@ func LoadBundle(ctx context.Context, path string, opts BundleVerifyOptions) (*Bu
 	digest := sha256.Sum256(raw)
 	files, err := parseBundleTarball(bytes.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("intel bundle: read: %w", err)
+		// "read:" here duplicated the io.ReadAll wrap above and misnamed the
+		// failure: the bytes are already in memory, what failed is the parse.
+		return nil, fmt.Errorf("intel bundle: parse tarball: %w", err)
 	}
 
 	manifestRaw, ok := files["manifest.json"]

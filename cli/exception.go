@@ -67,7 +67,7 @@ func runExceptionList(cmd *cobra.Command, _ []string) error {
 
 	asJSON := useJSON(cmd)
 	if asJSON {
-		return PrintJSONTo(cmd, resp.Entries)
+		return PrintJSONTo(cmd, jsonArray(resp.Entries))
 	}
 
 	if len(resp.Entries) == 0 {
@@ -76,10 +76,7 @@ func runExceptionList(cmd *cobra.Command, _ []string) error {
 	}
 	rows := make([][]string, len(resp.Entries))
 	for i, e := range resp.Entries {
-		days := "-"
-		if e.DaysRemaining >= 0 {
-			days = fmt.Sprintf("%d", e.DaysRemaining)
-		}
+		days := formatDaysRemaining(e.DaysRemaining)
 		rows[i] = []string{
 			e.ID,
 			e.Repository,
@@ -400,9 +397,24 @@ func runExceptionRenew(cmd *cobra.Command, args []string) error {
 	if asJSON {
 		return PrintJSONTo(cmd, resp.Entry)
 	}
-	fmt.Printf("Renewed exception %s (status: %s, days remaining: %d)\n",
-		resp.Entry.ID, resp.Entry.Status, resp.Entry.DaysRemaining)
+	fmt.Printf("Renewed exception %s (status: %s, days remaining: %s)\n",
+		resp.Entry.ID, resp.Entry.Status, formatDaysRemaining(resp.Entry.DaysRemaining))
 	return nil
+}
+
+// formatDaysRemaining renders entries.ExceptionEntry.DaysRemaining for humans.
+//
+// A NEGATIVE value is the documented no-expiry sentinel
+// (internal/server/entries.go:42), not a count of days already past — so it
+// renders as "-" rather than "-1". The list table and the renew confirmation
+// both go through here because they used to disagree: the table folded the
+// sentinel to "-" while renew printed a literal "days remaining: -1", which
+// reads as an expired exception the operator just renewed.
+func formatDaysRemaining(days int) string {
+	if days < 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d", days)
 }
 
 // ── delete ────────────────────────────────────────────────────────────────────

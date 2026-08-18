@@ -61,7 +61,13 @@ two. Every ` + "`auth login`" + ` flag works here, including --device for
 headless / CI hosts and --token to paste a pre-minted API key.
 
 Your org is resolved from your identity at the IdP; there is nothing to
-pass on the command line.`,
+pass on the command line.
+
+Plan note — LOGGING IN via SSO works on any plan; there is no gate on this
+command. What is paid-plan is CONFIGURING a SAML/OIDC provider for your org
+(and SCIM provisioning) on the server side. If nobody has configured a
+provider yet, the admin doing that setup gets CHW-1401 with an upgrade link
+rather than an error here. See https://chain305.com/pricing.`,
 	SilenceUsage: true,
 	RunE:         runAuthLogin,
 }
