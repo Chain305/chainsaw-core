@@ -30,18 +30,45 @@ package agenticux
 // Heuristic is a first-utterance routing hint. Match is a human-readable
 // description of the user-message shape; Do is the canonical sequence
 // of tool calls or instructions the agent should perform.
+//
+// CLIDo and AgentOnly exist because this catalog has two audiences: an
+// agent over MCP, and a human running `chainsaw introduce` in a
+// terminal. "Call get_install_snippet(ecosystem=…)" is the right answer
+// for one and gibberish for the other. Both fields are json:"-" so the
+// MCP response shape is unchanged (see the package doc — the JSON is
+// part of the agent contract).
 type Heuristic struct {
 	Match string `json:"match"`
 	Do    string `json:"do"`
+
+	// CLIDo is Do restated for a person at a terminal: chainsaw
+	// commands instead of MCP tool calls. Empty means Do already
+	// reads correctly for both audiences.
+	CLIDo string `json:"-"`
+
+	// AgentOnly marks a row that is only meaningful to an agent —
+	// credential bootstrap, or instructions about how the agent should
+	// phrase its own replies. `chainsaw introduce` skips these; the
+	// MCP response still carries them.
+	AgentOnly bool `json:"-"`
 }
 
 // VocabularyEntry is one glossary row. Term is the canonical name;
 // Meaning is the definition the agent should echo to users; Synonyms
 // are alternative forms the agent should normalise back to Term.
+//
+// CLIMeaning / AgentOnly work the same way as on Heuristic.
 type VocabularyEntry struct {
 	Term     string   `json:"term"`
 	Meaning  string   `json:"meaning"`
 	Synonyms []string `json:"synonyms,omitempty"`
+
+	// CLIMeaning is Meaning with the wire detail an agent needs and a
+	// human doesn't. Empty means Meaning serves both.
+	CLIMeaning string `json:"-"`
+
+	// AgentOnly hides the row from `chainsaw introduce`.
+	AgentOnly bool `json:"-"`
 }
 
 // MentalModel is one persona viewed from the agent's perspective:
@@ -165,8 +192,12 @@ func MentalModels() []MentalModel {
 			Preset:    PresetManageReadonly,
 		},
 		{
-			Persona:   PersonaAgent,
-			Head:      "I'm headless — no browser, no cookies, no Turnstile widget I can solve.",
+			Persona: PersonaAgent,
+			// Named the specific bot-check vendor until 2026-08. This
+			// string is printed by `chainsaw introduce --personas` and
+			// served in the unauthenticated MCP introduce response, so
+			// it should not point at which control guards which door.
+			Head:      "I'm headless — no browser, no cookies, no bot-check widget I can solve.",
 			Utterance: "(no user utterance — this is the agent's own mental model)",
 			Success:   "Fetched mcp.json, completed device-code flow, connected MCP, called chainsaw_introduce.",
 			// Deliberately no Mode/Preset — the agent picks per user.
@@ -181,29 +212,47 @@ func MentalModels() []MentalModel {
 func Vocabulary() []VocabularyEntry {
 	return []VocabularyEntry{
 		{
-			Term:     "Chain305",
-			Meaning:  "The product and the company. Use this name in user-facing replies.",
-			Synonyms: []string{"chain305.com"},
+			Term:    "Chain305",
+			Meaning: "The product and the company. Use this name in user-facing replies.",
+			// "Use this name in your replies" is an instruction TO the
+			// agent. A person reading a glossary needs the definition,
+			// not the style rule.
+			CLIMeaning: "The product, and the company behind it. Chain305 is the whole thing; Chainsaw is the proxy inside it.",
+			Synonyms:   []string{"chain305.com"},
 		},
 		{
-			Term:     "Chainsaw",
-			Meaning:  "The proxy component inside Chain305 — the piece that intercepts package installs and enforces policy. Paths: /chainproxy/*, /chainproxy/mcp.",
-			Synonyms: []string{"the proxy", "chain365 (common folder-name typo)"},
+			Term:    "Chainsaw",
+			Meaning: "The proxy component inside Chain305 — the piece that intercepts package installs and enforces policy. Paths: /chainproxy/*, /chainproxy/mcp.",
+			// The path map is wire detail an agent needs to build
+			// request URLs. A person reading a glossary does not —
+			// their URLs come out of `chainsaw install-hook`.
+			CLIMeaning: "The proxy component inside Chain305 — the piece your package installs go through, and the piece that enforces policy. It is also the name of this CLI.",
+			Synonyms:   []string{"the proxy", "chain365 (common folder-name typo)"},
 		},
 		{
-			Term:     "client_credential",
-			Meaning:  "The username/password-style secret that goes into .npmrc / pip.conf / ~/.docker/config.json. Held by the human. Agents NEVER hold these — you only help the human paste one into their config files.",
-			Synonyms: []string{"client id and secret", "npm token", "pip credentials"},
+			Term:    "client_credential",
+			Meaning: "The username/password-style secret that goes into .npmrc / pip.conf / ~/.docker/config.json. Held by the human. Agents NEVER hold these — you only help the human paste one into their config files.",
+			// Same fact, stated as the user's rule rather than the
+			// agent's: this one is yours to hold.
+			CLIMeaning: "The username/password-style secret that goes into .npmrc / pip.conf / ~/.docker/config.json so your package installs authenticate to the proxy. `chainsaw install-hook` can write it for you. It stays yours — never hand it to an AI agent.",
+			Synonyms:   []string{"client id and secret", "npm token", "pip credentials"},
 		},
 		{
-			Term:     "API key",
-			Meaning:  "The bearer token the agent uses for MCP and the management API. Minted via dashboard or device-code. Scoped to a preset (client-setup / manage-readonly / manage-propose / custom).",
-			Synonyms: []string{"bearer token", "management token", "agent credential"},
+			Term:       "API key",
+			Meaning:    "The bearer token the agent uses for MCP and the management API. Minted via dashboard or device-code. Scoped to a preset (client-setup / manage-readonly / manage-propose / custom).",
+			CLIMeaning: "The token the CLI and any MCP client use to reach the management API. Mint one in the dashboard or with `chainsaw auth login`; list and rotate them with `chainsaw token`. Each is scoped to a preset (client-setup / manage-readonly / manage-propose / custom) so it carries only the permissions it needs.",
+			Synonyms:   []string{"bearer token", "management token", "agent credential"},
 		},
 		{
+			// Billy is a product name, not a codename — it is the
+			// label on the dashboard nav and on the `billy` plan
+			// entitlement that `chainsaw features` prints. What the
+			// old wording described ("the internal approval
+			// workflow") was the thing Billy's proposals go THROUGH,
+			// not Billy itself.
 			Term:     "Billy",
-			Meaning:  "The internal approval workflow — policy proposals route through it. Translate to 'human approval' in user-facing replies; users don't need the internal name.",
-			Synonyms: []string{"approval workflow"},
+			Meaning:  "The AI assistant inside the Chain305 dashboard. It can draft policy changes and other actions, but everything it proposes waits for a person to approve it before it takes effect.",
+			Synonyms: []string{"the assistant", "Ask Billy"},
 		},
 	}
 }
@@ -217,30 +266,46 @@ func RoutingHeuristics() []Heuristic {
 		{
 			Match: "user says 'set up for python' / 'configure npm' / 'add chain305 to my pip/maven/docker'",
 			Do:    "Mode A; call list_my_repositories then get_install_snippet(ecosystem=...).",
+			CLIDo: "Run `chainsaw setup` for the guided path, or `chainsaw install-hook <manager>` to wire one package manager on its own.",
 		},
 		{
 			Match: "user says 'do it for me' / 'just set it up' / 'i don't know how to create the credentials'",
-			Do:    "Mode A; call chainsaw_onboard(skip=true) to silence persona nudge, then guide the user through the device-code flow at /chainproxy/api/auth/cli/device. Never POST /api/login — it's Turnstile-gated.",
+			// The reason for avoiding /api/login is stated as a
+			// capability fact ("browser-only"), deliberately without
+			// naming the anti-abuse control in front of it — this
+			// catalog is served to unauthenticated callers.
+			Do:    "Mode A; call chainsaw_onboard(skip=true) to silence persona nudge, then guide the user through the device-code flow at /chainproxy/api/auth/cli/device. Never POST /api/login — it is a browser-only form and cannot be driven headlessly.",
+			CLIDo: "Run `chainsaw setup` — it mints the credentials and writes the config files for you. On a machine with no browser (CI, SSH), run `chainsaw auth login --device` and finish signing in from another device.",
 		},
 		{
 			Match: "user says 'block this CVE' / 'block package X' / 'block MIT-licensed packages'",
 			Do:    "Mode B with manage-propose preset; call list_policies then propose_policy. Mutations route through human approval by default.",
+			CLIDo: "Run `chainsaw policy list` to see what is already in place, then `chainsaw policy create` to add a rule. New rules start in monitor mode unless you pass --mode block.",
 		},
 		{
 			Match: "user says 'audit' / 'export SBOM' / 'who installed X' / 'show me the audit log'",
 			Do:    "Mode B with manage-readonly preset; call get_audit_log with the right filters.",
+			CLIDo: "Run `chainsaw audit view` for the activity log (--since, --actor, --action to narrow it), or `chainsaw sbom export` for a CycloneDX SBOM.",
 		},
 		{
 			Match: "user says 'why is this blocked' / 'policy error on package X'",
 			Do:    "Mode B with manage-readonly preset; call get_package_info(name,version) then list_policies to diagnose the matching rule.",
+			CLIDo: "Run `chainsaw why <ecosystem> <package>@<version>` — it prints the decision, the rule that matched, and who to ask about it.",
 		},
 		{
-			Match: "user types 'chain305' / 'chainsaw' / 'chain365' (common folder-name typo)",
-			Do:    "Normalize: Chainsaw is the proxy component, Chain305 is the product. Don't correct the user; just use the canonical name in your own replies.",
+			// Instructions about how the agent should phrase its own
+			// replies. Nothing for a person to act on.
+			Match:     "user types 'chain305' / 'chainsaw' / 'chain365' (common folder-name typo)",
+			Do:        "Normalize: Chainsaw is the proxy component, Chain305 is the product. Don't correct the user; just use the canonical name in your own replies.",
+			AgentOnly: true,
 		},
 		{
-			Match: "agent has no bearer token yet",
-			Do:    "Before anything else, fetch /.well-known/mcp.json for the discovery doc, then start /chainproxy/api/auth/cli/device (RFC 8628). Show the user the user_code and verification URL. Do NOT POST /api/login.",
+			// Credential bootstrap for a headless caller. A human at a
+			// terminal does this with `chainsaw auth login`, which the
+			// "do it for me" row above already covers.
+			Match:     "agent has no bearer token yet",
+			Do:        "Before anything else, fetch /.well-known/mcp.json for the discovery doc, then start /chainproxy/api/auth/cli/device (RFC 8628). Show the user the user_code and verification URL. Do not POST /api/login — it is a browser-only form.",
+			AgentOnly: true,
 		},
 	}
 }

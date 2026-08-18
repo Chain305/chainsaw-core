@@ -1,6 +1,17 @@
 // Package platform resolves platform-appropriate locations for chainsaw
 // configuration. Conventions differ per OS and we also honor a universal
 // CHAINSAW_CONFIG_HOME override for CI, nix, and portable installs.
+//
+// This package is the SINGLE resolver for the config directory. It imports
+// nothing outside the standard library on purpose: core/telemetry (which sits
+// below core/cli in every other respect, and is linked into the server) calls
+// ConfigHome directly, and that edge is only acyclic and free because this
+// package has no internal dependencies. Do not add one.
+//
+// There used to be a second, hand-copied resolver in core/telemetry.ConfigDir.
+// Its doc claimed the two "must stay in lockstep"; they had not been for as
+// long as macOS was a supported target, so config.yaml lived in ~/.chainsaw
+// while install_id lived in ~/.config/chainsaw. The copy is gone.
 package platform
 
 import (
@@ -30,14 +41,19 @@ const (
 //
 // If $HOME is unavailable for any reason the returned path may be empty or
 // relative; callers should tolerate that.
+//
+// Both env reads are TrimSpace'd: a whitespace-only value is an unset value,
+// not a request to put the config directory in a directory literally named
+// " ". core/telemetry already trimmed, this did not, and that was the last
+// remaining input on which the two resolvers disagreed.
 func ConfigHome() string {
-	if override := os.Getenv(EnvConfigHome); override != "" {
+	if override := strings.TrimSpace(os.Getenv(EnvConfigHome)); override != "" {
 		return expandTilde(override)
 	}
 
 	switch runtime.GOOS {
 	case "linux":
-		if xdg := os.Getenv(EnvXDGConfigHome); xdg != "" {
+		if xdg := strings.TrimSpace(os.Getenv(EnvXDGConfigHome)); xdg != "" {
 			return filepath.Join(xdg, dirName)
 		}
 		home := homeDir()

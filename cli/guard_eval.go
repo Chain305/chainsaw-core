@@ -248,12 +248,13 @@ type guardVerdict struct {
 	// of the ladder went on to say.
 	//
 	// They exist because the waiver used to be COMPLETELY silent. A cleared
-	// verdict produced no output line, so one planted line in
-	// ~/.chainsaw/guard_allowlist.json was a permanent hole that looked
-	// byte-identical to an install the guard never had an opinion about. The
-	// only surface that revealed it was `guard allow --list`, which nobody runs
-	// on a machine they do not already suspect. printGuardVerdicts now prints a
-	// waiver notice for every one of these, --quiet included.
+	// verdict produced no output line, so one planted line in the guard
+	// allowlist (<config home>/guard_allowlist.json — the config home is
+	// platform-dependent, see cli/platform.ConfigHome) was a permanent hole
+	// that looked byte-identical to an install the guard never had an opinion
+	// about. The only surface that revealed it was `guard allow --list`, which
+	// nobody runs on a machine they do not already suspect. printGuardVerdicts
+	// now prints a waiver notice for every one of these, --quiet included.
 	//
 	// WHY NOT ALSO RecentBlocks AND TELEMETRY — decided, not overlooked:
 	//

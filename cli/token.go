@@ -54,10 +54,11 @@ var tokenCmd = &cobra.Command{
 	Use:     "token",
 	GroupID: GrpConfig,
 	Short:   "Manage API tokens (PATs and AI-agent credentials)",
-	Long: "Manage /api/api-keys: list, mint, rotate, and revoke management-API " +
-		"tokens. These are distinct from registry-side client credentials " +
-		"(managed via `auth client`) — api tokens carry management-API perms " +
-		"and authenticate against /api/*, /mcp, and the Billy/MCP surfaces.",
+	Long: "List, mint, rotate, and revoke the API tokens your org uses to drive " +
+		"Chain305 itself — the CLI, the management API, and MCP clients such " +
+		"as an AI coding agent. These are NOT the credentials that go in " +
+		".npmrc / pip.conf to install packages; those are client credentials, " +
+		"managed via `chainsaw auth client`.",
 }
 
 // ── list ──────────────────────────────────────────────────────────────────────

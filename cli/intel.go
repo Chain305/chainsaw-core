@@ -10,8 +10,13 @@ package cli
 //
 //   chainsaw intel package <ecosystem> <name> <version>
 //   chainsaw intel scan    [--lockfile <path>]
-//   chainsaw intel signals
+//   chainsaw intel signals [--local]
 //   chainsaw intel health
+//
+// `intel signals` is the one subcommand that does NOT require a server: the
+// signal catalogue is static compiled-in data and this binary links it, so it
+// falls back to the local registry and labels the output accordingly. See
+// intel_signals.go. The other three genuinely need the server.
 //
 // Exit codes (also documented in each command's Long help). The canonical
 // table for the tree scan lives in intel_scan.go; the constants are in
@@ -341,7 +346,10 @@ var intelCmd = &cobra.Command{
 	Long: `intel surfaces the v1 public risk-intelligence API (/api/v1/intel/*):
 single-package lookups, full tree evaluation from a lockfile, the signal
 catalogue, and a quick engine health check. All subcommands honour the
-persistent --json flag for machine-readable output.`,
+persistent --json flag for machine-readable output.
+
+'intel signals' works without a server or a token — the catalogue is compiled
+into this binary. The other subcommands need both.`,
 }
 
 func init() {

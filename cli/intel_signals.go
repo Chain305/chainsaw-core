@@ -4,51 +4,161 @@ package cli
 // category. Helpful both for policy authors (who want to know which IDs
 // they can reference) and for operators who want to audit what the risk
 // engine is evaluating on their behalf.
+//
+// THIS COMMAND DOES NOT REQUIRE A SERVER. It used to: runIntelSignals went
+// through newV1Client, which refuses without a base URL and a token, so an
+// unauthenticated user could not read a list of signal IDs. But the
+// catalogue is static compiled-in data — the server handler
+// (handleV1IntelSignals) does nothing but map risk.AllSignals() with no DB
+// read and no org lookup, and this binary already links core/risk (pulled in
+// via intelligence and githubactions), so the exact same table is sitting in
+// the process that just refused to print it.
+//
+// What the round-trip DOES buy is the SERVER's catalogue, which is the one
+// that will actually judge your packages. When the CLI and the server are on
+// different builds those two tables can disagree. So:
+//
+//   - server configured and authenticated → ask the server (authoritative)
+//   - otherwise, or with --local          → print the linked catalogue
+//
+// and either way the output SAYS which one it is. Presenting the local table
+// as though it came from the server would be the one genuinely harmful
+// outcome here: a policy author would go on to reference an ID the server has
+// never heard of, and find out at enforcement time.
 
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/chain305/chainsaw-core/risk"
 )
+
+// signalSource records where a rendered catalogue came from, so the renderer
+// can label it and --json can carry it in a machine-readable field.
+type signalSource string
+
+const (
+	signalSourceServer signalSource = "server"
+	signalSourceLocal  signalSource = "local"
+)
+
+// localCatalogueNote is the one-line caveat printed under a local listing.
+const localCatalogueNote = "No server was contacted. A server on a different build may register a different set."
 
 var intelSignalsCmd = &cobra.Command{
 	Use:   "signals",
 	Short: "List registered signals grouped by category",
-	Long: `Print every risk signal the server has registered, grouped by category
-and sorted by severity within each group. Use --json to round-trip the
-full catalogue (e.g. to generate policy templates).`,
+	Long: `Print every risk signal the engine can register, grouped by category and
+sorted by severity within each group. Use --json to round-trip the full
+catalogue (e.g. to generate policy templates).
+
+Works offline. The catalogue is static data compiled into this binary, so no
+server or token is needed. When a server IS configured and you are
+authenticated, its catalogue is fetched instead — it is the one that will
+actually judge your packages, and it can differ from this build's if the two
+have drifted. The output always states which of the two you are looking at;
+--local forces the compiled-in one.
+
+Exit codes:
+  0  catalogue printed (from either source)
+  2  a configured server was contacted and failed
+  3  auth was rejected by a configured server`,
 	RunE: runIntelSignals,
 }
 
 func init() {
+	intelSignalsCmd.Flags().Bool("local", false,
+		"print the catalogue compiled into this CLI without contacting the server")
 	intelCmd.AddCommand(intelSignalsCmd)
 }
 
 func runIntelSignals(cmd *cobra.Command, _ []string) error {
-	client, err := newV1Client(cmd)
-	if err != nil {
-		// Classify via Execute(): auth → 3, network/IO → 2 (invariant B).
-		return err
-	}
-	ctx := context.Background()
-	sigs, env, err := client.Signals(ctx)
-	if err != nil {
-		return err
+	localOnly, _ := cmd.Flags().GetBool("local")
+
+	if !localOnly {
+		// newV1Client's error means "no server URL" or "no token" — a
+		// configuration state, not a failure. Fall back rather than refuse.
+		// A network error from Signals() below is NOT treated the same way:
+		// once you have pointed the CLI at a server, silently answering from
+		// a different table because the server was unreachable would hide an
+		// outage behind a plausible-looking answer. Say so, and point at
+		// --local.
+		if client, cerr := newV1Client(cmd); cerr == nil {
+			// Bound the call so a black-holed server can't hang the CLI —
+			// 10s, matching `intel health`. Context() is nil when RunE is
+			// invoked directly (tests), so fall back to Background.
+			base := cmd.Context()
+			if base == nil {
+				base = context.Background()
+			}
+			ctx, cancel := context.WithTimeout(base, 10*time.Second)
+			defer cancel()
+
+			sigs, env, err := client.Signals(ctx)
+			if err != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"hint: 'chainsaw intel signals --local' prints the catalogue compiled into this CLI, with no server")
+				return err
+			}
+			return emitSignals(cmd, sigs, signalSourceServer, env)
+		}
 	}
 
-	if useJSON(cmd) {
-		return PrintJSONTo(cmd, map[string]any{
-			"apiVersion":    env.APIVersion,
-			"engineVersion": env.EngineVersion,
-			"data":          sigs,
-			"warnings":      env.Warnings,
-			"meta":          env.Meta,
+	return emitSignals(cmd, localSignals(), signalSourceLocal, nil)
+}
+
+// localSignals maps the compiled-in registry onto the same wire shape the
+// server returns. Deliberately the same field-for-field mapping as
+// server.handleV1IntelSignals so the two renderings are comparable; if that
+// handler ever starts applying org weight overrides (it does not today — it
+// emits raw ship defaults), this is the copy that will need a note saying so.
+func localSignals() []v1SignalSummary {
+	all := risk.AllSignals()
+	out := make([]v1SignalSummary, 0, len(all))
+	for _, s := range all {
+		out = append(out, v1SignalSummary{
+			ID:          s.ID,
+			Category:    string(s.Category),
+			Severity:    string(s.Severity),
+			Weight:      s.Weight,
+			Title:       s.Title,
+			Description: s.Description,
 		})
 	}
+	return out
+}
 
-	renderSignals(sigs)
+// emitSignals renders the catalogue in whichever format was asked for,
+// carrying the source label into both. env is nil for the local source.
+func emitSignals(cmd *cobra.Command, sigs []v1SignalSummary, src signalSource, env *v1Envelope) error {
+	if useJSON(cmd) {
+		// "source" is additive: every key the server path emitted before is
+		// still emitted with the same meaning, so existing consumers keep
+		// working and only gain the ability to tell the two apart.
+		payload := map[string]any{
+			"source": string(src),
+			"data":   sigs,
+		}
+		if env != nil {
+			payload["apiVersion"] = env.APIVersion
+			payload["engineVersion"] = env.EngineVersion
+			payload["warnings"] = env.Warnings
+			payload["meta"] = env.Meta
+		} else {
+			payload["engineVersion"] = risk.EngineVersion
+			payload["cliVersion"] = resolveVersion().Version
+			payload["warnings"] = []string{localCatalogueNote}
+			payload["meta"] = v1Meta{ProcessedCount: len(sigs)}
+		}
+		return PrintJSONTo(cmd, payload)
+	}
+
+	renderSignals(cmd.OutOrStdout(), sigs, src, env)
 	return nil
 }
 
@@ -70,7 +180,24 @@ func sevRank(s string) int {
 	return -1
 }
 
-func renderSignals(sigs []v1SignalSummary) {
+// signalsHeader is the provenance line. It is printed FIRST and
+// unconditionally: a reader who scrolls past it still has it in scrollback,
+// and a reader who pipes to head still sees it.
+func signalsHeader(sigs []v1SignalSummary, src signalSource, env *v1Envelope) string {
+	if src == signalSourceLocal {
+		return fmt.Sprintf("Signal catalogue — LOCAL: compiled into this CLI (chainsaw %s, risk engine v%s), %d signals\n%s\n",
+			resolveVersion().Version, risk.EngineVersion, len(sigs), localCatalogueNote)
+	}
+	engine := ""
+	if env != nil && env.EngineVersion != "" {
+		engine = " v" + env.EngineVersion
+	}
+	return fmt.Sprintf("Signal catalogue — SERVER: risk engine%s, %d signals\n", engine, len(sigs))
+}
+
+func renderSignals(w io.Writer, sigs []v1SignalSummary, src signalSource, env *v1Envelope) {
+	fmt.Fprintln(w, signalsHeader(sigs, src, env))
+
 	// Group by category. Iterate in the stable categoryOrder so CLI
 	// output doesn't churn run-to-run — a silent re-ordering would
 	// frustrate diff-based review of policy authoring sessions.
@@ -112,12 +239,12 @@ func renderSignals(sigs []v1SignalSummary) {
 		if !known {
 			label = cat
 		}
-		fmt.Printf("%s (%d)\n", trimLabel(label), len(list))
+		fmt.Fprintf(w, "%s (%d)\n", trimLabel(label), len(list))
 		for _, s := range list {
-			fmt.Printf("  [%-8s] %-28s — %s (w=%.2f)\n",
+			fmt.Fprintf(w, "  [%-8s] %-28s — %s (w=%.2f)\n",
 				s.Severity, s.ID, s.Title, s.Weight)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 }
 

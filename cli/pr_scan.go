@@ -375,7 +375,7 @@ func prScanDiffBase(repoPath, base, head string) string {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "pr-scan: could not compute the merge base of %s and %s (%v); "+
-		"comparing against the base tip instead — the report may list changes this PR "+
+		"comparing against the base tip instead "+glyphs().dash+" the report may list changes this PR "+
 		"did not make. Add `fetch-depth: 0` to the checkout step to fix.\n",
 		base, head, err)
 	return base
@@ -1322,11 +1322,46 @@ func printPRScanReport(cmd *cobra.Command, r prScanReport) {
 	fmt.Fprintf(out, "added: %d  upgraded: %d  blocking: %d  warnings: %d\n\n",
 		r.Summary.Added, r.Summary.Upgraded, r.Summary.Blocking, r.Summary.Warnings)
 
-	fmt.Fprintln(out, "offline heuristics only — run `chainsaw scan` for full signals")
+	fmt.Fprintln(out, "offline heuristics only "+glyphs().dash+" run `chainsaw scan` for full signals")
 	fmt.Fprintln(out)
 
 	printEntryGroup(cmd, "Added dependencies", r.Added)
 	printEntryGroup(cmd, "Upgraded dependencies", r.Upgraded)
+}
+
+// prScanVerdictIcon maps a pr-scan verdict to its row marker.
+//
+// pr-scan is the one command that speaks EMOJI rather than the CLI's ✓/✗/⚠
+// vocabulary, because its primary reader is a GitHub Actions log. Two of the
+// three are astral-plane (🚫 U+1F6AB) or carry a VS16 emoji-presentation
+// selector (⚠️ = U+26A0 U+FE0F); none is in CP437, and the VS16 pair is the
+// worst of the set because a console that cannot encode it may render TWO
+// boxes for one marker, shifting the coordinate that follows.
+//
+// The emoji are preserved verbatim on a capable console — a CI log is exactly
+// where they earn their keep, and this change must not alter what the 99% see.
+// The fallback drops to the shared ASCII markers rather than inventing a
+// fourth alphabet. Within either branch all three markers share a width, so
+// the "  %s [eco] name@ver" column never shifts between rows.
+func prScanVerdictIcon(g glyphSet, verdict string) string {
+	if g == unicodeGlyphs {
+		switch verdict {
+		case "block":
+			return "🚫"
+		case "warn":
+			return "⚠️"
+		default:
+			return "✅"
+		}
+	}
+	switch verdict {
+	case "block":
+		return g.fail
+	case "warn":
+		return g.warn
+	default:
+		return g.ok
+	}
 }
 
 func printEntryGroup(cmd *cobra.Command, title string, entries []prScanEntry) {
@@ -1334,14 +1369,10 @@ func printEntryGroup(cmd *cobra.Command, title string, entries []prScanEntry) {
 		return
 	}
 	out := cmd.OutOrStdout()
+	g := glyphs()
 	fmt.Fprintf(out, "%s (%d)\n", title, len(entries))
 	for _, e := range entries {
-		icon := "✅"
-		if e.Verdict == "block" {
-			icon = "🚫"
-		} else if e.Verdict == "warn" {
-			icon = "⚠️"
-		}
+		icon := prScanVerdictIcon(g, e.Verdict)
 		prev := ""
 		if e.PreviousVersion != nil {
 			prev = fmt.Sprintf(" (was %s)", *e.PreviousVersion)

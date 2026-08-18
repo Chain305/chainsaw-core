@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -62,9 +63,15 @@ func runDepsTree(cmd *cobra.Command, args []string) error {
 		return errServerNotConfigured(cmd)
 	}
 
+	g := glyphs()
+
 	pkgName, pkgVersion := splitPackageArg(args[0])
 	if pkgName == "" {
-		return fmt.Errorf("invalid argument — expected name@version")
+		// errors.New, not fmt.Errorf: with the separator interpolated the
+		// format string stops being a constant, and `go vet`'s printf check
+		// rejects a non-constant format with no arguments (correctly — a stray
+		// % in an interpolated glyph would become a verb).
+		return errors.New("invalid argument " + g.dash + " expected name@version")
 	}
 
 	// Fetch the full org SBOM; filter client-side so we see the complete
@@ -72,7 +79,7 @@ func runDepsTree(cmd *cobra.Command, args []string) error {
 	// server: deps tree's value is the same-ecosystem PEER packages, and a
 	// server-side package filter would strip exactly those. Surface a
 	// progress line on stderr since the unfiltered fetch can be large.
-	fmt.Fprintln(os.Stderr, "fetching org SBOM…")
+	fmt.Fprintln(os.Stderr, "fetching org SBOM"+g.ellipsis)
 	var bom sbomDoc
 	if err := client.Get("/api/sbom", &bom); err != nil {
 		return err
@@ -128,13 +135,15 @@ func runDepsTree(cmd *cobra.Command, args []string) error {
 		return PrintJSONTo(cmd, treeOutput{Root: root, Peers: peers})
 	}
 
-	// ASCII tree output.
+	// Tree output. Both the connectors and the CVE marker come from the glyph
+	// set: the connectors so the fallback has no exception list (they are the
+	// one CP437-safe part of the set), the marker because it is the whole
+	// point — a boxed ⚠ makes a vulnerable peer indistinguishable from a clean
+	// one, which is the same state collapse the doctor matrix suffered.
 	rootLabel := args[0]
 	if root != nil {
 		rootLabel = root.Name + "@" + root.Version
-		if cves := componentCVEs(*root); cves != "" {
-			rootLabel += "  ⚠  " + cves
-		}
+		rootLabel += depsCVESuffix(g, componentCVEs(*root))
 	}
 	fmt.Println(rootLabel)
 
@@ -145,26 +154,39 @@ func runDepsTree(cmd *cobra.Command, args []string) error {
 		} else if root == nil {
 			label = "(package not found in SBOM)"
 		}
-		fmt.Println("└── " + label)
+		fmt.Println(g.treeEnd + " " + label)
 		return nil
 	}
 
 	for i, c := range peers {
-		prefix := "├──"
-		if i == len(peers)-1 {
-			prefix = "└──"
-		}
-		line := fmt.Sprintf("%s %s@%s", prefix, c.Name, c.Version)
-		if cves := componentCVEs(c); cves != "" {
-			line += "  ⚠  " + cves
-		}
-		fmt.Println(line)
+		fmt.Println(depsTreeLine(g, c, i == len(peers)-1))
 	}
 
 	if root == nil {
 		fmt.Printf("\nNote: %q was not found in the org SBOM. Showing all same-ecosystem packages.\n", args[0])
 	}
 	return nil
+}
+
+// depsCVESuffix renders the vulnerability annotation appended to a tree line,
+// or "" when the component is clean. Split out from runDepsTree (which needs a
+// live /api/sbom to run at all) so the glyph behaviour is unit-testable
+// without a server.
+func depsCVESuffix(g glyphSet, cves string) string {
+	if cves == "" {
+		return ""
+	}
+	return "  " + g.warn + "  " + cves
+}
+
+// depsTreeLine renders one peer row: connector, coordinate, CVE annotation.
+// last selects the closing connector.
+func depsTreeLine(g glyphSet, c sbomComponent, last bool) string {
+	prefix := g.treeTee
+	if last {
+		prefix = g.treeEnd
+	}
+	return fmt.Sprintf("%s %s@%s%s", prefix, c.Name, c.Version, depsCVESuffix(g, componentCVEs(c)))
 }
 
 // purlEcosystem extracts the package type from a PURL string (e.g. "pkg:npm/foo@1.0" → "npm").

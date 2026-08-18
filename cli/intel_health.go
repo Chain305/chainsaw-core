@@ -22,7 +22,9 @@ how many signals are registered, and the list of categories.
 
 Exit codes:
   0  engine reachable and healthy
-  2  HTTP / auth / unreachable`,
+  2  server unreachable, or it answered with an error
+  3  no server configured, or not authenticated
+  4  bad invocation`,
 	RunE: runIntelHealth,
 }
 

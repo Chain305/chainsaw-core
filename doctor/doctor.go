@@ -58,7 +58,28 @@ func (s Severity) String() string {
 }
 
 // Mark returns a single-glyph status indicator suitable for the
-// text-mode scorecard.
+// text-mode scorecard, in the UNICODE alphabet.
+//
+// WHY THIS IS NOT CONSOLE-AWARE. ✓/⚠/✗ are absent from CP437, so on a legacy
+// Windows console all three render as the same replacement box and the
+// scorecard's STATUS column stops distinguishing "ok" from "do not upgrade".
+// The fix for that lives in `core/cli` (glyphSet, glyphs()), and it cannot be
+// reached from here: core/cli imports core/doctor, so an accessor exported
+// the other way would close an import cycle. Nor is a second copy of the
+// probe warranted — the probe is a build-tagged Windows syscall plus an env
+// convention, and two copies of a Windows-only decision that only one runner
+// can exercise is exactly how the two drift apart unnoticed.
+//
+// So the mapping moved to the caller instead. Rendering is a property of the
+// console, this package is a diagnostic LIBRARY that never prints, and its
+// only in-repo consumer — printUpgradeReport in core/cli/doctor_upgrade.go —
+// already holds the resolved glyph set. That consumer now maps Severity to a
+// marker itself and does not call this method.
+//
+// Mark stays because core/doctor is part of a PUBLIC module: deleting an
+// exported method to tidy up an internal refactor would break third-party
+// renderers for no benefit. It is correct for any UTF-8 sink. A caller that
+// might face a legacy codepage should map severities itself.
 func (s Severity) Mark() string {
 	switch s {
 	case SeverityOK:

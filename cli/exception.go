@@ -123,7 +123,7 @@ var exceptionCreateCmd = &cobra.Command{
 
 func init() {
 	exceptionCreateCmd.Flags().String("repository", "", "Repository name (required; --ecosystem is an accepted alias)")
-	exceptionCreateCmd.Flags().String("ecosystem", "", "Alias for --repository — smoke spec D.5 and several internal runbooks use --ecosystem")
+	exceptionCreateCmd.Flags().String("ecosystem", "", "Alias for --repository: the repository the package came from (e.g. npm-proxy, maven-central). Use whichever name reads better; setting both to different values is an error.")
 	exceptionCreateCmd.Flags().String("package", "", "Package name (required)")
 	exceptionCreateCmd.Flags().String("version", "", "Package version (required)")
 	exceptionCreateCmd.Flags().String("reason", "", "Human-readable justification for the exception (recorded in audit log)")

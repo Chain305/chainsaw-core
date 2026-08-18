@@ -227,6 +227,28 @@ var rolePermissions = map[string][]string{
 		PermOrgMembersRemove,
 		PermClientsCreate,
 		PermClientsManageAll,
+		// PermClientsManageOwn is REDUNDANT as a capability and REQUIRED as
+		// a set element. canManageClient (internal/server/server_clients.go)
+		// returns true on PermClientsManageAll before it ever consults
+		// PermClientsManageOwn, so a manager could already manage every
+		// client credential in the org, its own included — this grant adds
+		// no reachable capability.
+		//
+		// It has to be listed anyway because CanAssignRole
+		// (internal/server/rolesapi/roles.go) compares role permission sets
+		// by LITERAL containment: a manager may act on a target role only
+		// when the target's set is a subset of the manager's. org-member
+		// carries PermClientsManageOwn, so omitting it here made
+		// org-member ⊄ org-manager and a manager was refused CHW-1204
+		// (CannotModifyBroaderMember) on the most ordinary member in the
+		// org — it could not invite, demote, or remove one. global-admin,
+		// org-admin and org-owner all carry both halves of the pair;
+		// org-manager was the sole break in that ladder.
+		//
+		// Keep the pair together. Granting `clients:manage:all` to a role
+		// without `clients:manage:own` re-opens the same hole for every
+		// role below it.
+		PermClientsManageOwn,
 		PermReposRead,
 		PermReposManage,
 		PermSettingsRead,

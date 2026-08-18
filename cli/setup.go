@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -27,22 +28,74 @@ var setupCmd = &cobra.Command{
 	Aliases: []string{"init", "get-started", "getting-started", "quickstart", "start"},
 	GroupID: GrpConfig,
 	Short:   "Interactive first-time setup wizard",
-	Long: `Walk through server URL, authentication, org selection, and optional default policy,
-then save credentials to ~/.chainsaw/config.yaml.
-
-Use --yes to skip all confirmation prompts.
-Progress is saved to ~/.chainsaw/.setup_progress so the wizard can resume after an error.`,
+	// Long is assembled in init() below — it names two real paths, and the
+	// config home is resolved per-platform at runtime rather than being a
+	// literal. See the comment there.
 	RunE: runSetup,
 }
 
 func init() {
+	// The wizard's help used to hardcode "~/.chainsaw/config.yaml". That is
+	// only true on macOS: platform.ConfigHome() resolves to
+	// %APPDATA%\Chainsaw on Windows and $XDG_CONFIG_HOME/chainsaw (or
+	// ~/.config/chainsaw) on Linux — so `chainsaw status` printed one path
+	// while `chainsaw setup --help` sent the same user hunting in a
+	// directory that does not exist on their machine, at the exact moment
+	// they are debugging setup.
+	//
+	// Why init() and not the struct literal above: cobra reads Long as a
+	// plain string at help-render time, so the value has to exist before
+	// Execute(). configFilePath() -> configDir() -> platform.ConfigHome()
+	// reads only the process environment and $HOME — it does not touch
+	// viper, flags, or initConfig() — so it is safe this early, and
+	// resolving in init() keeps the dependency explicit instead of relying
+	// on Go's inferred ordering between package-level vars. (There is no
+	// --config flag to move the file, so nothing later in the run can
+	// invalidate this.)
+	setupCmd.Long = fmt.Sprintf(
+		`Walk through server URL, authentication, org selection, and optional default policy,
+then save credentials to %s.
+
+Use --yes to skip all confirmation prompts.
+Progress is saved to %s so the wizard can resume after an error.`,
+		displayPath(configFilePath()), displayPath(setupProgressPath()))
+
 	setupCmd.Flags().Bool("yes", false, "Skip confirmation prompts")
 	setupCmd.Flags().Bool("skip-persona", false, "Skip only the persona prompt (auth prompt still runs)")
 	setupCmd.Flags().String("token", "", "Paste an existing API token instead of opening a browser (also honors CHAINSAW_TOKEN)")
 	rootCmd.AddCommand(setupCmd)
 }
 
-// setupProgress is persisted to ~/.chainsaw/.setup_progress between steps.
+// displayPath renders a resolved config path for help text and error
+// messages. It is the REAL location (platform.ConfigHome, which differs per
+// OS and honours CHAINSAW_CONFIG_HOME / XDG_CONFIG_HOME), with the user's
+// home directory collapsed back to "~".
+//
+// The collapse is not cosmetic. These strings are also the source for the
+// generated CLI reference, so an uncollapsed path would publish the
+// generating machine's username into the docs. On Windows the path is left
+// absolute: "~\AppData\Roaming\Chainsaw" is not a form anyone recognises,
+// and the absolute path is exactly what `chainsaw status` prints.
+func displayPath(p string) string {
+	if p == "" || runtime.GOOS == "windows" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+string(os.PathSeparator)) {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
+// setupProgress is persisted to .setup_progress inside the resolved config
+// directory (see setupProgressPath / platform.ConfigHome — it is NOT always
+// under ~/.chainsaw).
 // The auth token is intentionally not persisted here; it is held in memory only.
 type setupProgress struct {
 	Step        string    `json:"step"`

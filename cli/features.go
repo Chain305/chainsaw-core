@@ -196,9 +196,11 @@ func runFeatures(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out, "Server entitlements")
 	switch {
 	case !report.Server.Configured:
-		fmt.Fprintf(out, "  (unavailable) %s\n", report.Server.Error)
+		// Server.Error is also JSON payload (`json:"error"`), so it keeps its
+		// Unicode form in the struct and is folded here, at the render.
+		fmt.Fprintf(out, "  (unavailable) %s\n", foldPunctuationForConsole(report.Server.Error))
 	case report.Server.Error != "":
-		fmt.Fprintf(out, "  (unavailable) %s\n", report.Server.Error)
+		fmt.Fprintf(out, "  (unavailable) %s\n", foldPunctuationForConsole(report.Server.Error))
 	default:
 		if report.Server.PlanName != "" {
 			fmt.Fprintf(out, "  Plan: %s\n", report.Server.PlanName)

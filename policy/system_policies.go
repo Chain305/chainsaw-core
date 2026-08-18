@@ -253,8 +253,16 @@ func isPrecedenceUniqueViolation(err error) bool {
 // allocateFreePrecedence returns MAX(precedence)+10 for the given org,
 // or 10 if the table is empty. Mirrors the auto-increment pattern used
 // by the user-facing policy create handler (F23').
+//
+// The `precedence >= 0` filter matches Store.MaxPrecedence and exists for
+// the same reason: exception rows carry a large NEGATIVE sentinel so they
+// sort first, and letting one win the MAX hands the recovering system
+// policy a negative precedence — which would seat a baseline rule ahead of
+// every user policy. This path only runs while recovering from a duplicate
+// precedence collision during seeding, so it is rarely exercised; that is
+// an argument for fixing it in lockstep, not for leaving it.
 func allocateFreePrecedence(execer policyExecutor, orgID string) (int, error) {
-	rows, err := execer.Query(`SELECT COALESCE(MAX(precedence), 0) FROM policies WHERE org_id = $1`, orgID)
+	rows, err := execer.Query(`SELECT COALESCE(MAX(precedence), 0) FROM policies WHERE org_id = $1 AND precedence >= 0`, orgID)
 	if err != nil {
 		return 0, err
 	}

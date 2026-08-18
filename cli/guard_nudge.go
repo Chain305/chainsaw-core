@@ -369,23 +369,31 @@ func ensureGuardConsent(st *guardState, firstRun bool) string {
 		}
 		return s
 	}
+	// The consent prompt is a CONVERSION surface and the first thing many
+	// users ever see from Chainsaw. Every non-ASCII character in it — the two
+	// ticks, the three middle dots, the two em dashes — boxes on CP437, which
+	// on a fresh Windows box turns the one screen that has to read as
+	// trustworthy into mojibake. Note "!" on the caveat line was already
+	// hard-coded ASCII and happens to equal glyphs().warn; it is routed
+	// through the set now so the pairing cannot drift.
+	g := glyphs()
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %s %s help improve malware detection for everyone?\n", c(ansiBold, "Chainsaw"), c(ansiDim, "·"))
+	fmt.Fprintf(w, "  %s %s help improve malware detection for everyone?\n", c(ansiBold, "Chainsaw"), c(ansiDim, g.bullet))
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  Share %s — anonymous usage counts, and for any package we\n", c(ansiBold, "detection signals"))
+	fmt.Fprintf(w, "  Share %s %s anonymous usage counts, and for any package we\n", c(ansiBold, "detection signals"), g.dash)
 	fmt.Fprintf(w, "  %s, its name, version, and reason, so the shared feed flags it faster.\n", c(ansiYellow, "BLOCK"))
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "    %s Your clean installs are never sent.\n", c(ansiGreen, "✓"))
-	fmt.Fprintf(w, "    %s A blocked package's name could be a private/internal one of yours.\n", c(ansiYellow, "!"))
+	fmt.Fprintf(w, "    %s Your clean installs are never sent.\n", c(ansiGreen, g.ok))
+	fmt.Fprintf(w, "    %s A blocked package's name could be a private/internal one of yours.\n", c(ansiYellow, g.warn))
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %s\n", c(ansiDim, "Change anytime with `chainsaw telemetry on|off` · chain305.com/legal/privacy"))
+	fmt.Fprintf(w, "  %s\n", c(ansiDim, "Change anytime with `chainsaw telemetry on|off` "+g.bullet+" chain305.com/legal/privacy"))
 	fmt.Fprintln(w)
 	if PromptConfirmDefaultYes("  Share detection signals?") {
 		st.Consent = consentGranted
-		fmt.Fprintf(w, "  %s telemetry on — thanks. Disable anytime with `chainsaw telemetry off`.\n", c(ansiGreen, "✓"))
+		fmt.Fprintf(w, "  %s telemetry on %s thanks. Disable anytime with `chainsaw telemetry off`.\n", c(ansiGreen, g.ok), g.dash)
 	} else {
 		st.Consent = consentDeclined
-		fmt.Fprintf(w, "  %s telemetry off. Nothing is sent. Enable later with `chainsaw telemetry on`.\n", c(ansiDim, "·"))
+		fmt.Fprintf(w, "  %s telemetry off. Nothing is sent. Enable later with `chainsaw telemetry on`.\n", c(ansiDim, g.bullet))
 	}
 	fmt.Fprintln(w)
 	return st.Consent
@@ -439,11 +447,15 @@ func nudgePostBlock(totalBlocks int, consent string) {
 		emitNudgeSuppressed(consent, reason)
 		return
 	}
-	fmt.Fprintln(os.Stderr, "chainsaw: see every block across your team and who's installing what → sign up free: "+guardCTA(guardNudgeBaseSignup, consent))
+	// The arrow points at the URL that follows it. A boxed arrow immediately
+	// before a link is the worst place for one: it reads as corruption in the
+	// URL itself, on the line whose entire job is to be clicked.
+	g := glyphs()
+	fmt.Fprintln(os.Stderr, "chainsaw: see every block across your team and who's installing what "+g.arrow+" sign up free: "+guardCTA(guardNudgeBaseSignup, consent))
 	// Show the full enforcement pitch once, on the first nudge (the second
 	// block), then collapse to the single signup line so repeats don't nag.
 	if totalBlocks == 2 {
-		fmt.Fprintln(os.Stderr, "chainsaw: enforce one policy for everyone (central policy, SSO/RBAC, audit, SLA) → "+guardCTA(guardNudgeBasePricing, consent))
+		fmt.Fprintln(os.Stderr, "chainsaw: enforce one policy for everyone (central policy, SSO/RBAC, audit, SLA) "+g.arrow+" "+guardCTA(guardNudgeBasePricing, consent))
 	}
 	emitNudgeShown(consent, "post_block")
 }
@@ -467,7 +479,7 @@ func maybePeriodicNudge(st *guardState, now time.Time, consent string) {
 		return
 	}
 	st.LastNudgeUnix = now.Unix()
-	fmt.Fprintf(os.Stderr, "chainsaw: checked %d installs, blocked %d on this machine. See org-wide threats and sync across your team → %s\n", st.InstallsChecked, st.Blocks, guardCTA(guardNudgeBaseSignup, consent))
+	fmt.Fprintf(os.Stderr, "chainsaw: checked %d installs, blocked %d on this machine. See org-wide threats and sync across your team %s %s\n", st.InstallsChecked, st.Blocks, glyphs().arrow, guardCTA(guardNudgeBaseSignup, consent))
 	emitNudgeShown(consent, "periodic")
 }
 

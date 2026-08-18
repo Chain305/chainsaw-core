@@ -208,24 +208,25 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 	}
 	lost := unreadablePolicySkips(skipped)
 
+	g := glyphs()
 	inert := inertPolicyConditions(rows, usage)
 	if len(inert) == 0 {
 		if len(lost) > 0 {
 			// Never "✓ every condition is supported" over a policy set we
 			// only half read — that sentence is the gate's answer, and it
 			// would be an answer about files we never opened.
-			fmt.Fprintf(out, "\n✗ no unsupported condition found in what could be read, but %d path(s) under %s were unreadable — this gate is INCOMPLETE.\n",
-				len(lost), policyPath)
+			fmt.Fprintf(out, "\n%s no unsupported condition found in what could be read, but %d path(s) under %s were unreadable %s this gate is INCOMPLETE.\n",
+				g.fail, len(lost), policyPath, g.dash)
 			return &ExitCodeError{
 				Code: policyScanIncompleteExitCode,
 				Err: fmt.Errorf("policy preflight: %d path(s) under %s could not be read; the gate did not cover the whole policy set",
 					len(lost), policyPath),
 			}
 		}
-		fmt.Fprintf(out, "\n✓ every condition used by %s is supported on the printed ecosystem(s).\n", policyPath)
+		fmt.Fprintf(out, "\n%s every condition used by %s is supported on the printed ecosystem(s).\n", g.ok, policyPath)
 		return nil
 	}
-	fmt.Fprintf(out, "\n✗ conditions your policies use that are inert on the printed ecosystem(s):\n")
+	fmt.Fprintf(out, "\n%s conditions your policies use that are inert on the printed ecosystem(s):\n", g.fail)
 	for _, i := range inert {
 		fmt.Fprintf(out, "  - %s: condition %s is unsupported on %s (%s:%d)\n",
 			i.Rule, i.Condition, i.Ecosystem, i.File, i.Line)
@@ -415,12 +416,17 @@ func printPreflightTable(cmd *cobra.Command, rows []supportMatrixRowDTO, allCond
 		fmt.Fprintln(out, "No matching ecosystems.")
 		return
 	}
+	g := glyphs()
 	headers := []string{"ECOSYSTEM", "STATUS", "UNSUPPORTED CONDITIONS"}
 	tableRows := make([][]string, 0, len(rows))
 	for _, row := range rows {
 		unsupported := unsupportedConditions(row, allConditions)
 		status := "ok"
-		conds := "—"
+		// The "nothing unsupported here" cell. It is the LAST column, which
+		// writeTable never pads, so the two-byte fallback cannot disturb the
+		// grid — and it is strictly better for tabwriter, which measures bytes
+		// and therefore counted the three-byte em dash as three columns.
+		conds := g.dash
 		if len(unsupported) > 0 {
 			status = "unsupported"
 			conds = strings.Join(unsupported, ", ")

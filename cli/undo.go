@@ -48,11 +48,11 @@ var undoCmd = &cobra.Command{
 	Short:   "Roll back the most recent agent action (or a specific action by id)",
 	Long: "Undoes the inverse of a previously recorded agent action in the " +
 		"current org. By default, targets the ORG's most recent undoable " +
-		"action — not the caller's own: the server resolves the target with " +
-		"GetLastUndoable(orgID), so a teammate's or an agent's action can be " +
-		"the one that gets reversed. Pass --action-id to target a specific " +
-		"entry. " +
-		"Use --dry-run to preview what would be undone without applying. " +
+		"action — not your own: if a teammate or an agent acted after you " +
+		"did, theirs is the one that gets reversed. Pass --action-id to " +
+		"target a specific entry. " +
+		"Use --dry-run to preview what would be undone without applying it — " +
+		"worth doing first, since it names the action you are about to reverse. " +
 		"Permission is checked dynamically per action type: undoing a " +
 		"policy mutation requires policies:manage, an exception mutation " +
 		"requires exceptions:manage. The server returns 403 when the " +

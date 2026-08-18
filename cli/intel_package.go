@@ -26,8 +26,10 @@ Examples:
   chainsaw intel package pypi requests 2.32.3 --json
 
 Exit codes:
-  0  success (any verdict)
-  2  HTTP / usage error`,
+  0  success (any verdict — the verdict is in the output, not the exit code)
+  2  server unreachable, or it answered with an error
+  3  no server configured, or not authenticated
+  4  bad invocation`,
 	Args: cobra.ExactArgs(3),
 	RunE: runIntelPackage,
 }

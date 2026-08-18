@@ -165,7 +165,7 @@ Deferred: swift, yarn, maven, gradle, sbt, nuget, go.
 Examples:
   chainsaw doctor verify-hook bun
   chainsaw doctor verify-hook docker --timeout 60s
-  chainsaw --server https://chainsaw.example doctor verify-hook npm --json`,
+  chainsaw --server https://chain305.com/chainproxy doctor verify-hook npm --json`,
 		RunE: runDoctorVerifyHook,
 		Args: cobra.ExactArgs(1),
 	}

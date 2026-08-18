@@ -537,13 +537,27 @@ func NewStore(db *pgstore.Store) (*Store, error) {
 // auto-default precedence to MAX+10 when callers omit it (F23 — neither
 // the MCP propose_policy schema nor common scripts force callers to pick
 // a precedence, and a bare `0` collides with the seeded baseline rules).
+//
+// NEGATIVE precedences are excluded from the MAX on purpose. Exceptions
+// are stored as policy rows carrying `int(-time.Now().UnixNano())`
+// (internal/server/exceptions_api.go, bulk_actions_api.go) — a sentinel
+// chosen so `List()`'s `ORDER BY precedence ASC` returns them first.
+// Counting those in the MAX means an org whose only rows are exceptions
+// gets `MAX+10` ≈ -1.7e18, so the next auto-defaulted policy is created
+// with a NEGATIVE precedence and silently sorts ahead of every real
+// policy — the opposite of the intended "append at the end" default.
+// Filtering here rather than clamping the result keeps the reason at the
+// point the sentinel is skipped. `>= 0` (not `> 0`) so a genuine
+// precedence-0 row still anchors the sequence at 10.
 func (s *Store) MaxPrecedence() (int, error) {
 	if s == nil || s.sql == nil {
 		return 0, errors.New("policy store unavailable")
 	}
 	orgID := tenancy.NormalizeOrgID(s.orgID)
 	var max sql.NullInt64
-	if err := s.sql.DB().QueryRow(`SELECT MAX(precedence) FROM policies WHERE org_id=?`, orgID).Scan(&max); err != nil {
+	if err := s.sql.DB().QueryRow(
+		`SELECT MAX(precedence) FROM policies WHERE org_id=? AND precedence >= 0`,
+		orgID).Scan(&max); err != nil {
 		return 0, err
 	}
 	if !max.Valid {

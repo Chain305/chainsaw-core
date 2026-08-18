@@ -54,23 +54,22 @@ func newOnboardCmd() *cobra.Command {
 		Use:     "onboard",
 		GroupID: GrpConfig,
 		Short:   "Record your persona to tailor onboarding (twin of the MCP chainsaw_onboard tool)",
-		Long: `Record the user's persona so future chainsaw introduces (CLI or MCP)
-return tailored guidance. The persona enum matches the dashboard's
-onboarding flow:
+		Long: `Record your persona so Chain305 tailors the guidance it gives you.
+The persona list matches the dashboard's onboarding flow:
 
   appsec         Platform & Application Security  (CVE triage, SBOM insights)
   devsecops     DevSecOps & Compliance            (policy gates, CI/CD templates)
   enterprise_it Enterprise IT & Shared Services   (SSO, SCIM, SIEM webhooks)
 
-Pass --skip (with or without --persona) to silence the nudge in
-chainsaw_introduce. With no flags, prints the current persona state
-without changing it.
+Pass --skip (with or without --persona) to stop being asked. That also
+silences the persona prompt AI agents get back over MCP. With no flags,
+prints the current persona state without changing it.
 
 Persona is UX-only — it never gates permissions.`,
 		RunE: runOnboard,
 	}
 	cmd.Flags().String("persona", "", "Persona ID (appsec, devsecops, enterprise_it)")
-	cmd.Flags().Bool("skip", false, "Silence the persona-pick nudge in future introduces")
+	cmd.Flags().Bool("skip", false, "Stop being asked to pick a persona (also silences the prompt agents get over MCP)")
 	cmd.Flags().Bool("json", false, "Output as JSON (matches MCP chainsaw_onboard response shape)")
 	return cmd
 }
@@ -87,7 +86,7 @@ func newOnboardingCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "onboarding",
 		GroupID: GrpConfig,
-		Short:   "Inspect onboarding state (alias surface for chainsaw_onboarding_state)",
+		Short:   "Inspect onboarding state (twin of the MCP chainsaw_onboarding_state tool)",
 		Long: `Parent command for onboarding-state inspection. Mirrors the MCP
 chainsaw_onboarding_state tool shape so agents that know the MCP
 surface find the equivalent CLI subcommand under the same name.

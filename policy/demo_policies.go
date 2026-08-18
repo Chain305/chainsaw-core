@@ -173,8 +173,15 @@ func SeedDemoPoliciesIfNeededTx(tx *sql.Tx, orgID string, logger *slog.Logger) (
 // in use for the org, or 0 if no policies exist yet. Reads through
 // the same executor interface seedPolicies uses so it composes inside
 // the caller's transaction.
+//
+// The `precedence >= 0` filter is the third copy of the same guard, and
+// exists for the reason spelled out on Store.MaxPrecedence: exception rows
+// carry a large NEGATIVE sentinel (`int(-time.Now().UnixNano())`) so they
+// sort first, and counting one in the MAX would seed the demo policies at a
+// negative precedence — placing sample rules ahead of every real one in an
+// org that had already created an exception.
 func nextPrecedenceTx(execer policyExecutor, orgID string) (int, error) {
-	rows, err := execer.Query(`SELECT MAX(precedence) FROM policies WHERE org_id=?`, orgID)
+	rows, err := execer.Query(`SELECT MAX(precedence) FROM policies WHERE org_id=? AND precedence >= 0`, orgID)
 	if err != nil {
 		return 0, err
 	}

@@ -266,14 +266,67 @@ type glyphSet struct {
 	none    string // inert: no coverage at all
 	info    string // reported, deliberately not graded
 
-	// dash is the em dash used as a clause separator in status PROSE, not a
-	// marker. U+2014 is absent from CP437 like the markers above, but a boxed
-	// dash mid-sentence only looks wrong, whereas a boxed marker destroys
-	// information — so the general em-dash sweep is deliberately NOT part of
-	// this set's remit. It is carried here for the one line where prose and
-	// headline coincide: the guard's refusal (guardRefusalLine). Do not reach
-	// for it elsewhere without converting that call site's whole string.
-	dash string
+	// ── punctuation ────────────────────────────────────────────────────────
+	//
+	// These are not markers; they are the non-ASCII punctuation the CLI prints
+	// inside prose. Each is absent from CP437 (unlike ○, and unlike the box
+	// drawing below), so each boxes on a legacy console.
+	//
+	// The original set carried `dash` alone and scoped it BY COMMENT to
+	// guardRefusalLine, on the reasoning that a boxed dash mid-sentence merely
+	// looks wrong while a boxed marker destroys information. That severity
+	// ordering still holds — it is why markers came first — but it was an
+	// argument for SEQUENCING the work, not for stopping. The scoping comment
+	// is therefore gone: dash is now the general separator for printed status
+	// prose. The line it must NOT be used on is drawn elsewhere (see the
+	// package rule recorded in glyphs_test.go): never in `Short`/`Long`/flag
+	// help, and never in a string that is also JSON or SARIF payload.
+	dash     string // em dash: clause separator in status prose
+	ellipsis string // "work in progress" suffix on a chatter line
+	arrow    string // "go here next": CTA and transition prose
+	bullet   string // dim separator, and the inert twin of ok in the consent prompt
+
+	// ── tree drawing ───────────────────────────────────────────────────────
+	//
+	// `deps tree` connectors. These are the one part of this set that is NOT
+	// broken on CP437: U+2500/U+251C/U+2514 are codepage 437's own box-drawing
+	// range (0xC4/0xC3/0xC0) and render correctly there. They are carried
+	// anyway so the fallback's guarantee can be stated without an exception
+	// list — "no byte above 0x7F" is a property a test can enforce forever,
+	// whereas "no byte above 0x7F except the six that happen to survive CP437"
+	// is a property that rots the first time someone adds a seventh. The ASCII
+	// forms are `tree -A`'s, which is the convention users already know.
+	treeTee string // a peer with siblings after it
+	treeEnd string // the last peer
+}
+
+// foldPunctuationForConsole rewrites the non-ASCII punctuation in an ALREADY
+// BUILT string to the current console's alphabet.
+//
+// It exists for the one case the field-by-field approach above cannot reach:
+// a string that is simultaneously JSON payload and human output. serverFeatures
+// .Error and statusReport.Auth.Error are both — they carry `json:"error"` AND
+// are printed by the human renderer. Building them from glyphs() would make the
+// JSON codepage-dependent, which is strictly worse than a boxed dash: a
+// machine-readable artifact must not change shape with the terminal that
+// happened to produce it.
+//
+// So the payload keeps its Unicode form and the RENDERER folds. Presentation is
+// the only layer that knows about the console, which is where a console
+// decision belongs. Callers apply this at the Fprintf, never at assignment.
+//
+// No-op when Unicode is enabled, so the default path is byte-for-byte unchanged.
+func foldPunctuationForConsole(s string) string {
+	if unicodeEnabled() {
+		return s
+	}
+	g := asciiGlyphs
+	return strings.NewReplacer(
+		unicodeGlyphs.dash, g.dash,
+		unicodeGlyphs.ellipsis, g.ellipsis,
+		unicodeGlyphs.arrow, g.arrow,
+		unicodeGlyphs.bullet, g.bullet,
+	).Replace(s)
 }
 
 // unicodeGlyphs is the default set — unchanged from the literals these
@@ -286,7 +339,14 @@ var unicodeGlyphs = glyphSet{
 	refresh: "↻",
 	none:    "○",
 	info:    "ℹ",
-	dash:    "—",
+
+	dash:     "—",
+	ellipsis: "…",
+	arrow:    "→",
+	bullet:   "·",
+
+	treeTee: "├──",
+	treeEnd: "└──",
 }
 
 // asciiGlyphs is the fallback. Three constraints drove the choices:
@@ -312,10 +372,34 @@ var asciiGlyphs = glyphSet{
 	refresh: "~",
 	none:    "-",
 	info:    "i",
-	// Two hyphens, not one: a lone "-" is already the `none` marker, and the
-	// refusal line would otherwise read "X refused ... - nothing was installed",
-	// where the separator is indistinguishable from a status glyph.
-	dash: "--",
+
+	// The punctuation fields are NOT bound by constraint 1. That rule exists
+	// because the markers sit in a column-aligned table; the em dash, the
+	// ellipsis and the arrow appear mid-sentence in free-flowing prose where
+	// nothing is measured, so the legible ASCII spelling wins over a
+	// same-width one. Each is still pure ASCII (constraint 2), which is the
+	// constraint that actually makes the fallback safe.
+	//
+	// Two hyphens for dash, not one: a lone "-" is already the `none` marker,
+	// and the refusal line would otherwise read "X refused ... - nothing was
+	// installed", where the separator is indistinguishable from a status glyph.
+	dash:     "--",
+	ellipsis: "...",
+	arrow:    "->",
+	// bullet, by contrast, IS held to one rune: it is the only punctuation
+	// field that also occupies a marker slot (the dim "telemetry off" line in
+	// the consent prompt, printed directly opposite a green ok). Its collision
+	// with `none` is deliberate rather than tolerated — in that slot "nothing
+	// is being sent" is precisely what `none` means — and in its other, purely
+	// decorative use a hyphen separates two clauses without being mistaken for
+	// the pipe that already appears in "telemetry on|off".
+	bullet: "-",
+
+	// Three runes in BOTH sets, so `deps tree` indents identically either way
+	// and a peer line never shifts under the fallback. These are `tree -A`'s
+	// connectors.
+	treeTee: "|--",
+	treeEnd: "`--",
 }
 
 // glyphs returns the status-marker set appropriate for the current terminal.

@@ -241,7 +241,10 @@ func TestBundleVerificationStatus(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			sym, txt := bundleVerificationStatus(c.verified, c.authenticated)
+			// unicodeGlyphs explicitly, so this case table keeps pinning the
+			// exact Unicode wording regardless of the runner's console. The
+			// ASCII counterpart is asserted in glyphs_test.go.
+			sym, txt := bundleVerificationStatus(unicodeGlyphs, c.verified, c.authenticated)
 			if sym != c.wantSym {
 				t.Errorf("symbol: got %q want %q", sym, c.wantSym)
 			}

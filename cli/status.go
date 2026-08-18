@@ -98,7 +98,9 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		if ok {
 			fmt.Printf("  %s  %-18s %s\n", tick, label+":", val)
 		} else {
-			fmt.Printf("  %s  %-18s %s\n", cross, label+":", errVal)
+			// errVal is also JSON payload (statusReport.*.Error), so it keeps
+			// its Unicode form in the struct and is folded here, at the render.
+			fmt.Printf("  %s  %-18s %s\n", cross, label+":", foldPunctuationForConsole(errVal))
 		}
 	}
 

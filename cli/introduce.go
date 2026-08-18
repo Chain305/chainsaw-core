@@ -213,12 +213,23 @@ func renderModes(w io.Writer) {
 	}
 }
 
+// renderVocabulary prints the glossary for a person. Rows the catalog
+// marks AgentOnly are skipped, and CLIMeaning wins over Meaning where
+// the catalog carries both — see the audience note on
+// agenticux.VocabularyEntry.
 func renderVocabulary(w io.Writer) {
 	fmt.Fprintln(w, "Glossary — what the terms mean")
 	fmt.Fprintln(w, strings.Repeat("-", 40))
 	for _, v := range agenticux.Vocabulary() {
+		if v.AgentOnly {
+			continue
+		}
+		meaning := v.Meaning
+		if v.CLIMeaning != "" {
+			meaning = v.CLIMeaning
+		}
 		fmt.Fprintf(w, "• %s\n", v.Term)
-		for _, line := range wrapLines(v.Meaning, 72, "    ") {
+		for _, line := range wrapLines(meaning, 72, "    ") {
 			fmt.Fprintf(w, "    %s\n", line)
 		}
 		if len(v.Synonyms) > 0 {
@@ -228,14 +239,25 @@ func renderVocabulary(w io.Writer) {
 	}
 }
 
+// renderRoutingHeuristics prints the examples table for a person: the
+// CLI command to run, not the MCP tool to call. Agent-only rows (auth
+// bootstrap, reply-phrasing guidance) are skipped — they stay in the
+// MCP response and in `--json`.
 func renderRoutingHeuristics(w io.Writer) {
 	fmt.Fprintln(w, "Examples — common requests and what to do")
 	fmt.Fprintln(w, strings.Repeat("-", 40))
 	for _, h := range agenticux.RoutingHeuristics() {
+		if h.AgentOnly {
+			continue
+		}
+		do := h.Do
+		if h.CLIDo != "" {
+			do = h.CLIDo
+		}
 		for _, line := range wrapLines("when "+h.Match, 72, "    ") {
 			fmt.Fprintf(w, "  %s\n", line)
 		}
-		for _, line := range wrapLines("→ "+h.Do, 72, "      ") {
+		for _, line := range wrapLines("→ "+do, 72, "      ") {
 			fmt.Fprintf(w, "    %s\n", line)
 		}
 		fmt.Fprintln(w)

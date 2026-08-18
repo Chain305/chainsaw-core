@@ -75,8 +75,9 @@ package cli
 //  3. OS keyring under service "chainsaw", account
 //     "cargo-credentials@<server>" — populated by
 //     `chainsaw cargo-credentials store`.
-//  4. ~/.chainsaw/config.yaml `cargo_credentials:` key (plaintext;
-//     enforced 0600 file mode on read).
+//  4. The `cargo_credentials:` key in the config file (plaintext; enforced
+//     0600 file mode on read). Its path is platform-dependent — see
+//     platform.ConfigHome; `chainsaw status` prints the resolved value.
 //
 // Errors are sent to cargo as {"Err":{"kind":"other","message":"..."}}
 // so cargo surfaces a real diagnostic instead of a generic "credential
@@ -357,7 +358,7 @@ func resolveCargoCredentialToken() (string, error) {
 			"no Chainsaw client_credential available. Tried (in order): " +
 				"CHAINSAW_CARGO_CREDENTIALS env, CHAINSAW_CLIENT_CREDENTIALS env, " +
 				"OS keyring (chainsaw/cargo-credentials@<server>), " +
-				"~/.chainsaw/config.yaml cargo_credentials. " +
+				cargoCredsYAMLSource() + ". " +
 				"Fix: run `chainsaw cargo-credentials store --client-id ... --client-secret ...` " +
 				"or set CHAINSAW_CARGO_CREDENTIALS=client_id:client_secret.")
 	}
@@ -394,9 +395,19 @@ func lookupCargoCredentials() (creds, source string) {
 	// double-check file perms here because the file is already
 	// machine-readable to the user.
 	if v := strings.TrimSpace(viper.GetString("cargo_credentials")); v != "" {
-		return v, "~/.chainsaw/config.yaml cargo_credentials"
+		return v, cargoCredsYAMLSource()
 	}
 	return "", ""
+}
+
+// cargoCredsYAMLSource names the YAML credential source with the config
+// file's REAL location. It used to be the literal "~/.chainsaw/config.yaml",
+// which is the macOS path only — a Windows or Linux operator debugging a
+// cargo 401 was told to check a file that does not exist on their machine.
+// platform.ConfigHome() (via configFilePath) is the same resolver
+// `chainsaw status` prints, so the two can no longer disagree.
+func cargoCredsYAMLSource() string {
+	return displayPath(configFilePath()) + " cargo_credentials"
 }
 
 // splitCargoCreds parses "client_id:client_secret". A duplicate of

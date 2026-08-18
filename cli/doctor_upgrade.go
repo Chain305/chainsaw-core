@@ -179,11 +179,44 @@ func runDoctorUpgradeCheck(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// upgradeSeverityMark maps a doctor severity to the STATUS-column marker.
+//
+// This is the console-aware replacement for doctor.Severity.Mark(), which
+// returns the Unicode alphabet unconditionally (see its doc comment for why
+// the decision could not live in core/doctor: core/cli imports core/doctor,
+// so reaching back for glyphs() would close an import cycle). The mapping is
+// three lines, so the alternative — a second copy of the codepage probe in
+// core/doctor — would have cost more and could drift.
+//
+// The "?" default is deliberately left as a literal: it is already ASCII, it
+// means "this build emitted a severity this renderer does not know", and it
+// must stay distinct from every real marker in both alphabets.
+func upgradeSeverityMark(g glyphSet, s doctor.Severity) string {
+	switch s {
+	case doctor.SeverityOK:
+		return g.ok
+	case doctor.SeverityWarn:
+		return g.warn
+	case doctor.SeverityBreaking:
+		return g.fail
+	default:
+		return "?"
+	}
+}
+
 // printUpgradeReport renders the scorecard in a one-line-per-check
-// format with ✓ / ⚠ / ✗ markers and a summary footer. Kept separate
-// from the JSON path so --json stays machine-stable.
+// format with ok / warn / breaking markers (glyphSet, so a CP437 console
+// gets + / ! / X instead of three identical boxes) and a summary footer.
+// Kept separate from the JSON path so --json stays machine-stable.
+//
+// NOTE the boundary: the markers and the verdict line are this renderer's
+// own text and follow the console. Finding.Message and Finding.Remediation
+// are NOT touched — they are `json:"message"` payload, so making them vary
+// with the operator's codepage would make the machine-readable report
+// machine-dependent. Their em dashes are a copy question, not a codepage one.
 func printUpgradeReport(cmd *cobra.Command, r *doctor.Report) {
 	out := cmd.OutOrStdout()
+	g := glyphs()
 	fmt.Fprintf(out, "chainsaw doctor --upgrade-check\n")
 	fmt.Fprintf(out, "  version : %s\n", r.Version)
 	fmt.Fprintf(out, "  platform: %s\n\n", r.Platform)
@@ -191,7 +224,7 @@ func printUpgradeReport(cmd *cobra.Command, r *doctor.Report) {
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "STATUS\tCHECK\tMESSAGE")
 	for _, f := range r.Findings {
-		mark := f.Severity.Mark()
+		mark := upgradeSeverityMark(g, f.Severity)
 		fmt.Fprintf(w, "%s\t%s\t%s\n", mark, f.Check, f.Message)
 	}
 	w.Flush()
@@ -225,7 +258,7 @@ func printUpgradeReport(cmd *cobra.Command, r *doctor.Report) {
 		len(r.Findings)-warns-breakings, warns, breakings)
 	switch r.Worst() {
 	case doctor.SeverityBreaking:
-		fmt.Fprintln(out, "verdict: DO NOT UPGRADE — resolve breaking findings first. See MIGRATIONS.md.")
+		fmt.Fprintln(out, "verdict: DO NOT UPGRADE "+g.dash+" resolve breaking findings first. See MIGRATIONS.md.")
 	case doctor.SeverityWarn:
 		fmt.Fprintln(out, "verdict: upgrade possible; review warnings and MIGRATIONS.md before cutover.")
 	default:

@@ -183,7 +183,7 @@ func runDoctorOffline(cmd *cobra.Command, _ []string) error {
 		// know whether the loaded bundle is merely tamper-checked or actually
 		// bot-signed. Active bundle picks up CHAINSAW_INTEL_BUNDLE_STRICT_VERIFY
 		// at load time, so this reflects the operator's chosen posture.
-		sym, txt := bundleVerificationStatus(bundle.Verified(), bundle.Authenticated())
+		sym, txt := bundleVerificationStatus(g, bundle.Verified(), bundle.Authenticated())
 		fmt.Fprintf(out, "  verify:      %s %s\n", sym, txt)
 	} else {
 		fmt.Fprintln(out, "  bundle:      (not loaded — refreshable providers will run with empty data)")

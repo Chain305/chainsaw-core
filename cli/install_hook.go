@@ -21,8 +21,9 @@ import (
 // to avoid sharing flag state with the package-global registration.
 //
 // The server URL is resolved from the standard config chain — the root
-// --server flag, CHAINSAW_SERVER env var, or ~/.config/chainsaw/config.yaml
-// (via cfgServerURL). There is deliberately no local --server flag here:
+// --server flag, CHAINSAW_SERVER env var, or the saved config.yaml under the
+// config home (via cfgServerURL; the config home is platform-dependent — see
+// cli/platform.ConfigHome). There is deliberately no local --server flag here:
 // a duplicate would shadow the root flag in unpredictable ways.
 func newInstallHookCmd() *cobra.Command {
 	c := &cobra.Command{
@@ -40,11 +41,12 @@ configured, the block is still written but without a server URL.
 
 The generated URLs are ` + "`<server>/repository/@<org-slug>/<ecosystem>/`" + `, matching
 the dashboard's "Save this secret now" snippet exactly. Any base path comes
-from the configured server URL itself, so a deployment mounted behind an edge
-prefix (` + "`--server https://chain305.com/chainproxy`" + `) and one served at the root
-(` + "`--server http://localhost:8787`" + `) each get a URL their own proxy serves.
+from the configured server URL itself, so the hosted service
+(` + "`--server https://chain305.com/chainproxy`" + `) and a proxy you run yourself at
+the root of a host (` + "`--server http://localhost:8787`" + `) each get a URL their own
+proxy serves.
 
-The org slug is resolved from --org when set, then from /api/orgs after
+The org slug is resolved from --org when set, then from your account after
 ` + "`chainsaw auth login`" + `, and finally falls back to a visible placeholder so a
 misconfigured install fails loud: the proxy rejects SLUG-less URLs with
 CHW-4314 ("legacy URLs without the org slug are disabled").
@@ -52,14 +54,14 @@ CHW-4314 ("legacy URLs without the org slug are disabled").
 Examples:
   chainsaw install-hook npm
   chainsaw install-hook --all
-  chainsaw --server https://chainsaw.example install-hook npm --org acme-corp`,
+  chainsaw --server https://chain305.com/chainproxy install-hook npm --org acme-corp`,
 		RunE: runInstallHook,
 	}
 	c.Flags().Bool("all", false, "Wire every installed manager")
 	c.Flags().String("scope", "", "Where to write config: \"user\" (global) or \"project\" (current dir). Prompts when unset on a TTY.")
-	c.Flags().String("credentials", "", "Embed the given \"client_id:client_secret\" pair in the generated config. When unset the CLI offers to mint a fresh pair via /api/clients on a TTY.")
+	c.Flags().String("credentials", "", "Embed the given \"client_id:client_secret\" pair in the generated config. When unset the CLI offers to issue a fresh pair for you on a TTY.")
 	c.Flags().Bool("no-credentials", false, "Skip the credentials prompt and emit an unauthenticated block (the pre-2026-04 behaviour).")
-	c.Flags().String("org", "", "Org slug to splice into the generated URLs (e.g. acme-corp). Auto-discovered via /api/orgs when unset and the CLI has a valid auth token. Required by the proxy — slug-less URLs fail with CHW-4314 (BUG-A6).")
+	c.Flags().String("org", "", "Org slug to splice into the generated URLs (e.g. acme-corp). Auto-discovered from your account when unset and you are logged in. Required by the proxy — slug-less URLs fail with CHW-4314.")
 	return c
 }
 

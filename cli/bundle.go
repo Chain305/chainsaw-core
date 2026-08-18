@@ -62,14 +62,20 @@ docs/install/AIRGAP.md for the refresh cadence and per-provider matrix.`,
 // loaded bundle's verification posture, mirroring the two layers in
 // intelligence.verifyBundleSignature: skipped, digest-bound integrity only,
 // or full Sigstore authenticity. Kept pure (no *Bundle) for testability.
-func bundleVerificationStatus(verified, authenticated bool) (symbol, text string) {
+//
+// g is passed in rather than read from glyphs() inside so the function stays
+// a pure mapping and the test can render both alphabets without touching
+// process state. `doctor --offline` reaches this same helper, which is why it
+// had to move: the offline matrix was already ASCII-aware, so on a CP437
+// console its bundle row was the one line still emitting a boxed marker.
+func bundleVerificationStatus(g glyphSet, verified, authenticated bool) (symbol, text string) {
 	switch {
 	case !verified:
-		return "⚠", "skipped — signature not checked (CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY=1)"
+		return g.warn, "skipped " + g.dash + " signature not checked (CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY=1)"
 	case authenticated:
-		return "✓", "authenticated — full Sigstore: Fulcio cert chain + Rekor inclusion + OIDC issuer + signer identity"
+		return g.ok, "authenticated " + g.dash + " full Sigstore: Fulcio cert chain + Rekor inclusion + OIDC issuer + signer identity"
 	default:
-		return "✓", "integrity only — digest-bound; authenticity not checked (run with --strict or set CHAINSAW_INTEL_BUNDLE_STRICT_VERIFY=1)"
+		return g.ok, "integrity only " + g.dash + " digest-bound; authenticity not checked (run with --strict or set CHAINSAW_INTEL_BUNDLE_STRICT_VERIFY=1)"
 	}
 }
 
@@ -98,6 +104,7 @@ func newBundleVerifyCmd() *cobra.Command {
 				return fmt.Errorf("verify failed: %w", err)
 			}
 			out := cmd.OutOrStdout()
+			g := glyphs()
 			m := b.Manifest()
 			fmt.Fprintf(out, "Bundle:    %s\n", b.Path())
 			fmt.Fprintf(out, "Schema:    %s\n", m.Schema)
@@ -107,11 +114,11 @@ func newBundleVerifyCmd() *cobra.Command {
 			// "0001-01-01T00:00:00Z (0s ago)" reads as brand new, which
 			// is the misreading the Stale() fix exists to prevent.
 			if m.BuildTime.IsZero() {
-				fmt.Fprintln(out, "Built:     unknown — manifest carries no build_time")
+				fmt.Fprintln(out, "Built:     unknown "+g.dash+" manifest carries no build_time")
 			} else {
 				fmt.Fprintf(out, "Built:     %s (%s ago)\n", m.BuildTime.Format(time.RFC3339), b.Age().Round(time.Hour))
 			}
-			sym, txt := bundleVerificationStatus(b.Verified(), b.Authenticated())
+			sym, txt := bundleVerificationStatus(g, b.Verified(), b.Authenticated())
 			fmt.Fprintf(out, "Signature: %s %s\n", sym, txt)
 			// The verb whose entire job is verification must not report
 			// success when verification did not run.
@@ -126,12 +133,12 @@ func newBundleVerifyCmd() *cobra.Command {
 			if !b.Verified() && !allowUnverified {
 				return &ExitCodeError{
 					Code: ExitOpError,
-					Err: fmt.Errorf("signature verification did not run (%s is set) — this bundle is UNVERIFIED; pass --allow-unverified to accept it anyway",
+					Err: fmt.Errorf("signature verification did not run (%s is set) "+g.dash+" this bundle is UNVERIFIED; pass --allow-unverified to accept it anyway",
 						intelligence.BundleSkipVerifyEnvVar),
 				}
 			}
 			if b.Stale() {
-				fmt.Fprintf(out, "Freshness: ⚠ stale — bundle older than %s (or the manifest has no build_time); refresh recommended\n", intelligence.BundleStaleAfter)
+				fmt.Fprintf(out, "Freshness: %s stale %s bundle older than %s (or the manifest has no build_time); refresh recommended\n", g.warn, g.dash, intelligence.BundleStaleAfter)
 				// Exit 1, not 2 — the file header has always documented
 				// stale as warn-only and distinct from a verification
 				// failure, but the plain fmt.Errorf here mapped to
@@ -141,7 +148,7 @@ func newBundleVerifyCmd() *cobra.Command {
 				// documented code 1 was unreachable.
 				return &ExitCodeError{Code: ExitBlocked, Err: fmt.Errorf("stale bundle")}
 			}
-			fmt.Fprintln(out, "Freshness: ✓ fresh")
+			fmt.Fprintln(out, "Freshness: "+g.ok+" fresh")
 			fmt.Fprintln(out, "Contents:")
 			for _, k := range b.ContentKeys() {
 				fmt.Fprintf(out, "  - %s\n", k)

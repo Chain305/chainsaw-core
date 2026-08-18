@@ -26,7 +26,13 @@ package cli
 //	$ chainsaw guard allow npm:jsdoc
 //	Allowed npm:jsdoc on this machine.
 //	  Recorded  looks like a typosquat of "jsdom" (distance 1, edit-distance, target rank #451)
-//	  Stored    ~/.chainsaw/guard_allowlist.json
+//	  Stored    <config home>/guard_allowlist.json
+//
+// The "Stored" line prints the RESOLVED path (guardAllowlistPath). The config
+// home is platform-dependent — see cli/platform.ConfigHome — so it is
+// ~/.chainsaw on macOS, ~/.config/chainsaw on Linux, and
+// %APPDATA%\Chainsaw on Windows. Never write one of those as the universal
+// answer; `chainsaw status` prints the real one.
 //
 // TRUST ON FIRST USE. `guard allow` evaluates the coordinate at the moment you
 // allow it and records the verdict text verbatim, so the file answers "what
@@ -258,8 +264,8 @@ func guardAllowlistPathIsNotASymlink(path string) error {
 // writeGuardAllowlist persists the store at mode 0600, creating parent dirs.
 //
 // SYMLINK REFUSAL, THEN AN ATOMIC RENAME. Writing straight to the path with
-// os.WriteFile + os.Chmod follows a symlink: a link planted at
-// ~/.chainsaw/guard_allowlist.json turned `chainsaw guard allow` into a
+// os.WriteFile + os.Chmod follows a symlink: a link planted at the allowlist
+// path (guardAllowlistPath) turned `chainsaw guard allow` into a
 // truncate-and-clobber of whatever it pointed at, with partly attacker-chosen
 // JSON as the content and 0600 as the final mode. So:
 //
@@ -629,29 +635,8 @@ func sortedGuardAllowlistEcosystems() []string {
 var guardAllowCmd = &cobra.Command{
 	Use:   "allow [<ecosystem>:<name>]",
 	Short: "Clear a false typosquat block for one package, locally and permanently",
-	Long: `Record a local decision that one package is NOT a typosquat, so the guard
-stops refusing it on this machine.
-
-Typosquat detection is name-similarity inference, and no heuristic reaches
-zero false positives. This is the escape hatch that makes a residual one
-survivable: instead of turning the guard off, you clear the single coordinate
-that was wrong. The decision is written to a small JSON file (mode 0600) next
-to the guard's other local state, with the verdict text and a timestamp, so it
-reads as an audit trail rather than a list of names.
-
-Offline. Nothing is sent anywhere, and nothing is shared with other machines.
-
-WHAT IT CANNOT DO. The allowlist clears typosquat verdicts and nothing else.
-A known-malicious package (the OpenSSF feed and the built-in floor) and a
-known-vulnerable version are evidence about a published incident, not a guess
-about a name, so they are refused here and keep blocking at install time. The
-byte-level behavioral checks are excluded too, and deliberately: they read the
-package's bytes, which change with every release, so a version-less exemption
-would silently cover a future compromised version of a package you vouched for
-while it was clean.
-
-Exit codes: 0 on success, 1 when the coordinate is refused on evidence the
-allowlist cannot clear, 2 on an IO failure, 4 on a bad invocation.`,
+	// Long carries one runtime-resolved path, so it is finished in init()
+	// below. guardAllowLongTmpl holds the %s.
 	Example: `  # clear a false typosquat block
   chainsaw guard allow npm:jsdoc
 
@@ -668,7 +653,47 @@ allowlist cannot clear, 2 on an IO failure, 4 on a bad invocation.`,
 	RunE:         runGuardAllow,
 }
 
+// guardAllowLongTmpl is guardAllowCmd.Long with the allowlist location left
+// as a %s. The path is platform-dependent (cli/platform.ConfigHome) and
+// env-overridable, so hardcoding "~/.chainsaw/guard_allowlist.json" — as this
+// help once did — is wrong for every Windows and Linux operator.
+const guardAllowLongTmpl = `Record a local decision that one package is NOT a typosquat, so the guard
+stops refusing it on this machine.
+
+Typosquat detection is name-similarity inference, and no heuristic reaches
+zero false positives. This is the escape hatch that makes a residual one
+survivable: instead of turning the guard off, you clear the single coordinate
+that was wrong. The decision is written to a small JSON file (mode 0600) next
+to the guard's other local state, with the verdict text and a timestamp, so it
+reads as an audit trail rather than a list of names.
+
+Offline. Nothing is sent anywhere, and nothing is shared with other machines.%s
+
+WHAT IT CANNOT DO. The allowlist clears typosquat verdicts and nothing else.
+A known-malicious package (the OpenSSF feed and the built-in floor) and a
+known-vulnerable version are evidence about a published incident, not a guess
+about a name, so they are refused here and keep blocking at install time. The
+byte-level behavioral checks are excluded too, and deliberately: they read the
+package's bytes, which change with every release, so a version-less exemption
+would silently cover a future compromised version of a package you vouched for
+while it was clean.
+
+Exit codes: 0 on success, 1 when the coordinate is refused on evidence the
+allowlist cannot clear, 2 on an IO failure, 4 on a bad invocation.`
+
 func init() {
+	// Resolve the store location for the help text. guardAllowlistPath()
+	// reads only the environment and $HOME, so it is safe at init() —
+	// before viper, flags, or initConfig(). It returns "" when no config
+	// home can be resolved at all; in that case say nothing rather than
+	// print a dangling "Stored in .".
+	if p := displayPath(guardAllowlistPath()); p != "" {
+		guardAllowCmd.Long = fmt.Sprintf(guardAllowLongTmpl,
+			fmt.Sprintf("\n\nStored in %s (override with "+guardAllowlistEnv+").", p))
+	} else {
+		guardAllowCmd.Long = fmt.Sprintf(guardAllowLongTmpl, "")
+	}
+
 	guardAllowCmd.Flags().Bool("list", false, "list the allowed coordinates and exit")
 	// `--remove` rather than a `guard deny` sibling, on purpose. "deny" reads
 	// as "add to a denylist" — a control this guard does not have — so

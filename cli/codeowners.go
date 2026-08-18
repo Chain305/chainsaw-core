@@ -15,10 +15,9 @@ var codeownersCmd = &cobra.Command{
 	Long: `Pull a repository's CODEOWNERS file from GitHub, persist the
 parsed mappings, and answer path → owner queries against them.
 
-Talks exclusively to the Chainsaw API — run 'chainsaw auth login'
-first so the CLI has a Bearer token. As of BUG-CLI-4 this command no
-longer reads CHAINSAW_DATABASE_URL; the server holds the database
-connection on the CLI's behalf.`,
+Everything goes through the Chain305 server, so run 'chainsaw auth login'
+first. Nothing is stored locally and the CLI needs no database access of
+its own — the server keeps the mappings for you.`,
 }
 
 var codeownersSyncCmd = &cobra.Command{

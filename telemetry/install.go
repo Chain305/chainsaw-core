@@ -1,8 +1,11 @@
 package telemetry
 
 // install_id is the cross-channel identity anchor. A UUIDv7 is generated
-// the first time one is actually needed and persisted under the XDG config
-// directory. The ID is emitted as the PostHog distinct_id (prefixed
+// the first time one is actually needed and persisted in the chainsaw config
+// directory — cli/platform.ConfigHome, the same directory as config.yaml and
+// guard_state.json, NOT "the XDG config directory" as this comment used to
+// claim (that is one of three answers, and the wrong one on macOS). The ID is
+// emitted as the PostHog distinct_id (prefixed
 // "install:") until a user-authenticated request arrives — at that point
 // the server issues an Alias(install:<id> → user:<user_id>) so the pre-auth
 // events merge into the authenticated person.
@@ -30,12 +33,14 @@ package telemetry
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 
+	"github.com/chain305/chainsaw-core/cli/platform"
 	"github.com/google/uuid"
 )
 
@@ -50,10 +55,11 @@ const (
 	// it; the per-run umbrellas (CHAINSAW_OFFLINE, DO_NOT_TRACK) do not.
 	installIDDisabled = "disabled"
 
-	// envConfigHome mirrors cli/platform.EnvConfigHome. Duplicated as a
-	// string rather than imported so core/telemetry keeps no dependency on
-	// core/cli; see ConfigDir.
-	envConfigHome = "CHAINSAW_CONFIG_HOME"
+	// envConfigHome is cli/platform.EnvConfigHome. It used to be a
+	// hand-copied string literal "so core/telemetry keeps no dependency on
+	// core/cli"; the copy is now an alias of the real constant, which is
+	// one fewer thing that can drift. See ConfigDir.
+	envConfigHome = platform.EnvConfigHome
 )
 
 // Install is the persistent install record. ID is the PostHog distinct_id
@@ -74,22 +80,67 @@ type Install struct {
 //
 // A non-nil error is a filesystem problem (permissions, unreadable file);
 // callers reporting status should render that as "unknown", not as "none".
+//
+// PeekInstall inspects exactly the directory it is given and nothing else.
+// The canonical-plus-legacy search lives in PeekProcessInstall; keeping this
+// function single-directory is what lets a test point it at a t.TempDir()
+// without the developer's real install record leaking in.
 func PeekInstall(dir string) (Install, bool, error) {
+	install, _, found, err := peekAcross(dir)
+	return install, found, err
+}
+
+// readInstallFile returns the raw (trimmed) file contents. A missing file and
+// an empty one are both reported as not-found, matching LoadInstall's own
+// treatment of an empty file as "first run".
+func readInstallFile(dir string) (string, bool, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, installFilename))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Install{}, false, nil
+			return "", false, nil
 		}
-		return Install{}, false, err
+		return "", false, err
 	}
-	switch val := strings.TrimSpace(string(raw)); {
-	case val == installIDDisabled:
-		return Install{Disabled: true}, true, nil
-	case val != "":
-		return Install{ID: val}, true, nil
-	default:
-		return Install{}, false, nil
+	val := strings.TrimSpace(string(raw))
+	if val == "" {
+		return "", false, nil
 	}
+	return val, true, nil
+}
+
+func installFromValue(val string) Install {
+	if val == installIDDisabled {
+		return Install{Disabled: true}
+	}
+	return Install{ID: val}
+}
+
+// peekAcross reads the given directories in priority order and returns the
+// first record found, along with the directory it came from. It NEVER writes.
+//
+// A filesystem error on one directory does not abort the walk: if the
+// canonical directory is unreadable but a legacy directory still holds the
+// id, honoring the id we can actually see beats reporting a failure and
+// letting the caller mint a replacement. The error is surfaced only when no
+// directory yielded a record.
+func peekAcross(dirs ...string) (Install, string, bool, error) {
+	var firstErr error
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		val, found, err := readInstallFile(dir)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if found {
+			return installFromValue(val), dir, true, nil
+		}
+	}
+	return Install{}, "", false, firstErr
 }
 
 // LoadInstall resolves the install_id for this binary, creating and
@@ -106,12 +157,21 @@ func PeekInstall(dir string) (Install, bool, error) {
 // CLI's guard_state.json, which core/telemetry deliberately cannot see), so
 // the CALLER owns it. Nothing here can tell a consenting user from a user
 // who was never asked.
+//
+// Like PeekInstall, this operates on exactly the directory it is given. The
+// canonical-plus-legacy resolution is in ProcessInstall.
 func LoadInstall(dir string) (Install, error) {
 	if install, found, err := PeekInstall(dir); err != nil {
 		return Install{}, err
 	} else if found {
 		return install, nil
 	}
+	return mintInstall(dir)
+}
+
+// mintInstall is the write path: it is reached only once every directory we
+// know about has been searched and none held a record.
+func mintInstall(dir string) (Install, error) {
 	path := filepath.Join(dir, installFilename)
 
 	// First run — either the file is missing or it was empty. Respect
@@ -159,42 +219,129 @@ func LoadInstall(dir string) (Install, error) {
 }
 
 // ResetInstall erases the install record so the next run starts fresh.
-// Equivalent to `rm ~/.config/chainsaw/install_id` but routed through Go
-// for Windows portability.
+// Equivalent to deleting install_id from dir, but routed through Go for
+// Windows portability.
+//
+// dir is whatever the caller resolved — in practice ConfigDir(), whose
+// location is platform- and env-dependent; `chainsaw telemetry status`
+// prints the resolved directory.
+//
+// When dir IS the canonical directory this also erases any legacy copy. That
+// is load-bearing rather than tidy: migrateInstallFile deliberately leaves
+// the legacy file in place, so a reset that cleared only the canonical copy
+// would be silently undone by the next run re-reading the legacy one — the
+// user asks to be forgotten and gets their old id back. A caller passing some
+// other directory (tests) gets exactly that directory touched and no more.
 func ResetInstall(dir string) error {
-	path := filepath.Join(dir, installFilename)
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removeInstallFile(dir); err != nil {
+		return err
+	}
+	canonical, legacy, err := installDirsFn()
+	if err != nil || !sameDir(dir, canonical) {
+		return nil
+	}
+	for _, d := range legacy {
+		if err := removeInstallFile(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeInstallFile(dir string) error {
+	if err := os.Remove(filepath.Join(dir, installFilename)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
 // ConfigDir returns the config directory for chainsaw, creating it if
-// missing. Precedence:
+// missing. It is cli/platform.ConfigHome — the ONE resolver — plus a
+// MkdirAll. See that function for the precedence rules.
 //
-//  1. CHAINSAW_CONFIG_HOME (with leading ~ expansion) — the universal
-//     override documented for CI, nix, and portable installs.
-//  2. XDG_CONFIG_HOME/chainsaw on Unix, %APPDATA%/chainsaw on Windows.
-//  3. $HOME/.config/chainsaw.
+// This used to be a second, hand-written resolver that agreed with
+// cli/platform on Linux and disagreed everywhere else, so on macOS
+// config.yaml sat in ~/.chainsaw while install_id sat in ~/.config/chainsaw.
+// A comment on each copy asserted they "must stay in lockstep"; a comment is
+// not a mechanism. Calling the other resolver is.
 //
-// R9: step 1 used to be missing, so `CHAINSAW_CONFIG_HOME=/tmp/cfg2
-// chainsaw …` scoped config.yaml and guard_state.json into /tmp/cfg2 but
-// still persisted install_id — a stable machine identifier — outside it,
-// and `chainsaw telemetry reset` targeted a directory the operator never
-// configured.
-//
-// The override is read by NAME rather than through cli/platform on
-// purpose: core/telemetry sits below core/cli in the dependency graph and
-// a new package edge upward is not worth ten lines. The two resolvers
-// must stay in lockstep — see cli/platform.ConfigHome, whose override
-// branch likewise returns the directory ITSELF with no "chainsaw" suffix.
+// R9 (retained): the CHAINSAW_CONFIG_HOME override must scope install_id too,
+// or a CI container that scopes CHAINSAW_CONFIG_HOME still persists a stable
+// machine identifier outside it and `chainsaw telemetry reset` targets a
+// directory the operator never configured. The override branch returns the
+// directory ITSELF, with no "chainsaw" suffix.
 func ConfigDir() (string, error) {
-	if override := strings.TrimSpace(os.Getenv(envConfigHome)); override != "" {
-		dir := expandTilde(override)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return "", err
+	dir, err := configHome()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// configHome resolves the canonical directory without creating it.
+//
+// cli/platform.ConfigHome documents that it may return an empty or relative
+// path when $HOME is unresolvable, and leaves it to callers to cope. Here
+// "cope" means refuse: MkdirAll on a relative path would scatter a config
+// directory — and a stable machine identifier — into whatever the process's
+// working directory happened to be. The old resolver propagated
+// os.UserHomeDir's error in that case and so does this.
+func configHome() (string, error) {
+	dir := platform.ConfigHome()
+	if dir == "" {
+		return "", errors.New("telemetry: cannot resolve the chainsaw config home")
+	}
+	if !filepath.IsAbs(dir) && strings.TrimSpace(os.Getenv(envConfigHome)) == "" {
+		return "", fmt.Errorf("telemetry: chainsaw config home resolved to the relative path %q (no home directory)", dir)
+	}
+	return dir, nil
+}
+
+// installDirsFn is indirected so tests can drive the read/migrate/mint logic
+// against two temp directories instead of depending on the host GOOS — on
+// Linux the canonical and legacy locations are the SAME directory, so a
+// GOOS-dependent test would silently assert nothing there.
+var installDirsFn = installDirs
+
+// installDirs resolves every directory install_id may live in, canonical
+// first, WITHOUT creating any of them. Creating the canonical directory is
+// the write path's job (mintInstall and migrateInstallFile both MkdirAll);
+// a peek that conjured directories would be a smaller version of the bug
+// PeekInstall exists to prevent.
+func installDirs() (string, []string, error) {
+	canonical, err := configHome()
+	if err != nil {
+		return "", nil, err
+	}
+	var legacy []string
+	for _, dir := range legacyInstallDirs() {
+		if dir == "" || sameDir(dir, canonical) {
+			continue
 		}
-		return dir, nil
+		legacy = append(legacy, dir)
+	}
+	return canonical, legacy, nil
+}
+
+// legacyInstallDirs reproduces the directory the pre-lockstep resolver
+// returned, so an install_id minted by an older binary is still found.
+//
+// Dropping this would not "clean up" anything: the id would simply be absent
+// from the canonical location, a fresh one would be minted, every affected
+// machine would be counted as a brand-new install, and the alias that stitches
+// a pre-signup install to its account would point at an id nobody uses. That
+// is silent and irreversible, which is why the old locations are load-bearing
+// rather than legacy trivia.
+//
+// Under CHAINSAW_CONFIG_HOME there is deliberately no legacy search: the old
+// resolver honored the override too, so nothing can be stranded, and reaching
+// outside a scoped directory would undo exactly the isolation R9 established.
+func legacyInstallDirs() []string {
+	if strings.TrimSpace(os.Getenv(envConfigHome)) != "" {
+		return nil
 	}
 	var base string
 	switch runtime.GOOS {
@@ -203,7 +350,7 @@ func ConfigDir() (string, error) {
 		if base == "" {
 			home, err := os.UserHomeDir()
 			if err != nil {
-				return "", err
+				return nil
 			}
 			base = filepath.Join(home, "AppData", "Roaming")
 		}
@@ -212,16 +359,68 @@ func ConfigDir() (string, error) {
 		if base == "" {
 			home, err := os.UserHomeDir()
 			if err != nil {
-				return "", err
+				return nil
 			}
 			base = filepath.Join(home, ".config")
 		}
 	}
-	dir := filepath.Join(base, "chainsaw")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+	return []string{filepath.Join(base, "chainsaw")}
+}
+
+// sameDir compares two resolved directories. Windows and macOS default to
+// case-insensitive filesystems, and on Windows the two resolvers differ only
+// in the case of the leaf ("Chainsaw" vs "chainsaw") — treating those as
+// distinct would make the code copy a file onto itself.
+func sameDir(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.EqualFold(a, b)
 	}
-	return dir, nil
+	return a == b
+}
+
+// migrateInstallFile copies an existing install record into the canonical
+// directory. BEST EFFORT: every failure path returns silently, because the
+// caller already holds the id it read from `from` and will keep using it. A
+// machine that cannot complete the copy keeps working off the legacy file
+// forever, which is a non-event; losing the id is not.
+//
+// Written to a temp file and renamed so a partial write can never leave a
+// truncated file in the canonical location — that file would then shadow the
+// intact legacy one and hand back a corrupted id.
+//
+// The legacy file is deliberately NOT deleted. Deleting it would strand any
+// older chainsaw binary on the same machine (a system package alongside a
+// `go install`ed build, a pinned CI image), which would find nothing and mint
+// a second id for a machine that already has one — the exact failure this
+// migration exists to prevent, reintroduced from the other side. A stale
+// duplicate is harmless: the canonical copy always wins the read, and
+// ResetInstall clears both.
+func migrateInstallFile(from, to string) {
+	val, found, err := readInstallFile(from)
+	if err != nil || !found {
+		return
+	}
+	if err := os.MkdirAll(to, 0o755); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(to, ".install_id-*")
+	if err != nil {
+		return
+	}
+	name := tmp.Name()
+	if _, err := tmp.WriteString(val + "\n"); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return
+	}
+	if err := os.Rename(name, filepath.Join(to, installFilename)); err != nil {
+		os.Remove(name)
+	}
 }
 
 var (
@@ -240,15 +439,23 @@ var (
 // read decide what a later emit sees. Two file reads in one CLI invocation
 // is not a cost worth that coupling.
 //
-// ConfigDir() still creates the config DIRECTORY (it is shared with
-// config.yaml and guard_state.json). A directory is not an identifier; the
-// install_id file is what this must not conjure.
+// Searches the canonical directory first, then any legacy one. It does NOT
+// migrate what it finds: migration is a write, and the whole point of this
+// function is that a user inspecting their privacy state triggers no writes
+// at all. ProcessInstall does the migration, on the path where a write was
+// already going to happen.
+//
+// This no longer creates the config directory either — installDirs resolves
+// without MkdirAll. A directory is not an identifier, so creating one was
+// never the bug, but `CHAINSAW_OFFLINE=1 chainsaw telemetry status` leaving
+// no trace at all is a cleaner promise than one with a footnote.
 func PeekProcessInstall() (Install, bool, error) {
-	dir, err := ConfigDir()
+	canonical, legacy, err := installDirsFn()
 	if err != nil {
 		return Install{}, false, err
 	}
-	return PeekInstall(dir)
+	install, _, found, err := peekAcross(append([]string{canonical}, legacy...)...)
+	return install, found, err
 }
 
 // ProcessInstall returns the install record for the current process,
@@ -258,14 +465,31 @@ func PeekProcessInstall() (Install, bool, error) {
 //
 // THIS MINTS — see LoadInstall. Status/reporting callers want
 // PeekProcessInstall instead.
+//
+// Minting is the LAST resort: every known directory is searched first, and an
+// id found in a legacy one is returned unchanged and copied forward. Pointing
+// this at the canonical directory alone would have been the obvious one-line
+// fix and a data-destroying one — every macOS install would have looked brand
+// new on the first run of the new binary.
 func ProcessInstall() (Install, error) {
 	processInstallOnce.Do(func() {
-		dir, err := ConfigDir()
+		canonical, legacy, err := installDirsFn()
 		if err != nil {
 			processInstallErr = err
 			return
 		}
-		processInstall, processInstallErr = LoadInstall(dir)
+		install, from, found, err := peekAcross(append([]string{canonical}, legacy...)...)
+		switch {
+		case found:
+			if !sameDir(from, canonical) {
+				migrateInstallFile(from, canonical)
+			}
+			processInstall = install
+		case err != nil:
+			processInstallErr = err
+		default:
+			processInstall, processInstallErr = mintInstall(canonical)
+		}
 	})
 	return processInstall, processInstallErr
 }
@@ -295,25 +519,9 @@ func DistinctID(install Install) string {
 	return "install:" + install.ID
 }
 
-// expandTilde resolves a leading "~" in a CHAINSAW_CONFIG_HOME override.
-// Mirrors cli/platform.expandTilde; kept byte-compatible with it so the
-// two config-home resolvers agree on every input.
-func expandTilde(p string) string {
-	if p == "~" {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			return home
-		}
-		return p
-	}
-	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
-			return p
-		}
-		return filepath.Join(home, p[2:])
-	}
-	return p
-}
+// (The local expandTilde copy that used to live here is gone: it existed only
+// to be "kept byte-compatible" with cli/platform.expandTilde, and the tilde
+// expansion now happens exactly once, inside cli/platform.ConfigHome.)
 
 func writeInstallFile(dir, path, value string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {

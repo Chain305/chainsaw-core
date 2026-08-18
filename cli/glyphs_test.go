@@ -22,8 +22,10 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/chain305/chainsaw-core/doctor"
 	"github.com/spf13/cobra"
 )
 
@@ -73,6 +75,13 @@ func asciiOnly(s string) bool {
 // what this change fixes; the prose punctuation is a separate, far larger
 // sweep spanning files this change does not own, and is recorded as follow-up
 // rather than half-done here.
+//
+// UPDATE: that follow-up sweep has since landed for the files listed in
+// asciiOutputRenderers below, and those are held to the stricter asciiOnly
+// bar instead. This predicate stays the right one for output that this
+// package renders but that sweep did not reach (the wrapped guard, features,
+// status, and any prose that arrives as JSON payload rather than as a
+// renderer's own template).
 func noUnicodeMarkers(s string) (string, bool) {
 	for _, m := range []string{
 		unicodeGlyphs.ok, unicodeGlyphs.fail, unicodeGlyphs.warn,
@@ -454,4 +463,414 @@ func TestFeatures_ActiveAndInactiveMarkersDifferInASCII(t *testing.T) {
 	if asciiGlyphs.ok == asciiGlyphs.fail {
 		t.Fatal("active and inactive markers are identical — this IS the reported bug")
 	}
+}
+
+// ── the punctuation fields ─────────────────────────────────────────────────
+
+// dash, ellipsis, arrow, bullet and the two tree connectors are not markers,
+// so constraint 1 (exactly one rune) does not bind them — but constraint 2
+// (pure ASCII) is the one that makes the fallback safe and it binds all of
+// them. This pins each field's shape against the reasoning recorded beside it
+// in output.go, so a later edit cannot quietly reintroduce a multi-byte
+// "fallback" or unbalance the tree.
+func TestGlyphSets_PunctuationFields(t *testing.T) {
+	for name, s := range map[string]string{
+		"dash": asciiGlyphs.dash, "ellipsis": asciiGlyphs.ellipsis,
+		"arrow": asciiGlyphs.arrow, "bullet": asciiGlyphs.bullet,
+		"treeTee": asciiGlyphs.treeTee, "treeEnd": asciiGlyphs.treeEnd,
+	} {
+		if s == "" {
+			t.Errorf("fallback %s is empty — the character would silently vanish", name)
+		}
+		if !asciiOnly(s) {
+			t.Errorf("fallback %s = %q is not 7-bit ASCII", name, s)
+		}
+	}
+	// bullet is the one punctuation field that also occupies a MARKER slot
+	// (the dim "telemetry off" line, printed directly opposite a green ok in
+	// the consent prompt), so it inherits the single-rune rule.
+	for setName, set := range map[string]glyphSet{"unicode": unicodeGlyphs, "ascii": asciiGlyphs} {
+		if n := utf8.RuneCountInString(set.bullet); n != 1 {
+			t.Errorf("%s set: bullet = %q is %d runes, want 1 (it doubles as a marker)", setName, set.bullet, n)
+		}
+	}
+	// The tree connectors must be the SAME width in both sets, or every peer
+	// line in `deps tree` would shift horizontally under the fallback and the
+	// two branches would no longer line up with each other.
+	for _, pair := range []struct{ name, u, a string }{
+		{"treeTee", unicodeGlyphs.treeTee, asciiGlyphs.treeTee},
+		{"treeEnd", unicodeGlyphs.treeEnd, asciiGlyphs.treeEnd},
+	} {
+		if utf8.RuneCountInString(pair.u) != utf8.RuneCountInString(pair.a) {
+			t.Errorf("%s: unicode %q is %d runes but ascii %q is %d — the tree would re-indent",
+				pair.name, pair.u, utf8.RuneCountInString(pair.u), pair.a, utf8.RuneCountInString(pair.a))
+		}
+	}
+	if unicodeGlyphs.treeTee == unicodeGlyphs.treeEnd || asciiGlyphs.treeTee == asciiGlyphs.treeEnd {
+		t.Error("the branch and last-branch connectors are identical — the tree loses its shape")
+	}
+}
+
+// ── the pure renderers ─────────────────────────────────────────────────────
+
+// Every status string these files build is produced by a pure glyphSet ->
+// string function, precisely so both alphabets can be rendered in one test
+// without touching process state. Each row pins TWO properties at once:
+//
+//   - the ASCII rendering is 7-bit, which is the fix; and
+//   - the Unicode rendering is byte-for-byte what shipped before, which is
+//     the promise to the 99% of users who were never affected. That second
+//     half is why the table carries literal expected strings rather than
+//     something computed from unicodeGlyphs — a computed expectation would
+//     happily follow a typo in the glyph set itself.
+func TestGlyphRenderers_ASCIIFallbackAndUnicodeUnchanged(t *testing.T) {
+	cases := []struct {
+		name        string
+		render      func(glyphSet) string
+		wantUnicode string
+	}{
+		// bundle.go — bundleVerificationStatus. Reached by BOTH `bundle
+		// verify` and `doctor --offline`; the offline matrix was already
+		// ASCII-aware, so this shared helper was the one row of that table
+		// still emitting a boxed marker.
+		{"bundle/skipped", func(g glyphSet) string {
+			s, txt := bundleVerificationStatus(g, false, false)
+			return s + " " + txt
+		}, "⚠ skipped — signature not checked (CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY=1)"},
+		{"bundle/integrity-only", func(g glyphSet) string {
+			s, txt := bundleVerificationStatus(g, true, false)
+			return s + " " + txt
+		}, "✓ integrity only — digest-bound; authenticity not checked (run with --strict or set CHAINSAW_INTEL_BUNDLE_STRICT_VERIFY=1)"},
+		{"bundle/authenticated", func(g glyphSet) string {
+			s, txt := bundleVerificationStatus(g, true, true)
+			return s + " " + txt
+		}, "✓ authenticated — full Sigstore: Fulcio cert chain + Rekor inclusion + OIDC issuer + signer identity"},
+
+		// pr_scan.go — the emoji trio. These deliberately do NOT collapse into
+		// the shared markers on a capable console: a GitHub Actions log is
+		// where they earn their keep.
+		{"pr-scan/allow", func(g glyphSet) string { return prScanVerdictIcon(g, "allow") }, "✅"},
+		{"pr-scan/warn", func(g glyphSet) string { return prScanVerdictIcon(g, "warn") }, "⚠️"},
+		{"pr-scan/block", func(g glyphSet) string { return prScanVerdictIcon(g, "block") }, "🚫"},
+
+		// doctor_upgrade.go — the console-aware replacement for
+		// doctor.Severity.Mark(), which cannot be made console-aware in place
+		// (core/cli imports core/doctor; the accessor would close a cycle).
+		{"upgrade/ok", func(g glyphSet) string { return upgradeSeverityMark(g, doctor.SeverityOK) }, "✓"},
+		{"upgrade/warn", func(g glyphSet) string { return upgradeSeverityMark(g, doctor.SeverityWarn) }, "⚠"},
+		{"upgrade/breaking", func(g glyphSet) string { return upgradeSeverityMark(g, doctor.SeverityBreaking) }, "✗"},
+		{"upgrade/unknown", func(g glyphSet) string { return upgradeSeverityMark(g, doctor.Severity(99)) }, "?"},
+
+		// deps.go — tree connectors and the CVE annotation.
+		{"deps/clean-peer", func(g glyphSet) string {
+			return depsTreeLine(g, sbomComponent{Name: "left-pad", Version: "1.3.0"}, false)
+		}, "├── left-pad@1.3.0"},
+		{"deps/last-vulnerable-peer", func(g glyphSet) string {
+			return depsTreeLine(g, sbomComponent{
+				Name: "lodash", Version: "4.17.20",
+				Properties: []sbomProperty{{Name: "chainsaw:vuln:cves", Value: "CVE-2021-23337"}},
+			}, true)
+		}, "└── lodash@4.17.20  ⚠  CVE-2021-23337"},
+		{"deps/no-cve-suffix", func(g glyphSet) string { return "|" + depsCVESuffix(g, "") + "|" }, "||"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.render(unicodeGlyphs); got != tc.wantUnicode {
+				t.Errorf("Unicode rendering changed — every UTF-8 terminal sees this:\n got %q\nwant %q", got, tc.wantUnicode)
+			}
+			got := tc.render(asciiGlyphs)
+			if !asciiOnly(got) {
+				t.Errorf("fallback rendering is not 7-bit ASCII: %q", got)
+			}
+			if got == "" {
+				t.Error("fallback rendering is empty")
+			}
+		})
+	}
+}
+
+// The verdict markers of a single command must stay mutually distinguishable
+// in the fallback, or pr-scan's CI log reports every dependency the same way.
+// This is the state-collapse regression, restated for the emoji surface.
+func TestPRScanVerdictIcon_StatesStaySeparable(t *testing.T) {
+	for setName, set := range map[string]glyphSet{"unicode": unicodeGlyphs, "ascii": asciiGlyphs} {
+		seen := map[string]string{}
+		for _, v := range []string{"allow", "warn", "block"} {
+			icon := prScanVerdictIcon(set, v)
+			if other, dup := seen[icon]; dup {
+				t.Errorf("%s set: %q and %q both render as %q", setName, v, other, icon)
+			}
+			seen[icon] = v
+		}
+	}
+}
+
+// ── whole-command renderings ───────────────────────────────────────────────
+
+// asciiOutputRenderers is the generalised assertion the pure-function table
+// cannot make on its own: drive each command's REAL text path end to end and
+// require that not one byte above 0x7F survives.
+//
+// WHAT IS IN SCOPE, and why the boundary is where it is. Every string here is
+// the RENDERER'S OWN template — its markers, separators, headings and verdict
+// lines. Data that merely flows through is deliberately excluded, and the
+// fixtures below therefore supply ASCII-only data. That is not the test
+// dodging the hard cases; it is the same distinction the product has to make.
+// doctor.Finding.Message and prScanSignal.Reason are `json:"..."` payload:
+// they are emitted verbatim into --json and into SARIF, so making them depend
+// on the operator's console codepage would make a machine-readable artifact
+// machine-DEPENDENT — a strictly worse bug than the one being fixed. Their
+// punctuation is a copy question for whoever owns that wording, not a
+// codepage question, and it is left alone here.
+//
+// Help text (Short, Long, flag usage) is excluded for a different reason:
+// see TestDoctorOfflineFlagHelp_NamesTheRenderedAlphabet.
+var asciiOutputRenderers = []struct {
+	name   string
+	render func(t *testing.T) string
+}{
+	{"pr-scan/entry-group", func(t *testing.T) string {
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		prev := "4.17.20"
+		printEntryGroup(cmd, "Upgraded dependencies", []prScanEntry{
+			{Ecosystem: "npm", Name: "lodash", Version: "4.17.21", PreviousVersion: &prev, Verdict: "allow"},
+			{Ecosystem: "npm", Name: "shady", Version: "0.0.1", Verdict: "warn",
+				Signals: []prScanSignal{{ID: "typosquat", Severity: "warn", Reason: "close to lodash"}}},
+			{Ecosystem: "pypi", Name: "evil", Version: "9.9.9", Verdict: "block",
+				Signals: []prScanSignal{{ID: "malware", Severity: "block", Reason: "known malware"}}},
+		})
+		return out.String()
+	}},
+	{"doctor/upgrade-report", func(t *testing.T) string {
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		printUpgradeReport(cmd, &doctor.Report{
+			Version: "0.20.2", Platform: "windows/amd64",
+			Findings: []doctor.Finding{
+				{Check: "tls", Severity: doctor.SeverityOK, SeverityName: "ok", Message: "cert and key parse"},
+				{Check: "flags", Severity: doctor.SeverityWarn, SeverityName: "warn", Message: "deprecated flag", Remediation: "drop it"},
+				{Check: "schema", Severity: doctor.SeverityBreaking, SeverityName: "breaking", Message: "schema is newer than this binary", Remediation: "upgrade the binary"},
+			},
+		})
+		return out.String()
+	}},
+	{"doctor/onboarding", func(t *testing.T) string {
+		var out bytes.Buffer
+		printDoctorOnboarding(&out, &doctorOnboardingState{
+			Steps: map[string]bool{"client_created": true, "policy_applied": true},
+		})
+		return out.String()
+	}},
+	{"doctor/strict-report-inconclusive-egress", func(t *testing.T) string {
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		printStrictReport(cmd, doctorStrictReport{
+			DeviceID: "dev", User: "u", Platform: "windows/amd64", ChainsawVersion: "0.20.2",
+			Ecosystems:           map[string]ecosystemState{"npm": {Status: "wired"}},
+			DirectRegistryEgress: "unknown",
+		}, 1)
+		return out.String()
+	}},
+	{"doctor/path-warning", func(t *testing.T) string {
+		// An empty PATH cannot contain the test binary's directory, so the
+		// warning branch is the deterministic one.
+		t.Setenv("PATH", "")
+		return chainsawPathWarning()
+	}},
+	{"policy/preflight-table", func(t *testing.T) string {
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		printPreflightTable(cmd, []supportMatrixRowDTO{
+			{Ecosystem: "npm", Conditions: map[string]string{"malware": "full"}},
+			{Ecosystem: "cargo", Conditions: map[string]string{"malware": "none"}},
+		}, []string{"malware"})
+		return out.String()
+	}},
+	{"guard/post-block-nudge", func(t *testing.T) string {
+		t.Setenv("CHAINSAW_NO_NUDGE", "0")
+		t.Setenv("CI", "")
+		return captureStderr(t, func() { nudgePostBlock(2, consentGranted) })
+	}},
+	{"guard/periodic-nudge", func(t *testing.T) string {
+		t.Setenv("CHAINSAW_NO_NUDGE", "0")
+		t.Setenv("CI", "")
+		st := &guardState{InstallsChecked: periodicNudgeEveryNInstalls, Blocks: 3}
+		return captureStderr(t, func() { maybePeriodicNudge(st, time.Now(), consentGranted) })
+	}},
+}
+
+func TestCommandOutput_IsPureASCIIInFallbackMode(t *testing.T) {
+	for _, tc := range asciiOutputRenderers {
+		t.Run(tc.name, func(t *testing.T) {
+			forceASCIIGlyphs(t)
+			t.Setenv("NO_COLOR", "1") // keep ANSI bytes out of the assertion
+
+			got := tc.render(t)
+			if strings.TrimSpace(got) == "" {
+				t.Fatal("renderer produced no output — the assertion below would pass vacuously")
+			}
+			for i := 0; i < len(got); i++ {
+				if got[i] > 0x7f {
+					// Report the offending RUNE, not the byte, or the message
+					// is a hex value nobody can act on.
+					r, _ := utf8.DecodeRuneInString(got[i:])
+					t.Fatalf("byte %d is %q (U+%04X), outside 7-bit ASCII, in fallback output:\n%s", i, r, r, got)
+				}
+			}
+		})
+	}
+}
+
+// The other half of the guarantee, at the command level: turning the fallback
+// OFF must leave every one of those renderings carrying its glyphs. The
+// fallback is for a minority of consoles; it must cost the majority nothing.
+func TestCommandOutput_UnicodeDefaultStillCarriesItsGlyphs(t *testing.T) {
+	for _, tc := range asciiOutputRenderers {
+		t.Run(tc.name, func(t *testing.T) {
+			forceUnicodeConsole(t)
+			t.Setenv("NO_COLOR", "1")
+			if got := tc.render(t); asciiOnly(got) {
+				// Every renderer in this table carries at least one non-ASCII
+				// character on a capable console. If one stops doing so, the
+				// ASCII assertion above has quietly become vacuous for it.
+				t.Errorf("Unicode rendering is now pure ASCII — the fallback assertion for %q no longer proves anything:\n%s", tc.name, got)
+			}
+		})
+	}
+}
+
+// ── the consent prompt (guard_nudge.go) ────────────────────────────────────
+
+// The first-run consent prompt is a conversion surface and, for many users,
+// the first thing Chainsaw ever prints. It carried seven non-ASCII characters
+// — two ticks, three middle dots, two em dashes — so on a fresh Windows box
+// the one screen that has to read as trustworthy read as mojibake instead.
+func TestGuardConsentPrompt_ASCIIInFallbackMode(t *testing.T) {
+	forceASCIIGlyphs(t)
+	t.Setenv("NO_COLOR", "1")
+	// Nothing may pre-empt the prompt: an env-level opt-out returns "declined"
+	// before a single line is printed.
+	for _, k := range []string{"CHAINSAW_TELEMETRY_DISABLED", "CHAINSAW_OFFLINE", "DO_NOT_TRACK"} {
+		t.Setenv(k, "0")
+	}
+	prevStdin := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = prevStdin })
+
+	st := &guardState{}
+	out := captureStderr(t, func() { ensureGuardConsent(st, true) })
+	if !strings.Contains(out, "help improve malware detection") {
+		t.Fatalf("the consent prompt did not render; got %q", out)
+	}
+	if !asciiOnly(out) {
+		t.Fatalf("the consent prompt is not 7-bit ASCII in fallback mode:\n%s", out)
+	}
+	// It must still SAY something — a prompt stripped to punctuation would
+	// pass an ASCII test and fail the user.
+	for _, want := range []string{"Your clean installs are never sent", "chain305.com/legal/privacy"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("consent prompt lost %q:\n%s", want, out)
+		}
+	}
+}
+
+// ── help text: the deliberate exception ────────────────────────────────────
+
+// THE RULE APPLIED TO --help. Em dashes in Short, Long and flag usage are NOT
+// swept. Help is documentation: multi-paragraph raw-string prose where a boxed
+// dash mid-sentence is merely ugly and the sentence still reads, and
+// converting it would mean breaking those literals into glyph concatenations
+// — trading real source legibility for a cosmetic gain on a minority console.
+// gen-cli-docs also renders these strings into the docs site, where they must
+// not vary with the generating host's codepage.
+//
+// MARKERS inside help are the exception to the exception, and this is the one
+// place they occur: doctor's --offline usage NAMES the exact three glyphs the
+// matrix is about to print. Leave it hard-coded and a CP437 user is told to
+// look for symbols that appear nowhere in the table they just ran — the same
+// defect TestDoctorOffline_LegendMatchesRenderedAlphabet pins for the legend.
+func TestDoctorOfflineFlagHelp_NamesTheRenderedAlphabet(t *testing.T) {
+	// The usage string is built when the command is constructed, so build a
+	// fresh command under each console.
+	usage := func() string {
+		f := newDoctorCmd().Flags().Lookup("offline")
+		if f == nil {
+			t.Fatal("doctor has no --offline flag")
+		}
+		return f.Usage
+	}
+
+	forceASCIIGlyphs(t)
+	got := usage()
+	for _, want := range []string{
+		"(" + asciiGlyphs.ok + ")", "(" + asciiGlyphs.warn + ")", "(" + asciiGlyphs.fail + ")",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("--offline help does not name %s in fallback mode: %q", want, got)
+		}
+	}
+	if m, ok := noUnicodeMarkers(got); !ok {
+		t.Errorf("--offline help still advertises the unrenderable marker %q: %q", m, got)
+	}
+
+	forceUnicodeConsole(t)
+	const wantUnicode = "Air-gap diagnostics (W4): walk every intelligence condition and report whether it runs offline (✓), is degraded (⚠), or requires a refreshed bundle (✗). Reads CHAINSAW_INTEL_BUNDLE_PATH and CHAINSAW_OFFLINE_FAIL_MODE."
+	if got := usage(); got != wantUnicode {
+		t.Errorf("default --offline help changed:\n got %q\nwant %q", got, wantUnicode)
+	}
+}
+
+// ── strings that are BOTH payload and prose ────────────────────────────────
+
+// serverFeatures.Error and statusReport.*.Error carry `json:"error"` AND are
+// printed by the human renderer. Building them from glyphs() would make the
+// JSON output depend on the terminal that produced it — a machine-readable
+// artifact changing shape with the console is strictly worse than a boxed
+// dash, so the payload keeps its Unicode form and the RENDERER folds instead.
+//
+// This pins both halves of that split: the fold is total on the console side,
+// and a no-op when Unicode is available so the default path is untouched.
+func TestFoldPunctuationForConsole(t *testing.T) {
+	// The real string that exposed the gap: features/status print it, and it
+	// also ships as JSON.
+	const payload = "server URL not configured — run 'chainsaw setup' or 'chainsaw auth login'"
+
+	t.Run("folds on a console that cannot encode it", func(t *testing.T) {
+		forceASCIIGlyphs(t)
+		got := foldPunctuationForConsole(payload)
+		if !asciiOnly(got) {
+			t.Errorf("fold left non-ASCII in a rendered payload: %q", got)
+		}
+		if !strings.Contains(got, asciiGlyphs.dash) {
+			t.Errorf("fold dropped the separator instead of replacing it: %q", got)
+		}
+		// The words must survive — this is a punctuation swap, not a rewrite.
+		if !strings.Contains(got, "server URL not configured") ||
+			!strings.Contains(got, "chainsaw auth login") {
+			t.Errorf("fold altered the message text: %q", got)
+		}
+	})
+
+	t.Run("is a no-op on a capable console", func(t *testing.T) {
+		forceUnicodeConsole(t)
+		t.Setenv("CHAINSAW_NO_UNICODE", "0")
+		if got := foldPunctuationForConsole(payload); got != payload {
+			t.Errorf("fold must not touch output on a Unicode console:\n got %q\nwant %q", got, payload)
+		}
+	})
+
+	t.Run("covers every punctuation field", func(t *testing.T) {
+		forceASCIIGlyphs(t)
+		in := unicodeGlyphs.dash + unicodeGlyphs.ellipsis +
+			unicodeGlyphs.arrow + unicodeGlyphs.bullet
+		if got := foldPunctuationForConsole(in); !asciiOnly(got) {
+			t.Errorf("a punctuation field is missing from the replacer: %q", got)
+		}
+	})
 }

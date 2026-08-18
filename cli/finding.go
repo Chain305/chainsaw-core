@@ -58,10 +58,10 @@ var findingCmd = &cobra.Command{
 	Use:     "finding",
 	GroupID: GrpAudit,
 	Short:   "Manage security findings (triage lifecycle: ack / snooze / resolve / suppress / reopen)",
-	Long: "Drive a finding through its lifecycle from the CLI. Mirrors the " +
-		"investigate/findings/[id] page in the Web UI. All verbs hit the same " +
-		"/api/findings handlers the dashboard uses, so permissions, audit " +
-		"trail, and state-machine validation are identical.",
+	Long: "Drive a finding through its lifecycle from the CLI — the same thing " +
+		"you would do on a finding's page in the dashboard. Both go through " +
+		"the same server, so the permissions you need, the audit trail you " +
+		"leave, and the transitions that are allowed are identical either way.",
 }
 
 // ── list ──────────────────────────────────────────────────────────────────────

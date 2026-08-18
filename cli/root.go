@@ -306,7 +306,7 @@ func Execute() {
 		// viper.ReadInConfig() never runs. Without that, the YAML
 		// fallback branch in lookupCargoCredentials sees an empty viper
 		// store and the provider reports "no client_credential
-		// available" even when ~/.chainsaw/config.yaml has the right
+		// available" even when the saved config.yaml has the right
 		// `cargo_credentials` key. Run initConfig manually here so the
 		// env / keyring / YAML resolution all behave the same way in
 		// fast-path mode as they do under normal cobra dispatch.
@@ -592,12 +592,15 @@ func init() {
 	// subcommand stays unchanged for richer output / JSON.
 	rootCmd.SetVersionTemplate("chainsaw {{.Version}}\n")
 
-	// The ldflags path in this help text is published verbatim on
-	// docs.chain305.com/cli-reference/ by gen-cli-docs, so it has to name the
-	// symbol that actually exists. It read `.../internal/cli.DefaultServer`
-	// until the open-core split moved this package to core/ — a path no build
-	// has been able to set since.
-	rootCmd.PersistentFlags().String("server", DefaultServer, "Server URL (overrides config; default baked at build via -X github.com/chain305/chainsaw-core/cli.DefaultServer)")
+	// This string used to end with the -X ldflags symbol that supplies
+	// DefaultServer. It was accurate and useless: a Go symbol path means
+	// nothing to someone reading `--help`, and at ~110 characters it was the
+	// widest line on all 143 help screens, so it forced a wrap in an 80-column
+	// terminal. Nothing is lost: pflag already prints the baked-in
+	// DefaultServer as this flag's `(default …)`, which is the part a reader
+	// can act on. Keep this under ~70 characters — gen-cli-docs publishes it
+	// verbatim on docs.chain305.com/cli-reference/ too.
+	rootCmd.PersistentFlags().String("server", DefaultServer, "Chain305 server URL (overrides the saved config)")
 	rootCmd.PersistentFlags().String("token", "", "Auth token (overrides config)")
 	// A9: this used to read "Org ID (overrides config)", which every reader
 	// took to mean "run this command against another org". It does NOT: no
@@ -614,7 +617,10 @@ func init() {
 	// this persistent flag as `--org org delete` on all 143 help screens.
 	// Single quotes keep the prose and let pflag fall back to the type name
 	// ("--org string"). Never reintroduce backticks here.
-	rootCmd.PersistentFlags().String("org", "", "Org ID used for LOCAL purposes only (status display, 'org delete' target, SBOM/VEX metadata). It is NOT sent to the server — your org is resolved from your token's identity.")
+	// Y7b: the wording below is the short form of the A9 explanation. The
+	// long form ran ~170 characters and, like --server, overflowed every
+	// help screen; the load-bearing half is "local only, never sent".
+	rootCmd.PersistentFlags().String("org", "", "Org ID for local use only (status, 'org delete', SBOM metadata); never sent to the server")
 	rootCmd.PersistentFlags().Bool("json", false, "Output JSON instead of human-readable text (alias for --format=json)")
 	rootCmd.PersistentFlags().Bool("no-color", false, "Disable colored output")
 
@@ -733,7 +739,8 @@ func setupProgressPath() string {
 //     viper.BindEnv("server_url", "CHAINSAW_SERVER") in initConfig — the
 //     AutomaticEnv prefix maps to CHAINSAW_SERVER_URL, not the documented
 //     CHAINSAW_SERVER, so the explicit binding is what makes the env path work)
-//  3. `server_url:` key in ~/.chainsaw/config.yaml
+//  3. `server_url:` key in the saved config.yaml (configFilePath — the config
+//     home is platform-dependent, see cli/platform.ConfigHome)
 //  4. Built-in default baked at build time via -X .../internal/cli.DefaultServer
 func cfgServerURL() string { return viper.GetString("server_url") }
 func cfgOrgID() string     { return viper.GetString("org_id") }
@@ -741,7 +748,8 @@ func cfgOrgID() string     { return viper.GetString("org_id") }
 // cfgToken resolves the active auth token. Precedence (highest first):
 //  1. --token flag (viper picks this up via BindPFlag)
 //  2. CHAINSAW_TOKEN env var (viper picks this up via AutomaticEnv)
-//  3. `token:` key in ~/.chainsaw/config.yaml (legacy; new installs route through credstore)
+//  3. `token:` key in the saved config.yaml (configFilePath; legacy — new
+//     installs route through credstore)
 //  4. OS keyring / file-store credential keyed by server URL
 //
 // The bug fix this docstring exists to pin: step 1 must win over step 4.

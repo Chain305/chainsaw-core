@@ -74,7 +74,7 @@ func authClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "client",
 		Short:        "Manage registry client_credentials (.npmrc / pip.conf credentials)",
-		Long:         "Mint, list, delete, and rotate registry client_credentials — the credentials that authenticate developer machines and CI jobs against the package proxy. These are DISTINCT from management-API tokens (see `chainsaw token`). The CLI hits POST /api/clients, GET /api/clients, and DELETE /api/clients/{id}; the bearer token established by `chainsaw auth login` authorises every call.",
+		Long:         "Mint, list, delete, and rotate registry client_credentials — the credentials that authenticate developer machines and CI jobs against the package proxy. These are DISTINCT from management-API tokens (see `chainsaw token`). Every subcommand here talks to your Chain305 server, so run `chainsaw auth login` first; the session it establishes authorises all of them.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Bare `chainsaw auth client` (no subcommand) is the only spot

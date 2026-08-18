@@ -8,7 +8,10 @@ package telemetry
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/chain305/chainsaw-core/cli/platform"
 )
 
 func installPath(dir string) string { return filepath.Join(dir, installFilename) }
@@ -343,7 +346,13 @@ func TestConfigDir_HonorsChainsawConfigHome(t *testing.T) {
 	}
 }
 
-func TestConfigDir_FallsBackToXDGWhenOverrideAbsent(t *testing.T) {
+// Renamed from TestConfigDir_FallsBackToXDGWhenOverrideAbsent, which was only
+// true on Linux. It asserted nothing anywhere else: the mismatch branch called
+// t.Logf, so on macOS — where ConfigDir was returning a DIFFERENT directory
+// from the one holding config.yaml — this test passed while quietly printing
+// the bug. Assert the property that actually has to hold on every OS, and
+// leave the XDG specifics to the resolver's own tests.
+func TestConfigDir_MatchesTheOneResolverOnEveryOS(t *testing.T) {
 	clearTelemetryEnv(t)
 	base := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", base)
@@ -352,10 +361,17 @@ func TestConfigDir_FallsBackToXDGWhenOverrideAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConfigDir: %v", err)
 	}
-	// On darwin/linux the XDG branch appends chainsaw/; on Windows the
-	// APPDATA branch does the same. Either way the suffix is present.
-	if want := filepath.Join(base, "chainsaw"); got != want && os.Getenv("APPDATA") == "" {
-		t.Logf("ConfigDir = %q (platform-specific; XDG branch expects %q)", got, want)
+	if want := platform.ConfigHome(); got != want {
+		t.Fatalf("ConfigDir = %q, cli/platform.ConfigHome = %q; install_id must land in the "+
+			"same directory as config.yaml and guard_state.json", got, want)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Errorf("ConfigDir did not create the directory it returned: %v", err)
+	}
+	if runtime.GOOS == "linux" {
+		if want := filepath.Join(base, "chainsaw"); got != want {
+			t.Errorf("linux ConfigDir = %q, want the XDG branch %q", got, want)
+		}
 	}
 }
 

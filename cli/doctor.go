@@ -70,7 +70,15 @@ acknowledge.`,
 	cmd.Flags().String("data-dir", "", "Path to chainsaw data directory (for --upgrade-check). Defaults to $CHAINSAW_DATA_DIR or /etc/chainsaw/data.")
 	cmd.Flags().String("docker-compose-path", "", "Path to docker-compose.yml for version-drift check (for --upgrade-check). Empty disables the check.")
 	cmd.Flags().Bool("skip-network", false, "Skip upstream-registry reachability probes (for --upgrade-check). Use in air-gapped environments.")
-	cmd.Flags().Bool("offline", false, "Air-gap diagnostics (W4): walk every intelligence condition and report whether it runs offline (✓), is degraded (⚠), or requires a refreshed bundle (✗). Reads CHAINSAW_INTEL_BUNDLE_PATH and CHAINSAW_OFFLINE_FAIL_MODE.")
+	// The one help string whose MARKERS have to follow the console. Help prose
+	// keeps its em dashes (a boxed dash still reads); this sentence instead
+	// NAMES the exact alphabet the --offline matrix is about to print, so
+	// hard-coding it would tell a CP437 user to look for three glyphs that
+	// appear nowhere in the table they just ran. That is the same defect
+	// TestDoctorOffline_LegendMatchesRenderedAlphabet pins for the legend.
+	offlineGlyphs := glyphs()
+	cmd.Flags().Bool("offline", false, fmt.Sprintf("Air-gap diagnostics (W4): walk every intelligence condition and report whether it runs offline (%s), is degraded (%s), or requires a refreshed bundle (%s). Reads CHAINSAW_INTEL_BUNDLE_PATH and CHAINSAW_OFFLINE_FAIL_MODE.",
+		offlineGlyphs.ok, offlineGlyphs.warn, offlineGlyphs.fail))
 
 	// `chainsaw doctor verify-hook <manager>` — close the
 	// install-hook → audit feedback loop (OBSERVABILITY_AUDIT gap 2).
@@ -408,11 +416,12 @@ func loadDoctorOnboardingState() *doctorOnboardingState {
 // canonical ordering used by the MCP chainsaw_onboarding_state tool —
 // if a new step lands, update both places.
 func printDoctorOnboarding(w io.Writer, ob *doctorOnboardingState) {
+	g := glyphs()
 	fmt.Fprintln(w, "Onboarding state")
 	if ob.Persona != "" {
 		fmt.Fprintf(w, "  persona                   %s\n", ob.Persona)
 	} else {
-		fmt.Fprintln(w, "  persona                   (not set — run `chainsaw setup` to pick one)")
+		fmt.Fprintln(w, "  persona                   (not set "+g.dash+" run `chainsaw setup` to pick one)")
 	}
 	order := []struct {
 		key   string
@@ -429,9 +438,11 @@ func printDoctorOnboarding(w io.Writer, ob *doctorOnboardingState) {
 		{"teammate_invited", "teammates invited"},
 	}
 	for _, row := range order {
-		mark := "✗"
+		// Nine rows in a fixed column. On CP437 done and not-done were the
+		// same box, so the checklist reported nothing at all.
+		mark := g.fail
 		if ob.Steps[row.key] {
-			mark = "✓"
+			mark = g.ok
 		}
 		fmt.Fprintf(w, "  %s %s\n", mark, row.label)
 	}
@@ -549,7 +560,7 @@ func chainsawPathWarning() string {
 			return ""
 		}
 	}
-	return fmt.Sprintf("warning: chainsaw binary at %s is not on PATH — package managers may not find it", exe)
+	return fmt.Sprintf("warning: chainsaw binary at %s is not on PATH %s package managers may not find it", exe, glyphs().dash)
 }
 
 // writeJSON is a small helper that matches the json.Encoder + SetIndent

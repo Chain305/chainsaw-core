@@ -557,7 +557,7 @@ var probeDirectEgressFn = probeDirectEgressImpl
 
 func probeDirectEgressImpl(ctx context.Context, stderr io.Writer, quiet bool) string {
 	if !quiet {
-		fmt.Fprintf(stderr, "probing direct egress to %d registries…\n", len(publicRegistryProbes))
+		fmt.Fprintf(stderr, "probing direct egress to %d registries%s\n", len(publicRegistryProbes), glyphs().ellipsis)
 	}
 	client := httpclient.New(httpclient.WithTimeout(3 * time.Second))
 	reachable := 0
@@ -749,7 +749,8 @@ func printStrictReport(cmd *cobra.Command, r doctorStrictReport, exit int) {
 	tw.Flush()
 	fmt.Fprintf(out, "\ndirect-egress-to-public-registries: %s\n", r.DirectRegistryEgress)
 	if r.DirectRegistryEgress == "unknown" {
-		fmt.Fprintln(out, "  ⚠ egress probe inconclusive — could not confirm the network blocks direct registry egress; treat as NOT blocked")
+		g := glyphs()
+		fmt.Fprintln(out, "  "+g.warn+" egress probe inconclusive "+g.dash+" could not confirm the network blocks direct registry egress; treat as NOT blocked")
 	}
 	if len(r.EnvOverrides) > 0 {
 		fmt.Fprintln(out, "\nenv overrides:")
