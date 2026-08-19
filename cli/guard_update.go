@@ -101,7 +101,22 @@ when you run it. After updating, known-malicious coverage is the full set,
 evaluated entirely on-box.`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
-	RunE:         runGuardUpdate,
+	RunE:         runGuardUpdateExplicit,
+}
+
+// runGuardUpdateExplicit is the cobra entry point, and exists ONLY to mark
+// "a human typed `chainsaw guard update`" as distinct from "the guarded
+// install path called the fetch on its own".
+//
+// L-21: the auto path calls runGuardUpdate DIRECTLY (guard_autofetch.go), so a
+// thin wrapper on the cobra side is unambiguous, whereas trying to detect the
+// caller inside runGuardUpdate would be a guess. The failure backoff is
+// cleared BEFORE the attempt, not after a success: a user who has just fixed
+// their proxy and reached for the manual command must never be told to wait,
+// and must never be left in backoff because the fix was only partial.
+func runGuardUpdateExplicit(cmd *cobra.Command, args []string) error {
+	clearFeedFetchBackoff()
+	return runGuardUpdate(cmd, args)
 }
 
 // guardUpdateOfflineEnv is the offline umbrella. `guard update` is the ONE

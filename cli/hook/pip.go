@@ -286,10 +286,12 @@ func pipBlockBody(opts WireOpts) (string, error) {
 	scheme, rest := splitScheme(base)
 	// When the caller passes client_id:client_secret, embed them in the
 	// index-url as percent-encoded userinfo so pip authenticates without
-	// the user having to export PIP_INDEX_URL. A credential-bearing file is
-	// created 0600 and an existing looser one is chmod'd down — except at
-	// ScopeSystem, where every user has to be able to read it (see
-	// credentialFileMode).
+	// the user having to export PIP_INDEX_URL. writeConfigFile restricts a
+	// credential-bearing file to the owner (0600 plus a chmod-down of an
+	// existing looser file on Unix, a protected owner-only DACL on Windows)
+	// — except at ScopeSystem, where every user has to be able to read it
+	// (see credentialFileMode). The file says which of those applies to it,
+	// via the shared credentialHeaderNote.
 	pypiPath, err := orgScopedRepoPath(opts.OrgSlug, "pypi")
 	if err != nil {
 		return "", err
@@ -301,12 +303,11 @@ func pipBlockBody(opts WireOpts) (string, error) {
 		}
 		// BUG-A6: index-url path must be /repository/@<org>/pypi/simple/.
 		// Trailing slash matters — pip treats the suffix as a directory.
-		return fmt.Sprintf(`# chainsaw: credentials embedded in index-url below; tighten this
-# file's permissions (chmod 600) if your home directory is shared.
-[global]
+		return fmt.Sprintf(`%s[global]
 index-url = %s%s:%s@%s/%s/simple/
 trusted-host = %s
-%s`, scheme, url.PathEscape(user), url.PathEscape(pass), rest, pypiPath, host, defaults), nil
+%s`, credentialHeaderNote("the index-url line below", opts),
+			scheme, url.PathEscape(user), url.PathEscape(pass), rest, pypiPath, host, defaults), nil
 	}
 	// pip does not expand env vars in pip.conf, so without embedded creds
 	// we only emit the unauthenticated index-url. Users whose proxy

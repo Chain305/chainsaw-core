@@ -271,3 +271,50 @@ func mustRead(t *testing.T, path string) []byte {
 	}
 	return data
 }
+
+// TestParseWorkflowDirFiles_ReportsRunOnlyWorkflows pins the reason the
+// files-returning sibling exists: a workflow with no `uses:` steps yields no
+// ActionRefs, so any caller counting distinct SourceFile values sees zero
+// workflows and reports the directory as empty. The file list is the only
+// honest source for "how many workflows did we read".
+func TestParseWorkflowDirFiles_ReportsRunOnlyWorkflows(t *testing.T) {
+	tmp := t.TempDir()
+	wfDir := filepath.Join(tmp, ".github", "workflows")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const runOnly = `name: build
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+`
+	if err := os.WriteFile(filepath.Join(wfDir, "build.yml"), []byte(runOnly), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	refs, files, err := ParseWorkflowDirFiles(tmp)
+	if err != nil {
+		t.Fatalf("ParseWorkflowDirFiles: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Errorf("refs = %d, want 0 (no `uses:` steps)", len(refs))
+	}
+	if len(files) != 1 {
+		t.Fatalf("files = %v, want exactly one parsed workflow", files)
+	}
+	if filepath.Base(files[0]) != "build.yml" {
+		t.Errorf("files[0] = %q, want the full path to build.yml", files[0])
+	}
+
+	// The wrapper must stay behaviour-identical for ref-only callers.
+	wrapped, err := ParseWorkflowDir(tmp)
+	if err != nil {
+		t.Fatalf("ParseWorkflowDir: %v", err)
+	}
+	if len(wrapped) != len(refs) {
+		t.Errorf("ParseWorkflowDir returned %d refs, sibling returned %d", len(wrapped), len(refs))
+	}
+}

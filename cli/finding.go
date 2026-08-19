@@ -465,17 +465,21 @@ func runFindingSuppress(cmd *cobra.Command, args []string) error {
 	}
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
-		// Non-TTY callers (CI, piped scripts) never see the prompt —
-		// PromptConfirm returns false and we'd silently print "Aborted."
-		// and exit 0, masking that the suppression never happened. Fail
-		// loudly instead, matching policy delete / exception delete /
-		// token revoke.
-		if !stdinIsTerminal() {
-			return fmt.Errorf("refusing to suppress finding %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
-		}
-		if !PromptConfirm(fmt.Sprintf("Suppress finding %q? This only hides it from triage — the package stays blocked. To allow installs, create an exception (chainsaw exception create).", id)) {
-			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
-			return nil
+		// The non-TTY guard now lives in confirmDestructive; rationale
+		// unchanged. L-30: resolve through the EXISTING GET /api/findings/{id}
+		// so the prompt names the package rather than echoing a possibly
+		// nonexistent id back at the operator.
+		ok, err := confirmDestructive(cmd, id, "suppress finding",
+			"This only hides it from triage — the package stays blocked. To allow installs, create an exception (chainsaw exception create).",
+			func() (string, error) {
+				f, err := getFinding(client, id)
+				if err != nil {
+					return "", err
+				}
+				return describeTarget(strings.TrimSpace(f.PackageName+"@"+f.PackageVersion), id), nil
+			})
+		if err != nil || !ok {
+			return err
 		}
 	}
 	var resp struct {

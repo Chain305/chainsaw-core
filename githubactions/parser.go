@@ -168,7 +168,26 @@ func walkForUses(n *yaml.Node, fn func(value string, line int)) {
 // returns every ActionRef from every *.yml / *.yaml file found. The dir
 // argument is the repository root (the directory containing .github), or
 // the .github/workflows directory itself — both are accepted.
+//
+// It is a thin wrapper over ParseWorkflowDirFiles, kept because it is exported
+// from the public open-core module: callers that only want the refs should not
+// have to change, and removing it would be a breaking change for nothing.
 func ParseWorkflowDir(dir string) ([]ActionRef, error) {
+	refs, _, err := ParseWorkflowDirFiles(dir)
+	return refs, err
+}
+
+// ParseWorkflowDirFiles is ParseWorkflowDir plus the list of workflow files it
+// actually parsed, in the same sorted order it walked them.
+//
+// The file list is not decoration: refs alone cannot distinguish "no workflows
+// here" from "workflows that pin nothing", because a workflow made entirely of
+// `run:` steps contributes zero ActionRefs and therefore zero distinct
+// SourceFile values. Callers that derive a workflow COUNT from the refs report
+// a repo of run-only workflows as if it had none — which is how
+// `chainsaw scan-actions` came to print "no workflows found" over a directory
+// it had just read end to end.
+func ParseWorkflowDirFiles(dir string) ([]ActionRef, []string, error) {
 	workflowsDir := dir
 	// Accept either the repo root or the workflows dir directly.
 	if base := filepath.Base(dir); base != "workflows" {
@@ -181,17 +200,17 @@ func ParseWorkflowDir(dir string) ([]ActionRef, error) {
 	info, err := os.Stat(workflowsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("stat %s: %w", workflowsDir, err)
+		return nil, nil, fmt.Errorf("stat %s: %w", workflowsDir, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("%s is not a directory", workflowsDir)
+		return nil, nil, fmt.Errorf("%s is not a directory", workflowsDir)
 	}
 
 	entries, err := os.ReadDir(workflowsDir)
 	if err != nil {
-		return nil, fmt.Errorf("read dir %s: %w", workflowsDir, err)
+		return nil, nil, fmt.Errorf("read dir %s: %w", workflowsDir, err)
 	}
 
 	// Stable order: sort filenames so callers get deterministic output.
@@ -210,17 +229,21 @@ func ParseWorkflowDir(dir string) ([]ActionRef, error) {
 	sort.Strings(files)
 
 	var all []ActionRef
+	parsed := make([]string, 0, len(files))
 	for _, name := range files {
 		full := filepath.Join(workflowsDir, name)
 		data, err := os.ReadFile(full)
 		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", full, err)
+			return nil, nil, fmt.Errorf("read %s: %w", full, err)
 		}
 		refs, err := ParseWorkflowFile(full, data)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		all = append(all, refs...)
+		// Recorded AFTER a successful parse, and with the full path so the
+		// list means the same thing as ActionRef.SourceFile.
+		parsed = append(parsed, full)
 	}
-	return all, nil
+	return all, parsed, nil
 }

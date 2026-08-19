@@ -96,6 +96,14 @@ type riskWeightsSimulateReq struct {
 	Weights               map[string]float64 `json:"weights"`
 	ProposedSignalWeights map[string]int     `json:"proposed_signal_weights,omitempty"`
 	SimulateID            string             `json:"simulate_id,omitempty"`
+	// AcknowledgeDegradedPreview waives the server's refusal to accept a
+	// simulate_id whose preview DEGRADED — i.e. one that returned a
+	// fallback reason instead of modelling the change against real data
+	// (CHW-4834). Omitted unless the operator passes the flag: a degraded
+	// preview is a record of a FAILED preview, not consent, and the whole
+	// point of the gate is that waiving it is a deliberate act. The server
+	// audits every waiver (weights.saved_without_preview).
+	AcknowledgeDegradedPreview bool `json:"acknowledge_degraded_preview,omitempty"`
 }
 
 // riskWeightsSimulateResp mirrors the server's
@@ -130,9 +138,10 @@ before saving.`,
 }
 
 var (
-	riskWeightsPreviewSet []string
-	riskWeightsApplySet   []string
-	riskWeightsSimulateID string
+	riskWeightsPreviewSet  []string
+	riskWeightsApplySet    []string
+	riskWeightsSimulateID  string
+	riskWeightsAckDegraded bool
 )
 
 var riskWeightsShowCmd = &cobra.Command{
@@ -175,6 +184,13 @@ re-derives the simulate inputs hash from them and returns CHW-4830 if
 they drifted, if the preview is older than 1h, or if another operator
 saved different weights in between. Re-run 'preview' and apply the new id.
 
+If the preview itself could not model the change -- it returned a
+fallback reason instead of real projected impact -- the server refuses
+the save with CHW-4834 rather than treating an empty projection as your
+consent. Fix the cause and re-preview, or pass
+--acknowledge-degraded-preview to save anyway; the waiver is recorded in
+the audit log against your user.
+
 apply prints the weights the server read BACK from storage, so the output
 is proof the write landed rather than an echo of the request. Confirm
 independently with 'chainsaw risk-weights show'.`,
@@ -192,6 +208,8 @@ func init() {
 	// `--simulate-id string`.
 	riskWeightsApplyCmd.Flags().StringVar(&riskWeightsSimulateID, "simulate-id", "",
 		"simulate_id returned by a fresh 'risk-weights preview' run")
+	riskWeightsApplyCmd.Flags().BoolVar(&riskWeightsAckDegraded, "acknowledge-degraded-preview", false,
+		"save even though the preview could not model the change (server answers CHW-4834 otherwise); the waiver is audited")
 
 	riskWeightsCmd.AddCommand(riskWeightsShowCmd)
 	riskWeightsCmd.AddCommand(riskWeightsPreviewCmd)
@@ -506,9 +524,10 @@ func runRiskWeightsApply(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	body := riskWeightsSimulateReq{
-		Weights:               cat,
-		ProposedSignalWeights: signalWeights,
-		SimulateID:            riskWeightsSimulateID,
+		Weights:                    cat,
+		ProposedSignalWeights:      signalWeights,
+		SimulateID:                 riskWeightsSimulateID,
+		AcknowledgeDegradedPreview: riskWeightsAckDegraded,
 	}
 	// Failures below RETURN rather than os.Exit so the whole apply path
 	// stays testable end-to-end. classifyCLIError already maps them to

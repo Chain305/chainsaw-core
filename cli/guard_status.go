@@ -28,23 +28,28 @@ import (
 //
 // Debug is reported as off because it is: nothing is sent.
 //
-// The label deliberately does NOT promise that events are printed. emitAt
-// (telemetry_runtime.go:129-136) returns at the consent gate BEFORE the debug
-// sink is ever constructed, so on a box that has not consented, debug mode
-// prints nothing at all — the old "events printed, never sent" wording was
-// false for exactly the operator most likely to read it. Making it true
-// (letting the debug sink print without consent) is a behaviour change owned
-// by a later wave; until then the label states only the half that holds.
+// L-11/L-12 history, in order, because the wording has now moved twice:
+// the label originally claimed "events printed, never sent", which was FALSE
+// on a box that had not consented — emitAt returned at the consent gate
+// before the debug sink existed, so debug printed nothing at all. Wave A
+// therefore deleted the printing half of the claim. L-12 then moved the
+// debug branch AHEAD of the consent gate (telemetry_runtime.go), so the
+// printing claim is true again, for everyone, and the label says so. If that
+// branch is ever moved back behind the consent gate, this string goes back
+// to stating only the "nothing is sent" half.
 //
 // ModeDebug is still checked BEFORE ModeDisabled because ResolveMode returns
 // them in that order (core/telemetry/consent.go:68-71) — swapping the arms
-// here would mislabel a debug run that also set a kill switch.
+// here would mislabel a debug run that also set a kill switch. That ordering
+// is load-bearing for a real combination: DO_NOT_TRACK=1 together with
+// CHAINSAW_TELEMETRY_DEBUG=1 resolves to ModeDebug, which now prints locally
+// (and still sends nothing, and still mints no install_id).
 func telemetryConsentLabel(st *guardState) string {
 	switch telemetry.ResolveMode() {
 	case telemetry.ModeDisabled:
 		return "off (disabled by env)"
 	case telemetry.ModeDebug:
-		return "off (debug mode: nothing is sent)"
+		return "off (debug mode: events are printed locally, nothing is sent)"
 	}
 	switch st.Consent {
 	case consentGranted:

@@ -95,11 +95,14 @@ func yarnBlockBody(opts WireOpts) (string, error) {
 		}
 		token = creds
 	}
+	// L-09: yarn embeds the secret in npmAuthToken and, like maven, said
+	// nothing about it. Same shared note as every other manager.
+	note := credentialHeaderNote("the npmAuthToken line below", opts)
 	// BUG-A6: org-scoped path required.
 	yarnPath, err := orgScopedRepoPath(opts.OrgSlug, "yarnpkg")
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(`npmRegistryServer: %q
-npmAuthToken: %q`, base+"/"+yarnPath+"/", token), nil
+	return fmt.Sprintf(`%snpmRegistryServer: %q
+npmAuthToken: %q`, note, base+"/"+yarnPath+"/", token), nil
 }

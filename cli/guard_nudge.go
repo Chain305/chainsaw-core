@@ -75,6 +75,22 @@ type guardState struct {
 	// last; capped at guardRecentBlocksMax. Package names only — no identifying
 	// data, same privacy posture as the counters above.
 	RecentBlocks []guardBlockRecord `json:"recent_blocks,omitempty"`
+	// FeedFetchFailures counts CONSECUTIVE failures of the offered feed
+	// auto-fetch, and FeedFetchRetryAfterUnix is the wall-clock instant before
+	// which the offer is suppressed. Both are reset to zero by any success and
+	// by any explicit `chainsaw guard update` (see guard_autofetch.go).
+	//
+	// L-21: the offer gated only on "feed absent or stale", which a FAILING
+	// fetch never changes — three consecutive guarded installs each prompted,
+	// each pulled a few hundred KB, and each failed identically. Without a
+	// memory of failure the user is nagged and re-downloads on every guarded
+	// install, forever.
+	//
+	// ZERO-MIGRATION: both fields are omitempty and absent-decodes-to-0, and
+	// zero means "no backoff" — a guard_state.json written by any earlier
+	// chainsaw decodes to exactly today's behaviour.
+	FeedFetchFailures       int   `json:"feed_fetch_failures,omitempty"`
+	FeedFetchRetryAfterUnix int64 `json:"feed_fetch_retry_after_unix,omitempty"`
 	// DeepFetchEgress is a small ring auditing the deep-fetch network calls the
 	// guard made (CHAINSAW_GUARD_DEEP=1). Each fetched package is recorded once,
 	// with the egress host it reached out to, so an operator who opted into the

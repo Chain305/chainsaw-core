@@ -279,8 +279,7 @@ func sbtCredentialsBody(opts WireOpts) (string, error) {
 			return "", err
 		}
 		user, pass = id, secret
-		credsNote = "# chainsaw: credentials embedded in cleartext (sbt's format\n" +
-			"# requires it); chainsaw keeps this file at mode 0600.\n"
+		credsNote = credentialHeaderNote("the user/password lines below; sbt's format requires cleartext", opts)
 	}
 	return fmt.Sprintf(`%s%srealm=Chainsaw repository
 host=%s
@@ -331,8 +330,12 @@ func sbtCoursierEnvBody(opts WireOpts) (string, error) {
 	// them to add it to ~/.zshrc), so the value must be a single shell
 	// literal. A secret of the form `x"; touch /tmp/PWNED; #` previously
 	// executed as a command the moment the file was sourced.
-	return fmt.Sprintf(`%sexport COURSIER_CREDENTIALS=%s`,
-		header, shellSingleQuote(host+" "+user+":"+pass)), nil
+	// L-09: this is a THIRD secret-bearing file (the sbt manager writes three)
+	// and it too carried no disclosure. It goes through writeWithBackup ->
+	// writeConfigFile, so the shared guarantee is accurate here.
+	return fmt.Sprintf(`%s%sexport COURSIER_CREDENTIALS=%s`,
+		header, credentialHeaderNote("the COURSIER_CREDENTIALS export below", opts),
+		shellSingleQuote(host+" "+user+":"+pass)), nil
 }
 
 // sbtHostFromURL returns the host (no scheme, no path) of a validated

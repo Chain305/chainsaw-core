@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/viper"
+
 	"github.com/chain305/chainsaw-core/cli/hook"
 )
 
@@ -496,14 +498,17 @@ func TestVerifyHook_FailWhenLastPollSucceedsAfterTransientErrors(t *testing.T) {
 // is unknown to the audit API; the verdict doesn't matter — we only
 // assert the status lines appear before the (degraded) result.
 func TestVerifyHookCmd_StatusLinesOnStderrInNonJSONMode(t *testing.T) {
-	// No server configured → pollAuditReceipt degrades immediately, so
-	// the command returns fast without a live network dependency. We use
-	// pip because its Drive() has no server precondition and exits fast.
-	withIsolatedConfigHome(t)
-	withFileCredStore(t)
+	// Both status lines describe work that only happens once the L-22
+	// preflight passes, so this needs a server AND a token — with neither,
+	// the command now short-circuits before printing either line, which is
+	// the whole point of L-22. Point at a closed port so the audit poll
+	// degrades on the first call, and stub the driver so no real `pip`
+	// (present or absent, online or not) is in the loop.
+	withConfiguredServer(t, "http://127.0.0.1:1")
+	withStubVerifyDriver(t, "pip")
 
 	cmd := newDoctorVerifyHookCmd()
-	cmd.SetArgs([]string{"pip"})
+	cmd.SetArgs([]string{"pip", "--timeout", "1s"})
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)
@@ -575,5 +580,128 @@ func TestMatchSentinelInEvents_ClientSideFallback(t *testing.T) {
 	}
 	if matchSentinelInEvents(items, "chainsaw-verify-cafebabe-1700000000") {
 		t.Errorf("did not expect match for absent sentinel")
+	}
+}
+
+// stubVerifyDriver records whether Drive was called. The real drivers shell
+// out to npm/bun/docker, so a test about WHETHER the synthetic install ran has
+// to supply one that only records the call.
+type stubVerifyDriver struct {
+	name  string
+	drove *atomic.Bool
+}
+
+func (d stubVerifyDriver) Manager() string { return d.name }
+func (d stubVerifyDriver) Drive(context.Context, string) ([]byte, error) {
+	d.drove.Store(true)
+	return []byte("stub driver output"), nil
+}
+func (d stubVerifyDriver) BypassHint() string { return "stub hint" }
+
+// withStubVerifyDriver installs the stub for one manager name and returns the
+// flag that records whether it was driven.
+func withStubVerifyDriver(t *testing.T, manager string) *atomic.Bool {
+	t.Helper()
+	drove := &atomic.Bool{}
+	prev := verifyDriverOverrides
+	verifyDriverOverrides = map[string]verifyDriver{manager: stubVerifyDriver{name: manager, drove: drove}}
+	t.Cleanup(func() { verifyDriverOverrides = prev })
+	return drove
+}
+
+// TestVerifyHook_NoTokenSkipsSyntheticInstall is the L-22 guard.
+//
+// The auth/server checks lived inside pollAuditReceipt, which runs AFTER the
+// synthetic install — so an unauthenticated user waited out a ~24s (60s
+// ceiling) install to be told to run `chainsaw auth login`, a fact checkable in
+// microseconds. The load-bearing assertion is that the driver was never
+// driven; the test's own runtime is the user-visible half of the same claim.
+func TestVerifyHook_NoTokenSkipsSyntheticInstall(t *testing.T) {
+	withIsolatedConfigHome(t)
+	withFileCredStore(t)
+	// A server IS configured — only the token is missing, so this pins the
+	// causeNoAuth branch specifically rather than passing by way of "nothing
+	// is set up at all".
+	viper.Set("server_url", "http://127.0.0.1:1")
+	drove := withStubVerifyDriver(t, "npm")
+
+	cmd := newDoctorVerifyHookCmd()
+	cmd.SetArgs([]string{"npm"})
+	var out, errb bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetContext(context.Background())
+	cmd.SilenceUsage = true
+
+	start := time.Now()
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\nstderr: %s", err, errb.String())
+	}
+	elapsed := time.Since(start)
+
+	if drove.Load() {
+		t.Fatal("the synthetic install ran even though the audit-log confirmation it feeds could not: that is the ~24s the user waits to be told to log in")
+	}
+	body := errb.String() + out.String()
+	if !strings.Contains(body, string(verifyDegraded)) {
+		t.Errorf("outcome is not DEGRADED — the verdict must not change, only its latency:\n%s", body)
+	}
+	if !strings.Contains(body, "auth login") {
+		t.Errorf("output does not name the remedy `auth login`:\n%s", body)
+	}
+	// Generous, because the point is the absence of a 24s install, not a
+	// microbenchmark.
+	if elapsed > 5*time.Second {
+		t.Errorf("preflight-degraded run took %s — it must not wait on the install", elapsed)
+	}
+}
+
+// TestVerifyHook_PreflightMatchesPollDegradation pins the two entry points to
+// the same answer. verifyPreflight is called from RunE *and* from
+// pollAuditReceipt (defence in depth); if they ever disagreed, --json
+// consumers would see one `reason` when the command short-circuits and a
+// different one when some other caller reaches the poll directly.
+func TestVerifyHook_PreflightMatchesPollDegradation(t *testing.T) {
+	cases := []struct {
+		name   string
+		server string
+		token  string
+		cause  degradedCause
+	}{
+		{"no server", "", "", causeNoServer},
+		{"no token", "http://127.0.0.1:1", "", causeNoAuth},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withIsolatedConfigHome(t)
+			withFileCredStore(t)
+			if tc.server != "" {
+				viper.Set("server_url", tc.server)
+			}
+			if tc.token != "" {
+				viper.Set("token", tc.token)
+			}
+
+			reason, cause, ok := verifyPreflight()
+			if ok {
+				t.Fatalf("verifyPreflight reported ok with server=%q token=%q", tc.server, tc.token)
+			}
+			if cause != tc.cause {
+				t.Errorf("cause = %q, want %q", cause, tc.cause)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			got := pollAuditReceipt(ctx, "chainsaw-verify-0badf00d-1700000000")
+			if got.outcome != verifyDegraded {
+				t.Fatalf("poll outcome = %s, want DEGRADED", got.outcome)
+			}
+			if got.degradedReason != reason {
+				t.Errorf("poll reason %q != preflight reason %q — the two entry points must agree", got.degradedReason, reason)
+			}
+			if got.cause != cause {
+				t.Errorf("poll cause %q != preflight cause %q", got.cause, cause)
+			}
+		})
 	}
 }

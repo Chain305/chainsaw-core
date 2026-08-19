@@ -22,3 +22,9 @@ func writeFile(path string, data []byte) error {
 	}
 	return nil
 }
+
+// restrictToCurrentUser is a no-op on Unix. The permission model here IS the
+// mode bits, which writeFile (and hook's tightenExistingFile) already set to
+// 0600; there is no separate ACL to protect. Present so callers can invoke
+// secureio.RestrictToCurrentUser without a build tag of their own.
+func restrictToCurrentUser(string) error { return nil }

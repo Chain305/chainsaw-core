@@ -496,3 +496,78 @@ func TestRunPolicyPreflight_SweepIgnoresNonPolicyFiles(t *testing.T) {
 		t.Errorf("the skipped non-policy files must still be surfaced, got:\n%s", buf.String())
 	}
 }
+
+// TestPreflightTable_CoverageColumnVaries is the L-26 guard.
+//
+// The second column used to be a STATUS cell that read "unsupported" whenever
+// a row had ANY hole. Measured on the real matrix (16 ecosystems x 46
+// conditions, 281 "none" cells) every row has at least one, so the column was
+// the same literal sixteen times — zero information, and it implied nothing
+// was supported when 455 of the 736 cells are. A coverage count has to VARY
+// with the row or it is the same defect in new clothes.
+func TestPreflightTable_CoverageColumnVaries(t *testing.T) {
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
+	resp := sampleMatrixResponse()
+	// pip has one "none" of three, maven has two of three — different
+	// counts on purpose.
+	rows := []supportMatrixRowDTO{resp.Matrix[1], resp.Matrix[2]}
+	printPreflightTable(cmd, rows, resp.Conditions)
+
+	out := buf.String()
+	cells := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[0] == "pip" || fields[0] == "maven" {
+			cells[fields[0]] = fields[1]
+		}
+	}
+	if len(cells) != 2 {
+		t.Fatalf("expected a coverage cell for pip and maven, got %v in:\n%s", cells, out)
+	}
+	if cells["pip"] != "2/3" {
+		t.Errorf("pip coverage cell = %q, want 2/3 (one of three conditions is none)", cells["pip"])
+	}
+	if cells["maven"] != "1/3" {
+		t.Errorf("maven coverage cell = %q, want 1/3 (two of three conditions are none)", cells["maven"])
+	}
+	if cells["pip"] == cells["maven"] {
+		t.Errorf("both rows render the same cell %q — a column that cannot vary carries no information", cells["pip"])
+	}
+	// The literal that used to fill the column must be gone as a STATUS
+	// value. It legitimately survives in the header ("UNSUPPORTED
+	// CONDITIONS"), so match the lower-case cell form.
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == "unsupported" {
+			t.Errorf("row still renders a constant %q status cell: %q", "unsupported", line)
+		}
+	}
+}
+
+// TestConditionCoverage_ComplementsUnsupportedList pins the invariant the two
+// columns share: whatever the third column lists as a hole is exactly what the
+// second column declines to count as supported. If they drift, the table
+// contradicts itself row by row.
+func TestConditionCoverage_ComplementsUnsupportedList(t *testing.T) {
+	resp := sampleMatrixResponse()
+	for _, row := range resp.Matrix {
+		supported, total := conditionCoverage(row, resp.Conditions)
+		unsupported := unsupportedConditions(row, resp.Conditions)
+		if supported+len(unsupported) != total {
+			t.Errorf("%s: supported=%d + unsupported=%d != total=%d", row.Ecosystem, supported, len(unsupported), total)
+		}
+		// Same invariant with no canonical condition order (the fallback
+		// branch that ranges the map).
+		supported, total = conditionCoverage(row, nil)
+		unsupported = unsupportedConditions(row, nil)
+		if supported+len(unsupported) != total {
+			t.Errorf("%s (unordered): supported=%d + unsupported=%d != total=%d", row.Ecosystem, supported, len(unsupported), total)
+		}
+	}
+}

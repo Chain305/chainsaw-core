@@ -322,15 +322,20 @@ func runAuthClientDelete(cmd *cobra.Command, args []string) error {
 
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
-		// A5 — see the identical guard on policy delete. Without it a
-		// scripted `auth client delete <id>` exits 0 having done nothing,
-		// and the credential keeps authenticating.
-		if !stdinIsTerminal() {
-			return fmt.Errorf("refusing to delete client_credential %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
-		}
-		if !PromptConfirm(fmt.Sprintf("Delete client_credential %q? This cannot be undone.", id)) {
-			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
-			return nil
+		// A5 (kept, now inside confirmDestructive) + L-30: resolve via the
+		// list-and-filter that `auth client rotate` already performs. The
+		// server exposes no GET /api/clients/{id}, and adding one was
+		// explicitly out of scope for this wave.
+		ok, err := confirmDestructive(cmd, id, "delete client_credential", "This cannot be undone.",
+			func() (string, error) {
+				existing, err := findClientCredential(client, id)
+				if err != nil {
+					return "", err
+				}
+				return describeTarget(existing.Name, id), nil
+			})
+		if err != nil || !ok {
+			return err
 		}
 	}
 
@@ -386,6 +391,32 @@ func authClientRotateCmd() *cobra.Command {
 	return cmd
 }
 
+// findClientCredential looks up one client_credential by id.
+//
+// The server has no GET /api/clients/{id} (internal/server routes only the
+// collection plus PATCH/DELETE on the item), so this lists the org's
+// credentials and filters. Cheap, because the list is org-scoped.
+//
+// L-30: extracted from runAuthClientRotate so `auth client delete` can reuse
+// it as its pre-confirmation probe without inventing a new endpoint. Absence
+// is reported as a 404-shaped error so confirmDestructive can tell "no such
+// credential" apart from "you may not list credentials" — the second must
+// still let a permitted delete proceed.
+func findClientCredential(client *APIClient, id string) (*clientCredItem, error) {
+	var listResp struct {
+		Clients []clientCredItem `json:"clients"`
+	}
+	if err := client.Get("/api/clients", &listResp); err != nil {
+		return nil, fmt.Errorf("look up existing client: %w", err)
+	}
+	for i := range listResp.Clients {
+		if listResp.Clients[i].ClientID == id {
+			return &listResp.Clients[i], nil
+		}
+	}
+	return nil, notFoundError(fmt.Sprintf("client_credential %q not found in current org", id))
+}
+
 func runAuthClientRotate(cmd *cobra.Command, args []string) error {
 	client := newClient()
 	if client.baseURL == "" {
@@ -403,23 +434,10 @@ func runAuthClientRotate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 1: fetch existing metadata so the recreated credential keeps
-	// its description / type / repo list. The server has no GET /api/clients/{id}
-	// — list all and find ours. Cheap because the list is org-scoped.
-	var listResp struct {
-		Clients []clientCredItem `json:"clients"`
-	}
-	if err := client.Get("/api/clients", &listResp); err != nil {
-		return fmt.Errorf("look up existing client: %w", err)
-	}
-	var existing *clientCredItem
-	for i := range listResp.Clients {
-		if listResp.Clients[i].ClientID == id {
-			existing = &listResp.Clients[i]
-			break
-		}
-	}
-	if existing == nil {
-		return fmt.Errorf("client_credential %q not found in current org", id)
+	// its description / type / repo list.
+	existing, err := findClientCredential(client, id)
+	if err != nil {
+		return err
 	}
 
 	yes, _ := cmd.Flags().GetBool("yes")

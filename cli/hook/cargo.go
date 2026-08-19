@@ -272,16 +272,15 @@ func cargoBlockBody(opts WireOpts) (string, error) {
 		if _, _, err := parseCreds(creds); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(`# chainsaw: token embedded below; tighten this file's permissions
-# (chmod 600) if your home directory is shared.
-[source.crates-io]
+		return fmt.Sprintf(`%s[source.crates-io]
 replace-with = "chainsaw"
 
 [source.chainsaw]
 registry = %s
 
 [registries.chainsaw]
-token = %s`, registryValue, strconv.Quote("Bearer "+creds)), nil
+token = %s`, credentialHeaderNote("the registries.chainsaw token below", opts),
+			registryValue, strconv.Quote("Bearer "+creds)), nil
 	}
 	return fmt.Sprintf(`[source.crates-io]
 replace-with = "chainsaw"

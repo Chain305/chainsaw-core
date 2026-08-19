@@ -15,9 +15,13 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chain305/chainsaw-core/telemetry"
@@ -127,6 +131,26 @@ func emit(name string, props map[string]any) {
 // OBSERVED earlier than it could be SENT (see markSessionStart). A zero ts
 // means "now".
 func emitAt(name string, ts time.Time, props map[string]any) {
+	// L-12: DEBUG IS A LOCAL PREVIEW AND IS NOT CONSENT-GATED.
+	//
+	// CHAINSAW_TELEMETRY_DEBUG=1 prints what WOULD be emitted and sends
+	// nothing (telemetry.Client short-circuits ModeDebug to a stderr write
+	// before the buffer, core/telemetry/client.go). Requiring consent to
+	// preview what consenting means is a consent dark pattern, and the old
+	// ordering made `chainsaw telemetry debug` a silent no-op on exactly the
+	// box whose operator had not opted in — indistinguishable from broken.
+	//
+	// The R1 invariant below still holds on this branch, and that is the
+	// whole point of writing the preview by hand instead of reusing the
+	// client: it deliberately does NOT call initTelemetry() (no client, no
+	// socket, no endpoint resolution) and does NOT call
+	// telemetry.ProcessInstall() (no persistent install_id is minted on a
+	// machine that has not consented). The printed install_id is an explicit
+	// placeholder for that reason — see telemetryDebugPlaceholderID.
+	if telemetry.ResolveMode() == telemetry.ModeDebug {
+		writeTelemetryDebugEvent(name, ts, props)
+		return
+	}
 	// R1: consent first, before ANYTHING else. Deliberately ahead of
 	// initTelemetry() and telemetry.ProcessInstall() so a non-consenting
 	// run constructs no client, opens no socket, and — via LoadInstall —
@@ -179,6 +203,10 @@ func emitAt(name string, ts time.Time, props map[string]any) {
 // passthrough branch that does return through Execute(). Flush is safe to
 // call repeatedly, and Client.Close is internally once-guarded too.
 func flushTelemetry() {
+	// L-12: the debug branch of emitAt never builds a client, so the trailer
+	// has to run BEFORE the nil check or `telemetry debug` would still end
+	// in silence when the wrapped command emitted nothing at all.
+	writeTelemetryDebugTrailer()
 	if telemetryCli == nil {
 		return
 	}
@@ -305,4 +333,96 @@ func isFirstRun() bool {
 		return false
 	}
 	return time.Since(fi.ModTime()) < 5*time.Second
+}
+
+// ── local debug preview (L-12) ────────────────────────────────────────────────
+//
+// CHAINSAW_TELEMETRY_DEBUG=1 turns emit() into a LOCAL PRINTER. Nothing is
+// buffered, nothing is sent, nothing is persisted. The sink lives here rather
+// than in telemetry.Client because reaching the client at all would mean
+// calling initTelemetry() and telemetry.ProcessInstall(), and the second of
+// those MINTS AND WRITES a persistent install_id — the identifier a
+// non-consenting operator must never acquire as a side effect of asking what
+// telemetry would look like. See the branch at the top of emitAt.
+
+// telemetryDebugPlaceholderID stands in for the install_id every real event
+// carries. It is deliberately not a valid id and deliberately self-describing:
+// the debug preview must not imply that a machine identifier exists, and must
+// not create one to make the preview prettier.
+// (Angle brackets are deliberately avoided: encoding/json HTML-escapes them,
+// which would render the placeholder as \u003c… in the very output an operator
+// reads to decide whether they believe us.)
+const telemetryDebugPlaceholderID = "(not minted in debug mode)"
+
+var (
+	telemetryDebugOut       io.Writer = os.Stderr
+	telemetryDebugPreamble  sync.Once
+	telemetryDebugTrailer   sync.Once
+	telemetryDebugEventSeen atomic.Int64
+)
+
+// writeTelemetryDebugPreamble prints the one-time header. It is what makes the
+// command self-explanatory instead of a wall of JSON (or, worse, nothing).
+func writeTelemetryDebugPreamble() {
+	telemetryDebugPreamble.Do(func() {
+		fmt.Fprintln(telemetryDebugOut, "chainsaw: telemetry debug mode (CHAINSAW_TELEMETRY_DEBUG=1).")
+		fmt.Fprintln(telemetryDebugOut, "chainsaw: events below are printed locally and are NOT sent anywhere.")
+		fmt.Fprintln(telemetryDebugOut, "chainsaw: no install_id is created, and your telemetry consent setting is not read or changed.")
+	})
+}
+
+// writeTelemetryDebugEvent renders one event as it would be captured. The
+// property set mirrors what emitAt stamps on a real event (surface, org_id)
+// so the preview is useful for verifying instrumentation, with install_id
+// replaced by the placeholder.
+func writeTelemetryDebugEvent(name string, ts time.Time, props map[string]any) {
+	writeTelemetryDebugPreamble()
+	telemetryDebugEventSeen.Add(1)
+
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	enriched := make(map[string]any, len(props)+3)
+	for k, v := range props {
+		enriched[k] = v
+	}
+	enriched["install_id"] = telemetryDebugPlaceholderID
+	enriched["surface"] = string(telemetry.SurfaceCLI)
+	if org := strings.TrimSpace(cfgOrgID()); org != "" {
+		enriched["org_id"] = org
+	}
+
+	payload := map[string]any{
+		"event":      name,
+		"timestamp":  ts.UTC().Format(time.RFC3339Nano),
+		"sent":       false,
+		"properties": enriched,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintf(telemetryDebugOut, "chainsaw: telemetry debug event %s (could not render properties: %v)\n", name, err)
+		return
+	}
+	fmt.Fprintln(telemetryDebugOut, string(b))
+}
+
+// writeTelemetryDebugTrailer closes out a debug run. NEVER A SILENT NO-OP is
+// the requirement: a wrapped command that emitted nothing must say so, because
+// "no output" is exactly what the broken behaviour looked like.
+//
+// Once-guarded so the guard path's mid-process flush and Execute()'s explicit
+// + deferred flushes cannot print it three times. The guard path exits right
+// after its flush, so printing there is the correct moment for that branch.
+func writeTelemetryDebugTrailer() {
+	if telemetry.ResolveMode() != telemetry.ModeDebug {
+		return
+	}
+	telemetryDebugTrailer.Do(func() {
+		writeTelemetryDebugPreamble()
+		if telemetryDebugEventSeen.Load() == 0 {
+			fmt.Fprintln(telemetryDebugOut, "chainsaw: this command emitted no telemetry events.")
+			return
+		}
+		fmt.Fprintf(telemetryDebugOut, "chainsaw: %d telemetry event(s) printed above; 0 sent.\n", telemetryDebugEventSeen.Load())
+	})
 }

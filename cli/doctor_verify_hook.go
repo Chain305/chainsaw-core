@@ -111,6 +111,9 @@ func verifyDrivers() map[string]verifyDriver {
 // error listing the explicitly-unsupported managers when we know the
 // hook surface exists but verify doesn't cover it yet.
 func verifyDriverFor(name string) (verifyDriver, error) {
+	if d, ok := verifyDriverOverrides[name]; ok {
+		return d, nil
+	}
 	if d, ok := verifyDrivers()[name]; ok {
 		return d, nil
 	}
@@ -127,6 +130,13 @@ func verifyDriverFor(name string) (verifyDriver, error) {
 	}
 	return nil, fmt.Errorf("unknown package manager %q; verify supports: %s", name, strings.Join(supported, ", "))
 }
+
+// verifyDriverOverrides substitutes a driver for a manager name. Test-only, and
+// nil in every shipped path — same posture as verifyExitOverride above. It
+// exists because the real drivers shell out to npm/bun/docker, so any test
+// about WHETHER the install ran (rather than what it returned) has to be able
+// to supply one that just records the call.
+var verifyDriverOverrides map[string]verifyDriver
 
 // newDoctorVerifyHookCmd builds the `chainsaw doctor verify-hook` subcommand.
 // Tests instantiate it directly to avoid sharing flag state with the
@@ -177,9 +187,12 @@ Examples:
 // runDoctorVerifyHook is the cobra RunE entry point. Splits into:
 //  1. Resolve the driver for the manager.
 //  2. Generate a sentinel coordinate.
-//  3. Drive the install (swallow the expected cmd failure).
-//  4. Poll the audit API for the sentinel.
-//  5. Render PASS / FAIL / DEGRADED + exit code.
+//  3. Preflight the audit-log prerequisites (verifyPreflight) — BEFORE the
+//     install, because the install is the expensive step and the confirmation
+//     it feeds is unreachable without them.
+//  4. Drive the install (swallow the expected cmd failure).
+//  5. Poll the audit API for the sentinel.
+//  6. Render PASS / FAIL / DEGRADED + exit code.
 func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 	manager := strings.TrimSpace(args[0])
 	driver, err := verifyDriverFor(manager)
@@ -196,6 +209,31 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 	}
 
 	start := time.Now()
+
+	// Preflight FIRST. The synthetic install below is the expensive step
+	// (~24s in practice, 60s ceiling) and the audit-log confirmation it
+	// exists to feed cannot run at all without a server URL and a token —
+	// so an unauthenticated user used to sit through the whole install to
+	// be told to log in, a fact checkable in microseconds. The verdict,
+	// reason strings and hint routing are identical to the late check
+	// inside pollAuditReceipt; only the wait is gone.
+	//
+	// InstallOK is false on this path because the install genuinely never
+	// ran. That is a --json shape change (it used to reflect a drive that
+	// happened before the same degrade), and it is the more accurate value.
+	if reason, cause, ok := verifyPreflight(); !ok {
+		res := verifyResult{
+			Manager:   manager,
+			Sentinel:  sentinel,
+			Outcome:   verifyDegraded,
+			Reason:    reason,
+			Duration:  time.Since(start).Round(time.Millisecond).String(),
+			InstallOK: false,
+		}
+		applyDegradedHint(&res, cause, sentinel)
+		return finishVerifyRun(cmd, res, jsonMode, verbose, nil, nil)
+	}
+
 	driveCtx, driveCancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 	defer driveCancel()
 	if !jsonMode {
@@ -234,34 +272,23 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 		applyDegradedHint(&res, receipt.cause, sentinel)
 	}
 
-	if jsonMode {
-		// Build the payload, THEN write it, THEN fall through. The
-		// verbose branch used to `return writeJSON(...)` directly, which
-		// skipped both the telemetry emit and the exit switch below — so
-		// adding --verbose to a failing CI step turned it green while the
-		// JSON still said "outcome":"FAIL". Choosing a richer rendering
-		// must never weaken a verdict.
-		payload := any(res)
-		if verbose && len(output) > 0 {
-			// In JSON mode the verbose output rides as a separate key so
-			// callers can ignore it without parsing free-form text.
-			payload = map[string]any{
-				"result":         res,
-				"command_output": string(output),
-				"command_error":  errString(driveErr),
-			}
-		}
-		if err := writeJSON(cmd, payload); err != nil {
-			return err
-		}
-	} else {
-		printVerifyResult(cmd, res, verbose, output, driveErr)
+	return finishVerifyRun(cmd, res, jsonMode, verbose, output, driveErr)
+}
+
+// finishVerifyRun is the single tail every verify-hook path ends in: render,
+// emit, then map the verdict onto the exit contract. It exists because the
+// preflight short-circuit above is a second exit from RunE, and the three
+// things done here are precisely the three a hand-copied early return drops —
+// the --verbose branch already shipped that bug once (see renderVerifyResult).
+func finishVerifyRun(cmd *cobra.Command, res verifyResult, jsonMode, verbose bool, output []byte, driveErr error) error {
+	if err := renderVerifyResult(cmd, res, jsonMode, verbose, output, driveErr); err != nil {
+		return err
 	}
 
 	emit("cli.doctor.verify_hook", map[string]any{
-		"manager":  manager,
+		"manager":  res.Manager,
 		"outcome":  string(res.Outcome),
-		"sentinel": sentinel,
+		"sentinel": res.Sentinel,
 	})
 
 	switch res.Outcome {
@@ -288,6 +315,33 @@ func runDoctorVerifyHook(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	return nil
+}
+
+// renderVerifyResult writes the verdict in whichever rendering the flags
+// selected. ONE renderer for every path on purpose: the JSON branch carries a
+// payload shape (bare result vs verbose envelope) plus a fallthrough
+// discipline that a second, hand-copied render block would drift from — and
+// that drift is not hypothetical here. The verbose branch used to
+// `return writeJSON(...)` directly, skipping both the telemetry emit and the
+// exit switch, so adding --verbose to a failing CI step turned it green while
+// the JSON still said "outcome":"FAIL". Choosing a richer rendering must never
+// weaken a verdict; nor may choosing an earlier exit.
+func renderVerifyResult(cmd *cobra.Command, res verifyResult, jsonMode, verbose bool, output []byte, driveErr error) error {
+	if !jsonMode {
+		printVerifyResult(cmd, res, verbose, output, driveErr)
+		return nil
+	}
+	payload := any(res)
+	if verbose && len(output) > 0 {
+		// In JSON mode the verbose output rides as a separate key so
+		// callers can ignore it without parsing free-form text.
+		payload = map[string]any{
+			"result":         res,
+			"command_output": string(output),
+			"command_error":  errString(driveErr),
+		}
+	}
+	return writeJSON(cmd, payload)
 }
 
 // verifyExitOverride mirrors doctorExitOverride (doctor_upgrade.go). It
@@ -361,6 +415,27 @@ func applyDegradedHint(res *verifyResult, cause degradedCause, sentinel string) 
 	}
 }
 
+// verifyPreflight reports why the audit-log confirmation cannot run at all.
+//
+// Called BEFORE the synthetic install: the install costs ~24s and the audit
+// poll it feeds is unreachable without a server and a token, so running it
+// first spends that time to learn something checkable in microseconds. Still
+// called from pollAuditReceipt as defence in depth — the two entry points must
+// never disagree about what "we cannot confirm" means, and a future caller of
+// pollAuditReceipt that skips the command layer still gets the same verdict.
+//
+// ok==true means only that the prerequisites exist, not that the audit API
+// answers; a transport failure is still classified later, by the poll itself.
+func verifyPreflight() (reason string, cause degradedCause, ok bool) {
+	if strings.TrimSpace(cfgServerURL()) == "" {
+		return "no server configured (set --server or run `chainsaw auth login`)", causeNoServer, false
+	}
+	if strings.TrimSpace(cfgToken()) == "" {
+		return "not authenticated to query the audit log (run `chainsaw auth login`)", causeNoAuth, false
+	}
+	return "", causeNone, true
+}
+
 // receiptResult bundles the audit-API poll outcome.
 type receiptResult struct {
 	outcome        verifyOutcome
@@ -398,13 +473,8 @@ type receiptResult struct {
 // fabricating a coordinate for every 404 would put packages that do not exist
 // into customers' SBOMs.
 func pollAuditReceipt(ctx context.Context, sentinel string) receiptResult {
-	server := strings.TrimSpace(cfgServerURL())
-	token := strings.TrimSpace(cfgToken())
-	if server == "" {
-		return receiptResult{outcome: verifyDegraded, cause: causeNoServer, degradedReason: "no server configured (set --server or run `chainsaw auth login`)"}
-	}
-	if token == "" {
-		return receiptResult{outcome: verifyDegraded, cause: causeNoAuth, degradedReason: "not authenticated to query the audit log (run `chainsaw auth login`)"}
+	if reason, cause, ok := verifyPreflight(); !ok {
+		return receiptResult{outcome: verifyDegraded, cause: cause, degradedReason: reason}
 	}
 	client := newClient()
 	path := "/api/events?logical_path=" + url.QueryEscape(sentinel) +

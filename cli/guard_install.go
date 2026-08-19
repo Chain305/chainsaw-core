@@ -486,10 +486,18 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	// fresh set. --quiet suppresses the prompt entirely (no blocking on a scripted run).
 	if !isQuiet {
 		stale := guard.bundle != nil && guard.bundle.Stale()
-		if fetched, ferr := maybeAutoFetchFeed(guard.fullFeed, stale, prodAutoFetchDeps()); ferr != nil {
+		fetched, notice, ferr := maybeAutoFetchFeed(guard.fullFeed, stale, prodAutoFetchDeps())
+		if ferr != nil {
 			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, "feed refresh failed; continuing with the offline floor ("+ferr.Error()+")"))
 		} else if fetched {
 			guard = newLocalGuard() // reload the index with the freshly-downloaded feed
+		}
+		// L-21: when the offer was suppressed by the failure backoff, say so
+		// ONCE through the existing notices channel — which the loop below
+		// already renders under the same --quiet rule as every other notice,
+		// so a suppressed offer cannot become new chatter on a scripted run.
+		if notice != "" {
+			guard.notices = append(guard.notices, notice)
 		}
 	}
 	if !isQuiet {

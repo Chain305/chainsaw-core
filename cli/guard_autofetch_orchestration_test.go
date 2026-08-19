@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // TestMaybeAutoFetchFeed_Orchestration verifies the prompt/fetch wiring around
@@ -11,6 +12,10 @@ import (
 func TestMaybeAutoFetchFeed_Orchestration(t *testing.T) {
 	newDeps := func(tty, offline, confirmYes bool, fetchErr error) (*autoFetchDeps, *int, *int) {
 		confirms, fetches := 0, 0
+		// L-21: the backoff seams are stubbed against an in-memory state so
+		// these cases keep asserting the ORCHESTRATION only, with no failure
+		// memory in play and no config directory touched.
+		state := &guardState{}
 		d := &autoFetchDeps{
 			isTTY:     func() bool { return tty },
 			isOffline: func() bool { return offline },
@@ -22,13 +27,16 @@ func TestMaybeAutoFetchFeed_Orchestration(t *testing.T) {
 				fetches++
 				return fetchErr
 			},
+			now:       time.Now,
+			loadState: func() *guardState { return state },
+			saveState: func(st *guardState) { state = st },
 		}
 		return d, &confirms, &fetches
 	}
 
 	t.Run("absent feed, confirmed → fetch runs", func(t *testing.T) {
 		d, confirms, fetches := newDeps(true, false, true, nil)
-		fetched, err := maybeAutoFetchFeed(false, false, d)
+		fetched, _, err := maybeAutoFetchFeed(false, false, d)
 		if err != nil || !fetched {
 			t.Fatalf("want fetched=true err=nil, got fetched=%v err=%v", fetched, err)
 		}
@@ -39,7 +47,7 @@ func TestMaybeAutoFetchFeed_Orchestration(t *testing.T) {
 
 	t.Run("offered but declined → no fetch", func(t *testing.T) {
 		d, confirms, fetches := newDeps(true, false, false, nil)
-		fetched, err := maybeAutoFetchFeed(false, false, d)
+		fetched, _, err := maybeAutoFetchFeed(false, false, d)
 		if err != nil || fetched {
 			t.Fatalf("want fetched=false err=nil, got fetched=%v err=%v", fetched, err)
 		}
@@ -50,7 +58,7 @@ func TestMaybeAutoFetchFeed_Orchestration(t *testing.T) {
 
 	t.Run("gate says no (present+fresh) → never prompts", func(t *testing.T) {
 		d, confirms, fetches := newDeps(true, false, true, nil)
-		fetched, err := maybeAutoFetchFeed(true, false, d)
+		fetched, _, err := maybeAutoFetchFeed(true, false, d)
 		if err != nil || fetched {
 			t.Fatalf("want fetched=false err=nil, got fetched=%v err=%v", fetched, err)
 		}
@@ -61,7 +69,7 @@ func TestMaybeAutoFetchFeed_Orchestration(t *testing.T) {
 
 	t.Run("offline → never prompts even if absent", func(t *testing.T) {
 		d, confirms, fetches := newDeps(true, true, true, nil)
-		fetched, _ := maybeAutoFetchFeed(false, false, d)
+		fetched, _, _ := maybeAutoFetchFeed(false, false, d)
 		if fetched || *confirms != 0 || *fetches != 0 {
 			t.Fatalf("offline must not prompt/fetch, got fetched=%v confirms=%d fetches=%d", fetched, *confirms, *fetches)
 		}
@@ -70,7 +78,7 @@ func TestMaybeAutoFetchFeed_Orchestration(t *testing.T) {
 	t.Run("fetch error is surfaced", func(t *testing.T) {
 		wantErr := errors.New("network down")
 		d, _, fetches := newDeps(true, false, true, wantErr)
-		fetched, err := maybeAutoFetchFeed(false, false, d)
+		fetched, _, err := maybeAutoFetchFeed(false, false, d)
 		if fetched || !errors.Is(err, wantErr) {
 			t.Fatalf("want fetched=false err=network down, got fetched=%v err=%v", fetched, err)
 		}

@@ -87,12 +87,23 @@ type scanActionsFinding struct {
 
 // scanActionsSummary aggregates per-severity counts plus the workflow-file
 // count so callers can render a one-line summary.
+//
+// Workflows counts FILES PARSED; ActionRefs counts the `uses:` entries found
+// inside them. They are separate numbers because they answer different
+// questions and used to be conflated: Workflows was derived from the distinct
+// SourceFile values of the refs, so a workflow of `run:`-only steps — which
+// yields no refs at all — vanished from the count and a repo full of them
+// reported identically to a repo with no workflows. Reporting both makes
+// "scanned 3 files, none of them use an Action" expressible.
 type scanActionsSummary struct {
 	Total     int `json:"total"`
 	High      int `json:"high"`
 	Medium    int `json:"medium"`
 	Low       int `json:"low"`
 	Workflows int `json:"workflows"`
+	// ActionRefs is additive: consumers that only read the fields above are
+	// unaffected.
+	ActionRefs int `json:"action_refs"`
 }
 
 type scanActionsReport struct {
@@ -146,7 +157,7 @@ func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 		return 0, fmt.Errorf("scan: %w", err)
 	}
 
-	report := buildScanActionsReport(findings, workflowCount)
+	report := buildScanActionsReport(findings, workflowCount, len(refs))
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
@@ -195,26 +206,26 @@ func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 }
 
 // parseTargetForScanActions accepts either a directory or a single workflow
-// file and returns the parsed []ActionRef plus the number of distinct
-// workflow files contributing to that list.
+// file and returns the parsed []ActionRef plus the number of workflow files
+// that were READ.
+//
+// The count comes from the parser's own file list, not from the distinct
+// SourceFile values of the refs. Deriving it from the refs made the count a
+// function of whether the workflows happened to reference an Action: a
+// workflow whose steps are all `run:` produces no refs, so it contributed no
+// SourceFile, so a directory of them counted zero workflows and the report
+// said "no workflows found" about files it had just parsed.
 func parseTargetForScanActions(target string) ([]githubactions.ActionRef, int, error) {
 	info, err := os.Stat(target)
 	if err != nil {
 		return nil, 0, fmt.Errorf("stat %s: %w", target, err)
 	}
 	if info.IsDir() {
-		refs, err := githubactions.ParseWorkflowDir(target)
+		refs, files, err := githubactions.ParseWorkflowDirFiles(target)
 		if err != nil {
 			return nil, 0, err
 		}
-		// Distinct SourceFile count == workflow count.
-		seen := make(map[string]struct{})
-		for _, r := range refs {
-			if r.SourceFile != "" {
-				seen[r.SourceFile] = struct{}{}
-			}
-		}
-		return refs, len(seen), nil
+		return refs, len(files), nil
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {
@@ -229,10 +240,13 @@ func parseTargetForScanActions(target string) ([]githubactions.ActionRef, int, e
 
 // buildScanActionsReport projects []githubactions.Finding into the wire
 // shape and computes the summary counters.
-func buildScanActionsReport(findings []githubactions.Finding, workflowCount int) scanActionsReport {
+func buildScanActionsReport(findings []githubactions.Finding, workflowCount, actionRefCount int) scanActionsReport {
 	out := scanActionsReport{
 		Findings: make([]scanActionsFinding, 0, len(findings)),
-		Summary:  scanActionsSummary{Workflows: workflowCount},
+		Summary: scanActionsSummary{
+			Workflows:  workflowCount,
+			ActionRefs: actionRefCount,
+		},
 	}
 	for _, f := range findings {
 		out.Findings = append(out.Findings, scanActionsFinding{
@@ -316,8 +330,9 @@ func writeScanActionsText(out io.Writer, errOut io.Writer, report scanActionsRep
 			r.sev, strings.Repeat(" ", sevW-displayWidth(r.sev)),
 			r.signal, r.msg)
 	}
-	fmt.Fprintf(out, "Found %d findings (%d high, %d medium, %d low) across %d workflows\n",
-		report.Summary.Total, report.Summary.High, report.Summary.Medium, report.Summary.Low, report.Summary.Workflows)
+	fmt.Fprintf(out, "Found %d findings (%d high, %d medium, %d low) across %d workflows (%d action references)\n",
+		report.Summary.Total, report.Summary.High, report.Summary.Medium, report.Summary.Low,
+		report.Summary.Workflows, report.Summary.ActionRefs)
 	// Risk evaluation line — keeps text output a near-superset of the
 	// JSON `risk` block so a `grep ^Risk` in CI logs surfaces the
 	// engine's verdict without having to re-run with --format=json.
@@ -328,8 +343,23 @@ func writeScanActionsText(out io.Writer, errOut io.Writer, report scanActionsRep
 	// Zero parsed workflows means the risk verdict isn't meaningful —
 	// "clean" would falsely imply we evaluated something. This wins over
 	// the (unlikely) signals-with-zero-workflows case on purpose.
-	if report.Summary.Workflows == 0 {
+	//
+	// Workflows>0 with no refs is the case the old wording could not express:
+	// we DID evaluate something and it was clean, there was simply no `uses:`
+	// to pin or attribute. Saying "no workflows found" there was a factual
+	// error about files we had just read.
+	//
+	// It overrides the signal list for the same reason the zero-workflow case
+	// above does, one step further out: with no action references there are no
+	// action findings by construction, so every signal the engine reports is
+	// an artifact of projecting an EMPTY input (it emits license.unidentified
+	// and friends on nothing at all). Printing those as the verdict for a
+	// clean run would attribute them to workflows that never made a claim.
+	switch {
+	case report.Summary.Workflows == 0:
 		verdict = "no workflows found"
+	case report.Summary.ActionRefs == 0:
+		verdict = fmt.Sprintf("clean (%d workflow(s) parsed, no action references to evaluate)", report.Summary.Workflows)
 	}
 	fmt.Fprintf(out, "Risk evaluation: %s\n", verdict)
 }

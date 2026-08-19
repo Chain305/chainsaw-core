@@ -466,6 +466,21 @@ func init() {
 	rootCmd.AddCommand(exceptionCmd)
 }
 
+// resolveExceptionLabel names the delete target using the DELETE dry-run this
+// command already implements for --dry-run. Exceptions are stored as policy
+// rows, so the preview target is a generic map; pull the name and fall back to
+// the id.
+func resolveExceptionLabel(client *APIClient, id string) (string, error) {
+	var preview struct {
+		Target map[string]any `json:"target"`
+	}
+	if err := client.WithHeader(DryRunHeader, "true").DeleteInto("/api/exceptions/"+id, &preview); err != nil {
+		return "", err
+	}
+	name, _ := preview.Target["name"].(string)
+	return describeTarget(name, id), nil
+}
+
 func runExceptionDelete(cmd *cobra.Command, args []string) error {
 	client := newClient()
 	if client.baseURL == "" {
@@ -510,16 +525,16 @@ func runExceptionDelete(cmd *cobra.Command, args []string) error {
 
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
-		// Non-TTY callers (CI, piped scripts) never see the prompt —
-		// PromptConfirm returns false and we'd silently print "Aborted."
-		// and exit 0, which masks broken automation. Require --yes
-		// explicitly here and exit with a clear error instead.
-		if !stdinIsTerminal() {
-			return fmt.Errorf("refusing to delete exception %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
-		}
-		if !PromptConfirm(fmt.Sprintf("Delete exception %q?", id)) {
-			fmt.Fprintln(out, "Aborted.")
-			return nil
+		// The non-TTY guard now lives in confirmDestructive; the rationale is
+		// unchanged (a silent "Aborted." at exit 0 masks broken automation).
+		//
+		// L-30: the probe is this command's OWN --dry-run request. There is no
+		// GET /api/exceptions/{id} — the item route only accepts
+		// PUT/PATCH/DELETE — and adding one was out of scope for this wave.
+		ok, err := confirmDestructive(cmd, id, "delete exception", "",
+			func() (string, error) { return resolveExceptionLabel(client, id) })
+		if err != nil || !ok {
+			return err
 		}
 	}
 

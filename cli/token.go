@@ -279,12 +279,14 @@ func runTokenRotate(cmd *cobra.Command, args []string) error {
 	// else.
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
-		if !stdinIsTerminal() {
-			return fmt.Errorf("refusing to rotate token %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
-		}
-		if !PromptConfirm(fmt.Sprintf("Rotate token %q? The current secret stops authenticating immediately and cannot be recovered.", id)) {
-			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
-			return nil
+		// L-30: resolve the target through the EXISTING GET before asking, so
+		// a typo'd id fails here instead of after the operator types y.
+		// --yes skips this entirely, so scripts pay no extra round trip.
+		ok, err := confirmDestructive(cmd, id, "rotate token",
+			"The current secret stops authenticating immediately and cannot be recovered.",
+			func() (string, error) { return resolveTokenLabel(client, id) })
+		if err != nil || !ok {
+			return err
 		}
 	}
 
@@ -326,6 +328,31 @@ func init() {
 	rootCmd.AddCommand(tokenCmd)
 }
 
+// resolveTokenRevokeLabel names the revoke target using the DELETE dry-run
+// this command already implements for --dry-run. Same request, same RBAC, so
+// the confirmation is checked against exactly what the revoke will hit.
+func resolveTokenRevokeLabel(client *APIClient, id string) (string, error) {
+	var preview struct {
+		Target tokenItem `json:"target"`
+	}
+	if err := client.WithHeader(DryRunHeader, "true").DeleteInto("/api/api-keys/"+id, &preview); err != nil {
+		return "", err
+	}
+	return describeTarget(preview.Target.Name, id), nil
+}
+
+// resolveTokenLabel names a token for a confirmation prompt using the existing
+// GET /api/api-keys/{id} (internal/server/server_api_keys.go). No new endpoint.
+func resolveTokenLabel(client *APIClient, id string) (string, error) {
+	var resp struct {
+		APIKey tokenItem `json:"api_key"`
+	}
+	if err := client.Get("/api/api-keys/"+id, &resp); err != nil {
+		return "", err
+	}
+	return describeTarget(resp.APIKey.Name, id), nil
+}
+
 func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	client := newClient()
 	if client.baseURL == "" {
@@ -360,19 +387,17 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
-		// A5: non-TTY callers (CI, piped scripts) never see the prompt —
-		// PromptConfirm returns false and we'd silently print "Aborted."
-		// and exit 0, masking that the revoke never happened. A CI job
-		// running `chainsaw token revoke $ID` without --yes reported
-		// success while the token stayed live. Require --yes explicitly
-		// here and exit with a clear error instead. (Same guard, same
-		// rationale, as policy delete / exception delete / undo.)
-		if !stdinIsTerminal() {
-			return fmt.Errorf("refusing to revoke token %s without --yes (stdin is not a TTY, so there is no confirmation prompt to display). Re-run with --yes to confirm.", id)
-		}
-		if !PromptConfirm(fmt.Sprintf("Revoke token %q? This cannot be undone.", id)) {
-			fmt.Fprintln(out, "Aborted.")
-			return nil
+		// A5 (kept, now inside confirmDestructive): non-TTY callers never see
+		// the prompt, so requiring --yes there is what stops a CI job from
+		// reporting success while the token stays live.
+		//
+		// L-30: the probe is this command's OWN --dry-run request, reused. It
+		// costs one round trip on the interactive path only, and a typo now
+		// fails before the prompt rather than after the y.
+		ok, err := confirmDestructive(cmd, id, "revoke token", "This cannot be undone.",
+			func() (string, error) { return resolveTokenRevokeLabel(client, id) })
+		if err != nil || !ok {
+			return err
 		}
 	}
 

@@ -6,6 +6,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+
+	"github.com/chain305/chainsaw-core/cli/secureio"
 )
 
 // credentialFileMode returns the mode a NEWLY CREATED config file should get,
@@ -24,17 +26,32 @@ func credentialFileMode(opts WireOpts) (os.FileMode, bool) {
 	return 0o644, false
 }
 
-// tightenExistingFile chmods a pre-existing, secret-bearing config down to
-// 0600 before we write into it. Needed because writeAtomicMode preserves an
+// tightenExistingFile restricts a pre-existing, secret-bearing config to the
+// owner before we write into it. Needed because writeAtomicMode preserves an
 // existing file's mode: without this, a file created 0644 by an older
 // chainsaw stays 0644 forever even after a re-wire embeds a fresh secret.
 //
 // Never called for ScopeSystem (credentialFileMode gates it) — a 0600
 // /etc/npmrc breaks npm for every non-root user on the box.
+//
+// L-09: the Windows arm used to `return` immediately, on the theory that
+// %APPDATA% ACL inheritance was enough — while three rendered config bodies
+// told the user chainsaw "keeps this file at mode 0600". Inheritance is not a
+// guarantee: it is whatever the parent directory happens to grant, which on a
+// roamed or re-created profile can include groups the operator never chose.
+// secureio already had a working protected-DACL tightener; call it, so the
+// promise the file makes is backed on every platform we ship.
 func tightenExistingFile(path string, opts WireOpts) {
 	if runtime.GOOS == "windows" {
-		// POSIX permission bits aren't meaningful; secureio's Windows path
-		// relies on %APPDATA% ACL inheritance instead.
+		if _, err := os.Stat(path); err != nil {
+			return
+		}
+		// Warning, never fatal: an unwritable DACL must not block a wire that
+		// would otherwise succeed, but the operator has to hear that the
+		// owner-only promise did not land on this file.
+		if err := secureio.RestrictToCurrentUser(path); err != nil {
+			opts.notify("warning: could not restrict %s to your user account (%v); it holds a client secret", path, err)
+		}
 		return
 	}
 	info, err := os.Stat(path)
@@ -59,7 +76,19 @@ func writeConfigFile(path string, data []byte, opts WireOpts) error {
 	if tighten {
 		tightenExistingFile(path, opts)
 	}
-	return writeAtomicMode(path, data, mode)
+	if err := writeAtomicMode(path, data, mode); err != nil {
+		return err
+	}
+	if tighten {
+		// L-09: tightenExistingFile above only covers a file that ALREADY
+		// existed. A freshly created one inherits the directory's ACLs on
+		// Windows, so it has to be restricted after the atomic write too.
+		// No-op on Unix, where writeAtomicMode's 0600 is the mechanism.
+		if err := secureio.RestrictToCurrentUser(path); err != nil {
+			opts.notify("warning: could not restrict %s to your user account (%v); it holds a client secret", path, err)
+		}
+	}
+	return nil
 }
 
 // checkSentinelIntegrity refuses to write when the target already carries
@@ -170,4 +199,85 @@ func statusForConfigWith(configPathFn func() (string, error), isInstalledFn func
 		Wired:      hasMarkedBlock(data, classify),
 		Installed:  isInstalledFn(),
 	}, nil
+}
+
+// ── the credential disclosure note (L-09) ────────────────────────────────────
+//
+// AUDIT THAT PRODUCED THIS: seven managers embed a plaintext secret in a
+// config file, and each described it differently. npm, bun and sbt claimed
+// chainsaw "keeps this file at mode 0600"; pip and cargo told the user to
+// "chmod 600" it themselves (stale advice — writeConfigFile already does);
+// maven wrote a cleartext <password> and said nothing at all.
+//
+// Two problems, not one. The wording had drifted, and the numeric mode was a
+// claim we do not honour everywhere: ScopeSystem configs are deliberately left
+// 0644 (a 0600 /etc/npmrc breaks npm for every non-root user), and Windows has
+// no POSIX mode bits at all. So the note is now generated from ONE helper, and
+// it names the GUARANTEE rather than a number: restricted to your user
+// account, except machine-wide files, which say plainly that they are not.
+
+// credentialNoteSentences returns the disclosure for a config body that
+// embeds a credential, as plain sentences with no comment syntax. `what`
+// names where the secret sits in this particular file, e.g. "_authToken
+// below".
+//
+// Returns nil when nothing is embedded — a placeholder-only config has no
+// secret to disclose and should not be decorated with a warning about one.
+func credentialNoteSentences(what string, opts WireOpts) []string {
+	if strings.TrimSpace(opts.Credentials) == "" {
+		return nil
+	}
+	lines := []string{"chainsaw: this file contains a credential in cleartext (" + what + ")."}
+	if opts.Scope == ScopeSystem {
+		// The honest version of the machine-wide case. This file MUST stay
+		// readable by every user or the package manager breaks for all of
+		// them, so the secret is readable by every user too. Say so.
+		lines = append(lines,
+			"This is a machine-wide config, so it stays readable by every user on",
+			"this system — and so does the credential. Use a per-user install",
+			"instead if that is not acceptable.")
+		return lines
+	}
+	lines = append(lines,
+		"chainsaw restricts it to your user account: owner-only permissions on",
+		"macOS and Linux, an owner-only ACL on Windows. Machine-wide configs are",
+		"deliberately left readable, because every user has to read them.")
+	return lines
+}
+
+// credentialHeaderNote renders credentialNoteSentences as hash-comment lines,
+// ready to prepend to an npm/pip/cargo/sbt/bun style config body. Returns ""
+// when nothing is embedded, so callers can interpolate it unconditionally.
+func credentialHeaderNote(what string, opts WireOpts) string {
+	lines := credentialNoteSentences(what, opts)
+	if len(lines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString("# ")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// credentialNoteXMLBody renders the same disclosure for maven's settings.xml,
+// which has no line-comment syntax and must be embedded in an XML comment by
+// the caller.
+//
+// CARE: an XML comment may not contain the two-hyphen sequence, which is why
+// none of the sentences above spell a long CLI flag or use "--" as
+// punctuation. Keep it that way.
+func credentialNoteXMLBody(what string, opts WireOpts) string {
+	lines := credentialNoteSentences(what, opts)
+	if len(lines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString("\n     ")
+		b.WriteString(l)
+	}
+	return b.String()
 }

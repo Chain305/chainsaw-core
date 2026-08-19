@@ -132,6 +132,10 @@ type mavenFields struct {
 	// Placeholder is true when no --server was supplied, so the rendered
 	// file points at an obviously-broken host and fails loud on first use.
 	Placeholder bool
+	// CredentialNote is the shared L-09 disclosure, already shaped for an XML
+	// comment (empty when no secret is embedded). maven was the ONE manager
+	// that wrote a cleartext <password> with no note at all.
+	CredentialNote string
 }
 
 func mavenRenderFields(opts WireOpts) (mavenFields, error) {
@@ -161,13 +165,20 @@ func mavenRenderFields(opts WireOpts) (mavenFields, error) {
 		}
 		f.ClientID, f.ClientSecret = id, secret
 	}
+	f.CredentialNote = credentialNoteXMLBody("the server password below; maven's format requires cleartext", opts)
 	return f, nil
 }
 
 // mavenMergeFragment is the XML an operator must paste into their own
 // settings.xml when chainsaw refuses to edit it (H1).
 func mavenMergeFragment(f mavenFields) string {
-	return fmt.Sprintf(`  <!-- inside <settings><servers> -->
+	note := ""
+	if f.CredentialNote != "" {
+		// An XML comment may not contain the two-hyphen sequence; see
+		// credentialNoteXMLBody.
+		note = "  <!--" + f.CredentialNote + "\n  -->\n"
+	}
+	return fmt.Sprintf(`%s  <!-- inside <settings><servers> -->
     <server>
       <id>chainsaw-maven</id>
       <username>%s</username>
@@ -181,7 +192,7 @@ func mavenMergeFragment(f mavenFields) string {
       <url>%s</url>
       <mirrorOf>*</mirrorOf>
     </mirror>
-`, xmlEscape(f.ClientID), xmlEscape(f.ClientSecret), xmlEscape(f.MirrorURL))
+`, note, xmlEscape(f.ClientID), xmlEscape(f.ClientSecret), xmlEscape(f.MirrorURL))
 }
 
 // mavenStandaloneSettings renders a complete settings.xml. Credentials are
@@ -208,7 +219,7 @@ func mavenStandaloneSettings(f mavenFields) string {
 %s
      This file is managed by chainsaw. Remove it with
      `+"`chainsaw uninstall-hook maven`"+` rather than editing it by hand:
-     chainsaw refuses to modify a settings.xml it did not write.%s
+     chainsaw refuses to modify a settings.xml it did not write.%s%s
 %s
 -->
 <settings>
@@ -228,6 +239,6 @@ func mavenStandaloneSettings(f mavenFields) string {
     </mirror>
   </mirrors>
 </settings>
-`, sentinelStart, note, sentinelEnd,
+`, sentinelStart, note, f.CredentialNote, sentinelEnd,
 		xmlEscape(f.ClientID), xmlEscape(f.ClientSecret), xmlEscape(f.MirrorURL))
 }

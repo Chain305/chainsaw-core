@@ -405,6 +405,13 @@ func anyUnsupported(rows []supportMatrixRowDTO) bool {
 // output. The full grid would be too wide to be readable on a terminal — the
 // operator wants to know "which cells are red", not the whole matrix.
 //
+// The second column is a SUPPORTED coverage count, not a status word. It used
+// to be a STATUS cell reading "unsupported" whenever the row had any hole —
+// and by the measurement in this file's header EVERY row has at least one, so
+// the column was the literal string "unsupported" sixteen times: zero
+// information, and it read as "nothing is supported" when 455 of the 736 cells
+// ARE. A count varies per row and states the true proportion.
+//
 // We write through cmd.OutOrStdout() rather than the package-level PrintTable
 // helper so tests can capture output via cmd.SetOut, and so a piped CI run
 // (where stdout is redirected) sees the same bytes.
@@ -417,21 +424,27 @@ func printPreflightTable(cmd *cobra.Command, rows []supportMatrixRowDTO, allCond
 		return
 	}
 	g := glyphs()
-	headers := []string{"ECOSYSTEM", "STATUS", "UNSUPPORTED CONDITIONS"}
+	headers := []string{"ECOSYSTEM", "SUPPORTED", "UNSUPPORTED CONDITIONS"}
 	tableRows := make([][]string, 0, len(rows))
 	for _, row := range rows {
 		unsupported := unsupportedConditions(row, allConditions)
-		status := "ok"
 		// The "nothing unsupported here" cell. It is the LAST column, which
 		// writeTable never pads, so the two-byte fallback cannot disturb the
 		// grid — and it is strictly better for tabwriter, which measures bytes
 		// and therefore counted the three-byte em dash as three columns.
 		conds := g.dash
 		if len(unsupported) > 0 {
-			status = "unsupported"
 			conds = strings.Join(unsupported, ", ")
 		}
-		tableRows = append(tableRows, []string{row.Ecosystem, status, conds})
+		supported, total := conditionCoverage(row, allConditions)
+		// Deliberately ASCII "%d/%d" and never the dash glyph, even at
+		// total==0: this is a MIDDLE column, which tabwriter pads by byte
+		// count, so a three-byte em dash here would shift the grid by two.
+		tableRows = append(tableRows, []string{
+			row.Ecosystem,
+			fmt.Sprintf("%d/%d", supported, total),
+			conds,
+		})
 	}
 	writeTable(out, headers, tableRows)
 }
@@ -450,6 +463,32 @@ func writeTable(out io.Writer, headers []string, rows [][]string) {
 		fmt.Fprintln(w, strings.Join(row, "\t"))
 	}
 	w.Flush()
+}
+
+// conditionCoverage counts how many of the row's conditions are supported out
+// of how many were measured. "Supported" is the exact complement of what
+// unsupportedConditions lists — a cell counts as a hole only when it is
+// literally "none", so partial counts as supported (mirroring the UI, see
+// rowHasUnsupported) and a condition the row simply does not carry is not
+// invented as a failure. Keeping the two in lockstep is what makes
+// `supported + len(unsupported) == total` hold in every printed row.
+func conditionCoverage(row supportMatrixRowDTO, allConditions []string) (supported, total int) {
+	if len(allConditions) == 0 {
+		for _, level := range row.Conditions {
+			total++
+			if level != "none" {
+				supported++
+			}
+		}
+		return supported, total
+	}
+	for _, cond := range allConditions {
+		total++
+		if row.Conditions[cond] != "none" {
+			supported++
+		}
+	}
+	return supported, total
 }
 
 // unsupportedConditions returns the sorted list of condition keys that are

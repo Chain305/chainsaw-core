@@ -593,12 +593,22 @@ func TestBrowserAuth_OpenFailureNamesDeviceFallback(t *testing.T) {
 // L-11 — the telemetry label claimed debug prints events
 // ---------------------------------------------------------------------------
 
+// UPDATED BY L-12. Wave A made this test assert that the label makes NO
+// printing claim, because at the time emitAt returned at the consent gate
+// before the debug sink existed and a non-consenting box printed nothing.
+// L-12 moved the debug branch ahead of the consent gate, so debug DOES print
+// for everyone and the claim is now true. The assertion is inverted rather
+// than deleted: the label and the emit path must agree in whichever direction
+// the emit path currently points.
 func TestTelemetryConsentLabel_DebugMakesNoPrintClaim(t *testing.T) {
 	t.Setenv("CHAINSAW_TELEMETRY_DEBUG", "1")
 	got := telemetryConsentLabel(&guardState{})
-	if strings.Contains(got, "printed") {
-		t.Errorf("the label must not claim events are printed — emitAt returns at "+
-			"the consent gate before the debug sink exists. got %q", got)
+	if !strings.Contains(got, "printed") {
+		t.Errorf("debug now prints without consent (see the ModeDebug branch in "+
+			"emitAt), so the label must say so. got %q", got)
+	}
+	if !strings.Contains(got, "nothing is sent") {
+		t.Errorf("the label must keep the load-bearing half — nothing leaves the box. got %q", got)
 	}
 	if !strings.HasPrefix(got, "off") {
 		t.Errorf("debug mode is still reported as off, got %q", got)

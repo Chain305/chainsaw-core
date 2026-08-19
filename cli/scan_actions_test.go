@@ -160,4 +160,151 @@ jobs:
 	}
 }
 
+// TestScanActions_RunOnlyWorkflowsAreCounted is the L-06 guard.
+//
+// The workflow count was derived from the distinct SourceFile values of the
+// parsed ActionRefs, so a workflow whose steps are all `run:` — which yields
+// no refs at all — counted as zero workflows, and the risk line reported
+// "no workflows found" about a file it had just parsed end to end. A repo of
+// run-only workflows was indistinguishable from a repo with none.
+func TestScanActions_RunOnlyWorkflowsAreCounted(t *testing.T) {
+	dir := t.TempDir()
+	wfDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const yaml = `name: build
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+      - run: make test
+`
+	if err := os.WriteFile(filepath.Join(wfDir, "build.yml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cmd := newScanActionsTestCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	if err := cmd.Flags().Set("format", "json"); err != nil {
+		t.Fatalf("set format: %v", err)
+	}
+
+	code, err := runScanActions(cmd, []string{dir})
+	if err != nil {
+		t.Fatalf("runScanActions: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (a run-only workflow is clean, not a failure)", code)
+	}
+	var report scanActionsReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("decode report: %v\nbody=%s", err, out.String())
+	}
+	if report.Summary.Workflows != 1 {
+		t.Errorf("summary.workflows = %d, want 1 — the file was parsed, it just uses no Actions", report.Summary.Workflows)
+	}
+	if report.Summary.ActionRefs != 0 {
+		t.Errorf("summary.action_refs = %d, want 0 (no `uses:` steps)", report.Summary.ActionRefs)
+	}
+
+	// And the text rendering must not claim the directory was empty.
+	textCmd := newScanActionsTestCmd()
+	var textOut, textErr bytes.Buffer
+	textCmd.SetOut(&textOut)
+	textCmd.SetErr(&textErr)
+	if _, err := runScanActions(textCmd, []string{dir}); err != nil {
+		t.Fatalf("runScanActions (text): %v", err)
+	}
+	body := textOut.String()
+	if strings.Contains(body, "no workflows found") {
+		t.Errorf("text output claims no workflows over a directory it parsed:\n%s", body)
+	}
+	if !strings.Contains(body, "clean") {
+		t.Errorf("text output should report a clean verdict for a parsed run-only workflow:\n%s", body)
+	}
+}
+
+// TestScanActions_EmptyDirStillReportsNoWorkflows is the other half of the
+// L-06 contract: the "found nothing to scan" wording must survive for the case
+// it was written for, and the exit code stays 0 (an absent .github/workflows
+// is the majority case for a repo, not an error).
+func TestScanActions_EmptyDirStillReportsNoWorkflows(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := newScanActionsTestCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	code, err := runScanActions(cmd, []string{dir})
+	if err != nil {
+		t.Fatalf("runScanActions: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 — an absent workflows dir is not a failure", code)
+	}
+	if !strings.Contains(out.String(), "no workflows found") {
+		t.Errorf("text output should still say 'no workflows found' for an empty dir:\n%s", out.String())
+	}
+}
+
+// TestScanActions_MultipleFilesCounted proves the count follows FILES, not
+// refs: two workflows where only one uses an Action still counts as two.
+func TestScanActions_MultipleFilesCounted(t *testing.T) {
+	dir := t.TempDir()
+	wfDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const runOnly = `name: build
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+`
+	const withUses = `name: ci
+on: [push]
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+`
+	if err := os.WriteFile(filepath.Join(wfDir, "build.yml"), []byte(runOnly), 0o644); err != nil {
+		t.Fatalf("write build.yml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wfDir, "ci.yml"), []byte(withUses), 0o644); err != nil {
+		t.Fatalf("write ci.yml: %v", err)
+	}
+
+	cmd := newScanActionsTestCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	if err := cmd.Flags().Set("format", "json"); err != nil {
+		t.Fatalf("set format: %v", err)
+	}
+
+	if _, err := runScanActions(cmd, []string{dir}); err != nil {
+		t.Fatalf("runScanActions: %v", err)
+	}
+	var report scanActionsReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("decode report: %v\nbody=%s", err, out.String())
+	}
+	if report.Summary.Workflows != 2 {
+		t.Errorf("summary.workflows = %d, want 2 — only one file has a `uses:`, but both were parsed", report.Summary.Workflows)
+	}
+	if report.Summary.ActionRefs != 1 {
+		t.Errorf("summary.action_refs = %d, want 1", report.Summary.ActionRefs)
+	}
+}
+
 // scan-actions end

@@ -154,7 +154,7 @@ func npmBlockBody(opts WireOpts) (string, error) {
 			return "", err
 		}
 		token = creds
-		header = "# chainsaw: credentials embedded in _authToken below; chainsaw keeps\n# this file at mode 0600 (except machine-wide /etc configs, which every\n# user must be able to read).\n"
+		header = credentialHeaderNote("the _authToken line below", opts)
 	}
 	// BUG-A6: org-scoped path required (/repository/@<org>/npmjs/).
 	npmPath, err := orgScopedRepoPath(opts.OrgSlug, "npmjs")

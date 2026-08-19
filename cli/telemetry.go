@@ -24,7 +24,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -142,7 +144,13 @@ sends them. Useful for verifying instrumentation on new commands.
 			if len(args) == 0 {
 				return errors.New("no command supplied (try: chainsaw telemetry debug -- chainsaw scan)")
 			}
-			sub := exec.Command(args[0], args[1:]...)
+			bin := resolveWrappedChainsaw(args[0])
+			// L-12: say which binary is being wrapped. The wrapped process
+			// prints its own preamble and its own "emitted no events" line
+			// (telemetry_runtime.go), so this stays to ONE line and only
+			// carries what the child cannot know: which executable we picked.
+			fmt.Fprintf(cmd.ErrOrStderr(), "chainsaw: running %s with CHAINSAW_TELEMETRY_DEBUG=1\n", bin)
+			sub := exec.Command(bin, args[1:]...)
 			sub.Stdout = cmd.OutOrStdout()
 			sub.Stderr = cmd.ErrOrStderr()
 			sub.Stdin = os.Stdin
@@ -150,6 +158,41 @@ sends them. Useful for verifying instrumentation on new commands.
 			return sub.Run()
 		},
 	}
+}
+
+// resolveWrappedChainsaw resolves a BARE `chainsaw` argument to the running
+// executable instead of leaving it to PATH.
+//
+// L-12: `chainsaw telemetry debug -- chainsaw scan .` is the documented
+// invocation, and exec.Command("chainsaw", …) resolves through PATH — so a
+// developer running ./chainsaw from a build directory, or holding two
+// installs, wrapped a DIFFERENT binary than the one they typed, and the
+// instrumentation they were trying to verify was in the other one. Anything
+// containing a path separator is passed through untouched: an explicit path
+// is an explicit choice.
+//
+// The `.exe` handling is not cosmetic — this wave came out of Windows
+// reports, where os.Executable() returns `…\chainsaw.exe` while the operator
+// typed `chainsaw`. Compare basenames with the suffix stripped from both
+// sides, case-insensitively, since Windows paths are case-insensitive.
+func resolveWrappedChainsaw(arg string) string {
+	if arg == "" || strings.ContainsAny(arg, `/\`) {
+		return arg
+	}
+	self, err := os.Executable()
+	if err != nil || self == "" {
+		return arg
+	}
+	trim := func(s string) string {
+		if strings.HasSuffix(strings.ToLower(s), ".exe") {
+			return s[:len(s)-4]
+		}
+		return s
+	}
+	if strings.EqualFold(trim(filepath.Base(self)), trim(arg)) {
+		return self
+	}
+	return arg
 }
 
 func newTelemetryResetCmd() *cobra.Command {

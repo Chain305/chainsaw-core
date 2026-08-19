@@ -137,9 +137,7 @@ func bunBlockBody(opts WireOpts) (string, error) {
 			return "", err
 		}
 		authLine = base64.StdEncoding.EncodeToString([]byte(id + ":" + secret))
-		credsNote = "# chainsaw: credentials embedded as base64(client_id:secret) in :_auth\n" +
-			"# below; chainsaw keeps this file at mode 0600 (except machine-wide\n" +
-			"# /etc configs, which every user must be able to read).\n"
+		credsNote = credentialHeaderNote("base64(client_id:secret) in the :_auth line below", opts)
 	}
 	// hostPath carries the leading `//` already (npm _auth line format).
 	return fmt.Sprintf("%s%sregistry=%s/%s/\n%s/%s/:_auth=%s\n%s/%s/:always-auth=true",
