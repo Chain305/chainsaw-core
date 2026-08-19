@@ -62,6 +62,15 @@ var okCodes = map[string]bool{
 	"":          true,
 	"not_found": true,
 	"http_404":  true,
+	// version_not_found: the registry answered, enumerated its published
+	// versions, and the requested one was not among them. Same rationale
+	// as not_found — a real answer from the source, not an outage. It
+	// MUST be classified here: an unregistered code falls through to
+	// StatusError, the opt-in fail-closed gate would read the source as
+	// FAILED, and an org that opted in would start refusing installs
+	// over a typo'd version pin. The refusal that IS warranted comes
+	// from the unknown verdict, not from the coverage gate.
+	"version_not_found": true,
 }
 
 // notApplicableCodes are raw codes meaning the source does not apply here.

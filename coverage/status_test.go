@@ -31,6 +31,7 @@ func TestStatusForWarnCode(t *testing.T) {
 		// A real answer, not an outage.
 		{"not_found", StatusOK},
 		{"http_404", StatusOK},
+		{"version_not_found", StatusOK},
 		{"", StatusOK},
 
 		// Never blocks.
@@ -59,5 +60,27 @@ func TestUnknownWarnCodeNeverBlocks(t *testing.T) {
 		if got := StatusForWarnCode(raw); got == StatusUnavailable {
 			t.Errorf("StatusForWarnCode(%q) = unavailable; unknown codes must never block", raw)
 		}
+	}
+}
+
+// TestStatusForWarnCodeVersionNotFoundIsOK guards the fail-closed
+// coverage gate against the L-01 marker.
+//
+// An unregistered code falls through to StatusError, and the opt-in
+// gate reads that as a source it could not evaluate — so a code added
+// upstream without a matching entry in okCodes could start REFUSING
+// INSTALLS for every org that opted in, over a typo'd version pin.
+// version_not_found is the same shape as not_found: the registry
+// answered, and the answer was "that version was never published". A
+// real answer is never an outage, and the refusal that IS warranted
+// comes from the unknown verdict, not from the coverage gate.
+//
+// Asserted separately from the table above so it cannot be lost in a
+// bulk edit.
+func TestStatusForWarnCodeVersionNotFoundIsOK(t *testing.T) {
+	if got := StatusForWarnCode("version_not_found"); got != StatusOK {
+		t.Fatalf("StatusForWarnCode(\"version_not_found\") = %q, want %q — "+
+			"an unclassified code would make the fail-closed coverage gate "+
+			"refuse installs for a version that simply does not exist", got, StatusOK)
 	}
 }

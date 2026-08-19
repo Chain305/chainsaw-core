@@ -516,6 +516,30 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 	}
 
 	entry, hasEntry := pack.Versions[ver]
+
+	// hasEntry is consulted a dozen times below, every one of them to
+	// pick a packument-level FALLBACK. That silently converts "this
+	// version does not exist" into "here is the package's general
+	// metadata", and the report comes back scored and normal-looking —
+	// a hallucinated or typo'd version pin gets a plausible risk grade
+	// instead of an answer. Say it out loud instead.
+	//
+	// The guard is the discriminator: the packument fetched OK (we are
+	// past the warn branch above), it enumerated a NON-EMPTY versions
+	// set, and the requested version is not in it. An empty or absent
+	// `versions` map is what a private mirror or a partial packument
+	// looks like, and it must keep today's silent-degrade behaviour.
+	if !hasEntry && len(pack.Versions) > 0 {
+		published := make([]string, 0, len(pack.Versions))
+		for v := range pack.Versions {
+			published = append(published, v)
+		}
+		if !versionListed(published, ver) {
+			pr.Warnings = append(pr.Warnings,
+				*versionNotFoundWarning(p, endpoint, pkg, ver, len(published)))
+		}
+	}
+
 	license := ""
 	if hasEntry {
 		license = npmLicense(entry.License, entry.Licenses)
@@ -2388,7 +2412,28 @@ func (p *registryMetadataProvider) runComposer(ctx context.Context, pkg, ver str
 		}
 	}
 	if match == nil {
-		return PartialReport{}, nil
+		// Packagist answered with the package and listed its releases,
+		// and the pinned version was not one of them. Until now this
+		// returned an EMPTY report with no warning at all — the most
+		// silent shape of the defect: no facts, no complaint, and the
+		// scorer treats a fact-free report as a clean one.
+		//
+		// `entries` is non-empty here (the len==0 early return above
+		// already covered the partial-document case), so this is
+		// positive evidence of absence, not absence of evidence.
+		published := make([]string, 0, len(entries))
+		for i := range entries {
+			published = append(published, entries[i].Version)
+		}
+		if versionListed(published, ver) {
+			// versionMatches is what the match loop above already used,
+			// so this cannot normally fire — it is a belt-and-braces
+			// guard against the two comparators drifting apart.
+			return pr, nil
+		}
+		pr.Warnings = append(pr.Warnings,
+			*versionNotFoundWarning(p, endpoint, pkg, ver, len(published)))
+		return pr, nil
 	}
 
 	license := ""
@@ -2797,8 +2842,10 @@ func (p *registryMetadataProvider) runCocoapods(ctx context.Context, pkg, ver st
 	}
 
 	release := &ReleaseSection{}
+	matched := false
 	for _, v := range pod.Versions {
 		if v.Name == ver {
+			matched = true
 			if t, ok := parseTime(v.CreatedAt); ok {
 				release.PublishedAt = &t
 			}
@@ -2807,6 +2854,24 @@ func (p *registryMetadataProvider) runCocoapods(ctx context.Context, pkg, ver st
 	}
 	if len(pod.Versions) > 0 {
 		release.LatestVersion = pod.Versions[len(pod.Versions)-1].Name
+	}
+
+	// Trunk's pod summary carries the complete published-version list,
+	// so a miss against a non-empty list is positive evidence the pinned
+	// version was never pushed. Before this the runner just carried on
+	// and returned owners + the latest version's podspec — a report that
+	// scores like any other pod while describing a version that does not
+	// exist. An empty `versions` array (a partial or mirrored trunk
+	// response) is NOT evidence and keeps the old behaviour.
+	if !matched && len(pod.Versions) > 0 {
+		published := make([]string, 0, len(pod.Versions))
+		for _, v := range pod.Versions {
+			published = append(published, v.Name)
+		}
+		if !versionListed(published, ver) {
+			pr.Warnings = append(pr.Warnings,
+				*versionNotFoundWarning(p, endpoint, pkg, ver, len(published)))
+		}
 	}
 
 	people := &PeopleSection{}
@@ -2953,9 +3018,31 @@ func (p *registryMetadataProvider) runPub(ctx context.Context, pkg, ver string) 
 	}
 	// Fall back to `latest`'s publish date if the requested version isn't in
 	// the list (e.g. yanked/retracted) so packageAge still has a signal.
-	if !matched && strings.TrimSpace(doc.Latest.Version) == ver {
+	isLatest := strings.TrimSpace(doc.Latest.Version) == ver
+	if !matched && isLatest {
 		if t, ok := parseTime(doc.Latest.Published); ok {
 			release.PublishedAt = &t
+		}
+	}
+
+	// `matched` used to exist purely to drive that fallback — the one
+	// place in this runner that knew the pinned version was absent, and
+	// it used the knowledge to paper over the absence. A pub package
+	// document lists every published version, so a miss against a
+	// non-empty list is positive evidence of absence.
+	//
+	// Two exclusions. `latest` naming the requested version is positive
+	// evidence of PRESENCE (the version exists; versions[] just did not
+	// carry it), so it wins over the miss. And an empty versions[] is a
+	// partial document, not an absent version.
+	if !matched && !isLatest && len(doc.Versions) > 0 {
+		published := make([]string, 0, len(doc.Versions))
+		for _, v := range doc.Versions {
+			published = append(published, v.Version)
+		}
+		if !versionListed(published, ver) {
+			pr.Warnings = append(pr.Warnings,
+				*versionNotFoundWarning(p, endpoint, pkg, ver, len(published)))
 		}
 	}
 
@@ -3536,6 +3623,50 @@ func splitCommaList(s string) []string {
 // optional "v" prefix so "v1.2.3" and "1.2.3" are treated as equal.
 func versionMatches(a, b string) bool {
 	return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
+}
+
+// versionListed reports whether ver appears anywhere in the registry's
+// published version list, using the same `v`-tolerant comparison the
+// per-entry matchers use.
+//
+// It exists only for the ABSENCE decision below: the runners do their
+// primary lookup with an exact map key or an exact string compare, and a
+// caller that pinned `v1.2.3` where the registry publishes `1.2.3` would
+// miss that lookup while the version plainly exists. Declaring a
+// hallucinated version on the back of a formatting difference is exactly
+// the false positive this whole path is built to avoid, so the miss path
+// pays one extra O(n) sweep before it commits to "not published".
+func versionListed(published []string, ver string) bool {
+	for _, p := range published {
+		if versionMatches(strings.TrimSpace(p), ver) {
+			return true
+		}
+	}
+	return false
+}
+
+// versionNotFoundWarning builds the WarnVersionNotFound diagnostic for a
+// coordinate whose registry document enumerated its published versions
+// and did not include the requested one.
+//
+// CALL THIS ONLY ON POSITIVE EVIDENCE OF ABSENCE — document fetched OK,
+// version list non-empty, requested version absent. The `published`
+// count is carried in the message precisely so an operator reading a
+// report can see the guard held: a marker claiming absence out of a
+// zero-length list would be a bug, not a finding.
+//
+// Downstream this is not cosmetic. risk_projection.go turns the code
+// into risk.Input.SignalsUnavailable, which makes the verdict `unknown`
+// and flips `chainsaw intel scan` from exit 0 to exit 2. Emitting it on
+// a mirror that serves partial documents would start failing builds.
+func versionNotFoundWarning(p *registryMetadataProvider, endpoint, pkg, ver string, published int) *Warning {
+	return &Warning{
+		Provider: "registrymetadata",
+		Code:     WarnVersionNotFound,
+		Message: fmt.Sprintf("endpoint=%s package=%s version=%s publishedVersions=%d",
+			endpoint, pkg, ver, published),
+		At: p.now(),
+	}
 }
 
 // timelineFetchFailedWarning builds a stable-code Warning for the

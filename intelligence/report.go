@@ -667,6 +667,29 @@ const (
 	// either verdict.
 	WarnVulnRangeUndecidable = "vuln_range_undecidable"
 
+	// WarnVersionNotFound is emitted when a registry answered with a
+	// package document that enumerated its published versions and the
+	// requested version was NOT among them. It is positive evidence of
+	// absence, not absence of evidence: a fetch failure, a package-level
+	// 404, or a document carrying an empty/absent version list must
+	// never produce this code — that is where registry lag, yanked-
+	// version pruning, and private or mirrored registries serving
+	// partial documents live, and treating those as "does not exist"
+	// would manufacture false positives at scale.
+	//
+	// It is deliberately NOT a risk signal. A signal is a fact about a
+	// package we EVALUATED; "this version does not exist" means we
+	// evaluated nothing. Minting a signal would also drop it into the
+	// tunable-weights surface, letting an operator dial hallucinated-
+	// version detection down to zero. Instead risk_projection.go turns
+	// this warning into risk.Input.SignalsUnavailable, which the
+	// evaluator short-circuits to VerdictUnknown.
+	//
+	// Classified as an OK code in core/coverage/status.go — like
+	// not_found, it is a real answer from the source, not an outage, so
+	// it must not trip the opt-in fail-closed coverage gate.
+	WarnVersionNotFound = "version_not_found"
+
 	// Transitive-risk visibility codes. Emitted by evaluateTransitiveRisk
 	// when a direct dep cannot be folded into the rolled-up score, so
 	// operators can tell a clean verdict from one with blind spots.

@@ -27,6 +27,31 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		return risk.Input{}
 	}
 
+	// A version the registry never published is NOT EVALUATED, not
+	// clean. Everything below this point reads facts off the Report,
+	// and for such a coordinate those fields hold packument-level
+	// fallbacks (the package's maintainers, its latest release date,
+	// its repo stars) — data about a DIFFERENT version. Projecting them
+	// produces a scored report whose score is mostly measuring its own
+	// blind spot, and a hallucinated version pin comes back with a
+	// plausible grade instead of an answer.
+	//
+	// Route it through the existing unavailability machinery rather
+	// than inventing vocabulary: SignalsUnavailable short-circuits
+	// EvaluatePackage to UnavailableEvaluation → VerdictUnknown → the
+	// CLI's "NOT EVALUATED" render → `intel scan` counts it toward
+	// INCOMPLETE and exits 2. Return immediately and carry no facts:
+	// half a fact set is what got us here.
+	if reason, ok := versionNotFoundReason(r); ok {
+		return risk.Input{
+			Ecosystem:          r.Identity.Ecosystem,
+			Package:            r.Identity.Package,
+			Version:            r.Identity.Version,
+			SignalsUnavailable: true,
+			UnavailableReason:  reason,
+		}
+	}
+
 	in := risk.Input{
 		// Identity — used by the evaluator to stamp the result's Key and
 		// by Resolution.TransitiveBlame in future tree evaluations.
@@ -236,6 +261,29 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	projectActionsSection(r.Actions, &in)
 
 	return in
+}
+
+// versionNotFoundReason reports whether any provider recorded positive
+// evidence that the requested version does not exist upstream, and
+// returns the operator-facing explanation to attach to the unavailable
+// evaluation.
+//
+// The wording is deliberately non-accusatory. A freshly published
+// version can 404 on a CDN edge or a lagging mirror for minutes, and a
+// private registry may legitimately not carry the version at all, so the
+// copy points at the two things the reader can actually check rather
+// than asserting the package is fake. It is rendered inside
+// UnavailableEvaluation's summary sentence, so it stays a clause: no
+// leading capital, no trailing period, no em dash (the surrounding
+// sentence already owns one).
+func versionNotFoundReason(r *Report) (string, bool) {
+	for _, w := range r.Observation.Warnings {
+		if w.Code == WarnVersionNotFound {
+			return "version not found in the registry's published versions; " +
+				"check for a typo or a hallucinated version pin", true
+		}
+	}
+	return "", false
 }
 
 // projectActionsSection walks the report's Action findings (if any) and
