@@ -261,16 +261,24 @@ func IsColorEnabled(cmd *cobra.Command) bool {
 // cannot render the Unicode set degrades to a legible ASCII one instead of a
 // column of identical replacement boxes.
 //
-// WHY THIS EXISTS. The Unicode markers we print — ✓ U+2713, ✗ U+2717,
-// ↻ U+21BB, ⚠ U+26A0, ℹ U+2139 — are NOT in CP437, the legacy Windows console
-// codepage. A console still on CP437 renders each of them as the same
+// WHY THIS EXISTS. On a classic Windows console the Unicode markers we print
+// — ✓ U+2713, ✗ U+2717, ↻ U+21BB, ⚠ U+26A0, ℹ U+2139 — come out as the SAME
 // replacement box, so `chainsaw features` showed two capability rows as
 // visually IDENTICAL when one was active and one was not, and the
-// `doctor --offline` matrix collapsed five distinct states into one. ○ U+25CB
-// IS in CP437 (0x09) and rendered correctly, which is what pinned the
-// diagnosis: a tester's screenshot boxed every marker EXCEPT ○.
+// `doctor --offline` matrix collapsed five distinct states into one. That is
+// strictly worse than an ugly ASCII marker: it destroys the distinction
+// between states rather than merely uglifying it.
 //
-// This is a CODEPAGE problem, not a color problem. ansi_windows.go enables
+// The original diagnosis named CP437 as the cause, on the strength of a
+// tester's screenshot in which ○ U+25CB rendered while ✓✗↻ℹ boxed. That
+// observation is OVERDETERMINED: console font coverage predicts the identical
+// screenshot (○ is in the conhost raster repertoire, the others are not), and
+// the codepage turns out not to be consulted at all for Go's output path.
+// Which of the two it was does not change this type — the fallback alphabet is
+// right either way — but it did change WHEN the fallback is selected. See
+// unicode_decide.go.
+//
+// This is a GLYPH problem, not a color problem. ansi_windows.go enables
 // ENABLE_VIRTUAL_TERMINAL_PROCESSING, which makes ANSI ESCAPES work and does
 // nothing whatsoever for glyph encoding; and NO_COLOR / TERM=dumb still
 // emitted the full Unicode legend. Hence a predicate of its own
@@ -437,9 +445,11 @@ func glyphs() glyphSet {
 //
 // False when either:
 //   - CHAINSAW_NO_UNICODE is set to anything but an explicit falsey value, or
-//   - the platform probe says the console cannot encode them (on Windows: the
-//     console output codepage is not 65001/UTF-8; everywhere else: always
-//     capable, since modern Unix terminals are UTF-8).
+//   - the platform decision says no (on Windows: a classic conhost window,
+//     which is the one terminal with no signal that it can draw the set;
+//     everywhere else: always yes, since modern Unix terminals are UTF-8 with
+//     font fallback). See unicode_decide.go for the ladder and for why glyph
+//     capability is a heuristic rather than something Windows will tell us.
 //
 // The env var is checked as "set, unless explicitly turned off" rather than as
 // bare presence. R7 (see verboseEnabled) recorded that presence tests on
@@ -447,7 +457,9 @@ func glyphs() glyphSet {
 // writing =0 intends. NO_COLOR's presence-only rule is a cross-vendor spec for
 // a var we do not own; this is our own var, so it follows our own convention.
 // Note that CHAINSAW_NO_UNICODE=0 does not FORCE Unicode on — it only declines
-// to be the reason it is off; the console probe still has the final say.
+// to be the reason it is off; the console decision still has the final say.
+// The var that DOES force it on is CHAINSAW_UNICODE (unicode_decide.go rule 2),
+// which is deliberately outranked by CHAINSAW_NO_UNICODE.
 func unicodeEnabled() bool {
 	if v, ok := os.LookupEnv("CHAINSAW_NO_UNICODE"); ok && !envFalsey(v) {
 		return false
@@ -465,13 +477,18 @@ func envFalsey(v string) bool {
 	return false
 }
 
-// consoleSupportsUnicode probes the platform for glyph-encoding capability.
+// consoleSupportsUnicode resolves the platform's Unicode decision.
 // It is a var, not a plain func, for exactly one reason: the failure it guards
 // is Windows-only, and a bug that can only be tested on a runner we do not
 // have is a bug that stops being tested. Overriding this in a test reproduces
-// a CP437 console on macOS/Linux, so the ASCII path is exercised on every CI
-// run rather than never. See unicode_windows.go / unicode_other.go for the
-// real probes.
+// a fallback console on macOS/Linux, so the ASCII path is exercised on every
+// CI run rather than never. It stays a var (rather than being folded into
+// decideUnicode) because 20+ call sites and the forceASCIIGlyphs /
+// forceUnicodeConsole helpers pivot on it.
+//
+// The DECISION lives in unicode_decide.go, which is build-tag-free and
+// unit-tested for every platform; unicode_windows.go and unicode_other.go are
+// thin adapters that fill in goos, stdoutIsConsole and the env lookup.
 var consoleSupportsUnicode = func() bool { return nativeConsoleSupportsUnicode() }
 
 // resolveFormat returns the active result format, honoring --format with --json

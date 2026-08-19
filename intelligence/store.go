@@ -502,6 +502,13 @@ func vulnSectionEmpty(v VulnSection) bool {
 	if len(v.CVEs) > 0 || len(v.CVEDetails) > 0 || len(v.KEVEntries) > 0 {
 		return false
 	}
+	// A section carrying only vetoes is NOT empty. "These CVEs were
+	// evaluated and do not apply" is a finding in its own right, and
+	// treating it as empty would restore the prior payload — the exact
+	// stickiness the veto exists to break.
+	if len(v.ClearedCVEs) > 0 {
+		return false
+	}
 	if v.ScannerDBDigest != "" {
 		return false
 	}

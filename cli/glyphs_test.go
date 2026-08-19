@@ -625,7 +625,7 @@ func TestPRScanVerdictIcon_StatesStaySeparable(t *testing.T) {
 // codepage question, and it is left alone here.
 //
 // Help text (Short, Long, flag usage) is excluded for a different reason:
-// see TestDoctorOfflineFlagHelp_NamesTheRenderedAlphabet.
+// see TestDoctorOfflineFlagHelp_IsConsoleIndependent (unicode_decide_test.go).
 var asciiOutputRenderers = []struct {
 	name   string
 	render func(t *testing.T) string
@@ -788,43 +788,19 @@ func TestGuardConsentPrompt_ASCIIInFallbackMode(t *testing.T) {
 // converting it would mean breaking those literals into glyph concatenations
 // — trading real source legibility for a cosmetic gain on a minority console.
 // gen-cli-docs also renders these strings into the docs site, where they must
-// not vary with the generating host's codepage.
+// not vary with the generating host.
 //
-// MARKERS inside help are the exception to the exception, and this is the one
-// place they occur: doctor's --offline usage NAMES the exact three glyphs the
-// matrix is about to print. Leave it hard-coded and a CP437 user is told to
-// look for symbols that appear nowhere in the table they just ran — the same
-// defect TestDoctorOffline_LegendMatchesRenderedAlphabet pins for the legend.
-func TestDoctorOfflineFlagHelp_NamesTheRenderedAlphabet(t *testing.T) {
-	// The usage string is built when the command is constructed, so build a
-	// fresh command under each console.
-	usage := func() string {
-		f := newDoctorCmd().Flags().Lookup("offline")
-		if f == nil {
-			t.Fatal("doctor has no --offline flag")
-		}
-		return f.Usage
-	}
-
-	forceASCIIGlyphs(t)
-	got := usage()
-	for _, want := range []string{
-		"(" + asciiGlyphs.ok + ")", "(" + asciiGlyphs.warn + ")", "(" + asciiGlyphs.fail + ")",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("--offline help does not name %s in fallback mode: %q", want, got)
-		}
-	}
-	if m, ok := noUnicodeMarkers(got); !ok {
-		t.Errorf("--offline help still advertises the unrenderable marker %q: %q", m, got)
-	}
-
-	forceUnicodeConsole(t)
-	const wantUnicode = "Air-gap diagnostics (W4): walk every intelligence condition and report whether it runs offline (✓), is degraded (⚠), or requires a refreshed bundle (✗). Reads CHAINSAW_INTEL_BUNDLE_PATH and CHAINSAW_OFFLINE_FAIL_MODE."
-	if got := usage(); got != wantUnicode {
-		t.Errorf("default --offline help changed:\n got %q\nwant %q", got, wantUnicode)
-	}
-}
+// MARKERS inside help used to be the exception to the exception: doctor's
+// --offline usage called glyphs() so it would NAME the alphabet the matrix was
+// about to print. That carve-out is GONE, and
+// TestDoctorOfflineFlagHelp_IsConsoleIndependent (unicode_decide_test.go) now
+// pins the opposite. The reason is the second sentence of the paragraph above:
+// flag usage is built at command-construction time, so gen-cli-docs baked the
+// generating developer's console into the published reference. The
+// console-aware naming moved to doctor_offline.go's legend line, which is
+// rendered at run time and pinned by
+// TestDoctorOffline_LegendMatchesRenderedAlphabet — so a fallback-console user
+// still gets told, by the table itself, which set it drew.
 
 // ── strings that are BOTH payload and prose ────────────────────────────────
 

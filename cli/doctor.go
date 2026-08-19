@@ -70,15 +70,27 @@ acknowledge.`,
 	cmd.Flags().String("data-dir", "", "Path to chainsaw data directory (for --upgrade-check). Defaults to $CHAINSAW_DATA_DIR or /etc/chainsaw/data.")
 	cmd.Flags().String("docker-compose-path", "", "Path to docker-compose.yml for version-drift check (for --upgrade-check). Empty disables the check.")
 	cmd.Flags().Bool("skip-network", false, "Skip upstream-registry reachability probes (for --upgrade-check). Use in air-gapped environments.")
-	// The one help string whose MARKERS have to follow the console. Help prose
-	// keeps its em dashes (a boxed dash still reads); this sentence instead
-	// NAMES the exact alphabet the --offline matrix is about to print, so
-	// hard-coding it would tell a CP437 user to look for three glyphs that
-	// appear nowhere in the table they just ran. That is the same defect
-	// TestDoctorOffline_LegendMatchesRenderedAlphabet pins for the legend.
-	offlineGlyphs := glyphs()
-	cmd.Flags().Bool("offline", false, fmt.Sprintf("Air-gap diagnostics (W4): walk every intelligence condition and report whether it runs offline (%s), is degraded (%s), or requires a refreshed bundle (%s). Reads CHAINSAW_INTEL_BUNDLE_PATH and CHAINSAW_OFFLINE_FAIL_MODE.",
-		offlineGlyphs.ok, offlineGlyphs.warn, offlineGlyphs.fail))
+	// HELP TEXT IS BUILT FROM THE FIXED UNICODE SET, NEVER FROM glyphs().
+	//
+	// This string used to call glyphs() so it would name whatever alphabet the
+	// --offline matrix was about to print. That was well-meant and wrong in
+	// the one way help text cannot afford: help is built at command-
+	// CONSTRUCTION time, and gen-cli-docs constructs the tree on a developer's
+	// machine to render how-tos-site/content/cli-reference/doctor.md. So the
+	// published reference already varied with the generating host's console —
+	// the exact boundary the package rule in glyphs_test.go draws ("never in
+	// Short/Long/flag usage"), violated one file over from where it is stated.
+	// The Unicode ladder (unicode_decide.go) only widened the set of inputs
+	// that could flip it.
+	//
+	// The console-aware naming did not disappear; it moved to the place that
+	// can honour it. doctor_offline.go's legend line is rendered at RUN time
+	// from the same resolved set as the rows above it, and is pinned by
+	// TestDoctorOffline_LegendMatchesRenderedAlphabet. A fallback-console user
+	// reading --help sees the canonical glyph names; the table they then run
+	// tells them, in its own alphabet, what it actually drew.
+	cmd.Flags().Bool("offline", false, fmt.Sprintf("Air-gap diagnostics (W4): walk every intelligence condition and report whether it runs offline (%s), is degraded (%s), or requires a refreshed bundle (%s). The matrix prints an ASCII alphabet instead on consoles that cannot render these; its legend names whichever set it used. Reads CHAINSAW_INTEL_BUNDLE_PATH and CHAINSAW_OFFLINE_FAIL_MODE.",
+		unicodeGlyphs.ok, unicodeGlyphs.warn, unicodeGlyphs.fail))
 
 	// `chainsaw doctor verify-hook <manager>` — close the
 	// install-hook → audit feedback loop (OBSERVABILITY_AUDIT gap 2).

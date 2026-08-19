@@ -258,10 +258,33 @@ func runExceptionCreate(cmd *cobra.Command, _ []string) error {
 	if asJSON {
 		return PrintJSONTo(cmd, resp.Entry)
 	}
-	fmt.Printf("Created exception %s for %s@%s in %s\n",
-		resp.Entry.ID, resp.Entry.PackageID, resp.Entry.Version, resp.Entry.Repository)
+	// Print the status, not just the ID. When approval gating is on for the
+	// org the server writes the exception as pending_approval — it exists,
+	// it has an ID, and it is NOT in effect. The old line said only
+	// "Created exception ..." for both cases, which is exactly what let a
+	// requester walk away believing the carve-out was live and then hit the
+	// same block again with no idea why.
+	fmt.Printf("Created exception %s for %s@%s in %s (status: %s)\n",
+		resp.Entry.ID, resp.Entry.PackageID, resp.Entry.Version,
+		resp.Entry.Repository, resp.Entry.Status)
+	if resp.Entry.Status == exceptionStatusPendingApproval {
+		// Deliberately does NOT name a `chainsaw exception approve`
+		// subcommand: none exists. Approve/deny live on the server only
+		// (POST /api/exceptions/{id}/approve|deny) and in the dashboard
+		// inbox. Printing a command that is not in this binary is the
+		// same defect one layer down.
+		fmt.Println("This exception is NOT yet in effect — it is awaiting approval.")
+		fmt.Printf("An approver must approve it in the dashboard (Protect → Exceptions) "+
+			"or call POST /api/exceptions/%s/approve.\n", resp.Entry.ID)
+	}
 	return nil
 }
+
+// exceptionStatusPendingApproval mirrors policy.StatusPendingApproval as it
+// crosses the wire (internal/server/entries.go::deriveExceptionStatus). It is
+// a local literal rather than an import because the CLI talks to the server
+// over HTTP and must not couple to the policy package's Go types.
+const exceptionStatusPendingApproval = "pending_approval"
 
 // applyVEXOverridesFromFlags layers the VEX-shaped flags (--cve,
 // --decision, --vex-note) onto the request body. Empty flag values

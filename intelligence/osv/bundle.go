@@ -52,6 +52,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -213,24 +214,55 @@ func Load(r io.Reader) (*Index, error) {
 // A nil receiver returns nil (provider may have been registered without
 // a bundle file). An ecosystem the index doesn't know also returns nil.
 func (i *Index) Lookup(ecosystem, pkg, version string) []Advisory {
+	hits, _, _ := i.LookupEx(ecosystem, pkg, version)
+	return hits
+}
+
+// LookupEx is Lookup's three-state form. It partitions the advisories
+// keyed to (ecosystem, pkg) into:
+//
+//	hits        — evaluated, and the range/version data says AFFECTED
+//	cleared     — evaluated, and the range/version data says NOT AFFECTED
+//	undecidable — a bound could not be parsed under this ecosystem's
+//	              grammar, so no verdict was reachable either way
+//
+// The `cleared` bucket is the whole point: it is positive evidence of
+// absence for a concrete coordinate, which is what lets the intelligence
+// merge VETO a CVE another source got wrong (see mergeVulns). "The
+// advisory is not in `hits`" alone can never mean that, because most
+// callers of a partial report simply have nothing to say about
+// vulnerabilities — see the silence-is-not-veto rule in mergeVulns.
+//
+// `undecidable` exists because the alternative — folding a parse failure
+// into `cleared` — would let a malformed version string silently veto a
+// real advisory. Undecidable is surfaced as a warning by the provider,
+// deliberately NOT as a severity signal: promoting an unparseable range
+// to critical would manufacture the exact false-positive class this
+// wave exists to remove.
+func (i *Index) LookupEx(ecosystem, pkg, version string) (hits, cleared, undecidable []Advisory) {
 	if i == nil {
-		return nil
+		return nil, nil, nil
 	}
 	key := canonicalKey(ecosystem, pkg)
 	if key == "" {
-		return nil
+		return nil, nil, nil
 	}
 	candidates, ok := i.byPackage[key]
 	if !ok {
-		return nil
+		return nil, nil, nil
 	}
-	var hits []Advisory
 	for _, a := range candidates {
-		if advisoryAffects(a, version) {
+		affects, undecided := advisoryAffectsEx(a, version)
+		switch {
+		case affects:
 			hits = append(hits, a)
+		case undecided:
+			undecidable = append(undecidable, a)
+		default:
+			cleared = append(cleared, a)
 		}
 	}
-	return hits
+	return hits, cleared, undecidable
 }
 
 // HasPackage reports whether the index has at least one advisory record
@@ -354,25 +386,39 @@ func CanonicalEcosystem(ecosystem string) string {
 // inverted default fixed the lodash 4.17.20 over-count regression
 // (10 → 5 CVEs).
 func advisoryAffects(a Advisory, version string) bool {
+	affects, _ := advisoryAffectsEx(a, version)
+	return affects
+}
+
+// advisoryAffectsEx is advisoryAffects with the third state broken out.
+// `undecidable` is true only when NO range produced a verdict and at
+// least one range failed to parse — i.e. we genuinely do not know. An
+// advisory with no version data at all is DECIDED clean (the
+// return-false default described above), not undecidable: silence in
+// the bundle is a statement about the advisory's shape, not a parse
+// failure.
+func advisoryAffectsEx(a Advisory, version string) (affects bool, undecidable bool) {
 	v := strings.TrimSpace(version)
 	if v == "" {
-		return false
+		return false, false
 	}
 	// Exact version list match — preferred when present.
 	for _, w := range a.VulnerableVersions {
 		if strings.TrimSpace(w) == v {
-			return true
+			return true, false
 		}
 	}
 	// Range match — handles the GHSA-style affected.ranges[] case.
-	if len(a.VulnerableRanges) > 0 {
-		for _, r := range a.VulnerableRanges {
-			if rangeAffects(a.Ecosystem, r, v) {
-				return true
-			}
+	for _, r := range a.VulnerableRanges {
+		hit, undecided := rangeAffectsEx(a.Ecosystem, r, a.FixedVersions, v)
+		if hit {
+			return true, false
+		}
+		if undecided {
+			undecidable = true
 		}
 	}
-	return false
+	return false, undecidable
 }
 
 // matchesVersion is kept as a shim against the old signature in case
@@ -392,66 +438,147 @@ func matchesVersion(affected []string, version string) bool {
 	return false
 }
 
-// rangeAffects reports whether the query version falls inside one
+// rangeAffectsEx reports whether the query version falls inside one
 // VulnerableRange under the appropriate version-compare semantics for
-// the given ecosystem. Each ecosystem has its own pre-release /
-// qualifier rules (PyPI uses PEP 440, Maven uses qualifier ordering,
-// RubyGems uses Gem::Version, etc.) — getting this wrong leads to
-// either false-positive over-matches or false-negative misses on
-// pre-release versions. compareVersions dispatches to the right
-// library; on parse failure we fall back to exact-string equality
-// against the range anchors so a malformed query doesn't over-match.
-func rangeAffects(ecosystem string, r VulnerableRange, queryRaw string) bool {
+// the given ecosystem, and whether the question was decidable at all.
+// Each ecosystem has its own pre-release / qualifier rules (PyPI uses
+// PEP 440, Maven uses qualifier ordering, RubyGems uses Gem::Version,
+// NuGet has a fourth numeric segment) — getting this wrong leads to
+// either false-positive over-matches or false-negative misses.
+// compareVersions dispatches to the right library.
+//
+// # Why the advisory's FixedVersions is an input
+//
+// An OSV `affected` block routinely carries MORE THAN ONE range, and the
+// bundle flatteners do not tag ranges with their upstream `type`. A GHSA
+// import typically ships a GIT range (`{introduced:"<sha or 0>"}`,
+// commonly with no closing event because the fix commit was never
+// recorded) alongside the real SEMVER range `[0, 4.17.21)`. Flattened,
+// the GIT range becomes the version range `{Introduced:"0"}` — an OPEN
+// upper bound, which matches EVERY version forever. advisoryAffects ORs
+// its ranges, so that one bogus open range overrides the correct
+// exclusive-fix verdict of its sibling.
+//
+// That is the mechanism behind the measured production false positive:
+// lodash 4.17.21 carrying CVE-2021-23337, an advisory *fixed in
+// 4.17.21*. The `fixed == query` boundary below was never the bug — it
+// has been correct since the range-aware matcher landed. The bug is that
+// a range claiming "never fixed" outranked an advisory that declares its
+// own fix version.
+//
+// So: when a range has no upper bound at all, and the advisory itself
+// declares a fix, we close the range at the EARLIEST declared fix
+// strictly above this range's `introduced`. Scoping the clamp to
+// open-upper ranges and to fixes above the range's own lower bound is
+// what keeps multi-branch advisories correct — an advisory fixed in
+// 1.2.3 on the 1.x line and still open on 2.x clamps only the 1.x range,
+// because 1.2.3 is not above `introduced: 2.0.0`.
+//
+// Parse failures return (false, true) rather than plain false. Returning
+// "not affected" for a version string we could not read is a silent
+// false negative — the caller decides what to do with the uncertainty.
+func rangeAffectsEx(ecosystem string, r VulnerableRange, fixedVersions []string, queryRaw string) (bool, bool) {
+	// Open-upper-bound clamp — see the FixedVersions rationale above.
+	// Applied before the zero-value sentinel check so a fully-open range
+	// on an advisory that declares a fix is closed too.
+	if r.Fixed == "" && r.LastAffected == "" {
+		if clamp := earliestFixAbove(ecosystem, fixedVersions, r.Introduced); clamp != "" {
+			r.Fixed = clamp
+		}
+	}
 	// Fully-zero range is the "applies to every published version"
 	// sentinel used when OSV upstream emits an empty affected block
 	// AND no fix is known. Distinct from "no range info at all" —
 	// see advisoryAffects' return-false default.
 	if r.Introduced == "" && r.Fixed == "" && r.LastAffected == "" {
-		return true
+		return true, false
 	}
 	// Cheap exact-match path: query string equals a range anchor
 	// literally. Resilient to ecosystems whose parsers reject the
 	// version (e.g. Maven "1.0-SNAPSHOT" vs "1.0.SNAPSHOT").
 	if r.LastAffected != "" && r.LastAffected == queryRaw {
-		return true
+		return true, false
+	}
+	// The exclusive-fix anchor is checked BEFORE the introduced anchor:
+	// `fixed` is exclusive under every OSV ecosystem, so query == fixed
+	// is "not affected" even for the degenerate introduced == fixed
+	// range (an empty interval), which the old ordering matched.
+	if r.Fixed == queryRaw {
+		return false, false // "fixed" is exclusive — query == fix → not affected
 	}
 	if r.Introduced == queryRaw {
-		return true
-	}
-	if r.Fixed == queryRaw {
-		return false // "fixed" is exclusive — query == fix → not affected
+		return true, false
 	}
 	// introduced bound (default "0" / open lower)
 	if intro := strings.TrimSpace(r.Introduced); intro != "" && intro != "0" {
 		cmp, err := compareVersions(ecosystem, queryRaw, intro)
 		if err != nil {
-			return false
+			return false, true
 		}
 		if cmp < 0 {
-			return false
+			return false, false
 		}
 	}
 	// fixed bound (exclusive)
 	if fix := strings.TrimSpace(r.Fixed); fix != "" {
 		cmp, err := compareVersions(ecosystem, queryRaw, fix)
 		if err != nil {
-			return false
+			return false, true
 		}
 		if cmp >= 0 {
-			return false
+			return false, false
 		}
 	}
 	// last_affected bound (inclusive)
 	if la := strings.TrimSpace(r.LastAffected); la != "" {
 		cmp, err := compareVersions(ecosystem, queryRaw, la)
 		if err != nil {
-			return false
+			return false, true
 		}
 		if cmp > 0 {
-			return false
+			return false, false
 		}
 	}
-	return true
+	return true, false
+}
+
+// earliestFixAbove returns the smallest advisory-declared fix version
+// strictly greater than `introduced`, or "" when the advisory declares
+// no such fix. "" and "0" both mean "open lower bound", in which case
+// every declared fix qualifies.
+//
+// Unparseable candidates are skipped rather than treated as a bound —
+// a fix version we cannot order against `introduced` is not evidence
+// that the range closes there, and guessing would re-open the
+// false-negative hole from the other side.
+func earliestFixAbove(ecosystem string, fixedVersions []string, introduced string) string {
+	intro := strings.TrimSpace(introduced)
+	openLower := intro == "" || intro == "0"
+	best := ""
+	for _, raw := range fixedVersions {
+		fix := strings.TrimSpace(raw)
+		if fix == "" {
+			continue
+		}
+		if !openLower {
+			cmp, err := compareVersions(ecosystem, fix, intro)
+			if err != nil || cmp <= 0 {
+				continue
+			}
+		}
+		if best == "" {
+			best = fix
+			continue
+		}
+		cmp, err := compareVersions(ecosystem, fix, best)
+		if err != nil {
+			continue
+		}
+		if cmp < 0 {
+			best = fix
+		}
+	}
+	return best
 }
 
 // compareVersions dispatches version comparison to the per-ecosystem
@@ -468,7 +595,15 @@ func rangeAffects(ecosystem string, r VulnerableRange, queryRaw string) bool {
 //	packagist     → Maven-flavoured fallback (Composer's rules are close
 //	                enough; the few divergences mis-rank pre-releases by
 //	                one band, which is acceptable for advisory matching)
-//	npm, yarn, bun, cargo, nuget, default → SemVer 2.0 via Masterminds.
+//	nuget         → NuGet 4-segment order (Major.Minor.Patch.Revision +
+//	                SemVer-style pre-release). NuGet is the one covered
+//	                ecosystem whose native version grammar has a fourth
+//	                numeric segment, and routing it through the SemVer
+//	                default was a FALSE NEGATIVE: parseSemver drops the
+//	                4th segment, so "1.2.3.4" and a fix at "1.2.3.5"
+//	                both collapsed to "1.2.3" — query >= fixed —
+//	                clearing an advisory that does affect the package.
+//	npm, yarn, bun, cargo, default → SemVer 2.0 via Masterminds.
 //	                A leading `v` and trailing 4th dot-segment are
 //	                normalised away — both shapes show up in registry
 //	                version strings.
@@ -476,6 +611,16 @@ func compareVersions(ecosystem, a, b string) (int, error) {
 	a = strings.TrimSpace(a)
 	b = strings.TrimSpace(b)
 	switch CanonicalEcosystem(ecosystem) {
+	case "nuget":
+		va, err := parseNuGet(a)
+		if err != nil {
+			return 0, err
+		}
+		vb, err := parseNuGet(b)
+		if err != nil {
+			return 0, err
+		}
+		return va.compare(vb), nil
 	case "pypi":
 		va, err := pep440.Parse(a)
 		if err != nil {
@@ -507,7 +652,7 @@ func compareVersions(ecosystem, a, b string) (int, error) {
 		}
 		return va.Compare(vb), nil
 	default:
-		// npm / yarn / bun / cargo / nuget / unknown → SemVer via
+		// npm / yarn / bun / cargo / unknown → SemVer via
 		// Masterminds. The lenient input filter handles `v`-prefix
 		// and 4-segment npm anti-patterns the strict parser rejects.
 		va, err := parseSemver(a)
@@ -541,4 +686,107 @@ func parseSemver(v string) (*semver.Version, error) {
 		}
 	}
 	return semver.NewVersion(s)
+}
+
+// nugetVersion is a parsed NuGet version: up to four numeric segments
+// plus an optional pre-release label. Build metadata (`+sha`) is parsed
+// off and discarded — NuGet, like SemVer, excludes it from ordering.
+type nugetVersion struct {
+	nums [4]uint64
+	pre  string
+}
+
+// parseNuGet reads `Major[.Minor[.Patch[.Revision]]][-pre][+build]`.
+// Missing trailing segments default to 0, matching NuGet's own
+// normalisation ("1.2" and "1.2.0.0" are the same version). A leading
+// `v` is tolerated for symmetry with parseSemver. Returns an error when
+// any present segment is not a plain integer, so the caller's
+// undecidable branch fires rather than a wrong verdict.
+func parseNuGet(v string) (nugetVersion, error) {
+	s := strings.TrimSpace(v)
+	s = strings.TrimPrefix(s, "v")
+	if s == "" {
+		return nugetVersion{}, fmt.Errorf("osv: empty nuget version")
+	}
+	if i := strings.IndexByte(s, '+'); i >= 0 {
+		s = s[:i]
+	}
+	var out nugetVersion
+	if i := strings.IndexByte(s, '-'); i >= 0 {
+		out.pre = s[i+1:]
+		s = s[:i]
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) > 4 {
+		return nugetVersion{}, fmt.Errorf("osv: nuget version %q has more than 4 segments", v)
+	}
+	for i, p := range parts {
+		n, err := strconv.ParseUint(strings.TrimSpace(p), 10, 64)
+		if err != nil {
+			return nugetVersion{}, fmt.Errorf("osv: nuget version %q segment %q: %w", v, p, err)
+		}
+		out.nums[i] = n
+	}
+	return out, nil
+}
+
+// compare returns -1/0/+1. Numeric segments first (all four, in order),
+// then the pre-release rule: a version WITHOUT a pre-release label
+// outranks the same numeric version WITH one.
+func (a nugetVersion) compare(b nugetVersion) int {
+	for i := range a.nums {
+		switch {
+		case a.nums[i] < b.nums[i]:
+			return -1
+		case a.nums[i] > b.nums[i]:
+			return 1
+		}
+	}
+	return compareNuGetPrerelease(a.pre, b.pre)
+}
+
+// compareNuGetPrerelease orders two pre-release labels. NuGet compares
+// them as dot-separated identifiers, case-INsensitively (unlike SemVer),
+// with all-numeric identifiers ordering below alphanumeric ones and a
+// shorter prefix ordering below a longer one. An empty label means "this
+// is the release", which sorts above every pre-release.
+func compareNuGetPrerelease(a, b string) int {
+	switch {
+	case a == "" && b == "":
+		return 0
+	case a == "":
+		return 1
+	case b == "":
+		return -1
+	}
+	as := strings.Split(strings.ToLower(a), ".")
+	bs := strings.Split(strings.ToLower(b), ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		an, aErr := strconv.ParseUint(as[i], 10, 64)
+		bn, bErr := strconv.ParseUint(bs[i], 10, 64)
+		switch {
+		case aErr == nil && bErr == nil:
+			if an != bn {
+				if an < bn {
+					return -1
+				}
+				return 1
+			}
+		case aErr == nil:
+			return -1 // numeric identifier < alphanumeric identifier
+		case bErr == nil:
+			return 1
+		default:
+			if c := strings.Compare(as[i], bs[i]); c != 0 {
+				return c
+			}
+		}
+	}
+	switch {
+	case len(as) < len(bs):
+		return -1
+	case len(as) > len(bs):
+		return 1
+	}
+	return 0
 }

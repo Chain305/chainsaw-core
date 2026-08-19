@@ -47,7 +47,7 @@ func pruneBackups(path string, keep int) {
 	if keep < 1 {
 		keep = 1
 	}
-	matches, err := filepath.Glob(path + ".chainsaw.bak.*")
+	matches, err := filepath.Glob(path + backupGlobSuffix)
 	if err != nil || len(matches) <= keep {
 		return
 	}
@@ -132,4 +132,74 @@ func writeAtomicMode(path string, data []byte, newFileMode os.FileMode) error {
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil
+}
+
+// backupGlobSuffix is appended to a config path to find the timestamped
+// copies backup() writes. Kept in one place so BackupsFor, PurgeBackups and
+// pruneBackups can never disagree about what a chainsaw backup looks like.
+const backupGlobSuffix = ".chainsaw.bak.*"
+
+// BackupsFor returns every chainsaw backup file that currently exists for the
+// manager's config in the given scope, newest first.
+//
+// L-08: Unwire removes the chainsaw block from the live config but the
+// timestamped backup it took first still holds the plaintext
+// client_id:client_secret pair. The CLI never said so. This is the read side
+// of that disclosure — it deliberately does NOT delete anything, because
+// xmlUnwire RESTORES maven/nuget from the newest backup and revoking the
+// credential (L-07) is the real mitigation.
+//
+// It goes through ConfigPathsForScope rather than ConfigPathForScope on
+// purpose: sbt writes THREE files (repositories, credentials, the coursier
+// env snippet) and two of them carry the secret. Asking the manager for "its"
+// config path would miss two thirds of the exposure.
+//
+// Ordering matches pruneBackups: names embed a zero-padded UTC timestamp, so
+// reverse-lexical is newest-first.
+func BackupsFor(m Manager, scope Scope) ([]string, error) {
+	paths, err := ConfigPathsForScope(m, scope)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, p := range paths {
+		matches, err := filepath.Glob(p + backupGlobSuffix)
+		if err != nil {
+			return nil, fmt.Errorf("scan backups for %s: %w", p, err)
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+		out = append(out, matches...)
+	}
+	return out, nil
+}
+
+// PurgeBackups deletes every backup BackupsFor would report and returns the
+// paths it removed. Opt-in only (`uninstall-hook --purge-backups`).
+//
+// MUST run AFTER Unwire: xmlUnwire restores maven/nuget from the newest
+// backup, so purging first would destroy the file it needs to put back.
+//
+// Best-effort per file: the first removal error is returned, but every other
+// backup is still attempted so a single permission problem does not leave the
+// rest of the plaintext on disk.
+func PurgeBackups(m Manager, scope Scope) ([]string, error) {
+	found, err := BackupsFor(m, scope)
+	if err != nil {
+		return nil, err
+	}
+	removed := make([]string, 0, len(found))
+	var firstErr error
+	for _, b := range found {
+		if err := os.Remove(b); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("remove %s: %w", b, err)
+			}
+			continue
+		}
+		removed = append(removed, b)
+	}
+	return removed, firstErr
 }

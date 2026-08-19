@@ -483,6 +483,12 @@ func authStatusCmd() *cobra.Command {
 				Role          string `json:"role,omitempty"`
 				Email         string `json:"email,omitempty"`
 				IsAdmin       bool   `json:"is_admin,omitempty"`
+				// L-10: when the active credential is an API key that
+				// carries an expiry, say so BEFORE it bites. A key minted
+				// with no expiry (today's default) leaves both fields unset,
+				// so nothing changes for existing users.
+				ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+				ExpiresInDays *int       `json:"expires_in_days,omitempty"`
 			}
 
 			result := statusResult{Server: server}
@@ -503,6 +509,11 @@ func authStatusCmd() *cobra.Command {
 					result.Role, _ = me["role"].(string)
 					result.Email, _ = me["email"].(string)
 					result.IsAdmin, _ = me["is_admin"].(bool)
+					if exp := lookupTokenExpiry(c, token); exp != nil {
+						result.ExpiresAt = exp
+						days := int(time.Until(*exp).Round(24*time.Hour) / (24 * time.Hour))
+						result.ExpiresInDays = &days
+					}
 				} else {
 					probeErr = err
 				}
@@ -542,13 +553,32 @@ func authStatusCmd() *cobra.Command {
 				if result.OrgID != "" {
 					printKV(out, cmd, "Org", result.OrgID)
 				}
+				if result.ExpiresAt != nil && result.ExpiresInDays != nil {
+					days := *result.ExpiresInDays
+					stamp := result.ExpiresAt.UTC().Format("2006-01-02")
+					switch {
+					case days < 0:
+						printKV(out, cmd, "Credential", fmt.Sprintf("EXPIRED on %s — run `chainsaw auth login`", stamp))
+					case days == 0:
+						printKV(out, cmd, "Credential", fmt.Sprintf("expires TODAY (%s) — run `chainsaw auth login`", stamp))
+					case days <= 14:
+						printKV(out, cmd, "Credential", fmt.Sprintf("expires in %d day(s), on %s — run `chainsaw auth login` before then", days, stamp))
+					default:
+						printKV(out, cmd, "Credential", fmt.Sprintf("expires in %d days, on %s", days, stamp))
+					}
+				}
 				return nil
 			case token == "":
 				fmt.Fprintln(out, "  Status: not logged in — run `chainsaw auth login`")
 				return &ExitCodeError{Code: 1, Err: nil}
 			case isUnauthorizedErr(probeErr):
-				// Token present but the server rejected it (expired/revoked).
-				fmt.Fprintln(out, "  Status: token expired or invalid — run `chainsaw auth login`")
+				// Token present but the server rejected it. L-10: name
+				// EXPIRY first. A 401 is indistinguishable on the wire from
+				// a revoked or malformed key, but expiry is the case a user
+				// can neither see coming nor diagnose — "not authenticated"
+				// sends them looking for a config problem that isn't there.
+				fmt.Fprintln(out, "  Status: credential expired, revoked, or invalid — the server rejected it")
+				fmt.Fprintln(out, "  Fix:    chainsaw auth login       (check the row's expiry with `chainsaw token list`)")
 				return &ExitCodeError{Code: 1, Err: nil}
 			default:
 				// Token present but we couldn't reach the server (DNS, TLS,
@@ -698,4 +728,67 @@ func PromptSelect(label string, options []string, defaultVal string) string {
 		return options[idx-1]
 	}
 	return defaultVal
+}
+
+// ── credential expiry (L-10) ──────────────────────────────────────────────────
+
+// apiKeyTokenPrefix is the literal prefix every Chain305 API key carries.
+// Mirrors internal/apikeys (tokenPrefix + tokenSeparator); the CLI lives in a
+// separate module and cannot import that internal package, so the shape is
+// re-stated here rather than guessed at call sites.
+const apiKeyTokenPrefix = "c305_"
+
+// apiKeyTokenSegments is the number of underscore-separated fields in a
+// wire token: "c305_<tag>_<prefix>_<secret>". SplitN, never Split — the
+// secret is base64url and legitimately contains underscores.
+const apiKeyTokenSegments = 4
+
+// apiKeyPrefixFromToken extracts the public prefix from a Chain305 API key so
+// the CLI can find its OWN row in /api/api-keys. Returns "" for a session JWT
+// or anything else that is not an API key — the caller then simply has no
+// expiry to report, which is the correct answer for a JWT.
+//
+// Purely local string work: the secret is never sent anywhere and never
+// logged.
+func apiKeyPrefixFromToken(token string) string {
+	token = strings.TrimSpace(token)
+	if !strings.HasPrefix(token, apiKeyTokenPrefix) {
+		return ""
+	}
+	parts := strings.SplitN(token, "_", apiKeyTokenSegments)
+	if len(parts) != apiKeyTokenSegments {
+		return ""
+	}
+	if parts[2] == "" || parts[3] == "" {
+		return ""
+	}
+	return parts[2]
+}
+
+// lookupTokenExpiry resolves the expiry of the credential we are currently
+// authenticating with, or nil when there isn't one.
+//
+// Deliberately best-effort and completely silent on failure. This runs inside
+// `auth status`, whose job is to answer "am I logged in" — a listing endpoint
+// the caller lacks permission for, an older server that doesn't serve it, or
+// a flaky network must degrade to "no expiry shown", never to an error or a
+// scary warning. The authenticated/not-authenticated answer above is already
+// established by /api/auth/me and does not depend on this.
+func lookupTokenExpiry(c *APIClient, token string) *time.Time {
+	prefix := apiKeyPrefixFromToken(token)
+	if prefix == "" {
+		return nil
+	}
+	var resp struct {
+		APIKeys []tokenItem `json:"api_keys"`
+	}
+	if err := c.Get("/api/api-keys", &resp); err != nil {
+		return nil
+	}
+	for _, k := range resp.APIKeys {
+		if k.Prefix == prefix {
+			return k.ExpiresAt
+		}
+	}
+	return nil
 }

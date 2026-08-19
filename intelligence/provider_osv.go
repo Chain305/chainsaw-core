@@ -187,10 +187,15 @@ func (p *osvProvider) Supports(ecosystem string) bool {
 //     NOT stamp a clean Vulns section; "we don't have data" is
 //     distinct from "we scanned and found nothing").
 //  3. Index loaded, package covered — return a non-nil VulnSection
-//     populated from the matching advisories. When the version is
-//     clean (no advisories match), VulnSection is non-nil but
-//     IsVulnerable=false / CVEs empty, so policy "we scanned, clean"
-//     logic fires correctly.
+//     populated from the matching advisories, PLUS the ids of the
+//     advisories that were evaluated and did not match, in
+//     ClearedCVEs. When the version is clean (no advisories match),
+//     VulnSection is non-nil but IsVulnerable=false / CVEs empty, so
+//     policy "we scanned, clean" logic fires correctly.
+//
+// Shapes 1 and 2 must stay silent on ClearedCVEs: a dormant index and
+// an uncovered package have evaluated nothing, and mergeVulns treats a
+// veto as evidence.
 func (p *osvProvider) Run(ctx context.Context, req Request, prior *Report) (PartialReport, error) {
 	p.idxMu.RLock()
 	idx := p.idx
@@ -209,41 +214,91 @@ func (p *osvProvider) Run(ctx context.Context, req Request, prior *Report) (Part
 		return PartialReport{}, nil
 	}
 
-	hits := idx.Lookup(eco, pkg, ver)
+	hits, cleared, undecided := idx.LookupEx(eco, pkg, ver)
 	scannedAt := idx.LoadedAt()
 	vuln := &VulnSection{
 		ScannedAt:       &scannedAt,
 		ScannerDBDigest: "osv-bundle",
 	}
-	if len(hits) == 0 {
-		// Covered but clean. Return a non-nil empty Vulns so
-		// VulnDataAvailable fires downstream — operators can tell the
-		// difference between "scanned, clean" and "not scanned".
-		return PartialReport{Vulns: vuln}, nil
-	}
 
-	vuln.IsVulnerable = true
 	vuln.CVEs = make([]string, 0, len(hits))
 	vuln.CVEDetails = make([]CVEDetail, 0, len(hits))
+	matched := make(map[string]struct{}, len(hits))
 	var maxCVSS float64
 	for _, a := range hits {
 		cve := a.PreferredCVE()
 		if cve == "" {
 			continue
 		}
+		matched[cve] = struct{}{}
 		vuln.CVEs = append(vuln.CVEs, cve)
 		if a.CVSSScore > maxCVSS {
 			maxCVSS = a.CVSSScore
 		}
-		detail := CVEDetail{CVE: cve}
+		detail := CVEDetail{CVE: cve, CVSS: a.CVSSScore}
 		if len(a.FixedVersions) > 0 {
 			detail.FixedVersion = a.FixedVersions[0]
 			detail.FixAvailable = true
 		}
 		vuln.CVEDetails = append(vuln.CVEDetails, detail)
 	}
+	vuln.IsVulnerable = len(vuln.CVEs) > 0
 	vuln.CVSSScore = maxCVSS
-	return PartialReport{Vulns: vuln}, nil
+
+	// Veto channel. The bundle is a version-range database, so for every
+	// advisory keyed to this package we reached an actual verdict for
+	// THIS version — not merely "we didn't find it". That is the
+	// positive evidence of absence mergeVulns requires before it will
+	// remove a CVE another source asserted. It is what lets a fixed
+	// range matcher retract a false positive that a previous, buggy
+	// bundle already persisted into the universal row.
+	//
+	// An id that matched some OTHER advisory for the same package is
+	// excluded from the veto — the same CVE can arrive via several
+	// advisory records, and one clean record must not cancel a dirty
+	// sibling.
+	//
+	// Undecidable advisories are deliberately absent from BOTH lists:
+	// a bound we could not parse is neither a hit nor an exclusion.
+	if len(cleared) > 0 {
+		vuln.ClearedCVEs = make([]string, 0, len(cleared))
+		seen := make(map[string]struct{}, len(cleared))
+		for _, a := range cleared {
+			cve := a.PreferredCVE()
+			if cve == "" {
+				continue
+			}
+			if _, hit := matched[cve]; hit {
+				continue
+			}
+			if _, dup := seen[cve]; dup {
+				continue
+			}
+			seen[cve] = struct{}{}
+			vuln.ClearedCVEs = append(vuln.ClearedCVEs, cve)
+		}
+	}
+
+	out := PartialReport{Vulns: vuln}
+	if len(undecided) > 0 {
+		// Loud, but not scored. See WarnVulnRangeUndecidable: promoting
+		// an unreadable range to a severity would manufacture the
+		// false-positive class this provider just learned to retract.
+		ids := make([]string, 0, len(undecided))
+		for _, a := range undecided {
+			if id := a.PreferredCVE(); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		out.Warnings = append(out.Warnings, Warning{
+			Provider: p.Name(),
+			Code:     WarnVulnRangeUndecidable,
+			Message: "advisory version range could not be ordered against " + ver +
+				"; neither counted nor cleared: " + strings.Join(ids, ", "),
+			At: time.Now().UTC(),
+		})
+	}
+	return out, nil
 }
 
 // IndexLoaded reports whether the underlying OSV bundle was successfully

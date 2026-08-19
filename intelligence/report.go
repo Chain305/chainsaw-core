@@ -550,6 +550,27 @@ type VulnSection struct {
 	// common case for advisories still pending a patched release.
 	CVEDetails []CVEDetail `json:"cveDetails,omitempty"`
 
+	// ClearedCVEs is the VETO channel: CVE ids this contributor
+	// positively evaluated against THIS coordinate and concluded do NOT
+	// apply. It is the only way a false positive from another source can
+	// ever leave a report — mergeVulns is otherwise union-only, so
+	// anything that lands once is permanent and (because the
+	// intelligence row is universal) global.
+	//
+	// Three-state, and the distinction is the whole design:
+	//   nil       — this contributor has nothing to say about vulns.
+	//               MOST contributors are here. Silence is NOT a veto.
+	//   non-empty — evaluated, and these ids are affirmatively excluded.
+	//   listed in both CVEs and ClearedCVEs — impossible by
+	//               construction; producers subtract their own hits.
+	//
+	// Only a contributor that range-evaluated the exact (ecosystem,
+	// package, version) coordinate may populate this. A source that
+	// merely failed to find a CVE must leave it nil — see
+	// osv.Index.LookupEx, which separates "cleared" from "undecidable"
+	// for precisely this reason.
+	ClearedCVEs []string `json:"clearedCves,omitempty"`
+
 	// KnownExploited is true when at least one of CVEs appears in the
 	// CISA KEV catalog. Populated by the KEV provider post-merge.
 	KnownExploited bool `json:"knownExploited,omitempty"`
@@ -566,6 +587,17 @@ type CVEDetail struct {
 	CVE          string `json:"cve"`
 	FixedVersion string `json:"fixedVersion,omitempty"`
 	FixAvailable bool   `json:"fixAvailable,omitempty"`
+	// CVSS is the per-CVE base score. Zero means "this contributor did
+	// not carry a score for this id" — it is NOT a claim that the CVE
+	// scores zero. mergeVulns needs per-CVE scores to recompute the
+	// section-level max after a veto removes an entry; without them,
+	// dropping the CVE that WAS the max would leave a stale aggregate
+	// (the removal would show in the id list but not in the score the
+	// policy engine and max_cvss column actually read). The OSV provider
+	// populates it from the advisory record; the Trivy-backed cve
+	// provider leaves it zero because vulnerability_metadata.cve_details
+	// carries no per-CVE score column.
+	CVSS float64 `json:"cvss,omitempty"`
 }
 
 // KEVEntry is a single row of CISA's Known Exploited Vulnerabilities
@@ -624,6 +656,16 @@ const (
 	WarnFeatureDisabled = "feature_disabled"
 	WarnRateLimited     = "rate_limited"
 	WarnUnsupported     = "ecosystem_unsupported"
+
+	// WarnVulnRangeUndecidable is emitted when an advisory's version
+	// range could not be ordered against the queried version under that
+	// ecosystem's grammar. It is a WARNING and nothing more: the
+	// advisory is neither counted as a hit (that would manufacture the
+	// false-positive class this wave removes) nor as a veto (that would
+	// let a malformed bound silently delete a real finding). Undecidable
+	// is a third state, and it stays visible instead of collapsing into
+	// either verdict.
+	WarnVulnRangeUndecidable = "vuln_range_undecidable"
 
 	// Transitive-risk visibility codes. Emitted by evaluateTransitiveRisk
 	// when a direct dep cannot be folded into the rolled-up score, so

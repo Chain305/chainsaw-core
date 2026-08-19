@@ -1255,6 +1255,54 @@ func mergeSupplyChain(dst *SupplyChainSection, src SupplyChainSection) {
 // is exactly how OSV's PyPI hits were being clobbered by Trivy's empty
 // scan result on idna 3.6 / requests 2.31.0. CVE strings are deduped,
 // CVSS takes the max, ScannedAt prefers the most recent.
+//
+// # The veto channel, and why union-only was a defect
+//
+// For a long time this merge could only ADD. Combined with
+// mergeReportPayload, which lists report.vulnerabilities as a preserved
+// subtree, that made any value which landed once permanent — and because
+// intelligence_reports is keyed by (ecosystem, package, version) with no
+// org column, permanent AND global. One source's false positive could
+// never be withdrawn by a source that had correctly evaluated the same
+// coordinate and concluded the CVE did not apply. Measured consequence:
+// lodash 4.17.21 carrying CVE-2021-23337, an advisory fixed in 4.17.21,
+// on the most-installed package on npm.
+//
+// The fix is VulnSection.ClearedCVEs, and its whole design is one
+// distinction:
+//
+//	"I evaluated this coordinate and this CVE does not apply"
+//	                    is NOT
+//	"I have nothing to say about vulnerabilities"
+//
+// Absence must never mean veto. Almost every provider that writes a
+// PartialReport says nothing about CVEs; if an empty CVE list were read
+// as an exclusion, every registry-metadata tick would delete every real
+// finding. So the veto is an explicit, positively-populated list rather
+// than a diff of what the source did not mention — the same three-state
+// discipline as VulnDataAvailable (ScannedAt nil vs set) and the
+// WeeklyDownloads nil / -1 / value ladder in core/risk.
+//
+// Order independence. The Tier-1 fan-out merges partials in
+// non-deterministic order, so a veto must not depend on arriving after
+// the assertion it withdraws. Vetoes therefore ACCUMULATE on dst and are
+// re-applied on every merge: a CVE added by a later source is removed
+// again on that same call.
+//
+// Veto beats assertion. If one source asserts a CVE and another vetoes
+// it, the veto wins — the deliberate inversion of the old never-clear
+// property. That is safe only because the veto is evidence-backed: a
+// producer may list an id in ClearedCVEs solely when it range-evaluated
+// the exact (ecosystem, package, version) coordinate against a concrete
+// advisory. A source that merely failed to look leaves the field nil,
+// and an evaluation that could not be decided (unparseable bound) goes
+// to a warning, not to the veto — see osv.Index.LookupEx.
+//
+// Vetoes are NOT sticky across scans. They live on the persisted section
+// so they survive the payload merge, but each scan re-derives them from
+// whatever sources ran. Making a veto permanent would recreate the
+// original bug with the sign flipped: an exclusion nothing could
+// withdraw.
 func mergeVulns(dst *VulnSection, src VulnSection) {
 	if src.ScannedAt != nil {
 		if dst.ScannedAt == nil || src.ScannedAt.After(*dst.ScannedAt) {
@@ -1321,6 +1369,149 @@ func mergeVulns(dst *VulnSection, src VulnSection) {
 			idx[k.CVE] = struct{}{}
 			dst.KEVEntries = append(dst.KEVEntries, k)
 		}
+	}
+	// Veto pass — runs LAST so it applies to everything unioned above,
+	// including entries this very call just added. Accumulating the veto
+	// set on dst is what makes the outcome independent of provider
+	// arrival order.
+	if len(src.ClearedCVEs) > 0 {
+		dst.ClearedCVEs = unionCVEIDs(dst.ClearedCVEs, src.ClearedCVEs)
+	}
+	applyCVEVeto(dst)
+}
+
+// unionCVEIDs appends the ids in add that are not already in base,
+// preserving base's order. CVE ids are compared verbatim — every
+// producer already upper-cases them (see osv.Advisory.PreferredCVE) and
+// normalising here would hide a producer that does not.
+func unionCVEIDs(base, add []string) []string {
+	seen := make(map[string]struct{}, len(base)+len(add))
+	for _, id := range base {
+		seen[id] = struct{}{}
+	}
+	for _, id := range add {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		base = append(base, id)
+	}
+	return base
+}
+
+// applyCVEVeto removes every id in dst.ClearedCVEs from the CVE list,
+// the per-CVE details and the KEV entries, then recomputes the
+// section-level aggregates that were derived from them. It is a no-op
+// when nothing is vetoed, so the common path pays one length check.
+//
+// KEVEntries matter here specifically: kevProvider derives them from the
+// merged CVE list, so a vetoed id that survived in KEVEntries would
+// resurrect as KnownExploited — the single highest-weight vulnerability
+// signal in the risk engine — for a CVE we just established does not
+// apply.
+func applyCVEVeto(dst *VulnSection) {
+	if len(dst.ClearedCVEs) == 0 {
+		return
+	}
+	vetoed := make(map[string]struct{}, len(dst.ClearedCVEs))
+	for _, id := range dst.ClearedCVEs {
+		vetoed[id] = struct{}{}
+	}
+	removed := false
+
+	if len(dst.CVEs) > 0 {
+		kept := dst.CVEs[:0]
+		for _, id := range dst.CVEs {
+			if _, bad := vetoed[id]; bad {
+				removed = true
+				continue
+			}
+			kept = append(kept, id)
+		}
+		dst.CVEs = kept
+	}
+	if len(dst.CVEDetails) > 0 {
+		kept := dst.CVEDetails[:0]
+		for _, d := range dst.CVEDetails {
+			if _, bad := vetoed[d.CVE]; bad {
+				removed = true
+				continue
+			}
+			kept = append(kept, d)
+		}
+		dst.CVEDetails = kept
+	}
+	if len(dst.KEVEntries) > 0 {
+		kept := dst.KEVEntries[:0]
+		for _, k := range dst.KEVEntries {
+			if _, bad := vetoed[k.CVE]; bad {
+				removed = true
+				continue
+			}
+			kept = append(kept, k)
+		}
+		dst.KEVEntries = kept
+	}
+	if !removed {
+		return
+	}
+	recomputeVulnAggregates(dst)
+}
+
+// recomputeVulnAggregates re-derives the section-level rollups after a
+// veto removed entries. Called ONLY on an actual removal — the merge
+// path must never recompute a max over data a contributor supplied
+// wholesale, because most contributors carry an aggregate CVSS without
+// per-CVE scores and a recompute would zero it.
+//
+// CVSSScore. Recomputed as the max of the surviving CVEDetails[].CVSS.
+// When some survivor carries no per-CVE score (the Trivy-backed path —
+// vulnerability_metadata.cve_details has no score column) we leave the
+// prior aggregate alone rather than lowering it to the max of the
+// subset we happen to know: under-reporting severity on a package that
+// still has CVEs is the worse failure. That is a knowingly conservative
+// residual, and it disappears as producers populate CVEDetail.CVSS.
+//
+// EPSSScore is untouched for the same reason in the general case — it
+// has no per-CVE carrier at all — and zeroed only when nothing is left.
+func recomputeVulnAggregates(dst *VulnSection) {
+	if len(dst.CVEs) == 0 {
+		// Nothing survived: every derived rollup must go with it.
+		// ScannedAt / ScannerDBDigest stay — the scan DID run, and
+		// clearing them would flip VulnDataAvailable to false and read
+		// as "no vulnerability coverage", which is exactly the
+		// fail-closed misfire the coverage gate must not see.
+		dst.IsVulnerable = false
+		dst.CVSSScore = 0
+		dst.EPSSScore = 0
+		dst.KnownExploited = false
+		return
+	}
+	dst.IsVulnerable = true
+	dst.KnownExploited = len(dst.KEVEntries) > 0
+
+	var maxKnown float64
+	allScored := len(dst.CVEDetails) == len(dst.CVEs)
+	for _, d := range dst.CVEDetails {
+		if d.CVSS <= 0 {
+			allScored = false
+			continue
+		}
+		if d.CVSS > maxKnown {
+			maxKnown = d.CVSS
+		}
+	}
+	if allScored {
+		dst.CVSSScore = maxKnown
+		return
+	}
+	// Partial score coverage: never raise, and only lower as far as the
+	// scores we actually hold justify.
+	if maxKnown > dst.CVSSScore {
+		dst.CVSSScore = maxKnown
 	}
 }
 

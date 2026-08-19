@@ -555,3 +555,248 @@ func TestAdvisory_CVSSScoreFromVectorIsCarried(t *testing.T) {
 		t.Errorf("Severity = %q, want HIGH", hits[0].Severity)
 	}
 }
+
+// TestAdvisoryAffects_Lodash41721FixBoundary pins the production false
+// positive measured on the universal intelligence row: lodash 4.17.21
+// carrying CVE-2021-23337, an advisory FIXED in 4.17.21.
+//
+// The suspected cause — "fixed == queried version matches" — was NOT
+// the bug; the exclusive-fix boundary has been correct since the
+// range-aware matcher landed, and the first subtest pins that so it
+// stays correct. The real cause is the second subtest: an OSV record
+// carries several ranges, and a GIT range (commit bounds, frequently
+// with no closing fix event) flattens into a version range with an OPEN
+// upper bound. advisoryAffects ORs its ranges, so that one bogus
+// open range outvoted the correct [0, 4.17.21).
+func TestAdvisoryAffects_Lodash41721FixBoundary(t *testing.T) {
+	lodash := func(ranges []VulnerableRange) Advisory {
+		return Advisory{
+			Ecosystem:        "npm",
+			Package:          "lodash",
+			VulnerableRanges: ranges,
+			FixedVersions:    []string{"4.17.21"},
+			AdvisoryID:       "GHSA-35jh-r3h4-6jhm",
+			Aliases:          []string{"CVE-2021-23337"},
+		}
+	}
+
+	t.Run("exclusive fix boundary", func(t *testing.T) {
+		a := lodash([]VulnerableRange{{Introduced: "0", Fixed: "4.17.21"}})
+		if advisoryAffects(a, "4.17.21") {
+			t.Errorf("4.17.21 == fixed and fixed is exclusive — must NOT match")
+		}
+		if !advisoryAffects(a, "4.17.20") {
+			t.Errorf("4.17.20 < 4.17.21 — must still match")
+		}
+	})
+
+	t.Run("open GIT range must not outvote the semver fix", func(t *testing.T) {
+		a := lodash([]VulnerableRange{
+			{Introduced: "0"}, // flattened GIT range, no fix commit recorded
+			{Introduced: "0", Fixed: "4.17.21"},
+		})
+		if advisoryAffects(a, "4.17.21") {
+			t.Errorf("advisory declares fixed_versions=[4.17.21]; an open sibling range must not resurrect it")
+		}
+		if !advisoryAffects(a, "4.17.20") {
+			t.Errorf("4.17.20 is genuinely affected — the clamp must not over-clear")
+		}
+	})
+
+	t.Run("fully-open sentinel is clamped by the declared fix", func(t *testing.T) {
+		a := lodash([]VulnerableRange{{}})
+		if advisoryAffects(a, "4.17.21") {
+			t.Errorf("zero-value sentinel must still respect the advisory's own fix version")
+		}
+		if !advisoryAffects(a, "4.17.20") {
+			t.Errorf("4.17.20 must remain affected under the sentinel")
+		}
+	})
+
+	t.Run("no declared fix leaves the open range open", func(t *testing.T) {
+		// The clamp is evidence-driven. An advisory with no patched
+		// release must keep matching every version at or above its
+		// lower bound — clamping on absent evidence would be the
+		// mirror-image false negative.
+		a := Advisory{
+			Ecosystem:        "npm",
+			Package:          "lodash",
+			VulnerableRanges: []VulnerableRange{{Introduced: "0"}},
+			AdvisoryID:       "GHSA-open",
+			Aliases:          []string{"CVE-2099-0001"},
+		}
+		if !advisoryAffects(a, "4.17.21") {
+			t.Errorf("unfixed advisory must keep matching")
+		}
+	})
+
+	t.Run("multi-branch advisory clamps only its own branch", func(t *testing.T) {
+		// Fixed on the 1.x line, still open on 2.x. The 1.2.3 fix is
+		// not above the 2.x range's introduced bound, so 2.x stays
+		// affected.
+		a := Advisory{
+			Ecosystem: "npm", Package: "p",
+			VulnerableRanges: []VulnerableRange{
+				{Introduced: "0", Fixed: "1.2.3"},
+				{Introduced: "2.0.0"},
+			},
+			FixedVersions: []string{"1.2.3"},
+			AdvisoryID:    "GHSA-multi",
+		}
+		if advisoryAffects(a, "1.2.3") {
+			t.Errorf("1.2.3 is the fix on the 1.x branch — must not match")
+		}
+		if !advisoryAffects(a, "2.5.0") {
+			t.Errorf("2.x branch is unfixed — 2.5.0 must still match")
+		}
+	})
+}
+
+// TestLookupEx_UndecidableIsNotClean pins the third state: a range whose
+// bound cannot be ordered under the ecosystem's grammar is neither a hit
+// (a false positive we would then have to retract) nor a veto (a silent
+// false negative that would delete a real finding).
+func TestLookupEx_UndecidableIsNotClean(t *testing.T) {
+	bundle := gzippedJSON(t, []Advisory{
+		{
+			Ecosystem: "npm", Package: "p",
+			// A git SHA where a version belongs — unorderable.
+			VulnerableRanges: []VulnerableRange{{Introduced: "0", Fixed: "3f9c1a5deadbeef"}},
+			AdvisoryID:       "GHSA-undecidable",
+			Aliases:          []string{"CVE-2024-9001"},
+		},
+		{
+			Ecosystem: "npm", Package: "p",
+			VulnerableRanges: []VulnerableRange{{Introduced: "0", Fixed: "1.0.0"}},
+			FixedVersions:    []string{"1.0.0"},
+			AdvisoryID:       "GHSA-clean",
+			Aliases:          []string{"CVE-2024-9002"},
+		},
+		{
+			Ecosystem: "npm", Package: "p",
+			VulnerableRanges: []VulnerableRange{{Introduced: "0", Fixed: "3.0.0"}},
+			FixedVersions:    []string{"3.0.0"},
+			AdvisoryID:       "GHSA-hit",
+			Aliases:          []string{"CVE-2024-9003"},
+		},
+	})
+	idx, err := Load(bytes.NewReader(bundle))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	hits, cleared, undecidable := idx.LookupEx("npm", "p", "2.0.0")
+	if len(hits) != 1 || hits[0].AdvisoryID != "GHSA-hit" {
+		t.Fatalf("hits = %+v, want only GHSA-hit", hits)
+	}
+	if len(cleared) != 1 || cleared[0].AdvisoryID != "GHSA-clean" {
+		t.Fatalf("cleared = %+v, want only GHSA-clean", cleared)
+	}
+	if len(undecidable) != 1 || undecidable[0].AdvisoryID != "GHSA-undecidable" {
+		t.Fatalf("undecidable = %+v, want only GHSA-undecidable", undecidable)
+	}
+	// The undecidable advisory must NOT appear in cleared — that is the
+	// false negative the third state exists to prevent.
+	for _, a := range cleared {
+		if a.AdvisoryID == "GHSA-undecidable" {
+			t.Fatalf("an unparseable range was reported as evaluated-clean")
+		}
+	}
+	// An advisory with no version data at all is DECIDED clean, not
+	// undecidable — bundle silence is a shape, not a parse failure.
+	quiet := Advisory{Ecosystem: "npm", Package: "p", AdvisoryID: "GHSA-quiet"}
+	if affects, undecided := advisoryAffectsEx(quiet, "2.0.0"); affects || undecided {
+		t.Fatalf("no-version-data advisory: affects=%v undecidable=%v, want false/false", affects, undecided)
+	}
+}
+
+// TestCompareVersions_NuGetFourSegment pins FN-2: NuGet's fourth numeric
+// segment is significant. Routing it through the SemVer default dropped
+// that segment, collapsing "1.2.3.4" and a fix at "1.2.3.5" to the same
+// version — query >= fixed — which cleared an advisory that does affect
+// the package. A false negative on a security tool.
+func TestCompareVersions_NuGetFourSegment(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.2.3.4", "1.2.3.5", -1},
+		{"1.2.3.5", "1.2.3.4", 1},
+		{"1.2.3.4", "1.2.3.4", 0},
+		{"1.2.3", "1.2.3.0", 0},     // trailing zero revision is the same version
+		{"1.2.3", "1.2.3.1", -1},    // ...but a non-zero revision is newer
+		{"1.2.3.4", "1.2.4", -1},    // patch still outranks revision
+		{"2.0.0.0", "10.0.0.0", -1}, // numeric, not lexical
+		{"1.0.0-beta", "1.0.0", -1}, // pre-release below release
+		{"1.0.0-alpha", "1.0.0-beta", -1},
+		{"1.0.0-rc.2", "1.0.0-rc.10", -1}, // numeric identifiers compare numerically
+	}
+	for _, c := range cases {
+		got, err := compareVersions("nuget", c.a, c.b)
+		if err != nil {
+			t.Errorf("compareVersions(nuget, %q, %q): %v", c.a, c.b, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("compareVersions(nuget, %q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+
+	// End-to-end: the advisory shape that used to be silently cleared.
+	a := Advisory{
+		Ecosystem: "NuGet", Package: "Some.Package",
+		VulnerableRanges: []VulnerableRange{{Introduced: "1.2.3.0", Fixed: "1.2.3.5"}},
+		FixedVersions:    []string{"1.2.3.5"},
+		AdvisoryID:       "GHSA-nuget-4seg",
+	}
+	if !advisoryAffects(a, "1.2.3.4") {
+		t.Errorf("1.2.3.4 is inside [1.2.3.0, 1.2.3.5) — must match")
+	}
+	if advisoryAffects(a, "1.2.3.5") {
+		t.Errorf("1.2.3.5 is the exclusive fix — must NOT match")
+	}
+}
+
+// TestFlattenRecord_SkipsGitRanges pins the flattener half of the
+// lodash 4.17.21 fix: a GIT range must never become a version range.
+// The runtime clamp is defence in depth for bundles already built by a
+// flattener that lacked this filter.
+func TestFlattenRecord_SkipsGitRanges(t *testing.T) {
+	rec := osvRecord{
+		ID:      "GHSA-35jh-r3h4-6jhm",
+		Aliases: []string{"CVE-2021-23337"},
+		Affected: []osvAffected{{
+			Package: osvPackage{Ecosystem: "npm", Name: "lodash"},
+			Ranges: []osvRangeIn{
+				{Type: "GIT", Events: []map[string]string{{"introduced": "0"}}},
+				{Type: "SEMVER", Events: []map[string]string{{"introduced": "0"}, {"fixed": "4.17.21"}}},
+			},
+		}},
+	}
+	advs := flattenRecord(rec)
+	if len(advs) != 1 {
+		t.Fatalf("flattenRecord: got %d advisories, want 1", len(advs))
+	}
+	got := advs[0].VulnerableRanges
+	if len(got) != 1 || got[0].Introduced != "0" || got[0].Fixed != "4.17.21" {
+		t.Fatalf("ranges = %+v, want only the SEMVER [0, 4.17.21)", got)
+	}
+	if advisoryAffects(advs[0], "4.17.21") {
+		t.Errorf("lodash 4.17.21 must be clean of an advisory fixed in 4.17.21")
+	}
+	if !advisoryAffects(advs[0], "4.17.20") {
+		t.Errorf("lodash 4.17.20 must still be affected")
+	}
+
+	// A range with no declared type is treated as a version range —
+	// our own fixtures and older dumps omit the field.
+	untyped := osvRecord{
+		ID: "GHSA-untyped",
+		Affected: []osvAffected{{
+			Package: osvPackage{Ecosystem: "npm", Name: "p"},
+			Ranges:  []osvRangeIn{{Events: []map[string]string{{"introduced": "0"}, {"fixed": "2.0.0"}}}},
+		}},
+	}
+	if got := flattenRecord(untyped)[0].VulnerableRanges; len(got) != 1 {
+		t.Fatalf("untyped range must be kept, got %+v", got)
+	}
+}

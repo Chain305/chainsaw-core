@@ -61,14 +61,14 @@ func init() {
 	reportCmd.AddCommand(reportProvenanceCmd)
 	// provenance-coverage end
 	// exposure-window
-	reportExposureCmd.Flags().String("start", "", "Inclusive RFC3339 start of window (required)")
-	reportExposureCmd.Flags().String("end", "", "Exclusive RFC3339 end of window (required)")
+	reportExposureCmd.Flags().String("start", "", "Inclusive start of window, RFC3339 or YYYY-MM-DD (required). A bare date starts at 00:00:00Z.")
+	reportExposureCmd.Flags().String("end", "", "End of window, RFC3339 or YYYY-MM-DD (required). A bare date is extended to 23:59:59Z so the day itself is included; an explicit timestamp is used as given.")
 	reportExposureCmd.Flags().String("ecosystem", "", "Filter by ecosystem (e.g. npm, pypi, maven)")
 	reportExposureCmd.Flags().String("format", "text", "Output format: text or json")
 	reportCmd.AddCommand(reportExposureCmd)
 	// exposure-window end
 	// owner-sla
-	reportSLACmd.Flags().String("since", "", "Only consider violations resolved at-or-after this RFC3339 timestamp")
+	reportSLACmd.Flags().String("since", "", "Only consider violations resolved at or after this point, RFC3339 or YYYY-MM-DD. A bare date starts at 00:00:00Z.")
 	reportSLACmd.Flags().String("format", "text", "Output format: text or json")
 	reportCmd.AddCommand(reportSLACmd)
 	// owner-sla end
@@ -257,6 +257,67 @@ func runReportProvenance(cmd *cobra.Command, _ []string) error {
 
 // provenance-coverage end
 
+// reportWireTime resolves a user-supplied --start/--end/--since value into the
+// RFC3339 string to put on the wire. It accepts either RFC3339 or a bare
+// YYYY-MM-DD date; endOfDay extends a bare date to 23:59:59 so that
+// `--end 2026-04-30` includes the 30th.
+//
+// WHY THIS EXISTS. These three flags used to call time.Parse(time.RFC3339)
+// directly and wrap the failure with %w. That handed the user Go's own parse
+// error verbatim:
+//
+//	--start must be RFC3339: parsing time "2026-01-01" as
+//	"2006-01-02T15:04:05Z07:00": cannot parse "" as "T"
+//
+// which leaks a Go layout constant as though it were a format the operator was
+// supposed to know, and answers a date-shaped guess with an internals dump.
+// `audit view` had already solved this one file over — parseDate (audit.go)
+// takes RFC3339 or YYYY-MM-DD and says so in plain words — so this routes
+// through it rather than growing a second dialect of the same flag.
+//
+// TWO DELIBERATE CHOICES.
+//
+// An explicit RFC3339 stamp is passed through BYTE-FOR-BYTE rather than
+// re-formatted. Round-tripping through time.Format(time.RFC3339) would
+// silently drop fractional seconds and rewrite the offset, editing a value the
+// operator stated exactly; and there is nothing to gain, since it is already
+// the wire format.
+//
+// A bare date is anchored in UTC, not in the local zone. parseDate resolves
+// dates in time.Local because `audit view` filters a local, already-fetched
+// slice; here the value crosses a network boundary into a server-side report,
+// and a compliance export whose window silently shifts with the operator's
+// laptop timezone is the same class of host-dependence the machine-output
+// boundary exists to prevent. Anyone who needs a specific zone can say so —
+// that is what the RFC3339 form is for.
+func reportWireTime(flag, v string, endOfDay bool) (string, error) {
+	t, dateOnly, err := parseDate(v)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", flag, err)
+	}
+	if !dateOnly {
+		return v, nil
+	}
+	y, m, d := t.Date()
+	u := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	if endOfDay {
+		// NEXT-DAY MIDNIGHT, not 23:59:59. The server window is half-open --
+		// internal/reports/exposure.go:9-10 documents Start inclusive, End
+		// EXCLUSIVE, and ListInstallEventRowsRange queries [Start, End). So
+		// `--end 2026-04-30` has to become 2026-05-01T00:00:00Z to cover the
+		// 30th in full; 23:59:59 would silently drop everything in that final
+		// second, which is the same class of off-by-one this flag already had.
+		//
+		// This deliberately does NOT mirror audit.go's --end, which subtracts
+		// a second. That is correct THERE because audit view filters an
+		// already-fetched slice with an inclusive compare, and wrong here.
+		// Same user-visible meaning ("through the 30th"), different arithmetic
+		// because the boundary on the other side of the wire differs.
+		u = u.AddDate(0, 0, 1)
+	}
+	return u.Format(time.RFC3339), nil
+}
+
 // exposure-window
 type reportExposureEntry struct {
 	Ecosystem  string    `json:"ecosystem"`
@@ -279,13 +340,15 @@ func runReportExposure(cmd *cobra.Command, _ []string) error {
 	start, _ := cmd.Flags().GetString("start")
 	end, _ := cmd.Flags().GetString("end")
 	if start == "" || end == "" {
-		return fmt.Errorf("--start and --end are required (RFC3339)")
+		return fmt.Errorf("--start and --end are required (RFC3339 or YYYY-MM-DD)")
 	}
-	if _, err := time.Parse(time.RFC3339, start); err != nil {
-		return fmt.Errorf("--start must be RFC3339: %w", err)
+	start, err := reportWireTime("--start", start, false)
+	if err != nil {
+		return err
 	}
-	if _, err := time.Parse(time.RFC3339, end); err != nil {
-		return fmt.Errorf("--end must be RFC3339: %w", err)
+	end, err = reportWireTime("--end", end, true)
+	if err != nil {
+		return err
 	}
 
 	format := resolveReportFormat(cmd)
@@ -357,10 +420,14 @@ func runReportSLA(cmd *cobra.Command, _ []string) error {
 
 	q := url.Values{}
 	if since, _ := cmd.Flags().GetString("since"); since != "" {
-		if _, err := time.Parse(time.RFC3339, since); err != nil {
-			return fmt.Errorf("--since must be RFC3339: %w", err)
+		// --since is an at-or-AFTER bound, so a bare date means "from the
+		// start of that day" — the opposite end from --end, hence endOfDay
+		// false.
+		wire, err := reportWireTime("--since", since, false)
+		if err != nil {
+			return err
 		}
-		q.Set("since", since)
+		q.Set("since", wire)
 	}
 
 	path := "/api/v1/reports/sla"

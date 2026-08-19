@@ -505,6 +505,20 @@ func flattenRecord(rec osvRecord) []Advisory {
 			introduced string
 		)
 		for _, r := range aff.Ranges {
+			// GIT ranges are commit-graph bounds, not version bounds:
+			// their events carry SHAs, and the fix commit is often
+			// absent entirely. Flattening one produced a version range
+			// with an OPEN upper bound, which the runtime matcher then
+			// read as "affects every version forever" — overriding the
+			// sibling SEMVER range's correct exclusive-fix verdict.
+			// That is how lodash 4.17.21 ended up carrying
+			// CVE-2021-23337, an advisory fixed in 4.17.21.
+			// An absent/empty type is NOT skipped — OSV requires the
+			// field but our own fixtures and older dumps omit it, and
+			// those are version ranges.
+			if strings.EqualFold(strings.TrimSpace(r.Type), "GIT") {
+				continue
+			}
 			for _, ev := range r.Events {
 				if v, ok := ev["introduced"]; ok {
 					if introduced != "" {
