@@ -1375,6 +1375,21 @@ func (s *Store) migrateSchema() error {
 		// JSONB so future consumers can query inside the evaluation shape
 		// without re-deserialising the whole report.
 		`ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS risk_evaluation JSONB`,
+		// L-02 slice 1 — MEASUREMENT ONLY, no behaviour change.
+		//
+		// intelligence_reports is keyed (ecosystem, package_name, version)
+		// with no org_id, so any tenant's scan overwrites the shared row.
+		// Most of what lands there is genuinely universal, but the CVE
+		// section is derived from the writing org's own vulnerability_metadata
+		// — so one tenant's write can replace another's verdict in EITHER
+		// direction (mergeReportPayload only preserves the prior section when
+		// the incoming one is EMPTY).
+		//
+		// Before paying for a partition of the hottest cache in the product,
+		// measure how often this actually happens. This column records which
+		// org last authored the row; Store.Upsert compares it and counts a
+		// cross-org overwrite. Nothing reads it for a decision.
+		`ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS authored_by_org TEXT`,
 
 		// --- intelligence cache: per-tenant → universal migration ---
 		// Package facts (CVEs, malware verdicts, typosquat signals, risk

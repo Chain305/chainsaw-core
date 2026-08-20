@@ -263,6 +263,28 @@ func (p *registryMetadataProvider) fetchXML(ctx context.Context, endpoint string
 	})
 }
 
+// fetchLines GETs endpoint and returns the body split into trimmed,
+// non-empty lines. Exists for proxy.golang.org's `@v/list`, the one
+// package-level endpoint in this file that answers text/plain rather
+// than JSON or XML — routing it through fetchDecoded keeps it on the
+// same timeout, retry and warning-shape machinery as everything else.
+func (p *registryMetadataProvider) fetchLines(ctx context.Context, endpoint string) ([]string, *Warning, error) {
+	var lines []string
+	warn, err := p.fetchDecoded(ctx, endpoint, "text/plain", func(body io.Reader) error {
+		b, err := io.ReadAll(body)
+		if err != nil {
+			return err
+		}
+		for _, ln := range strings.Split(string(b), "\n") {
+			if t := strings.TrimSpace(ln); t != "" {
+				lines = append(lines, t)
+			}
+		}
+		return nil
+	})
+	return lines, warn, err
+}
+
 // retry policy: up to 3 attempts (1 initial + 2 retries) with
 // exponential backoff (200ms, 800ms = base * 4^n) and ±25% jitter.
 // Retryable conditions: per-attempt timeout (DeadlineExceeded on the
@@ -865,6 +887,10 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 	}
 	pr := PartialReport{}
 	if warn != nil {
+		// /pypi/{pkg}/{ver}/json 404s identically for "no such project"
+		// and "no such release of this project". Ask the project-level
+		// document which one it was before the coordinate is scored.
+		warn = p.promoteVersionNotFound(ctx, warn, endpoint, pkg, ver, p.probePyPIPackage(pkg))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -1334,6 +1360,10 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 	}
 	pr := PartialReport{}
 	if warn != nil {
+		// A missing .pom is a missing version directory; it says nothing
+		// about whether the groupId:artifactId exists. maven-metadata.xml
+		// one level up does.
+		warn = p.promoteVersionNotFound(ctx, warn, pomURL, pkg, ver, p.probeMavenPackage(groupPath, artifact))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -1705,6 +1735,10 @@ func (p *registryMetadataProvider) runCargo(ctx context.Context, pkg, ver string
 	}
 	pr := PartialReport{}
 	if warn != nil {
+		// crates.io returns the same 404 for an unknown crate and for an
+		// unknown version of a known crate; the crate summary separates
+		// them.
+		warn = p.promoteVersionNotFound(ctx, warn, endpoint, pkg, ver, p.probeCargoPackage(pkg))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -1938,6 +1972,10 @@ func (p *registryMetadataProvider) runRubyGems(ctx context.Context, pkg, ver str
 	}
 	pr := PartialReport{}
 	if warn != nil {
+		// /api/v2/rubygems/{gem}/versions/{ver}.json cannot distinguish a
+		// missing gem from a missing version; /api/v1/versions/{gem}.json
+		// can.
+		warn = p.promoteVersionNotFound(ctx, warn, endpoint, pkg, ver, p.probeRubyGemsPackage(pkg))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -2152,6 +2190,10 @@ func (p *registryMetadataProvider) runNuGet(ctx context.Context, pkg, ver string
 	}
 	pr := PartialReport{}
 	if warn != nil {
+		// The flat container 404s a missing nuspec whether the package id
+		// is unknown or only the version is; its {id}/index.json says
+		// which.
+		warn = p.promoteVersionNotFound(ctx, warn, endpoint, pkg, ver, p.probeNuGetPackage(pkg))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -2653,6 +2695,9 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	}
 	pr := PartialReport{}
 	if warn != nil {
+		// @v/{ver}.info 404s for an unknown module and for an unknown
+		// version alike. @v/list answers 404 only for the former.
+		warn = p.promoteVersionNotFound(ctx, warn, infoURL, pkg, ver, p.probeGoModule(module))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -3459,7 +3504,10 @@ func (p *registryMetadataProvider) runDocker(ctx context.Context, pkg, ver strin
 		Digest      string `json:"digest"`
 	}
 	tagURL := fmt.Sprintf("%s/v2/repositories/%s/%s/tags/%s/", p.endpoints.docker, url.PathEscape(namespace), url.PathEscape(image), url.PathEscape(ver))
-	_, _ = p.fetchJSON(ctx, tagURL, "application/json", &tag)
+	// The warning is kept (it used to be discarded) purely so the
+	// version_not_found promotion below can read it. Everything
+	// downstream still treats a failed tag fetch as soft.
+	tagWarn, _ := p.fetchJSON(ctx, tagURL, "application/json", &tag)
 
 	release := &ReleaseSection{}
 	if t, ok := parseTime(repo.DateRegistered); ok {
@@ -3517,6 +3565,26 @@ func (p *registryMetadataProvider) runDocker(ctx context.Context, pkg, ver strin
 	pr.Metadata = metadata
 	if len(people.PublisherIDs) > 0 {
 		pr.People = people
+	}
+
+	// Docker is the one Group A ecosystem whose probe is free: the
+	// repository object fetched above IS the package-level evidence (it
+	// answered 200, so the image exists) and the per-tag object is the
+	// version-level lookup. A 404 on the tag against a live repository is
+	// positive evidence of absence — the hallucinated-tag case — and
+	// without this the runner returned a repository-level report that
+	// scored as though the tag were real.
+	//
+	// Only a literal not_found qualifies. A 401 on a private repo, a 429
+	// from Hub's rate limiter and a timeout all arrive with their own
+	// codes and must stay unpromoted.
+	//
+	// Digest pins are excluded: `image@sha256:...` is not a tag, so
+	// /tags/{ref}/ 404s for every one of them, and promoting that would
+	// mark every digest-pinned image NOT EVALUATED. An OCI tag cannot
+	// contain a colon, which makes the test exact rather than heuristic.
+	if tagWarn != nil && tagWarn.Code == "not_found" && !strings.Contains(ver, ":") {
+		pr.Warnings = append(pr.Warnings, *versionNotFoundByProbeWarning(p, tagURL, repoURL, pkg, ver, -1))
 	}
 	return pr, nil
 }
@@ -3666,6 +3734,295 @@ func versionNotFoundWarning(p *registryMetadataProvider, endpoint, pkg, ver stri
 		Message: fmt.Sprintf("endpoint=%s package=%s version=%s publishedVersions=%d",
 			endpoint, pkg, ver, published),
 		At: p.now(),
+	}
+}
+
+// -- Group A: promoting a per-version 404 into version_not_found ------
+//
+// Eight ecosystems ask a PER-VERSION endpoint for their metadata
+// (pypi, maven, cargo, rubygems, nuget, go, huggingface, docker) instead
+// of pulling a packument and indexing into it. Those endpoints answer
+// one 404 for two different facts — "no such package" and "no such
+// version of this package" — so the whole group fell back to the generic
+// not_found warning and a hallucinated pin still got scored. That is
+// precisely the LLM-invented-version case the marker exists to catch.
+//
+// The discriminator is a SECOND, package-level request, issued only
+// after the per-version endpoint 404s:
+//
+//	package-level 200, version absent from its list -> version_not_found
+//	package-level 404                               -> keep not_found
+//	package-level 5xx / timeout / transport failure -> keep not_found
+//
+// The last line is the load-bearing one. Absence of evidence is not
+// evidence of absence: promoting an unanswered probe would convert every
+// registry hiccup, private mirror and replication lag into an `unknown`
+// verdict and a failed build.
+//
+// Cost: the probe sits behind the 404 branch, so a healthy scan issues
+// exactly the requests it issued before this existed — pinned by
+// TestGroupAProbeDoesNotFireOnSuccessPath. It rides the shared fetch
+// helpers, whose retry policy already classes 4xx as terminal, so one
+// 404 stays one request rather than becoming three.
+//
+// Per-ecosystem decisions:
+//
+//	pypi        WIRED   /pypi/{pkg}/json           (reuses fetchPyPITimeline)
+//	maven       WIRED   .../maven-metadata.xml     (reuses fetchMavenTimeline)
+//	cargo       WIRED   /api/v1/crates/{crate}     (reuses fetchCargoTimeline)
+//	rubygems    WIRED   /api/v1/versions/{gem}.json(reuses fetchRubyGemsTimeline)
+//	nuget       WIRED   flat-container {id}/index.json — deliberately NOT the
+//	                    registration index fetchNuGetTimeline reads. That one
+//	                    paginates past ~64 entries and this file does not
+//	                    follow the page pointers, so it reports an empty list
+//	                    for exactly the popular packages where a wrong
+//	                    promotion would hurt most.
+//	go          WIRED   /{module}/@v/list (text/plain)
+//	docker      WIRED   free — runDocker ALREADY fetches the repository
+//	                    object first and the per-tag object second, so both
+//	                    halves of the evidence are in hand with no extra
+//	                    request. Handled inline in runDocker rather than
+//	                    through promoteVersionNotFound, and it is the one
+//	                    probe that proves existence without a version list:
+//	                    Docker Hub's tag listing is paginated and rate
+//	                    limited, so enumerating it is not cheap.
+//	huggingface SKIPPED A HF "version" is a git revision — a branch, a tag,
+//	                    or an arbitrary commit SHA, all equally valid pins.
+//	                    /api/models/{id}/refs enumerates branches and tags
+//	                    but can never enumerate commits, so a 404 on a
+//	                    revision cannot be told apart from "we pinned a SHA
+//	                    this replica has not fetched yet". No honest
+//	                    discriminator exists, so huggingface keeps the
+//	                    generic not_found.
+
+// packageProbe issues exactly ONE package-level request and reports what
+// the registry said: the version list the document enumerated, the URL
+// asked (for the warning message), and whether the registry answered at
+// all. ok is false for every non-200 outcome — 404, 5xx, timeout,
+// transport error and decode failure alike — because none of them is
+// evidence about versions.
+type packageProbe func(ctx context.Context) (published []string, endpoint string, ok bool)
+
+// promoteVersionNotFound upgrades a per-version not_found into the
+// version_not_found marker when — and only when — the package-level
+// probe supplies positive evidence of absence.
+//
+// Any other warning is returned untouched and the probe is NOT called.
+// That early return is the cost guarantee: on the success path (warn ==
+// nil) and on every non-404 failure the provider issues the same
+// requests it always did.
+func (p *registryMetadataProvider) promoteVersionNotFound(ctx context.Context, warn *Warning, versionEndpoint, pkg, ver string, probe packageProbe) *Warning {
+	if warn == nil || warn.Code != "not_found" {
+		return warn
+	}
+	published, probeEndpoint, ok := probe(ctx)
+	switch {
+	case !ok:
+		// Either the package really is absent (404) — in which case
+		// not_found is already the correct, narrower answer — or the
+		// registry told us nothing at all. Claiming a version does not
+		// exist on the back of a 5xx would be a fabrication.
+		return warn
+	case len(published) == 0:
+		// A 200 that enumerated nothing is a partial document, not a
+		// version list. This is the same guard the packument path
+		// applies (see versionNotFoundWarning), and the reason NuGet's
+		// paginating registration index is not the endpoint we probe.
+		return warn
+	case versionPublished(published, ver):
+		// The registry does publish it, so the per-version 404 came from
+		// URL formatting or replication skew rather than from the
+		// version being invented.
+		return warn
+	}
+	return versionNotFoundByProbeWarning(p, versionEndpoint, probeEndpoint, pkg, ver, len(published))
+}
+
+// versionNotFoundByProbeWarning builds the marker for the Group A
+// (per-version endpoint) path. Same Code as versionNotFoundWarning —
+// risk_projection.go and core/coverage's okCodes both key off it — but
+// the message names BOTH halves of the evidence, because here the
+// finding IS the pair: the per-version endpoint that 404ed and the
+// package-level endpoint that did not.
+//
+// published < 0 means the package-level endpoint proved existence
+// without enumerating versions (Docker Hub's repository object is the
+// only such probe). The count is then omitted rather than printed as 0,
+// so an operator can never read it as "enumerated an empty list" — the
+// shape versionNotFoundWarning documents as a bug rather than a finding.
+func versionNotFoundByProbeWarning(p *registryMetadataProvider, versionEndpoint, probeEndpoint, pkg, ver string, published int) *Warning {
+	msg := fmt.Sprintf("endpoint=%s package=%s version=%s packageEndpoint=%s",
+		versionEndpoint, pkg, ver, probeEndpoint)
+	if published >= 0 {
+		msg = fmt.Sprintf("%s publishedVersions=%d", msg, published)
+	}
+	return &Warning{
+		Provider: "registrymetadata",
+		Code:     WarnVersionNotFound,
+		Message:  msg,
+		At:       p.now(),
+	}
+}
+
+// timelineVersions flattens a VersionRelease list to bare version
+// strings, which is what lets the existing per-ecosystem timeline
+// fetchers double as package-level probes instead of this file growing a
+// second copy of every registry URL.
+func timelineVersions(timeline []VersionRelease) []string {
+	out := make([]string, 0, len(timeline))
+	for _, r := range timeline {
+		if s := strings.TrimSpace(r.Version); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// versionPublished is versionListed widened by a trailing-zero
+// tolerance. It is used ONLY to SUPPRESS the marker, never to produce
+// one, so widening it can only ever cost a finding — it can never
+// manufacture a false one.
+//
+// NuGet forces it: the registry normalises `1.0` to `1.0.0`, so a
+// packages.config pin of `1.0` 404s on the per-version nuspec while the
+// flat-container index lists `1.0.0`. A strict compare would call a
+// perfectly real, widely-installed package a hallucination.
+//
+// Maven is the counter-example — there `1.0` and `1.0.0` are genuinely
+// different artifacts — so on that ecosystem the tolerance can hide a
+// real miss. The trade is deliberate and one-directional: a false
+// negative costs one scored report, a false positive breaks a build.
+func versionPublished(published []string, ver string) bool {
+	if versionListed(published, ver) {
+		return true
+	}
+	want := canonicalVersionKey(ver)
+	if want == "" {
+		return false
+	}
+	for _, cand := range published {
+		if canonicalVersionKey(cand) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalVersionKey reduces a version to a comparison key: lower-cased,
+// `v` prefix dropped, `+build` metadata dropped, and trailing zero
+// components trimmed off the numeric core so 1.0 == 1.0.0 == 1.0.0.0.
+// The pre-release suffix is preserved verbatim — 1.0.0-rc1 and 1.0.0 are
+// different releases and must not collapse into each other.
+func canonicalVersionKey(ver string) string {
+	s := strings.ToLower(strings.TrimSpace(ver))
+	s = strings.TrimPrefix(s, "v")
+	if i := strings.IndexByte(s, '+'); i >= 0 {
+		s = s[:i]
+	}
+	if s == "" {
+		return ""
+	}
+	core, suffix := s, ""
+	if i := strings.IndexByte(s, '-'); i >= 0 {
+		core, suffix = s[:i], s[i:]
+	}
+	parts := strings.Split(core, ".")
+	for len(parts) > 1 && parts[len(parts)-1] == "0" {
+		parts = parts[:len(parts)-1]
+	}
+	return strings.Join(parts, ".") + suffix
+}
+
+// probePyPIPackage reuses the project-level packument the success path
+// already fetches for the version timeline, so the probe adds no new URL
+// shape to maintain.
+func (p *registryMetadataProvider) probePyPIPackage(pkg string) packageProbe {
+	return func(ctx context.Context) ([]string, string, bool) {
+		endpoint := fmt.Sprintf("%s/pypi/%s/json", p.endpoints.pypi, url.PathEscape(pkg))
+		timeline, _, warn := p.fetchPyPITimeline(ctx, pkg)
+		if warn != nil {
+			return nil, endpoint, false
+		}
+		return timelineVersions(timeline), endpoint, true
+	}
+}
+
+// probeMavenPackage asks the artifact-level maven-metadata.xml, which
+// every Maven repository publishes next to the version directories and
+// which carries the canonical <versions> list. Maven has no package
+// object of any other kind.
+func (p *registryMetadataProvider) probeMavenPackage(groupPath, artifact string) packageProbe {
+	return func(ctx context.Context) ([]string, string, bool) {
+		endpoint := fmt.Sprintf("%s/%s/%s/maven-metadata.xml", p.endpoints.maven, groupPath, artifact)
+		timeline, _, _, warn := p.fetchMavenTimeline(ctx, groupPath, artifact)
+		if warn != nil {
+			return nil, endpoint, false
+		}
+		return timelineVersions(timeline), endpoint, true
+	}
+}
+
+func (p *registryMetadataProvider) probeCargoPackage(pkg string) packageProbe {
+	return func(ctx context.Context) ([]string, string, bool) {
+		endpoint := fmt.Sprintf("%s/api/v1/crates/%s", p.endpoints.cargo, url.PathEscape(pkg))
+		timeline, _, warn := p.fetchCargoTimeline(ctx, pkg)
+		if warn != nil {
+			return nil, endpoint, false
+		}
+		return timelineVersions(timeline), endpoint, true
+	}
+}
+
+func (p *registryMetadataProvider) probeRubyGemsPackage(pkg string) packageProbe {
+	return func(ctx context.Context) ([]string, string, bool) {
+		endpoint := fmt.Sprintf("%s/api/v1/versions/%s.json", p.endpoints.rubygems, url.PathEscape(pkg))
+		timeline, _, warn := p.fetchRubyGemsTimeline(ctx, pkg)
+		if warn != nil {
+			return nil, endpoint, false
+		}
+		return timelineVersions(timeline), endpoint, true
+	}
+}
+
+// probeNuGetPackage asks the FLAT CONTAINER package index rather than
+// the registration index fetchNuGetTimeline reads. The flat container
+// returns the complete, unpaginated version list in a single document;
+// the registration index paginates and this file deliberately does not
+// chase the page pointers, so on a popular package it yields an empty
+// list — which promoteVersionNotFound would (correctly) refuse to act
+// on, silently disabling the check exactly where it matters most.
+func (p *registryMetadataProvider) probeNuGetPackage(pkg string) packageProbe {
+	lower := strings.ToLower(pkg)
+	return func(ctx context.Context) ([]string, string, bool) {
+		endpoint := fmt.Sprintf("%s/%s/index.json", p.endpoints.nuget, url.PathEscape(lower))
+		var idx struct {
+			Versions []string `json:"versions"`
+		}
+		warn, err := p.fetchJSON(ctx, endpoint, "application/json", &idx)
+		if err != nil || warn != nil {
+			return nil, endpoint, false
+		}
+		return idx.Versions, endpoint, true
+	}
+}
+
+// probeGoModule asks the module proxy's `@v/list`, the only Group A
+// package-level endpoint that answers text/plain.
+//
+// @v/list omits pseudo-versions, which costs nothing here: a real
+// pseudo-version is served by @v/{ver}.info, so a coordinate that
+// reached this branch already failed the authoritative lookup. A module
+// the proxy knows only through pseudo-versions answers 200 with an empty
+// body, and promoteVersionNotFound's empty-list guard keeps that case on
+// the generic not_found.
+func (p *registryMetadataProvider) probeGoModule(module string) packageProbe {
+	return func(ctx context.Context) ([]string, string, bool) {
+		endpoint := fmt.Sprintf("%s/%s/@v/list", p.endpoints.goproxy, module)
+		lines, warn, err := p.fetchLines(ctx, endpoint)
+		if err != nil || warn != nil {
+			return nil, endpoint, false
+		}
+		return lines, endpoint, true
 	}
 }
 

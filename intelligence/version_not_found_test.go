@@ -31,10 +31,15 @@ func hasVersionNotFound(pr PartialReport) bool {
 }
 
 // TestVersionNotFoundMarker walks all four Group-B (packument-style)
-// runners. Group A (pypi/maven/cargo/rubygems/nuget/go/huggingface/
-// docker) hits a per-version endpoint and is covered by the fetch
-// layer's not_found warning instead — see the note on
-// versionNotFoundWarning for why the two are deliberately distinct.
+// runners, where absence is read straight out of a single document's
+// version list.
+//
+// Group A (pypi/maven/cargo/rubygems/nuget/go/huggingface/docker) hits a
+// per-version endpoint, so it establishes the same fact with a second
+// package-level probe instead; those cases live in
+// provider_registrymetadata_versionprobe_test.go. huggingface is the one
+// ecosystem still on the bare not_found — see the decision table above
+// promoteVersionNotFound for why no honest discriminator exists there.
 func TestVersionNotFoundMarker(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -245,3 +245,89 @@ func TestOSVProvider_Run_EcosystemAliasResolves(t *testing.T) {
 		t.Fatalf("alias ecosystem 'pip' must resolve to pypi index, got %+v", partial.Vulns)
 	}
 }
+
+// TestOSVProvider_CannotServeAsUniversalVulnBaseline pins the fact that
+// blocks the L-02 tenancy remedy sketched in
+// docs/qa-remediation/L-02-REDIAGNOSIS.md ("keep the universal row's
+// INPUTS universal — OSV only — and move the org's Trivy contribution to
+// a per-org overlay").
+//
+// That design rests on the premise that osvProvider always stamps
+// ScannedAt, so VulnDataAvailable (risk_projection.go:168, literally
+// `r.Vulnerabilities.ScannedAt != nil`) stays true on a cache hit and the
+// opt-in core/coverage fail-closed gate is unaffected. The premise is
+// false, and it is false for the COMMON case rather than an edge:
+//
+//   - osv.Index.byPackage is built solely from the advisory records in the
+//     bundle (osv/bundle.go Load). A package with no advisory is simply
+//     absent from the map, so HasPackage returns false and Run returns an
+//     empty PartialReport by its own documented shape 2 — deliberately, to
+//     keep "we have no data" distinct from "we scanned and found nothing".
+//   - Clean packages are the overwhelming majority of coordinates. Today
+//     they get ScannedAt from the Trivy-backed cveProvider, which stamps a
+//     row whenever vulnerability_metadata has one INCLUDING the
+//     scanned-and-clean row. An OSV-only baseline drops that stamp.
+//   - OSV covers strictly fewer ecosystems than the CVE provider, so some
+//     ecosystems lose the stamp for every coordinate, clean or not.
+//
+// Net effect of an OSV-only persisted row: VulnDataAvailable flips false
+// for most cache hits, the Vulnerability category is dropped from the risk
+// rollup (evaluator.go dataAvailable), and every score renormalises. That
+// is the same class of blast radius that got the earlier "strip the vuln
+// section" remedy rejected.
+//
+// If this test ever fails because osvProvider learned to stamp a clean
+// section for uncovered packages, do NOT just update the assertions — that
+// change would make the coverage gate claim vuln coverage the product does
+// not have, which is worse than the bug it is trying to fix. Re-open the
+// L-02 design instead.
+func TestOSVProvider_CannotServeAsUniversalVulnBaseline(t *testing.T) {
+	restore := withStubbedBundle(t, []osv.Advisory{
+		{
+			Ecosystem:          "npm",
+			Package:            "lodash",
+			VulnerableVersions: []string{"4.17.20"},
+			AdvisoryID:         "GHSA-35jh-r3h4-6jhm",
+			Aliases:            []string{"CVE-2021-23337"},
+		},
+	})
+	t.Cleanup(restore)
+
+	p := newOSVProvider(slog.Default())
+
+	// A package with no advisory in the bundle — i.e. a clean package.
+	// The bundle is loaded and the ecosystem is covered; only the package
+	// is absent. Run must stay silent, leaving ScannedAt unstamped.
+	clean, err := p.Run(context.Background(), Request{
+		Key: Key{Ecosystem: "npm", Package: "left-pad", Version: "1.3.0"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run(clean) err: %v", err)
+	}
+	if clean.Vulns != nil {
+		t.Fatalf("clean package must produce no VulnSection (shape 2); got %+v", clean.Vulns)
+	}
+
+	// The advisory-carrying package does get a stamp — this is the half of
+	// the premise that IS true, and it is why the false half is easy to miss.
+	covered, err := p.Run(context.Background(), Request{
+		Key: Key{Ecosystem: "npm", Package: "lodash", Version: "4.17.21"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run(covered) err: %v", err)
+	}
+	if covered.Vulns == nil || covered.Vulns.ScannedAt == nil {
+		t.Fatalf("advisory-covered package must stamp ScannedAt; got %+v", covered.Vulns)
+	}
+
+	// Ecosystem asymmetry: coordinates the CVE provider covers but OSV does
+	// not would lose the stamp unconditionally under an OSV-only baseline.
+	for _, eco := range []string{"huggingface", "docker", "cocoapods", "swift", "apt"} {
+		if _, cve := supportedCVEEcosystems[eco]; !cve {
+			t.Fatalf("test premise stale: cveProvider no longer covers %q", eco)
+		}
+		if p.Supports(eco) {
+			t.Fatalf("test premise stale: osvProvider now covers %q — recheck the L-02 baseline analysis", eco)
+		}
+	}
+}

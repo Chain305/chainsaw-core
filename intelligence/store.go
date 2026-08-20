@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chain305/chainsaw-core/pgstore"
@@ -22,6 +23,51 @@ import (
 // for API compatibility with older callers but no longer narrows the
 // query. See internal/pgstore/store.go for the migration that strips
 // org_id from the table PKs.
+//
+// KNOWN DEFECT (L-02) — the paragraph above states the INTENT, not the
+// current behaviour. Two values written to this table are tenant-derived
+// today, so the row is not in fact universal:
+//
+//  1. Vulnerabilities. cveProvider (provider_cve.go) reads the ORG-SCOPED
+//     vulnerability_metadata table — metadata/store.go queries
+//     `WHERE org_id=? AND repository=? AND package=? AND version=?` — and
+//     the resulting VulnSection is merged into the report this Upsert
+//     persists. mergeReportPayload then lists report.vulnerabilities as a
+//     PRESERVED subtree, so the value is sticky.
+//  2. SupplyChain.TrustScore. scanner.go calls
+//     ComputeTrustScoreForOrg(report, req.OrgID), which applies the
+//     REQUESTING org's private risk-weight overrides, and the merge rules
+//     below always take TrustScore from the incoming report.
+//
+// Severity, stated deliberately and not inflated: what crosses the tenant
+// boundary is a verdict about a PUBLIC package coordinate derived from a
+// PUBLIC vulnerability database, plus a scanner digest and a weight-tuned
+// score. The row names neither the authoring org nor its repository. This
+// is cross-tenant cache contamination and non-reproducible verdicts — NOT
+// a data breach, and it must not be described as one to a customer or an
+// auditor. The real harms are that a tenant's verdict is unreproducible
+// from its own scanner, that it is last-writer-wins in BOTH directions
+// (one tenant's populated scan replaces another's wholesale, so CVEs can
+// be suppressed as well as injected), and that a tenant who shapes its own
+// scanner payload can move what other tenants see.
+//
+// Both behaviours are pinned by characterization tests in
+// store_tenancy_test.go; invert those assertions when the fix lands.
+//
+// The remedy is NOT to strip the vuln section from this row and resolve it
+// per-org at read time, and it is NOT to persist an OSV-only baseline
+// instead. Both make VulnDataAvailable (risk_projection.go, literally
+// `Vulnerabilities.ScannedAt != nil`) false for the majority of cache
+// hits: the OSV index is built solely from advisory records, so it has
+// nothing to say about a CLEAN package and stamps no ScannedAt for one.
+// That drops the Vulnerability category out of the risk rollup for most
+// coordinates and feeds the opt-in core/coverage fail-closed gate. See
+// TestOSVProvider_CannotServeAsUniversalVulnBaseline in
+// provider_osv_test.go, which pins that blocker, and
+// docs/qa-remediation/L-02-REDIAGNOSIS.md for the four earlier diagnoses
+// that were wrong. Any real fix has to supply a universal "scanned, clean"
+// stamp from a source that actually covers clean packages before the
+// per-org split can be made without a product-wide score shift.
 
 // Store persists Report rows to the intelligence_reports table and the
 // latest-version probe results to intelligence_latest_probes.
@@ -119,8 +165,25 @@ func (s *Store) ListVersions(ctx context.Context, orgID, ecosystem, name string)
 // continue to reflect the *new* incoming report — those track the latest
 // scan's verdict, not the merged blob. orgID is ignored — see the
 // package-level comment.
+// crossOrgVulnOverwrites counts how many times a report Upsert replaced a
+// non-empty vulnerability section that a DIFFERENT org had authored.
+//
+// This is the L-02 measurement, and it exists because the severity of that
+// defect is genuinely unknown: the one production instance we sampled showed
+// the shared row carrying an `osv-bundle` digest, i.e. the legitimately
+// universal source, with no contamination visible. Partitioning the hottest
+// cache in the product is a multi-week change; a counter is a day. Read it
+// before deciding.
+//
+// Deliberately a process counter and not a metric export: it is a
+// decision-support number for us, not an SLI, and wiring it into the metrics
+// surface would imply operators should act on it.
+var crossOrgVulnOverwrites atomic.Int64
+
+// CrossOrgVulnOverwrites reports the counter above. Test and diagnostic use.
+func CrossOrgVulnOverwrites() int64 { return crossOrgVulnOverwrites.Load() }
+
 func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
-	_ = orgID
 	if s == nil || s.sql == nil || s.sql.DB() == nil || r == nil {
 		return nil
 	}
@@ -140,13 +203,16 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	// Read any prior row's report JSONB so we can preserve Tier-2 subtrees
 	// the incoming report leaves empty. FOR UPDATE blocks concurrent
 	// writers on the same key from interleaving.
-	var priorPayload []byte
+	var (
+		priorPayload []byte
+		priorOrg     sql.NullString
+	)
 	row := tx.QueryRowContext(ctx, `
-		SELECT report FROM intelligence_reports
+		SELECT report, authored_by_org FROM intelligence_reports
 		WHERE ecosystem=$1 AND package_name=$2 AND version=$3
 		FOR UPDATE
 	`, r.Identity.Ecosystem, r.Identity.Package, r.Identity.Version)
-	switch err := row.Scan(&priorPayload); {
+	switch err := row.Scan(&priorPayload, &priorOrg); {
 	case err == nil, errors.Is(err, sql.ErrNoRows):
 		// Both fine — sql.ErrNoRows means this is a fresh insert and
 		// priorPayload stays nil so the merge step becomes a no-op.
@@ -190,13 +256,33 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 		}
 	}
 
+	// L-02 slice 1 — MEASUREMENT ONLY. Nothing here changes what is written.
+	//
+	// This table is keyed (ecosystem, package_name, version) with no org_id,
+	// so whoever scans last owns the row. Most of a Report genuinely is a
+	// fact about a coordinate, but the CVE section comes from the writing
+	// org's own vulnerability_metadata — and mergeReportPayload preserves the
+	// prior section ONLY when the incoming one is empty. A non-empty incoming
+	// section therefore REPLACES another tenant's verdict, in either
+	// direction: it can inject a false positive, and it can retract a real
+	// critical. Both were reproduced against Postgres.
+	//
+	// Partitioning this table is expensive and was deliberately not attempted
+	// (docs/qa-remediation/L-02-REDIAGNOSIS.md records why the obvious fix is
+	// worse than the bug). So: count it first. The counter answers "does this
+	// actually happen, and how often" before anyone pays for the fix.
+	if prior := strings.TrimSpace(priorOrg.String); prior != "" && prior != strings.TrimSpace(orgID) &&
+		!vulnSectionEmpty(r.Vulnerabilities) {
+		crossOrgVulnOverwrites.Add(1)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO intelligence_reports (
 			ecosystem, package_name, version, report,
 			collected_at, fresh_until, artifact_sha256, has_artifact_scan,
 			is_malicious, is_typosquat, trust_score, max_cvss, warning_count,
-			risk_evaluation
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			risk_evaluation, authored_by_org
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (ecosystem, package_name, version) DO UPDATE SET
 			report = EXCLUDED.report,
 			collected_at = EXCLUDED.collected_at,
@@ -208,12 +294,13 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 			trust_score = EXCLUDED.trust_score,
 			max_cvss = EXCLUDED.max_cvss,
 			warning_count = EXCLUDED.warning_count,
-			risk_evaluation = EXCLUDED.risk_evaluation
+			risk_evaluation = EXCLUDED.risk_evaluation,
+			authored_by_org = EXCLUDED.authored_by_org
 	`,
 		r.Identity.Ecosystem, r.Identity.Package, r.Identity.Version, payload,
 		r.Observation.CollectedAt, r.Observation.FreshUntil, artifactSHA, hasArtifactScan,
 		isMalicious, isTyposquat, trustScore, maxCVSS, len(r.Observation.Warnings),
-		riskPayload,
+		riskPayload, strings.TrimSpace(orgID),
 	)
 	if err != nil {
 		return fmt.Errorf("intelligence: upsert report: %w", err)
