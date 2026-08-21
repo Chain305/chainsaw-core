@@ -158,7 +158,16 @@ func (s *DefaultService) Scan(ctx context.Context, req Request) (*Report, error)
 	// row authored by the proxy or another tenant (the read side of the
 	// cache-poisoning threat).
 	if s.store != nil && !req.Options.Ephemeral {
-		if cached, err := s.store.Get(scanCtx, req.OrgID, req.Key); err == nil && cached != nil {
+		// The matcher-epoch check gates both serve paths below, and it has
+		// no escape hatch — not even AllowStale. A row from a superseded
+		// matcher is not "old data that is probably still fine"; it is a
+		// verdict we already know how to get wrong. Returning it under
+		// stale-while-revalidate would hand the caller the exact answer
+		// the fix was meant to retract, which is how two matcher fixes
+		// reached production and changed nothing anyone could observe.
+		// Skipping both paths recomputes synchronously; the singleflight
+		// and cross-replica leader machinery below collapse the herd.
+		if cached, err := s.store.Get(scanCtx, req.OrgID, req.Key); err == nil && cached != nil && !cached.MatcherStale() {
 			age := s.now().Sub(cached.Observation.CollectedAt)
 			if age < maxStale {
 				cached.Observation.Cached = true
@@ -224,7 +233,13 @@ func (s *DefaultService) Scan(ctx context.Context, req Request) (*Report, error)
 			return nil, nil
 		}
 		cached, err := s.store.Get(innerCtx, req.OrgID, req.Key)
-		if err != nil || cached == nil {
+		// A matcher-stale row here means the leader did not persist (it
+		// crashed, or lost its lock) and what we found is a pre-existing
+		// row from an older engine. Reporting nil routes the caller into
+		// the "leader released lock without persisting" retry below,
+		// which is the correct outcome: retry, don't serve the row the
+		// leader was in the middle of replacing.
+		if err != nil || cached.MatcherStale() {
 			return nil, nil
 		}
 		return cached, nil
@@ -260,11 +275,17 @@ func (s *DefaultService) Scan(ctx context.Context, req Request) (*Report, error)
 var xreplicaflightLeaderTimeout = 45 * time.Second
 
 // Get returns the cached Report or ErrNotFound.
+//
+// It deliberately returns whatever is persisted, including a row from a
+// superseded matcher, because the caller is the only party that knows whether
+// a stale verdict is acceptable for its use. Every caller must therefore
+// check MatcherStale() itself; TestIntelligenceCacheReadsCheckMatcherEpoch
+// enforces that across both modules.
 func (s *DefaultService) Get(ctx context.Context, orgID string, key Key) (*Report, error) {
 	if s.store == nil {
 		return nil, ErrNotFound
 	}
-	return s.store.Get(ctx, orgID, key)
+	return s.store.Get(ctx, orgID, key) // matcher-epoch-exempt: this IS the raw accessor; callers decide.
 }
 
 // Search delegates to the store.
@@ -316,6 +337,7 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			CollectedAt:   now,
 			FreshUntil:    now.Add(DefaultMaxStaleness),
 			RefreshReason: req.Options.RefreshReason,
+			MatcherEpoch:  CurrentMatcherEpoch,
 		},
 	}
 

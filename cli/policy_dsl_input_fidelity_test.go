@@ -81,11 +81,22 @@ func populateEveryField(t *testing.T, v reflect.Value) {
 			}
 			f.Set(reflect.ValueOf([]string{name + "-a", name + "-b"}))
 		case reflect.Pointer:
-			if f.Type().Elem().Kind() != reflect.Bool {
+			// Pointer fields are three-state at the Rego boundary (nil =
+			// absent, so a rule keyed on them is undefined rather than
+			// matching a zero). Populate them non-nil here: the invariant
+			// under test is that a fixture's value survives to OPA
+			// unchanged, and a nil would be indistinguishable from a
+			// dropped field.
+			switch f.Type().Elem().Kind() {
+			case reflect.Bool:
+				b := true
+				f.Set(reflect.ValueOf(&b))
+			case reflect.Int:
+				n := i + 1
+				f.Set(reflect.ValueOf(&n))
+			default:
 				t.Fatalf("policy.Input.%s: unhandled pointer element kind %v — extend populateEveryField", name, f.Type().Elem().Kind())
 			}
-			b := true
-			f.Set(reflect.ValueOf(&b))
 		default:
 			t.Fatalf("policy.Input.%s: unhandled kind %v — extend populateEveryField so the invariant keeps covering every field", name, f.Kind())
 		}

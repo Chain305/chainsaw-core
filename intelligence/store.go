@@ -183,6 +183,60 @@ var crossOrgVulnOverwrites atomic.Int64
 // CrossOrgVulnOverwrites reports the counter above. Test and diagnostic use.
 func CrossOrgVulnOverwrites() int64 { return crossOrgVulnOverwrites.Load() }
 
+// TyposquatConfidenceOf normalises the (status, confidence) pair the
+// typosquat provider writes into the value stored in the denormalised
+// intelligence_reports.typosquat_confidence column.
+//
+// Returns "" for anything that is not a suspected hit, and the
+// lowercased grade ("high" / "medium" / "low") otherwise. A suspected
+// hit that carries no grade — a report written before the provider
+// started emitting one — also returns "", which readers must treat as
+// "ungraded", NOT as "low".
+func TyposquatConfidenceOf(status, confidence string) string {
+	if !strings.EqualFold(strings.TrimSpace(status), "suspected") {
+		return ""
+	}
+	switch c := strings.ToLower(strings.TrimSpace(confidence)); c {
+	case "high", "medium", "low":
+		return c
+	default:
+		return ""
+	}
+}
+
+// TyposquatIsActionable reports whether a typosquat hit deserves the
+// is_typosquat denormalised flag — the flag that drives the list filter,
+// the sidebar facet count, and (before this change) the red chip.
+//
+// WHY THIS IS NOT `status == "suspected"`. The detector grades hits
+// high / medium / low and the risk engine tiers them -40 / -20 / -8
+// (core/risk/registry_supplychain.go). "low" is the combosquat lane:
+// "this name CONTAINS a popular name with <= 8 extra characters". That
+// is a real signal but a very broad one — `lodash.merge`, a first-party
+// package published by the lodash team, contains `lodash` with 6 extra
+// characters and scores -8, landing at 96 / grade A / verdict allow.
+// Measured against a held-out corpus of 24,206 real download-ranked
+// benign packages (npm rank 5,001-17,334 and PyPI rank 3,001-15,000,
+// built by scripts/detection-eval/build-heldout-name-corpus.sh), 3,151
+// of them — 13.0% — take a low-confidence combosquat hit.
+//
+// Collapsing that 13% into the same boolean as a homoglyph attack made
+// the flagship Package Intelligence surface contradict itself: a red
+// ATTACK chip beside an "allow 96" verdict. So the boolean now means
+// "actionable typosquat" (high or medium), and the grade travels
+// separately in typosquat_confidence so low-confidence hits can still be
+// SHOWN — quietly — without being COUNTED as attacks.
+//
+// Ungraded suspected hits (legacy rows, or a future provider that
+// forgets to grade) stay actionable. Absence of evidence about severity
+// must not silently downgrade a real signal.
+func TyposquatIsActionable(status, confidence string) bool {
+	if !strings.EqualFold(strings.TrimSpace(status), "suspected") {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(confidence), "low")
+}
+
 func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	if s == nil || s.sql == nil || s.sql.DB() == nil || r == nil {
 		return nil
@@ -232,7 +286,8 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 		artifactSHA     sql.NullString
 		hasArtifactScan = r.Scan.Performed
 		isMalicious     = strings.EqualFold(r.SupplyChain.MalwareStatus, "malicious")
-		isTyposquat     = strings.EqualFold(r.SupplyChain.TyposquatStatus, "suspected")
+		tsConfidence    = TyposquatConfidenceOf(r.SupplyChain.TyposquatStatus, r.SupplyChain.TyposquatConfidence)
+		isTyposquat     = TyposquatIsActionable(r.SupplyChain.TyposquatStatus, r.SupplyChain.TyposquatConfidence)
 		trustScore      sql.NullInt64
 		maxCVSS         sql.NullFloat64
 		riskPayload     []byte // nil ⇒ NULL in the risk_evaluation column
@@ -281,8 +336,8 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 			ecosystem, package_name, version, report,
 			collected_at, fresh_until, artifact_sha256, has_artifact_scan,
 			is_malicious, is_typosquat, trust_score, max_cvss, warning_count,
-			risk_evaluation, authored_by_org
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			risk_evaluation, authored_by_org, typosquat_confidence
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (ecosystem, package_name, version) DO UPDATE SET
 			report = EXCLUDED.report,
 			collected_at = EXCLUDED.collected_at,
@@ -291,6 +346,7 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 			has_artifact_scan = EXCLUDED.has_artifact_scan OR intelligence_reports.has_artifact_scan,
 			is_malicious = EXCLUDED.is_malicious,
 			is_typosquat = EXCLUDED.is_typosquat,
+			typosquat_confidence = EXCLUDED.typosquat_confidence,
 			trust_score = EXCLUDED.trust_score,
 			max_cvss = EXCLUDED.max_cvss,
 			warning_count = EXCLUDED.warning_count,
@@ -300,7 +356,7 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 		r.Identity.Ecosystem, r.Identity.Package, r.Identity.Version, payload,
 		r.Observation.CollectedAt, r.Observation.FreshUntil, artifactSHA, hasArtifactScan,
 		isMalicious, isTyposquat, trustScore, maxCVSS, len(r.Observation.Warnings),
-		riskPayload, strings.TrimSpace(orgID),
+		riskPayload, strings.TrimSpace(orgID), tsConfidence,
 	)
 	if err != nil {
 		return fmt.Errorf("intelligence: upsert report: %w", err)
@@ -711,6 +767,7 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, erro
 		SELECT ecosystem, package_name, version, collected_at, fresh_until,
 		       COALESCE(trust_score,0), COALESCE(max_cvss,0),
 		       is_malicious, is_typosquat, has_artifact_scan, warning_count,
+		       COALESCE(typosquat_confidence,''),
 		       risk_evaluation->>'verdict',
 		       (risk_evaluation->'rolledUp'->>'overall')::int
 		FROM intelligence_reports
@@ -735,6 +792,7 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, erro
 			&row.CollectedAt, &row.FreshUntil,
 			&row.TrustScore, &row.MaxCVSS,
 			&row.IsMalicious, &row.IsTyposquat, &row.HasArtifactScan, &row.WarningCount,
+			&row.TyposquatConfidence,
 			&verdict, &overallScore,
 		); err != nil {
 			return nil, fmt.Errorf("intelligence: scan search row: %w", err)

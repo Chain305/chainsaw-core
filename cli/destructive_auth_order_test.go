@@ -102,6 +102,12 @@ func destructiveRunners() []destructiveRunner {
 			c.Flags().Bool("yes", false, "")
 			return runCoverageExpectedRemove(quietCmd(c), []string{"7"})
 		}},
+		{"chainsaw repo disable", func(t *testing.T) error {
+			c := &cobra.Command{Use: "disable"}
+			c.Flags().Bool("yes", false, "")
+			c.Flags().Bool("json", false, "")
+			return runRepoSetEnabled(false)(quietCmd(c), []string{"npm-proxy"})
+		}},
 	}
 }
 

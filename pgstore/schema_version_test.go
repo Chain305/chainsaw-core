@@ -87,10 +87,22 @@ func TestErrNoSchemaVersionIsSentinel(t *testing.T) {
 // TestSchemaVersionRoundTrip_FreshInsert verifies the first-boot path:
 // Open() on a fresh DB inserts the CurrentSchemaVersion row.
 func TestSchemaVersionRoundTrip_FreshInsert(t *testing.T) {
-	dsn := os.Getenv("CHAINSAW_DATABASE_URL")
-	if dsn == "" {
+	baseDSN := os.Getenv("CHAINSAW_DATABASE_URL")
+	if baseDSN == "" {
 		t.Skip("CHAINSAW_DATABASE_URL not set; skipping integration test")
 	}
+	// Private database, for the same reason as the upgrade-path test.
+	//
+	// This one is subtler than a DROP SCHEMA: it parks schema_version at
+	// 99.99.99 and resets it at the end. But while it is parked, any other
+	// package calling Open() on the same DSN takes the downgrade-tolerance
+	// branch (schema_version.go:113) and SKIPS migrations — so a package
+	// running in parallel gets a store whose tables were never created, and
+	// fails somewhere unrelated. Mutating global schema state is not
+	// something to do on a database anyone else might be holding.
+	dsn, dropDB := provisionScratchDatabase(t, baseDSN)
+	t.Cleanup(dropDB)
+
 	store, err := Open(dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)

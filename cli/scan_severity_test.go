@@ -212,7 +212,7 @@ func TestRunScan_SeverityFilterReportsHiddenCount(t *testing.T) {
 // still prints the exact original sentence — the S4 fix must not change the
 // clean-tree wording.
 func TestPrintScanTable_CleanMessageUnchanged(t *testing.T) {
-	stdout, _ := captureScanRun(t, func() { printScanTable(nil, 0, "") })
+	stdout, _ := captureScanRun(t, func() { printScanTable(nil, 0, "", 0) })
 	if strings.TrimSpace(stdout) != "No vulnerabilities or supply-chain signals found." {
 		t.Fatalf("clean message changed: %q", stdout)
 	}

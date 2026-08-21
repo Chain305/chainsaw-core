@@ -253,6 +253,41 @@ func TestGroupAVersionNotFoundProbe(t *testing.T) {
 			want: false,
 			why:  "Hub's /tags/{ref}/ 404s for every digest; promoting that would unevaluate all digest pins",
 		},
+		{
+			// THE form the proxy actually produces. The docker resolver
+			// rewrites ':' to '-' before the coordinate reaches here, so
+			// the colon case above never fires on the proxy path — this
+			// is the one that keeps the guard honest.
+			name:      "docker/digest pin, dash form as the resolver emits it",
+			ecosystem: "docker",
+			pkg:       "library/nginx",
+			version:   "sha256-0000000000000000000000000000000000000000000000000000000000000000",
+			routes: []route{
+				{
+					path: "/v2/repositories/library/nginx/",
+					body: `{"name":"nginx","namespace":"library","user":"library"}`,
+				},
+				{path: "/v2/repositories/library/nginx/tags/", status: http.StatusNotFound},
+			},
+			want: false,
+			why:  "the proxy rewrites ':' to '-'; a colon-only test leaves the guard dead on the only path that emits digests",
+		},
+		{
+			// The reason the dash case cannot simply match on '-'.
+			name:      "docker/an ordinary tag containing a dash is still a tag",
+			ecosystem: "docker",
+			pkg:       "library/nginx",
+			version:   "v1.2-alpine",
+			routes: []route{
+				{
+					path: "/v2/repositories/library/nginx/",
+					body: `{"name":"nginx","namespace":"library","user":"library"}`,
+				},
+				{path: "/v2/repositories/library/nginx/tags/", status: http.StatusNotFound},
+			},
+			want: true,
+			why:  "a dash alone must not read as a digest, or a real missing tag goes unreported",
+		},
 	}
 
 	for _, tc := range tests {

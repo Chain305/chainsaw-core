@@ -58,6 +58,25 @@ var authLogoutCmd = &cobra.Command{
 		// that told them everything was fine.
 		hadCredential := storedCredentialExists(server)
 
+		// Retire the SERVER-SIDE key before the local one goes away. CLI keys
+		// have unbounded lifetime by design (internal/server/auth_cli.go), so a
+		// logout that only clears the local copy leaves a full-privilege,
+		// never-expiring credential live — and takes with it the one record of
+		// which key it was. The revocation is best-effort and never blocks the
+		// local logout; what it must never do is stay silent about having
+		// failed, hence the three-state result rendered below.
+		//
+		// The token is read from storage, not from cfgToken(): --token and
+		// CHAINSAW_TOKEN outrank the stored credential but logout does not
+		// clear them, and revoking a key the operator only passed through on
+		// the command line would destroy a credential this command never
+		// claimed to touch.
+		storedToken := storedCredential(server)
+		revocation := revokeNotAttempted
+		if hadCredential {
+			revocation = revokeStoredAPIKey(server, storedToken)
+		}
+
 		// Delete credential first so a failure to remove the YAML doesn't
 		// leave a dangling secret in the keyring. This stays UNCONDITIONAL and
 		// idempotent (ErrNotFound is not an error): logout must be safe to run
@@ -94,10 +113,16 @@ var authLogoutCmd = &cobra.Command{
 			// ran. A script polling this can tell "I removed a session" from
 			// "there was nothing to remove"; both stay rc=0 because both leave
 			// the machine signed out, which is what was asked for.
+			// server_key is additive: every pre-existing key keeps its name and
+			// meaning. It reports what happened to the credential on the
+			// SERVER, which "logged_out" (a statement about this machine)
+			// cannot express — a script that provisions and tears down CI
+			// runners needs to know when a key was left behind.
 			return PrintJSONTo(cmd, map[string]any{
 				"logged_out":       hadCredential,
 				"server":           server,
 				"env_token_active": override != "",
+				"server_key":       revocation.String(),
 			})
 		}
 		if !hadCredential {
@@ -108,6 +133,7 @@ var authLogoutCmd = &cobra.Command{
 			return nil
 		}
 		printSuccess(cmd.OutOrStdout(), cmd, "Logged out")
+		reportKeyRevocation(cmd, server, storedToken, revocation)
 		if override != "" {
 			warnTokenOverrideRemains(cmd.ErrOrStderr(), override)
 		}
@@ -136,6 +162,127 @@ func storedCredentialExists(server string) bool {
 		}
 	}
 	return viper.InConfig("token") && strings.TrimSpace(viper.GetString("token")) != ""
+}
+
+// storedCredential returns the credential `auth logout` is about to remove, or
+// "" when there is none. Same two tiers and the same viper.InConfig gate as
+// storedCredentialExists — the pair must agree, or logout could try to revoke
+// a --token value it never stored.
+func storedCredential(server string) string {
+	if server != "" {
+		if tok, err := credStore().Get(credService, server); err == nil && strings.TrimSpace(tok) != "" {
+			return strings.TrimSpace(tok)
+		}
+	}
+	if viper.InConfig("token") {
+		return strings.TrimSpace(viper.GetString("token"))
+	}
+	return ""
+}
+
+// logoutRevocation is what became of the SERVER-SIDE key during a logout.
+// Three states, not a bool: "we did not need to" and "we could not tell" are
+// different answers, and collapsing either into "not revoked" would either
+// warn on every JWT session or stay quiet on a key that is still live.
+type logoutRevocation int
+
+const (
+	// revokeNotAttempted — the stored credential is not an API key (a session
+	// JWT, or nothing was stored). There is no api_keys row to retire.
+	revokeNotAttempted logoutRevocation = iota
+	// revokeConfirmed — the server holds no live key for this credential any
+	// more, because we just revoked it or because it was already revoked.
+	revokeConfirmed
+	// revokeUnconfirmed — the server could not be reached or would not answer,
+	// so the key may still be live and the operator has to finish the job.
+	revokeUnconfirmed
+)
+
+func (r logoutRevocation) String() string {
+	switch r {
+	case revokeConfirmed:
+		return "revoked"
+	case revokeUnconfirmed:
+		return "unconfirmed"
+	default:
+		return "not_applicable"
+	}
+}
+
+// logoutRevokeTimeout caps the whole best-effort revocation. Logout is a local
+// operation that must always complete; an unreachable or hanging server is
+// allowed to cost a few seconds and a warning, never the command.
+const logoutRevokeTimeout = 5 * time.Second
+
+// revokeStoredAPIKey retires the server-side api_keys row backing the
+// credential this CLI is about to delete locally.
+//
+// Best-effort by contract: every failure path returns a state, never an error.
+// The caller must be able to complete the local logout regardless of what the
+// network, the server, or the operator's permissions do.
+//
+// Two round trips, and they are needed: the revoke verb is
+// DELETE /api/api-keys/{id} but the CLI only knows its own PUBLIC PREFIX (the
+// secret is not an identifier), so it matches its row out of the listing the
+// same way `auth status` resolves its own expiry. A row already revoked is
+// reported as confirmed rather than re-deleted, and so is a prefix the listing
+// does not contain at all: the server was asked and holds nothing live under
+// it.
+func revokeStoredAPIKey(server, token string) logoutRevocation {
+	prefix := apiKeyPrefixFromToken(token)
+	if server == "" || prefix == "" {
+		return revokeNotAttempted
+	}
+	client := newAPIClientWithTimeout(server, token, logoutRevokeTimeout)
+
+	var listing struct {
+		APIKeys []tokenItem `json:"api_keys"`
+	}
+	if err := client.Get("/api/api-keys", &listing); err != nil {
+		return revokeUnconfirmed
+	}
+	for _, k := range listing.APIKeys {
+		if k.Prefix != prefix {
+			continue
+		}
+		if k.RevokedAt != nil || !k.Active {
+			return revokeConfirmed
+		}
+		if err := client.Delete("/api/api-keys/" + k.ID); err != nil {
+			// A 404 means the row went away between the listing and the
+			// delete — concurrent revocation, which is the outcome we wanted.
+			if isNotFoundError(err) {
+				return revokeConfirmed
+			}
+			return revokeUnconfirmed
+		}
+		return revokeConfirmed
+	}
+	return revokeConfirmed
+}
+
+// reportKeyRevocation tells the operator what happened to the server-side key.
+// Silent on the two states that need no action; on the third it names the key
+// by its public prefix and says where to revoke it — after logout there is no
+// credential left to drive `chainsaw token revoke` with, so the dashboard is
+// the honest instruction rather than a command that would 401.
+func reportKeyRevocation(cmd *cobra.Command, server, token string, r logoutRevocation) {
+	switch r {
+	case revokeConfirmed:
+		fmt.Fprintln(cmd.OutOrStdout(), "  The API key this CLI was using has been revoked on the server.")
+	case revokeUnconfirmed:
+		w := cmd.ErrOrStderr()
+		fmt.Fprintln(w, "Warning: the local credential was cleared, but the API key behind it could not be")
+		fmt.Fprintln(w, "  revoked on the server, so it may still be live. CLI keys do not expire on their own.")
+		if prefix := apiKeyPrefixFromToken(token); prefix != "" {
+			fmt.Fprintf(w, "  The key to look for starts with %s.\n", prefix)
+		}
+		if base := consoleURL(server); base != "" {
+			fmt.Fprintf(w, "  Revoke it at: %s/settings/api-keys\n", base)
+		} else {
+			fmt.Fprintln(w, "  Revoke it from the API keys page of your Chainsaw dashboard.")
+		}
+	}
 }
 
 // warnTokenOverrideWithoutStored is warnTokenOverrideRemains for the case where
@@ -485,10 +632,18 @@ func authStatusCmd() *cobra.Command {
 				IsAdmin       bool   `json:"is_admin,omitempty"`
 				// L-10: when the active credential is an API key that
 				// carries an expiry, say so BEFORE it bites. A key minted
-				// with no expiry (today's default) leaves both fields unset,
-				// so nothing changes for existing users.
-				ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-				ExpiresInDays *int       `json:"expires_in_days,omitempty"`
+				// with no expiry leaves all three fields unset, so nothing
+				// changes for the pre-sliding-window keys still in the field.
+				//
+				// IdleExpiryDays is set only when the expiry SLIDES. For such
+				// a key ExpiresInDays is a moving target — this very command
+				// authenticated, which pushed the deadline back out — so a
+				// consumer that wants to know how long the credential really
+				// has must read IdleExpiryDays and interpret it as "days of
+				// disuse before it lapses", not as a countdown.
+				ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+				ExpiresInDays  *int       `json:"expires_in_days,omitempty"`
+				IdleExpiryDays *int       `json:"idle_expiry_days,omitempty"`
 			}
 
 			result := statusResult{Server: server}
@@ -509,10 +664,14 @@ func authStatusCmd() *cobra.Command {
 					result.Role, _ = me["role"].(string)
 					result.Email, _ = me["email"].(string)
 					result.IsAdmin, _ = me["is_admin"].(bool)
-					if exp := lookupTokenExpiry(c, token); exp != nil {
-						result.ExpiresAt = exp
-						days := int(time.Until(*exp).Round(24*time.Hour) / (24 * time.Hour))
+					if exp := lookupTokenExpiry(c, token); exp != nil && exp.At != nil {
+						result.ExpiresAt = exp.At
+						days := int(time.Until(*exp.At).Round(24*time.Hour) / (24 * time.Hour))
 						result.ExpiresInDays = &days
+						if exp.WindowDays > 0 {
+							w := exp.WindowDays
+							result.IdleExpiryDays = &w
+						}
 					}
 				} else {
 					probeErr = err
@@ -558,7 +717,21 @@ func authStatusCmd() *cobra.Command {
 					stamp := result.ExpiresAt.UTC().Format("2006-01-02")
 					switch {
 					case days < 0:
+						// Kept ahead of the sliding branch: a lapsed key is
+						// lapsed. Sliding buys a key more time while it is
+						// alive, never a resurrection, so the fix is the same
+						// one it has always been.
 						printKV(out, cmd, "Credential", fmt.Sprintf("EXPIRED on %s — run `chainsaw auth login`", stamp))
+					case result.IdleExpiryDays != nil:
+						// SLIDING. "expires in N days" would be a lie here in
+						// the most annoying possible way: the check itself is
+						// an authenticated request, so it just reset the very
+						// clock it would be reporting. State the rule (N days
+						// of DISUSE) and give the current deadline as what it
+						// is — where the key stands if it is never used again.
+						printKV(out, cmd, "Credential", fmt.Sprintf(
+							"expires after %d days unused — this check just reset that clock; lapses %s if untouched",
+							*result.IdleExpiryDays, stamp))
 					case days == 0:
 						printKV(out, cmd, "Credential", fmt.Sprintf("expires TODAY (%s) — run `chainsaw auth login`", stamp))
 					case days <= 14:
@@ -765,6 +938,16 @@ func apiKeyPrefixFromToken(token string) string {
 	return parts[2]
 }
 
+// credentialExpiry is what `auth status` needs to describe an expiry
+// truthfully: the deadline, plus whether that deadline SLIDES.
+type credentialExpiry struct {
+	// At is the deadline currently recorded on the key.
+	At *time.Time
+	// WindowDays > 0 means At is an IDLE deadline that every authenticated
+	// request pushes back out to now+window. Zero means At is a hard date.
+	WindowDays int
+}
+
 // lookupTokenExpiry resolves the expiry of the credential we are currently
 // authenticating with, or nil when there isn't one.
 //
@@ -774,7 +957,11 @@ func apiKeyPrefixFromToken(token string) string {
 // a flaky network must degrade to "no expiry shown", never to an error or a
 // scary warning. The authenticated/not-authenticated answer above is already
 // established by /api/auth/me and does not depend on this.
-func lookupTokenExpiry(c *APIClient, token string) *time.Time {
+//
+// A server that predates sliding expiry omits expiry_window_seconds
+// entirely, which decodes to zero and renders as the old hard-date
+// countdown — the correct answer for that server's keys.
+func lookupTokenExpiry(c *APIClient, token string) *credentialExpiry {
 	prefix := apiKeyPrefixFromToken(token)
 	if prefix == "" {
 		return nil
@@ -787,7 +974,10 @@ func lookupTokenExpiry(c *APIClient, token string) *time.Time {
 	}
 	for _, k := range resp.APIKeys {
 		if k.Prefix == prefix {
-			return k.ExpiresAt
+			if k.ExpiresAt == nil {
+				return nil
+			}
+			return &credentialExpiry{At: k.ExpiresAt, WindowDays: k.expiryWindowDays()}
 		}
 	}
 	return nil

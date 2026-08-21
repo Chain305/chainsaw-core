@@ -43,6 +43,7 @@ const (
 	// Landing
 	EventLandingCTAClicked              = "landing.cta.clicked"
 	EventLandingProcurementKitRequested = "landing.procurement_kit.requested"
+	EventLandingTrustPacketRequested    = "landing.trust_packet.requested"
 
 	// API
 	EventAPISignupStarted           = "api.signup.started"
@@ -160,6 +161,7 @@ var registry = map[string]struct{}{
 
 	EventLandingCTAClicked:              {},
 	EventLandingProcurementKitRequested: {},
+	EventLandingTrustPacketRequested:    {},
 
 	EventAPISignupStarted:           {},
 	EventAPISignupVerified:          {},

@@ -319,3 +319,106 @@ func TestSCBothURLDepSignalsFire(t *testing.T) {
 		t.Errorf("HTTP URL evidence unexpected: %v", httpEvidence)
 	}
 }
+
+// TestSCHighSeverityCeilingsArePresentAndUniform is the guard for the
+// omission class that produced this fix.
+//
+// A Signal with no MaxImpact contributes NO cap — the ceiling is the minimum
+// across fired primitives, and an absent value is simply skipped. So omitting
+// one on a High-severity supply-chain signal does not make it "uncapped in a
+// neutral way"; it makes that signal score MORE LENIENTLY than its identical
+// peers, silently. sc.reserved_namespace_violation carried Weight -25 and
+// SevHigh with no ceiling while five same-category, same-or-lighter peers all
+// declared 40, so a lone dependency-confusion hit landed around 91 (Allow)
+// where a lone publisher-change landed at 40 (Warn).
+//
+// This is the same shape as the vuln.cvss_critical inversion pinned by
+// TestVulnSeverityLadderIsMonotonic; the supply-chain family had no
+// equivalent guard, which is why the gap survived.
+//
+// The list is the "high-confidence harmful" tier from the MaxImpact policy
+// table in docs/architecture/package-intelligence.md. sc.typosquat_high is
+// excluded deliberately: it is the same severity but a heavier -40, and its
+// tighter 30 ceiling is a deliberate calibration, not drift.
+func TestSCHighSeverityCeilingsArePresentAndUniform(t *testing.T) {
+	const wantCeiling = 40
+
+	tier := []string{
+		SignalSCPublisherChanged,
+		SignalSCInstallScriptNetwork,
+		SignalSCRepoOwnershipMismatch,
+		SignalSCSuspiciousRepoStars,
+		SignalSCMaintainerAccountVeryYoung,
+		SignalSCNonExistentAuthor,
+		SignalSCReservedNamespace,
+	}
+
+	for _, id := range tier {
+		sig, ok := Registry[id]
+		if !ok {
+			t.Errorf("signal %q missing from Registry", id)
+			continue
+		}
+		if sig.Severity != SevHigh {
+			t.Errorf("%s: severity %q — this list is the High tier; move the row or re-tier the signal", id, sig.Severity)
+		}
+		if sig.MaxImpact != wantCeiling {
+			t.Errorf("%s: MaxImpact = %d, want %d. A missing or divergent ceiling here is not neutral — "+
+				"an absent MaxImpact contributes no cap at all, so the signal scores more leniently than its peers",
+				id, sig.MaxImpact, wantCeiling)
+		}
+	}
+}
+
+// TestSCReservedNamespaceCeilingOrdersAgainstItsSiblings checks the direction
+// of the fix rather than just its value: the ceiling must be no looser than a
+// more-severe sibling's and no tighter than a less-severe one's, or the
+// correction would have traded one inversion for another.
+func TestSCReservedNamespaceCeilingOrdersAgainstItsSiblings(t *testing.T) {
+	reserved := Registry[SignalSCReservedNamespace]
+
+	// Heavier High-severity sibling — must be at least as tight as reserved.
+	if tighter := Registry[SignalSCTyposquatHigh]; tighter.MaxImpact > reserved.MaxImpact {
+		t.Errorf("%s (weight %v) ceilings at %d, looser than %s (weight %v) at %d",
+			tighter.ID, tighter.Weight, tighter.MaxImpact,
+			reserved.ID, reserved.Weight, reserved.MaxImpact)
+	}
+
+	// Less-severe siblings in the same category — must be no tighter.
+	for _, id := range []string{
+		SignalSCHiddenUnicode,
+		SignalSCRepoArchived,
+		SignalSCRepoMissing,
+		SignalSCPublishVelocity,
+	} {
+		sib := Registry[id]
+		if sib.MaxImpact > 0 && sib.MaxImpact < reserved.MaxImpact {
+			t.Errorf("%s (%s) ceilings at %d, TIGHTER than the more-severe %s (%s) at %d — inverted",
+				sib.ID, sib.Severity, sib.MaxImpact, reserved.ID, reserved.Severity, reserved.MaxImpact)
+		}
+	}
+}
+
+// TestSCReservedNamespaceScoresLikeItsPeers is the behavioural half: fired
+// alone against an otherwise-clean input, a reserved-namespace violation must
+// land in the same band as sc.publisher_changed rather than tens of points
+// above it.
+func TestSCReservedNamespaceScoresLikeItsPeers(t *testing.T) {
+	base := Input{Ecosystem: "npm", Package: "internal-utils", Version: "1.0.0", LicenseSPDX: "MIT"}
+
+	reservedIn := base
+	reservedIn.ReservedNamespaceViolation = true
+	reserved := EvaluatePackage(reservedIn, Options{}).RolledUp.Overall
+
+	peerIn := base
+	peerIn.PublisherChanged = true
+	peer := EvaluatePackage(peerIn, Options{}).RolledUp.Overall
+
+	if reserved != peer {
+		t.Errorf("reserved-namespace scores %d but its same-severity, same-weight peer publisher-changed scores %d",
+			reserved, peer)
+	}
+	if reserved > 50 {
+		t.Errorf("reserved-namespace fired alone scores %d — the High tier is documented as 30-50", reserved)
+	}
+}

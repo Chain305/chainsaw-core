@@ -68,11 +68,27 @@ func snapshotColumns(db *sql.DB) (map[string]bool, error) {
 //	.github/workflows/upgrade-path.yml already runs every test in this
 //	file, so new from-version tests cost zero workflow churn.
 func TestMigrate_FromV015Schema(t *testing.T) {
-	dsn := os.Getenv("CHAINSAW_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("CHAINSAW_DATABASE_URL not set; skipping upgrade-path integration test " +
-			"(set this to a Postgres DSN with DROP+CREATE rights — the test wipes the public schema).")
+	baseDSN := os.Getenv("CHAINSAW_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("CHAINSAW_DATABASE_URL not set; skipping upgrade-path integration test.")
 	}
+	// Run against a PRIVATE database, not the one the env var points at.
+	//
+	// This test does `DROP SCHEMA public CASCADE` — it has to, because the
+	// thing under test is migrate() converging a 0.15.0-shaped database onto
+	// the fresh-install shape, and that needs a controlled starting state.
+	// But `go test ./...` runs packages in PARALLEL, and every other
+	// DB-gated package reads the same DSN. Wiping it mid-run made those
+	// packages fail with "relation \"users\" does not exist" — a failure that
+	// points at the innocent package and says nothing about the guilty one.
+	// That cost real debugging time on 2026-08-20.
+	//
+	// The Makefile has always documented "use a throwaway database", but
+	// documentation is not a mechanism: anyone running the suite with a DSN
+	// set got the footgun. Provisioning our own removes the requirement
+	// rather than restating it.
+	dsn, dropDB := provisionScratchDatabase(t, baseDSN)
+	t.Cleanup(dropDB)
 
 	// Step 1 — connect raw and seed the synthetic 0.15.0-shape schema.
 	// We deliberately bypass pgstore.Open here so migrate() does NOT run

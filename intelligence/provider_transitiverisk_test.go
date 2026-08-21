@@ -57,6 +57,12 @@ func newReport(eco, pkg, ver string) *Report {
 			Package:   pkg,
 			Version:   ver,
 		},
+		// Stamped because a Report that Scan produced always carries the
+		// current epoch, and lookupDepReport skips matcher-stale rows. A
+		// fixture without it models a row from a superseded engine, which
+		// makes every lookup in this file miss for the right reason and
+		// the wrong test.
+		Observation: ObservationSection{MatcherEpoch: CurrentMatcherEpoch},
 		Risk: &risk.Evaluation{
 			Key: risk.Key{Ecosystem: eco, Package: pkg, Version: ver},
 		},

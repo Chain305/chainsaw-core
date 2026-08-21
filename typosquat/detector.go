@@ -83,6 +83,7 @@ type Detector struct {
 	norms      map[string]Normalizer              // ecosystem → normalizer
 	reorder    map[string]map[string]reorderEntry // ecosystem → reorder-canonical form → entry
 	confusable map[string]map[string][]string     // ecosystem → confusable-normalized form → original popular names
+	siblings   map[string]map[string]struct{}     // ecosystem → normalized name → verified first-party sibling of a popular root
 	logger     *slog.Logger
 	thresholds ThresholdConfig
 }
@@ -434,8 +435,34 @@ func betterEditMatch(cand, best SearchResult, ranks map[string]int) bool {
 // prefix or suffix added (e.g., "lodash-utils" when "lodash" is popular).
 // Only checks popular names of length >= minPopularLen to avoid false positives
 // from very short popular names matching many strings.
+//
+// Every hit this produces is graded "low" (worth -8 in the risk registry)
+// because the rule is deliberately broad: measured against a held-out corpus of
+// 24,206 real download-ranked benign packages, 13.0% of them embed some popular
+// name within 8 characters. That breadth is the point — it is a hint, not an
+// accusation — and it is the caller's job to present it as one.
+//
+// Two guards keep the lane from firing on things nobody would call a squat:
+//
+//  1. TOKEN ALIGNMENT (below). The popular name must sit on at least one token
+//     boundary. A popular name buried mid-token — "ent" inside "agent-base",
+//     "ini" inside "unicorn-magic" — is a coincidence of spelling, not a squat:
+//     nobody reaching for "ent" mistypes it into the middle of another word.
+//     Every real combosquat shape survives: "expressjs" (root at index 0),
+//     "python3-dateutil" (root at end), "@attacker/react" (root after the
+//     scope separator, the case NormalizeNPM's comment depends on).
+//
+//  2. FIRST-PARTY SIBLINGS (official.go). An exact-name exemption for verified
+//     first-party siblings such as `lodash.merge`. Read the header of
+//     official.go before touching it — in particular why the exemption is NOT
+//     keyed on name shape, corpus membership, or family size.
 func (d *Detector) checkCombosquat(ecosystem, normalized string, names map[string]string, ranks map[string]int) DetectionResult {
 	if len(normalized) < 4 {
+		return DetectionResult{}
+	}
+
+	// Guard 2: verified first-party sibling of the name it embeds.
+	if d.isOfficialSibling(ecosystem, normalized) {
 		return DetectionResult{}
 	}
 
@@ -459,7 +486,8 @@ func (d *Detector) checkCombosquat(ecosystem, normalized string, names map[strin
 		if extra > 8 || extra >= bestExtra {
 			continue // skip if more extra chars than best found so far
 		}
-		if strings.Contains(normalized, popularNorm) {
+		// Guard 1: token alignment. Replaces a bare strings.Contains.
+		if tokenAlignedContains(normalized, popularNorm) {
 			bestResult = DetectionResult{
 				IsSuspected: true,
 				Confidence:  "low",
@@ -473,6 +501,50 @@ func (d *Detector) checkCombosquat(ecosystem, normalized string, names map[strin
 	}
 
 	return bestResult
+}
+
+// tokenAlignedContains reports whether `root` occurs inside `name` with at
+// least one of its edges on a token boundary — the start of the string, the
+// end of the string, or adjacent to a delimiter.
+//
+// "At least one edge", not both: requiring both would drop `expressjs` and
+// `reactjs`, which are the canonical combosquat shapes. Requiring neither is
+// the status quo, which matches `ent` inside `agent-base`.
+func tokenAlignedContains(name, root string) bool {
+	if root == "" || len(root) > len(name) {
+		return false
+	}
+	for i := 0; ; {
+		j := strings.Index(name[i:], root)
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		end := start + len(root)
+		startAligned := start == 0 || isNameDelimiter(name[start-1])
+		endAligned := end == len(name) || isNameDelimiter(name[end])
+		if startAligned || endAligned {
+			return true
+		}
+		i = start + 1
+		if i+len(root) > len(name) {
+			return false
+		}
+	}
+}
+
+// isNameDelimiter reports whether b separates tokens in a package name across
+// the ecosystems the detector covers: '-' and '_' (npm, PyPI, Cargo, pub),
+// '.' (npm modular names, Maven groupIds, Go import paths), '/' and '@' (npm
+// scopes, Go module paths, Composer vendor/package, HuggingFace org/model),
+// and ':' (Maven/Gradle coordinates).
+func isNameDelimiter(b byte) bool {
+	switch b {
+	case '-', '_', '.', '/', '@', ':':
+		return true
+	default:
+		return false
+	}
 }
 
 // HasIndex returns true if the detector has a loaded index for the ecosystem.

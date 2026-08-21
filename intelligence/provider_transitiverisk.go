@@ -384,7 +384,10 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 	for _, candidate := range candidateVersions(constraint) {
 		k := Key{Ecosystem: eco, Package: name, Version: candidate}
 		r, err := store.Get(ctx, orgID, k)
-		if err == nil && r != nil {
+		// A superseded-matcher row is skipped like a miss so the next
+		// candidate version gets a chance; a transitive alert built on a
+		// retracted verdict is worse than no alert.
+		if err == nil && !r.MatcherStale() {
 			return depgraph.Key{Ecosystem: eco, Name: name, Version: candidate}, r, lookupResolved, nil
 		}
 		if err != nil && !errors.Is(err, ErrNotFound) && firstStoreErr == nil {
@@ -398,7 +401,7 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 	if v != "" {
 		k := Key{Ecosystem: eco, Package: name, Version: v}
 		r, err := store.Get(ctx, orgID, k)
-		if err == nil && r != nil {
+		if err == nil && !r.MatcherStale() {
 			return depgraph.Key{Ecosystem: eco, Name: name, Version: v}, r, lookupResolved, nil
 		}
 		if err != nil && !errors.Is(err, ErrNotFound) && firstStoreErr == nil {

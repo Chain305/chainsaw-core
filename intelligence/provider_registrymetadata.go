@@ -3581,12 +3581,58 @@ func (p *registryMetadataProvider) runDocker(ctx context.Context, pkg, ver strin
 	//
 	// Digest pins are excluded: `image@sha256:...` is not a tag, so
 	// /tags/{ref}/ 404s for every one of them, and promoting that would
-	// mark every digest-pinned image NOT EVALUATED. An OCI tag cannot
-	// contain a colon, which makes the test exact rather than heuristic.
-	if tagWarn != nil && tagWarn.Code == "not_found" && !strings.Contains(ver, ":") {
+	// mark every digest-pinned image NOT EVALUATED.
+	//
+	// The test must accept BOTH separators. The proxy's docker resolver
+	// rewrites every ':' to '-' before the coordinate reaches intelligence
+	// (internal/formats/docker/resolver.go, normalizeReference), so the
+	// colon form only ever arrives from direct API callers. A colon-only
+	// test looks exact and is in fact dead on the single path that
+	// actually produces digest coordinates in production.
+	if tagWarn != nil && tagWarn.Code == "not_found" && !isOCIDigestPin(ver) {
 		pr.Warnings = append(pr.Warnings, *versionNotFoundByProbeWarning(p, tagURL, repoURL, pkg, ver, -1))
 	}
 	return pr, nil
+}
+
+// ociDigestHexLen maps an OCI digest algorithm to the exact number of hex
+// characters its encoded form carries. Membership in this table is what
+// makes isOCIDigestPin exact.
+var ociDigestHexLen = map[string]int{
+	"sha256": 64,
+	"sha384": 96,
+	"sha512": 128,
+}
+
+// isOCIDigestPin reports whether ver is a digest reference rather than a
+// tag, accepting both `sha256:<hex>` and `sha256-<hex>`.
+//
+// Both separators must be accepted because the proxy's docker resolver
+// rewrites ':' to '-' before the coordinate reaches intelligence, so the
+// dash form is the only one the proxy path ever produces.
+//
+// The algorithm prefix and the exact hex length are both required. A '-'
+// alone would be far too loose — `v1.2-alpine` is an ordinary tag, and
+// treating it as a digest would silently suppress a real not-found.
+func isOCIDigestPin(ver string) bool {
+	i := strings.IndexAny(ver, ":-")
+	if i <= 0 {
+		return false
+	}
+	want, ok := ociDigestHexLen[strings.ToLower(ver[:i])]
+	if !ok {
+		return false
+	}
+	hex := ver[i+1:]
+	if len(hex) != want {
+		return false
+	}
+	for _, r := range hex {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // splitDockerImage normalises a Docker image reference into (namespace,

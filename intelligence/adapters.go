@@ -12,6 +12,7 @@ import (
 
 	"github.com/chain305/chainsaw-core/hiddenunicode"
 	"github.com/chain305/chainsaw-core/metadata"
+	"github.com/chain305/chainsaw-core/risk"
 	"github.com/chain305/chainsaw-core/supplychain"
 	"github.com/chain305/chainsaw-core/trustscore"
 )
@@ -28,6 +29,13 @@ func (r *Report) ToLegacyPackageMetadata(repoName string) *metadata.PackageMetad
 	if r == nil {
 		return nil
 	}
+	// TrustScoreKnown: an UnavailableEvaluation reports Overall 0 and
+	// ComputeTrustScore mirrors that into SupplyChain.TrustScore, so a 0
+	// here can mean "never scored". Mark the score known only when an
+	// evaluation actually ran — the proxy download path projects this onto
+	// policy.EvaluationContext.TrustScore, where nil matches neither
+	// trustScoreMin nor trustScoreMax. A genuine 0 (malware sentinel /
+	// checksum mismatch) comes from a real evaluation and stays known.
 	meta := &metadata.PackageMetadata{
 		Repository:            repoName,
 		Package:               r.Identity.Package,
@@ -39,6 +47,7 @@ func (r *Report) ToLegacyPackageMetadata(repoName string) *metadata.PackageMetad
 		UpstreamURL:           r.Identity.RegistryBase,
 		ProvenanceStatus:      r.Provenance.Status,
 		TrustScore:            r.SupplyChain.TrustScore,
+		TrustScoreKnown:       r.Risk == nil || r.Risk.Verdict != risk.VerdictUnknown,
 		TrustScoreBreakdown:   r.SupplyChain.TrustScoreBreakdown,
 		TyposquatStatus:       r.SupplyChain.TyposquatStatus,
 		TyposquatSimilarTo:    r.SupplyChain.TyposquatSimilarTo,

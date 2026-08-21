@@ -177,7 +177,13 @@ func TestComputeTrustScore_OrgWeightsResolverChangesScore(t *testing.T) {
 			// ScannedAt non-nil → VulnDataAvailable=true → vuln category
 			// participates in the rollup and the per-org weight override
 			// has visible effect on the result.
-			Vulnerabilities: VulnSection{IsVulnerable: true, CVSSScore: 9.0, ScannedAt: &scannedAt},
+			//
+			// The CVE sits in the medium tier deliberately. risk's
+			// vuln.cvss_critical / vuln.cvss_high declare a MaxImpact
+			// ceiling, and a ceiling pins overall to a fixed value
+			// regardless of category weight — a ceilinged fixture would
+			// mask the override seam this test exists to prove.
+			Vulnerabilities: VulnSection{IsVulnerable: true, CVSSScore: 6.0, ScannedAt: &scannedAt},
 		}
 	}
 

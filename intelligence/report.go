@@ -635,6 +635,59 @@ type ObservationSection struct {
 	// every Report so the UI can render "tier X of Y" without a
 	// separate provider-catalog round-trip.
 	TierTotal int `json:"tierTotal,omitempty"`
+	// MatcherEpoch records which generation of the advisory matcher and
+	// risk engine produced this Report. See CurrentMatcherEpoch. Rows
+	// written before the epoch existed decode to 0, which is below every
+	// real epoch and therefore always stale — that is deliberate, and is
+	// how the one-time rescan of legacy rows happens.
+	MatcherEpoch int `json:"matcherEpoch,omitempty"`
+}
+
+// CurrentMatcherEpoch is the generation number of the advisory matcher and
+// the risk engine. A cached Report stamped with a lower epoch is treated as
+// stale no matter how recently it was collected.
+//
+// Why this exists. Every read path in the system is cache-first, and the
+// cache is keyed only by coordinate — so a Report persisted under an older,
+// buggier matcher is served forever. The 24h TTL does not save us: the row
+// is refreshed by re-running the SAME logic, so a wrong verdict is copied
+// forward rather than corrected. That is not hypothetical. The lodash
+// 4.17.21 false positive (an open-ended OSV GIT range out-voting the correct
+// [0, 4.17.21) SEMVER range) was fixed in the matcher in v0.20.8, and the
+// missing MaxImpact ceiling on vuln.cvss_critical was fixed in the risk
+// engine in v0.21.2 — and an external QA pass reproduced BOTH afterwards,
+// because the row predating the fixes was still being replayed verbatim.
+// Without an epoch, every future matcher or scoring fix ships the same way:
+// correct in the code, invisible to any coordinate anyone has already looked
+// at.
+//
+// The bump discipline: increment this in the SAME commit as any change that
+// can alter a verdict for an unchanged coordinate — advisory range matching,
+// version comparison, signal weights, MaxImpact ceilings, the category
+// rollup. Do NOT bump it for changes that only affect newly-observed data
+// (a new provider field, a new warning code); those ride the normal TTL.
+//
+// The cost of a bump is a one-time recompute of every coordinate as it is
+// next requested, coalesced by the singleflight and cross-replica leader
+// machinery in Scan. The cost of forgetting to bump it is shipping a fix
+// that no user ever sees.
+//
+// Epoch history:
+//
+//	1 — initial epoch (2026-08-22). Establishes the baseline and retires
+//	    every row written before it, which is the set carrying the two
+//	    defects named above.
+const CurrentMatcherEpoch = 1
+
+// MatcherStale reports whether this Report was produced by a superseded
+// generation of the matcher or risk engine, and so must not be served from
+// cache. A nil Report is stale: callers treat "no report" and "unusable
+// report" the same way, which keeps the check safe at every call site.
+func (r *Report) MatcherStale() bool {
+	if r == nil {
+		return true
+	}
+	return r.Observation.MatcherEpoch < CurrentMatcherEpoch
 }
 
 // Warning is a provider-level non-fatal diagnostic.

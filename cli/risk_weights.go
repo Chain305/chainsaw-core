@@ -415,6 +415,49 @@ func runRiskWeightsPreview(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// safeFallbackReason decides whether a `fallback` string from the server is
+// fit to print.
+//
+// The field is a REASON CODE — internal/simulate/riskweights.go emits
+// "empty_corpus" and friends — but one branch built it from err.Error(), and
+// that is how a raw `pq: column … does not exist (SQLSTATE 42703)` reached an
+// operator's terminal: schema internals, on stdout, from a preview command.
+// The server side of that is being fixed; this is the half that holds even
+// against a server that has not been upgraded yet, or a future branch that
+// reintroduces the same mistake.
+//
+// The test is on SHAPE, not on an allowlist of today's codes. A reason code in
+// this tree is a short lowercase snake_case token; database errors, Go error
+// strings and stack fragments all carry spaces, punctuation, capitals or
+// length that a code never has. Shape rather than allowlist so a legitimate
+// new code ships without a CLI release — an allowlist would silently
+// generalise every unrecognised code into "unavailable", which is the same
+// class of information loss in the other direction.
+//
+// Scope: the HUMAN render only. `--json` stays a faithful echo of the server's
+// response body — a structured consumer asked for what the server said, and
+// rewriting a field inside it would make the CLI's JSON disagree with the API
+// it is a client of. Keeping a raw error out of that body is the server's job.
+func safeFallbackReason(raw string) string {
+	const maxReasonCodeLen = 48
+	s := strings.TrimSpace(raw)
+	if s == "" || len(s) > maxReasonCodeLen {
+		return fallbackReasonRedacted
+	}
+	for _, c := range s {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return fallbackReasonRedacted
+		}
+	}
+	return s
+}
+
+// fallbackReasonRedacted is what the operator sees instead of server-supplied
+// free text. It says the same operationally useful thing the reason code would
+// have — the projection degraded — without echoing whatever produced it. The
+// detail belongs in the server's logs, where it already is.
+const fallbackReasonRedacted = "unavailable (see server logs)"
+
 func renderRiskWeightsPreview(r riskWeightsSimulateResp, draft map[string]int) {
 	fmt.Println("Draft signal weights")
 	keys := make([]string, 0, len(draft))
@@ -429,7 +472,7 @@ func renderRiskWeightsPreview(r riskWeightsSimulateResp, draft map[string]int) {
 
 	fmt.Printf("Projected impact: %s\n", r.Summary)
 	if r.Fallback != "" {
-		fmt.Printf("  (fallback: %s — projection sampled rather than full replay)\n", r.Fallback)
+		fmt.Printf("  (fallback: %s — projection sampled rather than full replay)\n", safeFallbackReason(r.Fallback))
 	}
 	if len(r.Buckets) > 0 {
 		bkeys := make([]string, 0, len(r.Buckets))

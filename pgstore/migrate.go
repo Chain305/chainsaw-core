@@ -1113,6 +1113,20 @@ func (s *Store) migrateSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(org_id) WHERE revoked_at IS NULL`,
 
+		// SLIDING expiry (L-10). Non-NULL means expires_at is an IDLE
+		// deadline that the auth path pushes forward on use, so an actively
+		// used credential never expires and only an abandoned one ages out.
+		// NULL — the value for every pre-existing row and for every key
+		// minted through POST /api/api-keys — means expires_at is a HARD
+		// deadline set by an operator, which nothing may silently extend.
+		//
+		// Deliberately additive and nullable: back-filling a window onto the
+		// keys that predate this column would recreate exactly the flag day
+		// the sliding design exists to avoid (see internal/server/auth_cli.go,
+		// parseCLIKeyTTL). Operators who want the old rows bounded do it
+		// themselves; see docs/plan_qa_remediation.md L-10.
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expiry_window_seconds BIGINT`,
+
 		// Per-day request counter for API keys. UX_AUDIT.md §8.6 (P0):
 		// the api-keys list view shows `request_count_7d` so operators
 		// can spot dormant keys at a glance. One row per (key, UTC day)
@@ -1390,6 +1404,25 @@ func (s *Store) migrateSchema() error {
 		// org last authored the row; Store.Upsert compares it and counts a
 		// cross-org overwrite. Nothing reads it for a decision.
 		`ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS authored_by_org TEXT`,
+		// Typosquat confidence, denormalised alongside is_typosquat.
+		//
+		// The detector grades every hit high / medium / low
+		// (core/typosquat/detector.go) and the risk engine tiers them
+		// -40 / -20 / -8 accordingly. The is_typosquat BOOLEAN collapsed
+		// all three into one flag, so the list view rendered a -8
+		// low-confidence combosquat ("lodash.merge contains lodash")
+		// identically to a -40 homoglyph attack — a red ATTACK chip next
+		// to an "allow 96" verdict. Measured against a held-out corpus of
+		// 24,206 real download-ranked benign packages, 13.0% take a
+		// low-confidence combosquat hit, so this was the dominant chip on
+		// the surface.
+		//
+		// Nullable TEXT, no default: existing rows read back NULL, which
+		// Store.Search maps to "" and the UI treats as "graded before this
+		// column existed" — the row keeps whatever is_typosquat already
+		// said. Backfill is unnecessary; intelligence_reports is a cache
+		// and rows re-derive on their next scan.
+		`ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS typosquat_confidence TEXT`,
 
 		// --- intelligence cache: per-tenant → universal migration ---
 		// Package facts (CVEs, malware verdicts, typosquat signals, risk

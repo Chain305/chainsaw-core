@@ -400,8 +400,12 @@ func TestGuardNeverWarnsOnLowConfidenceCombosquat(t *testing.T) {
 	})
 	g.detectors["npm"] = d
 
-	// Shapes real popular packages take: a popular name with a prefix/suffix.
-	for _, name := range []string{"lodash-es", "lodash-utils", "express-session"} {
+	// `lodash-es` used to sit in this list. It is a verified first-party lodash
+	// sibling, so the official-sibling guard in checkCombosquat now exempts it
+	// before the branch is reached — it is pinned separately below. The names
+	// kept here are shapes with no first-party relationship to their root, so
+	// they still reach the branch and still have to be silent.
+	for _, name := range []string{"lodash-utils", "express-session"} {
 		res := d.Check(ctx, "npm", name)
 		if !res.IsSuspected || res.Method != "combosquat" || res.Confidence != "low" {
 			t.Errorf("%q no longer exercises the combosquat branch (%+v) — re-pick the fixture so this pin keeps testing something", name, res)
@@ -411,5 +415,12 @@ func TestGuardNeverWarnsOnLowConfidenceCombosquat(t *testing.T) {
 		if v.Block || v.Severity != "" || v.Reason != "" {
 			t.Fatalf("%q: low-confidence combosquat must be SILENT (no block, no warn, no reason), got %+v", name, v)
 		}
+	}
+
+	// A verified first-party sibling must not even reach the combosquat branch.
+	// `lodash-es` is published by the lodash maintainers; flagging it at any
+	// confidence is a false positive on a legitimate, widely-used package.
+	if res := d.Check(ctx, "npm", "lodash-es"); res.IsSuspected {
+		t.Errorf("lodash-es is a first-party lodash sibling and must be exempt, got %+v", res)
 	}
 }

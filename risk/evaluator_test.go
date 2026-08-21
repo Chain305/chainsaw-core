@@ -358,7 +358,10 @@ func TestComputeOverall_AllUnavailableReturnsZero(t *testing.T) {
 // lands the rolled-up overall in the documented band. See the MaxImpact
 // policy table in docs/architecture/package-intelligence.md.
 //
-// Critical → ≤20 (KEV, dangerous pickle, sentinel malware/checksum).
+// Critical → ≤20 (KEV, dangerous pickle, sentinel malware/checksum), with
+//
+//	CVSS-critical at 20-30 — below every high-tier signal, above KEV.
+//
 // High    → 30-50 (typosquat-high, publisher-changed, repo-ownership-mismatch,
 //
 //	CVSS-high, etc.).
@@ -390,6 +393,21 @@ func TestMaxImpactCalibration_PerTier(t *testing.T) {
 			in: Input{
 				Ecosystem: "huggingface", Package: "evil-model", Version: "1.0.0", LicenseSPDX: "MIT",
 				DangerousPickleOpcode: true, DangerousPickleFiles: []string{"weights.pkl"},
+			},
+		},
+		{
+			// Sits deliberately between the Critical (0-20) and High
+			// (30-50) bands: a CVSS >= 9.0 with no confirmed in-the-wild
+			// exploitation is worse than any high-severity CVE but not
+			// the KEV-grade "already being exploited" claim. This row was
+			// missing when vuln.cvss_critical shipped with no MaxImpact
+			// at all, which is how the severity ladder inverted — see
+			// TestVulnSeverityLadderIsMonotonic.
+			name:     "critical/vuln.cvss_critical",
+			minScore: 20, maxScore: 30,
+			in: Input{
+				Ecosystem: "npm", Package: "x", Version: "1.0.0", LicenseSPDX: "MIT",
+				IsVulnerable: true, MaxCVSS: 9.8, CVEs: []string{"CVE-2024-8888"},
 			},
 		},
 		// --- High tier — strong attack-pattern evidence. ---

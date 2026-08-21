@@ -38,8 +38,18 @@ type PackageMetadata struct {
 	UpdatedAt          time.Time  `json:"updatedAt"`
 
 	// Supply chain integrity fields.
+	//
+	// TrustScoreKnown reports whether trust_score was non-NULL on the row.
+	// It is NOT redundant with `TrustScore != 0`: 0 is a legitimate score
+	// (malware sentinels and checksum mismatches roll up to 0 in
+	// core/risk). The proxy download path projects these onto
+	// policy.EvaluationContext.TrustScore, which is a pointer precisely so
+	// "never scored" and "scored 0" stay distinguishable to
+	// trustScoreMin/trustScoreMax rules — a match condition that treats an
+	// absent score as 0 blocks packages on a signal that never ran.
 	ProvenanceStatus    string `json:"provenanceStatus,omitempty"`    // verified, unverified, unavailable, missing, failed
 	TrustScore          int    `json:"trustScore,omitempty"`          // composite 0-100
+	TrustScoreKnown     bool   `json:"trustScoreKnown,omitempty"`     // trust_score column was non-NULL
 	TrustScoreBreakdown string `json:"trustScoreBreakdown,omitempty"` // JSON breakdown
 	TyposquatStatus     string `json:"typosquatStatus,omitempty"`     // clean, suspected, confirmed_safe
 	TyposquatSimilarTo  string `json:"typosquatSimilarTo,omitempty"`  // popular package it resembles
@@ -284,6 +294,7 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 	meta.TyposquatStatus = typosquatStatus.String
 	meta.TyposquatSimilarTo = typosquatSimilarTo.String
 	meta.TrustScore = int(trustScore.Int64)
+	meta.TrustScoreKnown = trustScore.Valid
 	if packageReleaseDate.Valid {
 		meta.PackageReleaseDate = &packageReleaseDate.Time
 	}

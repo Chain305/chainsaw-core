@@ -320,17 +320,26 @@ type SearchResults struct {
 // SearchRow is the flattened per-row payload the list view needs. The
 // full Report is fetched on the inspect page, not in the list.
 type SearchRow struct {
-	Ecosystem       string    `json:"ecosystem"`
-	Package         string    `json:"package"`
-	Version         string    `json:"version"`
-	CollectedAt     time.Time `json:"collectedAt"`
-	FreshUntil      time.Time `json:"freshUntil"`
-	TrustScore      int       `json:"trustScore,omitempty"`
-	MaxCVSS         float64   `json:"maxCvss,omitempty"`
-	IsMalicious     bool      `json:"isMalicious,omitempty"`
-	IsTyposquat     bool      `json:"isTyposquat,omitempty"`
-	HasArtifactScan bool      `json:"hasArtifactScan,omitempty"`
-	WarningCount    int       `json:"warningCount,omitempty"`
+	Ecosystem   string    `json:"ecosystem"`
+	Package     string    `json:"package"`
+	Version     string    `json:"version"`
+	CollectedAt time.Time `json:"collectedAt"`
+	FreshUntil  time.Time `json:"freshUntil"`
+	TrustScore  int       `json:"trustScore,omitempty"`
+	MaxCVSS     float64   `json:"maxCvss,omitempty"`
+	IsMalicious bool      `json:"isMalicious,omitempty"`
+	IsTyposquat bool      `json:"isTyposquat,omitempty"`
+	// TyposquatConfidence is the detector's grade for the hit —
+	// "high", "medium", "low", or "" for no hit / ungraded. IsTyposquat
+	// is deliberately NOT (TyposquatConfidence != ""): it stays false for
+	// "low", the broad combosquat lane that fires on 13% of real benign
+	// packages, so the list filter and facet count only ever mean
+	// "actionable". The UI still renders a muted chip when this is "low",
+	// so the signal is visible without claiming to be an attack.
+	// See intelligence.TyposquatIsActionable.
+	TyposquatConfidence string `json:"typosquatConfidence,omitempty"`
+	HasArtifactScan     bool   `json:"hasArtifactScan,omitempty"`
+	WarningCount        int    `json:"warningCount,omitempty"`
 	// V2 risk-engine verdict. Empty string when the evaluation
 	// short-circuited — callers treat empty as "not evaluated" and fall
 	// back to the trust-score/signal-chip heuristics.

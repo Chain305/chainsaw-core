@@ -172,6 +172,7 @@ var requiresYesGate = map[string]string{
 	"chainsaw undo":                     "reverses a prior action; the reversal is itself a mutation",
 	"chainsaw team remove":              "deletes the routing row; `team add` needs the team name this row was the only record of (Z3)",
 	"chainsaw coverage expected remove": "deletes a declared source by id; `coverage expected add` needs the client pattern the id hid (Z3)",
+	"chainsaw repo disable":             "takes a repository out of service org-wide; every client resolving through it starts failing",
 }
 
 // destructiveVerbExempt lists commands whose verb matches the vocabulary but
@@ -182,14 +183,22 @@ var destructiveVerbExempt = map[string]string{
 	"chainsaw admission soak clear": "read-only: evaluates the soak gate and prints a kubectl patch; never applies it",
 	"chainsaw telemetry reset":      "resets local telemetry consent; `telemetry on/off` restores it, no server state — and the operator supplies no argument that the reset destroys",
 	"chainsaw uninstall-hook":       "removes the local package-manager hook; `install-hook` restores it, and refusing to let someone turn the guard off is worse than the fat-finger risk",
+	"chainsaw policy disable":       "stops one rule from firing; `policy enable` restores it, nothing stops working, and the operator supplies no argument the disable destroys",
 }
 
 // destructiveVerbVocabulary is the trigger set for rule (2). Matched against
 // cmd.Name() — the verb, not the whole path — so it stays readable.
+//
+// "disable" joined the set with `repo disable`. It is the one verb here that
+// destroys nothing, and it earns its place anyway: taking a repository out of
+// service stops every client resolving through it, which is an outage whether
+// or not a row was deleted. Its presence forces every future `foo disable` to
+// be classified — `policy disable` is exempt above precisely because someone
+// had to write down why.
 var destructiveVerbVocabulary = []string{
 	"delete", "revoke", "rotate", "remove", "rm", "purge", "destroy",
 	"suppress", "undo", "reset", "clear", "uninstall", "wipe", "prune",
-	"drop", "flip-to-block",
+	"drop", "flip-to-block", "disable",
 }
 
 // walkRunnableCommands returns every runnable command in the tree rooted at

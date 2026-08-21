@@ -79,8 +79,18 @@ type Input struct {
 	ProvenanceStatus     string `json:"provenanceStatus,omitempty"`
 	IsSuspectedTyposquat bool   `json:"isSuspectedTyposquat,omitempty"`
 	IsKnownMalicious     bool   `json:"isKnownMalicious,omitempty"`
-	TrustScore           int    `json:"trustScore,omitempty"`
-	PublisherChanged     bool   `json:"publisherChanged,omitempty"`
+	// TrustScore mirrors EvaluationContext.TrustScore and is a pointer
+	// for the same reason: nil means "no score was computed", which
+	// omitempty renders as an ABSENT `input.trustScore` so a Rego rule
+	// keyed on it is simply undefined. A genuine 0 (malware sentinel,
+	// checksum mismatch) is a non-nil pointer and IS emitted as
+	// `"trustScore": 0`, so `input.trustScore <= 50` still fires on it.
+	//
+	// Before the pointer, `int` + omitempty omitted BOTH cases, which
+	// silently exempted genuinely-zero-scored packages from Rego trust
+	// rules. Absent now means absent; zero now means zero.
+	TrustScore       *int `json:"trustScore,omitempty"`
+	PublisherChanged bool `json:"publisherChanged,omitempty"`
 
 	// SignalsUnavailable is true when a signal-producing pass that was
 	// expected to run could not complete (scan error/timeout). Lets a

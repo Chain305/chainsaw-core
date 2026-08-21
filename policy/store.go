@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"sort"
 	"strings"
@@ -33,6 +34,15 @@ var ErrDuplicatePrecedence = errors.New("duplicate policy precedence")
 // (F12) — two policies sharing a name confused operators in the
 // list_policies UI on staging.
 var ErrDuplicateName = errors.New("duplicate policy name")
+
+// ErrPolicyStoreFailure is the classification for a policies write that
+// failed for a reason this package does not recognise as a user conflict
+// — a connection drop, a permissions change, schema drift. It exists so
+// the driver's own error text has somewhere to NOT go: handlers match on
+// this sentinel and render their own message, while policyConflictError
+// logs the underlying detail. Deliberately says nothing about the
+// backend; the message is user-facing.
+var ErrPolicyStoreFailure = errors.New("policy could not be saved")
 
 // Mode represents the policy action mode.
 type Mode string
@@ -1182,6 +1192,29 @@ func duplicatePolicyParameterError(policies []Policy, exceptID, parameterHash st
 	return nil
 }
 
+// policyConflictError translates a driver error from a policies INSERT or
+// UPDATE into something a handler can classify and a user can act on.
+//
+// The three named-index cases are the whole point of the function: the
+// unique indexes encode rules the user broke ("that precedence is taken"),
+// and the friendly text is the correct answer to give them. Those are
+// matched on the index name, which is ours, not the driver's.
+//
+// The default branch is different in kind, and used to be the disclosure
+// bug. A write can fail for reasons that have nothing to do with the
+// user's input — a dropped connection, a revoked grant, a schema that
+// drifted from what this build's SQL expects — and returning that error
+// unchanged handed the driver's own text to the caller. Every handler on
+// this path then rendered it into the response body with
+// WithMessage("%s", err.Error()), so a 400 came back reading
+// `pq: relation "policies" does not exist`, complete with the SQLSTATE.
+// It is also the wrong STATUS: an infrastructure failure is not a client
+// error, and the old shape made every one of them a 400.
+//
+// So the default now classifies as ErrPolicyStoreFailure — generic on the
+// wire, mapped to a 500 by the handlers — and the driver text goes to the
+// log, which is where an operator can act on it and an attacker cannot
+// read it.
 func policyConflictError(err error) error {
 	if err == nil {
 		return nil
@@ -1195,7 +1228,9 @@ func policyConflictError(err error) error {
 	case strings.Contains(msg, "idx_policies_org_name_unique"):
 		return fmt.Errorf("%w: a policy with this name already exists", ErrDuplicateName)
 	default:
-		return err
+		slog.Default().Error("policy store write failed with an unrecognised driver error",
+			"error", err)
+		return ErrPolicyStoreFailure
 	}
 }
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -177,6 +178,127 @@ func runRepoCreate(cmd *cobra.Command, _ []string) error {
 	}
 	printSuccess(out, cmd, fmt.Sprintf("Created repository %q (ecosystem: %s, type: %s)", name, ecosystem, repoType))
 	return nil
+}
+
+// ── enable / disable ──────────────────────────────────────────────────────────
+
+// There is deliberately NO `repo delete`. L-18 (docs/qa-remediation/W5-W6-
+// server-ux.md) rejected it: ten tables carry a bare `repository TEXT` with no
+// foreign key, so re-adopting a deleted name inherits the old `index_entries`
+// (blobs from the previous upstream), `vulnerability_metadata` (stale
+// verdicts) and `package_permissions` — a client credential silently regains
+// access to a repository an admin believes was destroyed. `DELETE
+// /api/proxies/{name}` correctly 405s for the same reason.
+//
+// What the operator with a mistyped repository actually needs is a way to take
+// it out of service, and the server has had one all along:
+// `PATCH {"enabled":false}`. These two verbs are that half of L-18 — the half
+// the plan called "fix the discoverability of PATCH" and never built. The
+// name stays owned, the row stays intact, and `repo enable` puts it back.
+
+var repoDisableCmd = &cobra.Command{
+	Use:   "disable <name>",
+	Short: "Take a repository out of service (reversible)",
+	Long: "Stop serving a repository without destroying it. Clients resolving " +
+		"through it start failing; its index, metadata and permissions are " +
+		"left untouched, and `chainsaw repo enable` puts it back.\n\n" +
+		"This is the supported way to retire a repository — including one " +
+		"created with the wrong name. There is no `repo delete`: recreating a " +
+		"deleted name would inherit the previous repository's index entries, " +
+		"cached verdicts and package permissions.",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runRepoSetEnabled(false),
+}
+
+var repoEnableCmd = &cobra.Command{
+	Use:          "enable <name>",
+	Short:        "Put a disabled repository back into service",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runRepoSetEnabled(true),
+}
+
+func init() {
+	// Only `disable` is gated. `enable` restores service — the failure mode of
+	// a fat-fingered enable is a repository that works, and prompting on it
+	// would train operators to type --yes on both.
+	repoDisableCmd.Flags().Bool("yes", false, "Skip confirmation prompt")
+	repoDisableCmd.Flags().Bool("json", false, "Output as JSON")
+	repoEnableCmd.Flags().Bool("json", false, "Output as JSON")
+	repoCmd.AddCommand(repoDisableCmd, repoEnableCmd)
+}
+
+func runRepoSetEnabled(enabled bool) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		client := newClient()
+		if client.baseURL == "" {
+			return errServerNotConfigured(cmd)
+		}
+		name := strings.TrimSpace(args[0])
+		if name == "" {
+			return fmt.Errorf("repository name is required")
+		}
+
+		if !enabled {
+			// Auth BEFORE the confirmation prompt (see requireAuth, root.go).
+			// Asking an unauthenticated operator to confirm an outage and only
+			// then reporting "not authenticated" is the Z2 ordering bug.
+			if err := requireAuth(cmd); err != nil {
+				return err
+			}
+			yes, _ := cmd.Flags().GetBool("yes")
+			if !yes {
+				// The prompt names the repository and what stops working,
+				// matching `team remove`: off a TTY there is no prompt to
+				// answer, so refusing is the only way the no-op cannot be
+				// reported as success.
+				ok, err := confirmDestructive(cmd, name, "disable repository",
+					"Clients resolving through it will start failing until it is re-enabled.",
+					func() (string, error) { return resolveRepoLabel(client, name) })
+				if err != nil || !ok {
+					return err
+				}
+			}
+		}
+
+		var resp struct {
+			Repository repoItem `json:"repository"`
+		}
+		if err := client.Patch("/api/proxies/"+url.PathEscape(name), map[string]any{"enabled": enabled}, &resp); err != nil {
+			return err
+		}
+
+		if useJSON(cmd) {
+			enc := json.NewEncoder(outWriterOr(cmd, cmd.OutOrStdout()))
+			enc.SetIndent("", "  ")
+			return enc.Encode(resp.Repository)
+		}
+		if enabled {
+			printSuccess(cmd.OutOrStdout(), cmd, fmt.Sprintf("Repository %q is enabled and serving again", name))
+			return nil
+		}
+		printSuccess(cmd.OutOrStdout(), cmd,
+			fmt.Sprintf("Repository %q is disabled — it keeps its index and permissions; re-enable with `chainsaw repo enable %s`", name, name))
+		return nil
+	}
+}
+
+// resolveRepoLabel names the disable target for the confirmation prompt using
+// the GET the `repo status` command already relies on. Same request, same
+// RBAC, so a typo'd name fails with the server's own 404 before the prompt
+// rather than after the y.
+func resolveRepoLabel(client *APIClient, name string) (string, error) {
+	var resp struct {
+		Repository repoItem `json:"repository"`
+	}
+	if err := client.Get("/api/proxies/"+url.PathEscape(name), &resp); err != nil {
+		return "", err
+	}
+	if resp.Repository.Format == "" {
+		return describeTarget("", name), nil
+	}
+	return fmt.Sprintf("%q (%s)", name, resp.Repository.Format), nil
 }
 
 // ── status ────────────────────────────────────────────────────────────────────

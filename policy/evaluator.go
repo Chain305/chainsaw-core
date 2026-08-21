@@ -45,8 +45,28 @@ type EvaluationContext struct {
 	ProvenanceStatus     string // "verified", "missing", "unavailable", "failed"
 	IsSuspectedTyposquat bool   // true if flagged by typosquat detection
 	IsKnownMalicious     bool   // true if in OpenSSF malware database
-	TrustScore           int    // composite trust score (0-100)
-	PublisherChanged     bool   // true if the publisher set changed vs the most recent prior version
+	// TrustScore is the composite trust score (0-100), or nil when no
+	// score was computed for this coordinate.
+	//
+	// The pointer is load-bearing, not stylistic. TrustScoreMin /
+	// TrustScoreMax are MATCH conditions (see matchesConditions), so a
+	// plain int made "unknown" indistinguishable from "scored, and
+	// maximally bad": an unevaluated coordinate arrives as 0, and 0 is
+	// <= every trustScoreMax anyone has ever configured. A BLOCK rule
+	// with `trustScoreMax: 50` would therefore refuse packages on the
+	// strength of a signal that was never computed.
+	//
+	// Zero is NOT a stand-in for unknown: malware sentinels and
+	// checksum mismatches legitimately roll up to 0 (see core/risk),
+	// and those packages MUST keep matching trustScoreMax rules.
+	// Producers therefore set this pointer only when the score is
+	// genuinely known, and both bound checks below skip on nil so an
+	// unknown score matches NEITHER bound.
+	//
+	// Failing CLOSED on a missing score stays an explicit opt-in via
+	// SignalsUnavailable below — never a side effect of a laundered 0.
+	TrustScore       *int
+	PublisherChanged bool // true if the publisher set changed vs the most recent prior version
 
 	// SignalsUnavailable is true when a signal-producing pass that was
 	// EXPECTED to run could not complete (scan error / timeout) — distinct
@@ -1294,12 +1314,22 @@ func matchesConditions(ctx EvaluationContext, cond Conditions) bool {
 		}
 	}
 
-	// Check trust score conditions
-	if cond.TrustScoreMin != nil && ctx.TrustScore < *cond.TrustScoreMin {
-		return false
+	// Check trust score conditions.
+	//
+	// An unknown score (ctx.TrustScore == nil) matches NEITHER bound:
+	// a rule that asks about the trust score cannot be satisfied by a
+	// coordinate that has no trust score. Orgs that want a missing
+	// signal to refuse the request opt into that explicitly through
+	// SignalsUnavailable, not through a laundered zero.
+	if cond.TrustScoreMin != nil {
+		if ctx.TrustScore == nil || *ctx.TrustScore < *cond.TrustScoreMin {
+			return false
+		}
 	}
-	if cond.TrustScoreMax != nil && ctx.TrustScore > *cond.TrustScoreMax {
-		return false
+	if cond.TrustScoreMax != nil {
+		if ctx.TrustScore == nil || *ctx.TrustScore > *cond.TrustScoreMax {
+			return false
+		}
 	}
 
 	// Check reserved namespaces (dependency confusion protection)

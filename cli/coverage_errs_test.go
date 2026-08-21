@@ -5,7 +5,6 @@ package cli
 
 import (
 	"bytes"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,16 +16,40 @@ import (
 )
 
 func TestTranslateCoverageCollectionErr_OnlyForCollections(t *testing.T) {
-	notFound := errors.New("GET /api/coverage/summary: 404 not found")
-	if got := translateCoverageCollectionErr(notFound); !strings.Contains(got.Error(), "coverage is not enabled") {
-		t.Errorf("a collection 404 should still translate to the feature-off message; got %v", got)
+	notFound := &apiError{Code: "HTTP 404", Message: "not found", Status: http.StatusNotFound}
+	got := translateCoverageCollectionErr(notFound)
+	if !strings.Contains(got.Error(), "returned 404 for the coverage endpoint") {
+		t.Errorf("a collection 404 should translate to the not-available message; got %v", got)
+	}
+	// The message must not send the operator to change a config key that
+	// already defaults to true (core/config: CoverageConfig.IsEnabled).
+	if strings.Contains(got.Error(), "set coverage.enabled: true") {
+		t.Errorf("message still instructs setting a key that defaults true: %v", got)
 	}
 	if translateCoverageCollectionErr(nil) != nil {
 		t.Errorf("nil in, nil out")
 	}
-	other := errors.New("500 internal server error")
-	if got := translateCoverageCollectionErr(other); got != other {
+	other := &apiError{Code: "CHW-5000", Message: "internal", Status: http.StatusInternalServerError}
+	if got := translateCoverageCollectionErr(other); got != error(other) {
 		t.Errorf("non-404 errors must pass through unchanged; got %v", got)
+	}
+}
+
+// TestTranslateCoverageCollectionErr_KeepsServerURLHint: pointing
+// --server at a host missing the /chainproxy prefix produces a
+// serverURLError whose text contains both "404" and "Not Found". The
+// old substring match swallowed that hint and replaced it with
+// coverage advice, so the operator was told to fix coverage when the
+// real problem was the server URL.
+func TestTranslateCoverageCollectionErr_KeepsServerURLHint(t *testing.T) {
+	hint := &serverURLError{
+		baseURL: "https://chain305.com",
+		status:  http.StatusNotFound,
+		message: `server URL "https://chain305.com" returned a generic 404 HTML page. Not Found.`,
+	}
+	got := translateCoverageCollectionErr(hint)
+	if got != error(hint) {
+		t.Fatalf("server-URL hint must pass through unchanged; got %v", got)
 	}
 }
 
@@ -49,7 +72,7 @@ func TestCoverageBypassConfirm_PerIDNotFoundIsNotTranslated(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a missing bypass report id")
 	}
-	if strings.Contains(err.Error(), coverageDisabledMessage) {
+	if strings.Contains(err.Error(), coverageNotAvailableMessage) {
 		t.Errorf("per-id 404 mis-reported as the feature being disabled: %v", err)
 	}
 }

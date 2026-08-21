@@ -279,11 +279,25 @@ func init() {
 		},
 	})
 
+	// MaxImpact tier: HIGH-confidence harmful (30-40). Dependency-confusion
+	// bait is an attack pattern, not a hygiene problem — a public name that
+	// shadows a private namespace exists to be resolved by mistake.
+	//
+	// The ceiling was MISSING, which is not the same as a deliberate
+	// no-ceiling call: a signal that declares no MaxImpact contributes no
+	// cap at all, so this scored strictly more leniently than its own exact
+	// peers — sc.publisher_changed, sc.install_script_network,
+	// sc.suspicious_repo_stars and sc.maintainer_account_very_young all sit
+	// at the same severity and the same -25 weight with MaxImpact 40, and
+	// sc.repo_ownership_mismatch is LIGHTER (-20) and still ceilings at 40.
+	// Same omission shape as the vuln.cvss_critical bug: see
+	// TestVulnSeverityLadderIsMonotonic for how that one inverted the ladder.
 	register(Signal{
 		ID:          SignalSCReservedNamespace,
 		Category:    CategorySupplyChain,
 		Severity:    SevHigh,
 		Weight:      -25,
+		MaxImpact:   40,
 		Title:       "Reserved namespace violation",
 		Description: "Package name shadows an internal/private namespace — possible dependency-confusion bait.",
 		Fires: func(in Input) (bool, string, map[string]any) {

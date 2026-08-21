@@ -105,7 +105,7 @@ decision contains d if {
 
 	dec, err := e.DecideInput(context.Background(), policy.Input{
 		Surface:    policy.SurfaceProxy,
-		TrustScore: 0,
+		TrustScore: new(int), // explicit 0 — a real score, not "unknown"
 	})
 	if err != nil {
 		t.Fatalf("a rule error must not be promoted to the caller: %v", err)

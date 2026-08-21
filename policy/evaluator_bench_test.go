@@ -82,7 +82,7 @@ func BenchmarkEvaluateWithPolicies(b *testing.B) {
 		PackageReleaseDate: &released,
 		LicenseSPDX:        "MIT",
 		HasProvenance:      true,
-		TrustScore:         82,
+		TrustScore:         scIntPtr(82),
 		CVSSScore:          3.1,
 	}
 

@@ -85,6 +85,15 @@ events:
     sample_rate: 1.0
     retention: hot
 
+  - name: landing.trust_packet.requested
+    surface: landing
+    description: Trust-packet request form submitted on /security; lead row written and Postmark acknowledgement queued.
+    required: []
+    optional: [company, role, source]
+    pii: email
+    sample_rate: 1.0
+    retention: hot
+
   # ---- API / BACKEND ----
   - name: api.signup.started
     surface: api

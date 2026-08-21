@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,7 +95,7 @@ func TestEvaluateTrustScoreMin(t *testing.T) {
 		Repository:     "npmjs",
 		PackageName:    "sketchy-pkg",
 		PackageVersion: "0.1.0",
-		TrustScore:     25,
+		TrustScore:     scIntPtr(25),
 	}
 
 	policy := Policy{
@@ -114,7 +115,7 @@ func TestEvaluateTrustScoreMin(t *testing.T) {
 	}
 
 	// High trust score should not match.
-	ctx.TrustScore = 80
+	ctx.TrustScore = scIntPtr(80)
 	result = eval.EvaluateWithPolicies(ctx, []Policy{policy}, 0)
 	if result.Action != ModeAllow {
 		t.Errorf("expected allow for high trust score, got %s", result.Action)
@@ -1117,5 +1118,112 @@ func TestEvaluateSkipsUnsupportedCargoPublisherChanged(t *testing.T) {
 	}
 	if ev.Reason != "unsupported_ecosystem" {
 		t.Errorf("reason: want unsupported_ecosystem, got %s", ev.Reason)
+	}
+}
+
+// --- Unknown vs genuinely-zero trust score -------------------------------
+//
+// EvaluationContext.TrustScore is a *int because "no score was computed"
+// and "scored 0" are different facts that a plain int collapsed into the
+// same value. trustScoreMin/trustScoreMax are MATCH conditions, so the
+// collapsed 0 matched every bound and a BLOCK rule refused packages on a
+// signal that never ran. The four tests below pin both halves: unknown
+// must match NEITHER bound, and a genuine 0 must still match, because 0
+// is what a malware sentinel / checksum mismatch rolls up to in core/risk.
+
+func trustScoreTestPolicy(cond Conditions) Policy {
+	return Policy{
+		ID:         "trust-rule",
+		Precedence: 1,
+		Mode:       ModeBlock,
+		Status:     StatusEnabled,
+		CreatedAt:  time.Now(),
+		Conditions: cond,
+	}
+}
+
+func trustScoreTestContext(score *int) EvaluationContext {
+	return EvaluationContext{
+		Repository:     "npmjs",
+		PackageName:    "internal-fork",
+		PackageVersion: "1.0.0",
+		TrustScore:     score,
+	}
+}
+
+// An unevaluated coordinate (publish pre-run against a package that only
+// exists internally, intelligence timeout, NULL trust_score column) must
+// not be blocked by a trustScoreMax rule. Fails on the pre-fix code, where
+// the absent score arrived as 0 and 0 <= 50.
+func TestTrustScoreMax_UnknownScoreDoesNotMatch(t *testing.T) {
+	store, _ := NewStore(nil)
+	eval := NewEvaluator(store)
+	p := trustScoreTestPolicy(Conditions{TrustScoreMax: scIntPtr(50)})
+
+	result := eval.EvaluateWithPolicies(trustScoreTestContext(nil), []Policy{p}, 0)
+	if result.Action != ModeAllow {
+		t.Errorf("action = %s, want allow — an unknown trust score must not satisfy trustScoreMax", result.Action)
+	}
+}
+
+// The regression that matters most. core/risk short-circuits malware
+// sentinels and checksum mismatches to a rolled-up 0. That 0 is a REAL
+// score and must keep matching trustScoreMax, or this fix would turn a
+// false-block into a false-allow on exactly the packages enforcement
+// exists for.
+func TestTrustScoreMax_GenuineZeroStillMatches(t *testing.T) {
+	store, _ := NewStore(nil)
+	eval := NewEvaluator(store)
+	p := trustScoreTestPolicy(Conditions{TrustScoreMax: scIntPtr(50)})
+
+	result := eval.EvaluateWithPolicies(trustScoreTestContext(scIntPtr(0)), []Policy{p}, 0)
+	if result.Action != ModeBlock {
+		t.Errorf("action = %s, want block — a genuine score of 0 (malware/checksum rollup) must still match trustScoreMax", result.Action)
+	}
+}
+
+func TestTrustScoreMin_UnknownScoreDoesNotMatch(t *testing.T) {
+	store, _ := NewStore(nil)
+	eval := NewEvaluator(store)
+	// Min 0 is satisfied by every real score, so only an unknown score can
+	// keep this rule from firing.
+	p := trustScoreTestPolicy(Conditions{TrustScoreMin: scIntPtr(0)})
+
+	result := eval.EvaluateWithPolicies(trustScoreTestContext(nil), []Policy{p}, 0)
+	if result.Action != ModeAllow {
+		t.Errorf("action = %s, want allow — an unknown trust score must not satisfy trustScoreMin", result.Action)
+	}
+}
+
+func TestTrustScoreMin_GenuineZeroStillMatches(t *testing.T) {
+	store, _ := NewStore(nil)
+	eval := NewEvaluator(store)
+	p := trustScoreTestPolicy(Conditions{TrustScoreMin: scIntPtr(0)})
+
+	result := eval.EvaluateWithPolicies(trustScoreTestContext(scIntPtr(0)), []Policy{p}, 0)
+	if result.Action != ModeBlock {
+		t.Errorf("action = %s, want block — a genuine score of 0 must still satisfy trustScoreMin: 0", result.Action)
+	}
+}
+
+// Rego parity. The Go evaluator and the OPA input must agree on what
+// "unknown" means. Before the pointer, `int` + omitempty omitted BOTH the
+// unknown case and a genuine 0, so `input.trustScore` was undefined for
+// malware-grade packages and a Rego trust rule silently skipped them.
+func TestContextToInput_TrustScoreUnknownIsAbsentZeroIsPresent(t *testing.T) {
+	unknown, err := MarshalInput(SurfaceProxy, trustScoreTestContext(nil))
+	if err != nil {
+		t.Fatalf("marshal unknown: %v", err)
+	}
+	if strings.Contains(string(unknown), "trustScore") {
+		t.Errorf("unknown score must be ABSENT from the OPA input, got %s", unknown)
+	}
+
+	zero, err := MarshalInput(SurfaceProxy, trustScoreTestContext(scIntPtr(0)))
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	if !strings.Contains(string(zero), `"trustScore":0`) {
+		t.Errorf(`a genuine 0 must be emitted as "trustScore":0 so Rego rules still fire, got %s`, zero)
 	}
 }

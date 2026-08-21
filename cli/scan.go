@@ -216,13 +216,22 @@ type scanResultItem struct {
 	// Ecosystem echoes the registry the server resolved this row against.
 	// Empty against a server older than the ecosystem field, or for a
 	// coordinate whose ecosystem could not be determined.
-	Ecosystem  string   `json:"ecosystem,omitempty"`
-	Repository string   `json:"repository,omitempty"`
-	Status     string   `json:"status"`
-	Severity   string   `json:"severity,omitempty"`
-	CVSSScore  *float64 `json:"cvss_score,omitempty"`
-	EPSSScore  *float64 `json:"epss_score,omitempty"`
-	CVEs       []string `json:"cves,omitempty"`
+	Ecosystem  string `json:"ecosystem,omitempty"`
+	Repository string `json:"repository,omitempty"`
+	Status     string `json:"status"`
+	Severity   string `json:"severity,omitempty"`
+	// UnscannedReason is the server's one-phrase explanation of WHY this
+	// coordinate could not be evaluated. Populated only when Status ==
+	// "unscanned"; empty against a server older than the field.
+	//
+	// L-05: "scanned and clean" and "could not scan" used to render the
+	// same way — a row with no CVEs and no signals — so an operator (and a
+	// CI gate) read the second as the first. This string is what the two
+	// renderers below use to keep them apart.
+	UnscannedReason string   `json:"unscanned_reason,omitempty"`
+	CVSSScore       *float64 `json:"cvss_score,omitempty"`
+	EPSSScore       *float64 `json:"epss_score,omitempty"`
+	CVEs            []string `json:"cves,omitempty"`
 
 	// Supply-chain signals surfaced from the 13-PR consolidation. The
 	// server populates these from package_metadata on the scan path; the
@@ -277,10 +286,18 @@ Batch input:
   chainsaw scan -            read newline-delimited package specs / lockfile
   chainsaw scan --stdin      paths from stdin (opt-in; bare scan never reads stdin)
 
+Coverage:
+  A package the server could not evaluate is reported as "not scanned", never
+  as clean, and the reason is printed to stderr. That state does NOT fail the
+  build by default; pass --fail-on-unscanned (or set
+  CHAINSAW_SCAN_FAIL_ON_UNSCANNED=1) to make it exit 1.
+
 Exit codes:
   0   clean — nothing at or above the gate
   1   blocked — findings at or above the threshold (--fail-on, else any
-      vulnerable package or high/critical supply-chain condition)
+      vulnerable package or high/critical supply-chain condition). Also
+      returned when --fail-on-unscanned is set and a package could not be
+      evaluated.
   2   operational failure (network, server, IO)
   3   configuration or authentication problem
   4   bad invocation (unknown flag, unparseable package ref, --path with
@@ -289,11 +306,21 @@ Exit codes:
       packages that did parse were still scanned. Same code, same meaning as
       chainsaw pr-scan. A block (1) outranks it.
 
+Naming the registry:
+  A lockfile scan (--path) knows which registry every coordinate came from.
+  A ref typed on the command line usually does not: "commander@2.20.3" exists
+  on npm AND on PyPI, and they are different packages. The scoped form
+  (@scope/pkg) and a Go module path are unambiguous and resolved for you;
+  anything else needs --ecosystem, and the scan says so rather than reporting
+  a coordinate nobody could look up as clean.
+
 Examples:
-  chainsaw scan lodash@4.17.11
+  chainsaw scan lodash@4.17.11 --ecosystem npm
+  chainsaw scan @babel/core@7.24.0
   chainsaw scan --path .
   chainsaw scan --path . --severity high
   chainsaw scan --path . --fail-on critical --json
+  chainsaw scan --path . --fail-on-unscanned
   chainsaw scan --path . --format sarif --output results.sarif
   cat specs.txt | chainsaw scan -`,
 	RunE: runScan,
@@ -301,8 +328,31 @@ Examples:
 
 func init() {
 	scanCmd.Flags().String("path", "", "Scan all dependencies found in a local project manifest")
+	// --ecosystem FILLS IN the registry for coordinates that name none — a
+	// positional `name@version` and a stdin spec line. It deliberately does
+	// NOT override a lockfile-derived coordinate: those already carry the
+	// ecosystem their parser proved, and letting one flag restamp a whole
+	// mixed tree as "npm" would reintroduce the cross-registry collision the
+	// per-item ecosystem exists to prevent.
+	scanCmd.Flags().String("ecosystem", "",
+		"Registry a bare package@version ref belongs to ("+scanEcosystemFlagValues+"); inferred from the lockfile with --path")
 	scanCmd.Flags().String("severity", "", "Minimum severity to display: critical, high, medium, low")
 	scanCmd.Flags().String("fail-on", "", "Exit 1 only when vulnerabilities at or above this severity are found")
+	// L-05 — opt-in, and deliberately so. This product's posture is that an
+	// unavailable signal fails CLOSED, so the RIGHT default is for a
+	// coordinate we could not evaluate to break the build. But flipping a
+	// default exit code silently breaks every existing user's CI on upgrade,
+	// with no warning and no way to have prepared for it. So: fix the
+	// substance first (the server now falls back to the same fetch-and-scan
+	// route `intel package` uses, which makes "unscanned" rare and truthful),
+	// make the state impossible to mistake for "clean" in the output, and
+	// give operators a switch they can turn on when they are ready.
+	//
+	// THE DEFAULT SHOULD FLIP ON THE NEXT MAJOR. When it does, this flag
+	// keeps its name and gains a --no-fail-on-unscanned counterpart rather
+	// than being removed, so a CI file written today still says what it means.
+	scanCmd.Flags().Bool("fail-on-unscanned", false,
+		"Exit 1 when any package could not be evaluated (default: warn only; will become the default in a future major release)")
 	// Y7: no backticks in this usage string. pflag's UnquoteUsage treats the
 	// first back-quoted span as the flag's value placeholder, so "the `-`
 	// arg" rendered a BOOL flag as `--stdin -`. Once the backticks are gone
@@ -328,6 +378,15 @@ func runScan(cmd *cobra.Command, args []string) error {
 	severityFlag, _ := cmd.Flags().GetString("severity")
 	failOnFlag, _ := cmd.Flags().GetString("fail-on")
 	stdinFlag, _ := cmd.Flags().GetBool("stdin")
+	// The env var is the CI-friendly half of the same switch: it lets an
+	// org turn the gate on fleet-wide without editing every workflow file.
+	// An EXPLICIT flag always wins over it in both directions, so
+	// `--fail-on-unscanned=false` can carve one job out of a fleet default
+	// — which is why this is Changed()-gated rather than a plain OR.
+	failOnUnscanned, _ := cmd.Flags().GetBool("fail-on-unscanned")
+	if !cmd.Flags().Changed("fail-on-unscanned") {
+		failOnUnscanned = envTruthy(os.Getenv("CHAINSAW_SCAN_FAIL_ON_UNSCANNED"))
+	}
 
 	// P2.9 — stdin batch is STRICTLY opt-in. It engages only when the user
 	// passes --stdin or the conventional `-` arg; a bare `chainsaw scan` must
@@ -362,6 +421,22 @@ func runScan(cmd *cobra.Command, args []string) error {
 		if !scanSeverityFlagValues[failOnFlag] {
 			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf("unknown --fail-on %q; use critical, high, medium, or low", failOnFlag)}
 		}
+	}
+
+	// --ecosystem is canonicalised through the same normaliser the server and
+	// the policy evaluator use (policy.EcosystemForFormat), so the CLI cannot
+	// grow a second spelling table. A value it cannot place comes back "" —
+	// reject it HERE rather than putting an unresolvable name on the wire and
+	// getting an "unscanned" row back that blames the coordinate.
+	ecosystemFlag, _ := cmd.Flags().GetString("ecosystem")
+	ecosystemFlag = strings.ToLower(strings.TrimSpace(ecosystemFlag))
+	if ecosystemFlag != "" {
+		canonical := string(policy.EcosystemForFormat(ecosystemFlag))
+		if canonical == "" {
+			return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+				"unknown --ecosystem %q; use one of %s", ecosystemFlag, scanEcosystemFlagValues)}
+		}
+		ecosystemFlag = canonical
 	}
 
 	// S6 — build the client with the command's own timeout budget rather than
@@ -447,6 +522,38 @@ func runScan(cmd *cobra.Command, args []string) error {
 		}
 		packages = []scanPkg{pkg}
 	}
+
+	// Fill in the ecosystem the user named for every coordinate that carries
+	// none. See the flag registration for why this fills rather than
+	// overrides: a lockfile coordinate already knows its own registry.
+	if ecosystemFlag != "" {
+		for i := range packages {
+			if packages[i].Ecosystem == "" {
+				packages[i].Ecosystem = ecosystemFlag
+			}
+		}
+	}
+	// Whether ANY coordinate is going out unplaced. The server can only
+	// resolve what it can place, so this is the difference between an
+	// "unscanned" row that means "we looked and found nothing" and one that
+	// means "you have not told us where to look" — and only the second has a
+	// fix the user can apply.
+	var sentWithoutEcosystem bool
+	for _, p := range packages {
+		if p.Ecosystem == "" {
+			sentWithoutEcosystem = true
+			break
+		}
+	}
+	// The one shape where an unplaceable coordinate is unambiguously a bad
+	// INVOCATION rather than a gap in coverage: the operator typed exactly one
+	// ref, we could not infer its registry, and they did not name one. If that
+	// scan comes back unscanned there is precisely one coordinate and one
+	// missing flag, so the CLI can say what to type. A --path or stdin batch
+	// gets the stderr advice above instead — there the unscanned rows may have
+	// several different causes and the run is usually a CI gate whose exit
+	// code must not change under us.
+	bareRefTyped := !useStdin && pathFlag == "" && len(packages) == 1 && packages[0].Ecosystem == ""
 
 	// Surface the dropped dependencies BEFORE the scan runs, and never gate it
 	// on --quiet: this is the reason for a non-zero exit, not chatter, and the
@@ -548,6 +655,19 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// everything", and it printed the clean message for both.
 	hiddenBySeverity := len(resp.Results) - len(displayed)
 
+	// L-05 — surface the coordinates the server could NOT evaluate, by name
+	// and with the server's reason, before any result rendering and for
+	// EVERY format.
+	//
+	// Two deliberate properties:
+	//   - It is not gated on --quiet. Same rule as the manifest-parse
+	//     warning above: --quiet suppresses chatter, never the reason a
+	//     scan is incomplete, and under --fail-on-unscanned this IS the
+	//     reason for the exit code.
+	//   - It goes to stderr for json/sarif too, so a structured consumer's
+	//     stdout stays pure while a human tailing the job still sees it.
+	warnUnscanned(resp.Results, resp.Unscanned, failOnUnscanned, sentWithoutEcosystem)
+
 	switch format {
 	case "json":
 		// P2.11 — schemaVersion is a NEW top-level field; every pre-existing
@@ -592,15 +712,12 @@ func runScan(cmd *cobra.Command, args []string) error {
 			return &ExitCodeError{Code: ExitOpError, Err: fmt.Errorf("write sarif: %w", err)}
 		}
 	default:
-		// Surface the unscanned count before the table/clean message so an
-		// operator never reads "no signals found" as "tree is clean" when
-		// the server actually could not evaluate some packages. JSON output
-		// already carries `unscanned`, so this is the human-path equivalent.
-		// quiet() gates this NOTE (chatter), never the table itself.
-		if resp.Unscanned > 0 && !quiet(cmd) {
-			fmt.Fprintf(os.Stderr, "note: %d package(s) could not be scanned\n", resp.Unscanned)
-		}
-		printScanTable(displayed, hiddenBySeverity, severityFlag)
+		// The unscanned coordinates were already named on stderr by
+		// warnUnscanned above; the count is passed in here so the table's
+		// own empty-state line cannot claim a clean tree alongside them.
+		// Same countUnscanned the warning and the gate use, so stdout,
+		// stderr and the exit code cannot report three different numbers.
+		printScanTable(displayed, hiddenBySeverity, severityFlag, countUnscanned(resp.Results, resp.Unscanned))
 	}
 
 	emit("cli.scan.completed", map[string]any{
@@ -667,7 +784,141 @@ func runScan(cmd *cobra.Command, args []string) error {
 	if manifestParseErr != nil {
 		return &ExitCodeError{Code: ExitManifestParseError, Err: manifestParseErr}
 	}
+
+	// L-05 — the opt-in coverage gate, last because it is the weakest claim
+	// of the three: a real block (1) and a dropped manifest (30) both mean
+	// something concrete went wrong with the packages we DID see, and 30
+	// carries strictly more information than this does, so when either
+	// fires the build is already red and this has nothing to add.
+	//
+	// ExitBlocked rather than a new number on purpose. This is a gate the
+	// operator explicitly switched on and it failed — the exact meaning
+	// ExitBlocked already publishes ("a policy block, a failed gate, or
+	// findings at or above the configured threshold"). Minting a new code
+	// for an opt-in gate would put a number in the shared exit-code space
+	// that only the people who already opted in could ever see.
+	//
+	// The error carries a message because, unlike a findings block, there
+	// is no table row that explains this one on its own.
+	if failOnUnscanned && countUnscanned(resp.Results, resp.Unscanned) > 0 {
+		return &ExitCodeError{Code: ExitBlocked, Err: errors.New(
+			"--fail-on-unscanned: one or more packages could not be evaluated (see the warning above)")}
+	}
+
+	// The single-ref usage failure, LAST of all the gates. `chainsaw scan
+	// lodash@4.17.11` used to print an "unscanned" row and exit 0 — a
+	// non-answer that reads as a pass, on what is most people's first command.
+	// It is a usage error (ExitUsage, same code as an unparseable ref or a
+	// --path with nothing under it), not an operational one: the run reached
+	// the server and the server answered, the invocation was just missing the
+	// one thing that makes the coordinate resolvable.
+	//
+	// Ordered after --fail-on-unscanned so an operator who explicitly wired
+	// that gate still gets the exit code they configured; this only fires on
+	// the interactive one-package path where nothing else has spoken.
+	//
+	// The response has to CONFIRM the diagnosis before the CLI blames the
+	// invocation: one row, unscanned, and echoing no ecosystem of its own.
+	// An unscanned row that came back placed ("this version does not exist
+	// upstream") is a genuine coverage gap that --ecosystem would not have
+	// fixed, and telling that operator to pass a flag would be a wrong answer
+	// delivered with a non-zero exit code.
+	if bareRefTyped && len(resp.Results) == 1 &&
+		resp.Results[0].Status == "unscanned" && resp.Results[0].Ecosystem == "" {
+		return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+			"%s could not be resolved because no registry was named — re-run with --ecosystem <%s>",
+			rest[0], scanEcosystemFlagValues)}
+	}
 	return nil
+}
+
+// countUnscanned reports how many coordinates in this response the server
+// could not evaluate.
+//
+// It prefers counting the rows themselves so the number always matches the
+// coordinates warnUnscanned printed, and falls back to the server's own
+// aggregate when the response carried a count but no rows (an older server,
+// or a response shape that summarises rather than enumerates). Taking the
+// max of the two is the fail-closed choice: under-reporting here is the
+// original defect.
+func countUnscanned(results []scanResultItem, serverCount int) int {
+	n := 0
+	for _, r := range results {
+		if r.Status == "unscanned" {
+			n++
+		}
+	}
+	if serverCount > n {
+		return serverCount
+	}
+	return n
+}
+
+// unscannedNoticeMax caps how many coordinates the warning enumerates. A
+// 10,000-package scan against a cold server could otherwise bury the rest of
+// the output; the count in the header line is always exact.
+const unscannedNoticeMax = 20
+
+// warnUnscanned prints the "could not scan" block to stderr: how many
+// coordinates were not evaluated, which ones, why, and what it means for the
+// exit code.
+//
+// This is the L-05 fix in the output layer. Before it, an unscannable
+// coordinate produced a bare "note: N package(s) could not be scanned" on the
+// human path only, sitting next to "No vulnerabilities or supply-chain
+// signals found" — so the two states a CI gate most needs to tell apart,
+// "scanned and clean" and "could not scan", read as the same result.
+// sentWithoutEcosystem says at least one coordinate went out with no registry
+// named, which is a cause of "unscanned" the operator can actually fix — and
+// the only one whose remedy is a flag rather than a retry. It is derived from
+// the REQUEST, not from the empty Ecosystem on a response row, so a server too
+// old to echo the field cannot make the CLI recommend a flag that would not
+// have helped.
+func warnUnscanned(results []scanResultItem, serverCount int, failOnUnscanned, sentWithoutEcosystem bool) {
+	total := countUnscanned(results, serverCount)
+	if total == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"warning: %d package(s) could NOT be scanned — this result is not evidence that they are clean.\n", total)
+
+	shown := 0
+	for _, r := range results {
+		if r.Status != "unscanned" {
+			continue
+		}
+		if shown == unscannedNoticeMax {
+			fmt.Fprintf(os.Stderr, "         … and %d more\n", total-shown)
+			break
+		}
+		name := r.Name
+		if r.Ecosystem != "" {
+			name = r.Name + " (" + r.Ecosystem + ")"
+		}
+		reason := r.UnscannedReason
+		if reason == "" {
+			// An older server sends no reason. Say that, rather than
+			// inventing one — "we don't know why" is still the honest
+			// answer and is materially different from "it is clean".
+			reason = "no reason reported by the server"
+		}
+		fmt.Fprintf(os.Stderr, "         %s@%s: %s\n", name, r.Version, reason)
+		shown++
+	}
+
+	if sentWithoutEcosystem {
+		fmt.Fprintf(os.Stderr,
+			"         at least one coordinate named no registry, and a bare name@version cannot be\n"+
+				"         resolved upstream — pass --ecosystem <%s>.\n", scanEcosystemFlagValues)
+	}
+
+	if failOnUnscanned {
+		fmt.Fprintf(os.Stderr, "         --fail-on-unscanned is set, so this scan exits %d.\n", ExitBlocked)
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"         exit code is unaffected by default; pass --fail-on-unscanned (or set\n"+
+			"         CHAINSAW_SCAN_FAIL_ON_UNSCANNED=1) to make incomplete coverage fail the build.\n")
 }
 
 // deriveTriggeredConditions inspects the enriched scan result and
@@ -761,13 +1012,33 @@ func resolveHighestSeverity(r scanResultItem) string {
 // the function printed the same all-clear message for both, and an operator
 // read it as a clean tree (S4). The exit gate is unaffected: it iterates the
 // UNFILTERED results (see runScan), which is deliberate and stays that way.
-func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilter string) {
+// unscanned is the count of coordinates the server could not evaluate. It is
+// the L-05 half: without it the empty-state line printed an unqualified
+// all-clear next to a warning saying the opposite, and stdout — which is what
+// a script or a screenshot usually captures — carried only the all-clear.
+func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilter string, unscanned int) {
+	// coverageNote qualifies any "nothing found" claim this function makes.
+	// "No vulnerabilities found" and "no vulnerabilities found in the
+	// packages we could look at" are different statements and must not
+	// share a rendering.
+	coverageNote := func() {
+		if unscanned > 0 {
+			fmt.Printf("%d package(s) could NOT be scanned — this scan does not clear them.\n", unscanned)
+		}
+	}
 	if len(results) == 0 {
 		if hiddenBySeverity > 0 {
 			// Keep the leading clause identical to the clean message so the
 			// two read alike, but qualify it and state the count.
 			fmt.Printf("No vulnerabilities or supply-chain signals found at or above --severity %s.\n", severityFilter)
 			fmt.Printf("%d finding(s) hidden by --severity %s.\n", hiddenBySeverity, severityFilter)
+			coverageNote()
+			return
+		}
+		if unscanned > 0 {
+			// Deliberately NOT the clean message. Nothing was found because
+			// nothing was successfully looked at.
+			coverageNote()
 			return
 		}
 		fmt.Println("No vulnerabilities or supply-chain signals found.")
@@ -776,6 +1047,10 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 	defer func() {
 		if hiddenBySeverity > 0 {
 			fmt.Printf("\n%d finding(s) hidden by --severity %s.\n", hiddenBySeverity, severityFilter)
+		}
+		if unscanned > 0 {
+			fmt.Println()
+			coverageNote()
 		}
 	}()
 	// Class-A glyph: these em dashes are not prose, they are the "no score" /
@@ -799,6 +1074,12 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 		severity := r.Severity
 		if severity == "" {
 			severity = r.Status
+			// "unscanned" sitting in a SEVERITY column reads like a band —
+			// a quiet one, next to "safe". Spell out that no verdict was
+			// reached instead.
+			if r.Status == "unscanned" {
+				severity = "NOT SCANNED"
+			}
 		}
 		signals := g.none
 		if len(r.TriggeredConditions) > 0 {
@@ -917,8 +1198,57 @@ func parsePackageRef(ref string) (scanPkg, error) {
 	if idx <= 0 {
 		return scanPkg{}, fmt.Errorf("invalid package ref %q — use name@version (e.g. lodash@4.17.11)", ref)
 	}
-	return scanPkg{Name: ref[:idx], Version: ref[idx+1:]}, nil
+	name, version := ref[:idx], ref[idx+1:]
+	return scanPkg{Name: name, Version: version, Ecosystem: inferEcosystemForBareRef(name, version)}, nil
 }
+
+// inferEcosystemForBareRef names the registry a bare `name@version` coordinate
+// belongs to, or returns "" when the name could belong to more than one.
+//
+// Why infer at all: the server can only resolve a coordinate it can place in a
+// registry (scanFallback in internal/server/scan.go bails outright on an empty
+// ecosystem), and a lockfile scan gets that for free from the parser. A ref
+// typed on the command line does not, so `chainsaw scan <name>@<version>` —
+// the first thing most people try — came back "unscanned" with nothing the
+// user could act on.
+//
+// Why infer so LITTLE: an invented ecosystem is worse than none. The server
+// answers the coordinate it was handed, so guessing "npm" for a name that is
+// really a PyPI package produces a confident clean verdict about a package
+// nobody looked at — the exact failure shape the ecosystem field was added to
+// close. So only shapes that belong to exactly ONE registry's naming grammar
+// are inferred:
+//
+//   - "@scope/name" — npm's scoped-name grammar. The leading "@" is not legal
+//     in any other registry's names, and "/" is legal in none of them either.
+//   - "host.tld/path…" at a "v"-prefixed version — a Go module path. Go module
+//     versions are always v-prefixed (pseudo-versions included) and a module
+//     path always starts with a domain-shaped segment; nothing else we proxy
+//     accepts "/" in a name once npm's scoped form is excluded.
+//
+// A plain "lodash" is deliberately NOT inferred even though npm is by far the
+// likeliest registry: "lodash" is registrable on PyPI, RubyGems and crates.io
+// too, and "most likely" is precisely the reasoning that yields a clean
+// verdict for the wrong package. The caller asks for --ecosystem instead.
+func inferEcosystemForBareRef(name, version string) string {
+	if scope, pkg, ok := strings.Cut(name, "/"); ok {
+		switch {
+		case strings.HasPrefix(scope, "@") && len(scope) > 1 && pkg != "" && !strings.Contains(pkg, "/"):
+			return string(policy.EcosystemForFormat("npm"))
+		case strings.HasPrefix(version, "v") && strings.Contains(scope, ".") && pkg != "":
+			return string(policy.EcosystemForFormat("go"))
+		}
+	}
+	return ""
+}
+
+// scanEcosystemFlagValues renders the ecosystem names --ecosystem accepts, for
+// the flag's help text and for the error a rejected value produces. Only the
+// CANONICAL spelling of each is listed; policy.EcosystemForFormat also folds
+// the aliases the rest of the tree carries (pypi → pip, yarn/bun → npm,
+// gradle → maven, gomod → go, oci → docker), so a user who types an alias is
+// accepted silently rather than being told a true value is wrong.
+const scanEcosystemFlagValues = "npm|pip|maven|cargo|rubygems|composer|nuget|go|cocoapods|swift|pub|docker"
 
 // collectFromManifests walks dir recursively and returns every pinned
 // (name, version) pair produced by chainsaw's dependency-parser

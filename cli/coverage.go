@@ -3,12 +3,14 @@ package cli
 // `chainsaw coverage` subcommands — opt-in coverage reporting CLI.
 //
 // Hard contract (mirrored from internal/coverage):
-//   - The feature is OFF by default. When the server has
-//     `coverage.enabled: false` (or is unset), every /api/coverage/*
-//     request returns 404. The CLI surfaces that as a plain "coverage
-//     is not enabled on the server" message rather than dumping a
-//     stack trace, so an operator running these commands against a
-//     dark deployment gets a clear signal.
+//   - The feature is ON by default (core/config: CoverageConfig.IsEnabled
+//     returns true when `coverage.enabled` is unset). A server that has
+//     it switched off — or that predates the coverage API, or booted
+//     without a database — answers every /api/coverage/* request with
+//     404. The CLI surfaces that as a plain description of what the
+//     server said rather than dumping a stack trace, so an operator
+//     running these commands against a dark deployment gets a clear
+//     signal.
 //   - The CLI is read + admin-CRUD only. Nothing here ever causes the
 //     server to block an install or change a policy decision. The
 //     `expected` subcommand mutates the coverage_expected metadata
@@ -16,7 +18,9 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -176,11 +180,23 @@ func init() {
 	rootCmd.AddCommand(coverageCmd)
 }
 
-// coverageDisabledMessage is what the CLI prints when the server
-// returns 404 for any /api/coverage/* path. The wording is neutral and
-// instructive — partial adoption is fine, we're just letting the
-// operator know they haven't opted in to the measurement view.
-const coverageDisabledMessage = "coverage is not enabled on this server (set coverage.enabled: true in the server config to opt in)"
+// coverageNotAvailableMessage is what the CLI prints when the server
+// answers a /api/coverage/* collection request with 404.
+//
+// It deliberately does NOT tell the operator to set `coverage.enabled:
+// true`. That key defaults to true (core/config/config.go —
+// CoverageConfig.IsEnabled) and is documented in
+// docs/CONFIG_REFERENCE.md, so the previous wording sent operators off
+// to change a setting that was already correct. A 404 has three real
+// causes and the response body cannot tell them apart, so the message
+// reports what the server said and names the causes instead of
+// guessing one.
+const coverageNotAvailableMessage = "the server returned 404 for the coverage endpoint.\n" +
+	"Coverage is on by default, so this is not a missing `coverage.enabled` setting. Usual causes:\n" +
+	"  - the server predates the coverage API — compare `chainsaw version` with the server build\n" +
+	"  - coverage is switched off for this org via the `coverage_default_on` feature flag\n" +
+	"  - the server booted without a database, so coverage is in dark mode — check the server logs\n" +
+	"An org with no install traffic yet is not one of these: that returns an empty summary, not a 404."
 
 func runCoverageSummary(cmd *cobra.Command, _ []string) error {
 	client := newClient()
@@ -506,9 +522,17 @@ func translateCoverageCollectionErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "404") || strings.Contains(msg, "not found") {
-		return fmt.Errorf("%s", coverageDisabledMessage)
+	// Status-first. apiError carries the HTTP status the transport
+	// observed, and that is the only authoritative "was this a 404" —
+	// see the Status field doc in client.go. The previous substring
+	// match on "404" / "not found" over the whole error text was too
+	// broad in both directions: it rewrote the misconfigured-`--server`
+	// hint (serverURLError's message contains both "404" and "Not
+	// Found") into coverage advice, and it would fire on any unrelated
+	// error whose text happened to contain those words.
+	var apiErr *apiError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+		return fmt.Errorf("%s", coverageNotAvailableMessage)
 	}
 	return err
 }

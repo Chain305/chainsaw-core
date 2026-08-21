@@ -157,7 +157,7 @@ func (s *DefaultService) scanTransitiveDep(eco, name string, depth int) {
 	// cache fall through so they get refreshed via the normal Scan
 	// path, which is consistent with how stale-while-revalidate works.
 	if s.store != nil {
-		if cached, err := s.store.Get(ctx, "", Key{Ecosystem: eco, Package: name, Version: version}); err == nil && cached != nil {
+		if cached, err := s.store.Get(ctx, "", Key{Ecosystem: eco, Package: name, Version: version}); err == nil && !cached.MatcherStale() {
 			age := s.now().Sub(cached.Observation.CollectedAt)
 			if age < DefaultMaxStaleness {
 				// Still propagate the recursion when grand-children

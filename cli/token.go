@@ -29,18 +29,42 @@ import (
 // field-for-field in sync with server_api_keys.go:apiKeyPayload so the
 // CLI never has to round-trip through a generic map.
 type tokenItem struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	KeyType    string     `json:"key_type"`
-	AgentKind  string     `json:"agent_kind,omitempty"`
-	Prefix     string     `json:"prefix"`
-	CreatedBy  string     `json:"created_by_user_id"`
-	Scopes     tokenScope `json:"scopes"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
-	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
-	Active     bool       `json:"active"`
-	CreatedAt  time.Time  `json:"created_at"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	KeyType   string     `json:"key_type"`
+	AgentKind string     `json:"agent_kind,omitempty"`
+	Prefix    string     `json:"prefix"`
+	CreatedBy string     `json:"created_by_user_id"`
+	Scopes    tokenScope `json:"scopes"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// ExpiryWindowSeconds is set only for keys whose expiry SLIDES — the
+	// ones the server mints for `chainsaw auth login`. For those, ExpiresAt
+	// is an IDLE deadline that every authenticated request pushes back out,
+	// not a date the key is counting down to. Absent (older servers, and
+	// every operator-dated key) means the expiry is hard.
+	ExpiryWindowSeconds *int64     `json:"expiry_window_seconds,omitempty"`
+	LastUsedAt          *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt           *time.Time `json:"revoked_at,omitempty"`
+	Active              bool       `json:"active"`
+	CreatedAt           time.Time  `json:"created_at"`
+}
+
+// expiryWindowDays renders the sliding window in the unit the CLI talks in.
+// Returns 0 for a hard expiry (or none), which every caller reads as "not
+// sliding". Rounds to the nearest day so a 90-day window minted a few
+// milliseconds of clock skew off still reads as 90.
+func (k tokenItem) expiryWindowDays() int {
+	if k.ExpiryWindowSeconds == nil || *k.ExpiryWindowSeconds <= 0 || k.ExpiresAt == nil {
+		return 0
+	}
+	const secondsPerDay = 60 * 60 * 24
+	days := (*k.ExpiryWindowSeconds + secondsPerDay/2) / secondsPerDay
+	if days < 1 {
+		// Sub-day windows exist only in tests and pathological configs, but
+		// they ARE sliding, and returning 0 would misreport them as hard.
+		days = 1
+	}
+	return int(days)
 }
 
 // tokenScope mirrors server_api_keys.go:scopeDTO.
@@ -107,10 +131,19 @@ func runTokenList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	rows := make([][]string, len(resp.APIKeys))
+	anySliding := false
 	for i, k := range resp.APIKeys {
 		expires := "-"
 		if k.ExpiresAt != nil {
 			expires = k.ExpiresAt.Format("2006-01-02")
+			// A bare date in an EXPIRES column reads as "dies then", which
+			// is wrong for a sliding key: using it moves the date. Mark the
+			// row and explain the mark once, below the table — cheaper than
+			// widening every row with an "(idle 90d)" suffix.
+			if k.expiryWindowDays() > 0 {
+				expires += "*"
+				anySliding = true
+			}
 		}
 		status := "active"
 		if k.RevokedAt != nil {
@@ -129,6 +162,11 @@ func runTokenList(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	PrintTable([]string{"ID", "NAME", "TYPE", "PREFIX", "STATUS", "EXPIRES", "CREATED"}, rows)
+	if anySliding {
+		fmt.Fprintln(cmd.OutOrStdout(),
+			"\n* sliding expiry: the date is when the key lapses if it is NOT used again. "+
+				"Each authenticated request pushes it back out, so a key in regular use does not expire.")
+	}
 	return nil
 }
 
@@ -312,11 +350,15 @@ func runTokenRotate(cmd *cobra.Command, args []string) error {
 // ── revoke ────────────────────────────────────────────────────────────────────
 
 var tokenRevokeCmd = &cobra.Command{
-	Use:   "revoke <token-id>",
+	Use:   "revoke <token-id | name>",
 	Short: "Revoke a token (irreversible)",
-	Long: "Revoke a token by id. The token stops authenticating immediately. " +
-		"This is irreversible — there is no un-revoke verb. Use --yes to skip " +
-		"the confirmation prompt in scripts.",
+	Long: "Revoke a token by id (ak-…) or by the name shown in `chainsaw token " +
+		"list`. The token stops authenticating immediately. This is " +
+		"irreversible — there is no un-revoke verb. Use --yes to skip the " +
+		"confirmation prompt in scripts.\n\n" +
+		"A name shared by two live tokens is refused rather than guessed at; " +
+		"the error lists the ids so you can pick one. CLI keys are named " +
+		"cli:<host>@<date>, so minting two in a day produces exactly that.",
 	Args: cobra.ExactArgs(1),
 	RunE: runTokenRevoke,
 }
@@ -341,6 +383,77 @@ func resolveTokenRevokeLabel(client *APIClient, id string) (string, error) {
 	return describeTarget(preview.Target.Name, id), nil
 }
 
+// tokenIDPrefix is the shape every api_keys row's primary key has: the server
+// mints ids as "ak-" + the key's public prefix (internal/server/
+// server_api_keys.go and auth_cli.go both build them that way). It is the
+// cheap, local test that keeps an id revoke a single round trip.
+const tokenIDPrefix = "ak-"
+
+// resolveTokenTarget turns whatever the operator typed into the id the revoke
+// endpoint takes.
+//
+// `token revoke` accepted only an id while its sibling `auth client delete`
+// accepts a label, so a name copied out of `token list` came back
+// "CHW-4925: api key not found" — a real token, a correct name, and an error
+// that reads like the token does not exist.
+//
+// Three rules, in order:
+//
+//   - An argument in the id shape is passed straight through. No listing, no
+//     extra round trip, byte-identical behaviour to before this function.
+//   - Otherwise the name is matched against the org's LIVE tokens. Two live
+//     tokens can legitimately share a name — CLI keys are named
+//     cli:<host>@<date> and a day can hold several — so an ambiguous name is
+//     refused with the ids listed. Revoking an arbitrary one of two live
+//     credentials is the kind of wrong that is only discovered later, by an
+//     outage.
+//   - Anything the listing cannot resolve falls through UNCHANGED, so the
+//     server still produces its own not-found error for a typo, and an id
+//     from some future or seeded row that does not match the "ak-" shape is
+//     not turned into a "no token named …" that hides it.
+func resolveTokenTarget(client *APIClient, arg string) (string, error) {
+	if strings.HasPrefix(arg, tokenIDPrefix) {
+		return arg, nil
+	}
+
+	var resp struct {
+		APIKeys []tokenItem `json:"api_keys"`
+	}
+	if err := client.Get("/api/api-keys", &resp); err != nil {
+		// A listing we could not read is not evidence about the argument.
+		// Hand it to the revoke endpoint and let the server answer.
+		return arg, nil
+	}
+
+	var live, revoked []tokenItem
+	for _, k := range resp.APIKeys {
+		if k.Name != arg {
+			continue
+		}
+		if k.RevokedAt == nil {
+			live = append(live, k)
+		} else {
+			revoked = append(revoked, k)
+		}
+	}
+
+	switch {
+	case len(live) == 1:
+		return live[0].ID, nil
+	case len(live) > 1:
+		ids := make([]string, 0, len(live))
+		for _, k := range live {
+			ids = append(ids, k.ID)
+		}
+		return "", fmt.Errorf(
+			"%d live tokens are named %q — revoke by id instead: %s",
+			len(live), arg, strings.Join(ids, ", "))
+	case len(revoked) > 0:
+		return "", fmt.Errorf("every token named %q is already revoked — nothing to do", arg)
+	}
+	return arg, nil
+}
+
 // resolveTokenLabel names a token for a confirmation prompt using the existing
 // GET /api/api-keys/{id} (internal/server/server_api_keys.go). No new endpoint.
 func resolveTokenLabel(client *APIClient, id string) (string, error) {
@@ -358,12 +471,20 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	if client.baseURL == "" {
 		return errServerNotConfigured(cmd)
 	}
-	id := strings.TrimSpace(args[0])
-	if id == "" {
-		return fmt.Errorf("token id is required")
+	target := strings.TrimSpace(args[0])
+	if target == "" {
+		return fmt.Errorf("token id or name is required")
 	}
 	// Auth BEFORE the confirmation prompt (see requireAuth, root.go).
 	if err := requireAuth(cmd); err != nil {
+		return err
+	}
+
+	// Resolve a name to an id BEFORE anything else touches it, so --dry-run
+	// previews the same row the revoke would hit and the L-30 confirmation
+	// probe below still runs against a real target.
+	id, err := resolveTokenTarget(client, target)
+	if err != nil {
 		return err
 	}
 
