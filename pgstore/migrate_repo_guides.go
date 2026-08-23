@@ -153,10 +153,38 @@ const staleRepositoryGuideCountSQL = `
 // that appears here but not in configs/seed.yaml is a repository the backfill
 // cannot repair (an operator-created proxy, or one dropped from the seed),
 // and seeing it is more useful than silently excluding it.
-func (s *Store) StaleRepositoryGuideCounts(ctx context.Context) (map[string]int, error) {
+// repairable reports whether the backfill could actually change a row for
+// this repository — i.e. whether its SEED guide contains the freshness
+// marker at all.
+//
+// Not every guide uses it. docker-hub and swift address the bare host
+// rather than the /chainproxy path, so their prose contains no
+// "your-chainsaw-base" token and never will. The stale predicate keys on
+// the marker's ABSENCE, so those rows match it permanently while the
+// UPDATE correctly leaves them alone (the replacement text is byte-identical
+// to what is already stored). The first production run of this backfill
+// reported "stale rows found total=63 by_repository=map[docker-hub:38
+// swift:25]" alongside "rows_updated=0" — a true statement of the predicate
+// and a completely misleading statement about the system, printed on every
+// boot.
+//
+// Counting only what the UPDATE can act on makes the two numbers agree, so
+// a non-zero "found" with a zero "updated" becomes a real signal again.
+func repairable(guides []RepositoryGuide) map[string]struct{} {
+	out := make(map[string]struct{}, len(guides))
+	for _, g := range guides {
+		if strings.Contains(g.Guide, repositoryGuideFreshMarker) {
+			out[g.Name] = struct{}{}
+		}
+	}
+	return out
+}
+
+func (s *Store) StaleRepositoryGuideCounts(ctx context.Context, guides []RepositoryGuide) (map[string]int, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
+	repair := repairable(guides)
 	rows, err := s.ReadDB().QueryContext(ctx, staleRepositoryGuideCountSQL)
 	if err != nil {
 		return nil, fmt.Errorf("count stale repository guides: %w", err)
@@ -169,6 +197,11 @@ func (s *Store) StaleRepositoryGuideCounts(ctx context.Context) (map[string]int,
 		var n int
 		if err := rows.Scan(&name, &n); err != nil {
 			return nil, fmt.Errorf("scan stale repository guide count: %w", err)
+		}
+		if _, ok := repair[name]; !ok {
+			// No marker in this repository's seed guide, so the
+			// backfill can never change it — see repairable.
+			continue
 		}
 		counts[name] = n
 	}

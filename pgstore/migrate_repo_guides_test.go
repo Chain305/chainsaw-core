@@ -79,7 +79,7 @@ func TestBackfillStaleRepositoryGuidesNoStore(t *testing.T) {
 		t.Fatalf("nil store: expected 0 rows, got %d", n)
 	}
 
-	counts, err := nilStore.StaleRepositoryGuideCounts(context.Background())
+	counts, err := nilStore.StaleRepositoryGuideCounts(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("nil store counts: unexpected error: %v", err)
 	}
@@ -149,8 +149,17 @@ func TestBackfillStaleRepositoryGuides(t *testing.T) {
 		Enabled: 1, AnonymousAccess: 0, Guide: freshGuideProse,
 	})
 
+	replacement := strings.TrimSpace(freshGuideProse)
+	guides := []RepositoryGuide{
+		{Name: staleRepo, Guide: freshGuideProse},
+		{Name: customRepo, Guide: freshGuideProse},
+		{Name: freshRepo, Guide: freshGuideProse},
+		{Name: "  ", Guide: freshGuideProse},       // skipped: no name
+		{Name: "guidebackfill_blank", Guide: "  "}, // skipped: blank replacement
+	}
+
 	// Dry run sees exactly the two stale rows and not the fresh one.
-	counts, err := store.StaleRepositoryGuideCounts(ctx)
+	counts, err := store.StaleRepositoryGuideCounts(ctx, guides)
 	if err != nil {
 		t.Fatalf("stale counts: %v", err)
 	}
@@ -163,15 +172,6 @@ func TestBackfillStaleRepositoryGuides(t *testing.T) {
 	if n, ok := counts[freshRepo]; ok {
 		t.Errorf("stale counts[%s] = %d, want absent — the row already carries %q",
 			freshRepo, n, repositoryGuideFreshMarker)
-	}
-
-	replacement := strings.TrimSpace(freshGuideProse)
-	guides := []RepositoryGuide{
-		{Name: staleRepo, Guide: freshGuideProse},
-		{Name: customRepo, Guide: freshGuideProse},
-		{Name: freshRepo, Guide: freshGuideProse},
-		{Name: "  ", Guide: freshGuideProse},       // skipped: no name
-		{Name: "guidebackfill_blank", Guide: "  "}, // skipped: blank replacement
 	}
 
 	updated, err := store.BackfillStaleRepositoryGuides(ctx, guides)
@@ -237,7 +237,7 @@ func TestBackfillStaleRepositoryGuides(t *testing.T) {
 	}
 
 	// And the dry run agrees nothing is left to do for these names.
-	counts, err = store.StaleRepositoryGuideCounts(ctx)
+	counts, err = store.StaleRepositoryGuideCounts(ctx, guides)
 	if err != nil {
 		t.Fatalf("stale counts after backfill: %v", err)
 	}
