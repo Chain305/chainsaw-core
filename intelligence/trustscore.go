@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/chain305/chainsaw-core/hiddenunicode"
+	"github.com/chain305/chainsaw-core/intelligence/osv"
 	"github.com/chain305/chainsaw-core/risk"
 	"github.com/chain305/chainsaw-core/trustscore"
 )
@@ -204,8 +205,147 @@ func ComputeTrustScoreForOrg(report *Report, orgID string) {
 		report.SupplyChain.TrustScore = score.Total
 		return
 	}
+	// A package whose ONLY real problem is a set of CVEs that all have a
+	// published patch is not a "manual review required" case — it is a
+	// one-line upgrade. promoteToUpgradeAvailable re-runs the evaluator
+	// with risk.Options.SafeUpgradeVersion set, but only when all three
+	// promotion gates hold; it returns nil (and the verdict stands
+	// exactly as it is today) for every other package. See the function
+	// for the gates, and risk.UpgradePromotionEligible for two of them.
+	safeVersion := MinimumSafeVersion(report)
+	if promoted := promoteToUpgradeAvailable(report, eval, safeVersion, weights, signalOverrides); promoted != nil {
+		eval = promoted
+	}
+
+	// Display fields. On the promoted path this is a no-op re-write of
+	// the SafeVersion resolveVerdict already set, plus the patch
+	// advisory sentence; on every non-promoted path it is the original
+	// display-only behaviour — the page stops rendering "no known safe
+	// version" next to its own "Fix available" signal without the
+	// verdict moving.
+	eval.ApplyKnownFix(safeVersion)
+
 	report.Risk = eval
 	report.SupplyChain.TrustScore = eval.RolledUp.Overall
+}
+
+// LatestVersionCorroborator, when non-nil, answers "what version does the
+// registry currently advertise as latest for this package?" from the
+// persisted intelligence_latest_probes row. It is consulted ONLY when the
+// Report being scored does not already carry Release.LatestVersion (the
+// same fact, fresher, from this scan's own registry-metadata provider).
+//
+// Store.NewStore installs the DB-backed implementation. It stays nil in
+// unit tests and in any binary with no intelligence store, which keeps
+// ComputeTrustScoreForOrg pure by default.
+//
+// A nil hook is not a failure: see upgradeCandidateCorroborated for what
+// "no corroboration available" means (the advisory data alone is allowed
+// to carry the claim, because it is the data that makes the claim TRUE —
+// the probe is only ever a veto).
+var LatestVersionCorroborator func(ecosystem, pkg string) (latest string, ok bool)
+
+// promoteToUpgradeAvailable decides whether this package's verdict may be
+// promoted to risk.VerdictUpgradeAvailable, and returns the promoted
+// Evaluation when it may. nil means "leave the verdict exactly as it is".
+//
+// Promotion is enforcement-visible by design — internal/decision maps
+// quarantine→Blocked but upgrade_available→Monitored, internal/scan drops
+// the lockfile severity, the transitive rollup drops the node from
+// blockedNodes, and `intel scan` moves it to the warn exit bucket. So the
+// three gates below are all required, and each one is a REFUSAL by
+// default:
+//
+//	(a) EVIDENCE. MinimumSafeVersion(report) — the maximum of the
+//	    per-CVE FixedVersion values across every advisory that still
+//	    affects this coordinate, empty if a single one of them has no
+//	    published fix, and never a version that is not strictly greater
+//	    than the installed one. That value, and only that value, is the
+//	    candidate: it is the lowest version we can PROVE clears
+//	    everything. A bare "latest version" probe is not evidence of
+//	    non-vulnerability and is never used as the candidate.
+//	    Corroboration (upgradeCandidateCorroborated) then vetoes the
+//	    promotion if the registry's advertised latest is BELOW the
+//	    candidate — i.e. the advisory names a fix that is not published
+//	    yet, so the upgrade we would recommend is not installable.
+//
+//	(b) VULNERABILITY-DRIVEN and (c) NOT THE BOTTOM BAND both live in
+//	    risk.UpgradePromotionEligible, next to the category taxonomy and
+//	    the band thresholds they read.
+//
+// The re-evaluation is a second pure EvaluatePackage call with identical
+// weights, so the scores are byte-identical to the first pass; the final
+// guard asserts that, and refuses the promotion if the engine ever
+// disagrees.
+func promoteToUpgradeAvailable(
+	report *Report,
+	eval *risk.Evaluation,
+	safeVersion string,
+	weights map[risk.Category]float64,
+	signalOverrides map[string]int,
+) *risk.Evaluation {
+	if report == nil || eval == nil || safeVersion == "" {
+		return nil
+	}
+	if !risk.UpgradePromotionEligible(eval) {
+		return nil
+	}
+	if !upgradeCandidateCorroborated(report, safeVersion) {
+		return nil
+	}
+	promoted := risk.EvaluatePackage(ProjectToRiskInput(report), risk.Options{
+		CategoryWeights:       weights,
+		SignalWeightOverrides: signalOverrides,
+		SafeUpgradeVersion:    safeVersion,
+	})
+	if promoted == nil || promoted.Verdict != risk.VerdictUpgradeAvailable {
+		return nil
+	}
+	if promoted.Resolution.SafeVersion != safeVersion {
+		return nil
+	}
+	// Promotion must change the VERDICT and nothing else. If the score
+	// moved, something other than the option we flipped is in play and
+	// the safe answer is the un-promoted one.
+	if promoted.DirectScore.Overall != eval.DirectScore.Overall ||
+		promoted.RolledUp.Overall != eval.RolledUp.Overall {
+		return nil
+	}
+	return promoted
+}
+
+// upgradeCandidateCorroborated asks the registry-advertised latest
+// version whether the candidate is actually installable.
+//
+// The candidate comes from advisory fix data, which can name a version
+// the registry has not published (a coordinated-disclosure fix version
+// announced ahead of the release, or a typo in a feed). Recommending
+// such an upgrade would send the user to a 404 while quietly unblocking
+// the package, so a latest BELOW the candidate is a veto.
+//
+// Sources, in order: the Report's own Release.LatestVersion (written by
+// the registry-metadata provider during this same scan) and then the
+// persisted daily probe via LatestVersionCorroborator. When neither is
+// available we PROCEED on the advisory data alone — that is the
+// documented fallback, and it is sound because the probe was never the
+// thing that made the claim true; MinimumSafeVersion is. An undecidable
+// comparison, by contrast, is a refusal: we cannot prove the candidate
+// is installable, so we do not promote.
+func upgradeCandidateCorroborated(report *Report, candidate string) bool {
+	latest := strings.TrimSpace(report.Release.LatestVersion)
+	if latest == "" && LatestVersionCorroborator != nil {
+		if probed, ok := LatestVersionCorroborator(report.Identity.Ecosystem, report.Identity.Package); ok {
+			latest = strings.TrimSpace(probed)
+		}
+	}
+	if latest == "" {
+		return true
+	}
+	cmp, err := osv.CompareVersions(report.Identity.Ecosystem, latest, candidate)
+	if err != nil {
+		return false
+	}
+	return cmp >= 0
 }
 
 // deref returns the pointed-to bool or false when nil.
@@ -214,4 +354,68 @@ func deref(p *bool) bool {
 		return false
 	}
 	return *p
+}
+
+// ReapplyKnownFixAfterTransitive restores the upgrade promotion and the
+// known-fix display fields after evaluateTransitiveRisk has overlaid the
+// tree pass onto report.Risk.
+//
+// WHY THIS EXISTS. The scan pipeline runs ComputeTrustScoreForOrg first
+// and evaluateTransitiveRisk second (scanner.go: ComputeTrustScoreForOrg
+// then evaluateTransitiveRisk). The overlay replaces Verdict and
+// Resolution wholesale from a root evaluation that EvaluateTree produced
+// with a bare risk.Options{} — so it carries neither the promotion nor
+// the SafeVersion / PatchAdvisory / corrected Summary that
+// ComputeTrustScoreForOrg had just established. Without this call a
+// package whose dependency graph resolves to more than one node silently
+// reverts to bare quarantine AND to the false "no known safe version"
+// summary, while the identical package with no resolvable deps keeps
+// both. The feature would be coherent only for single-node graphs, and
+// the display-only fix that shipped before it would be silently absent
+// on exactly the packages most likely to have dependencies.
+//
+// WHY IT IS SAFE. It re-runs the same three gates against the OVERLAID
+// evaluation, not the pre-overlay one:
+//   - a transitive malware / critical finding fires supply_chain signals,
+//     which risk.UpgradePromotionEligible vetoes outright;
+//   - a more-conservative secondEval verdict has already been folded in
+//     by the overlay, so the gates see the worse of the two;
+//   - the rolled-up score is the post-transitive one, so band-1 packages
+//     dragged below the quarantine threshold BY their dependencies stay
+//     ineligible.
+//
+// A package can therefore only keep its promotion here if it still earns
+// it after its dependency graph has been accounted for.
+//
+// WHY NOT pass SafeUpgradeVersion into EvaluateTree instead: that applies
+// the ROOT's safe version to every descendant node, promoting dependencies
+// on evidence that belongs to their parent.
+func ReapplyKnownFixAfterTransitive(report *Report, orgID string) {
+	if report == nil || report.Risk == nil {
+		return
+	}
+	var weights map[risk.Category]float64
+	if OrgWeightsResolver != nil {
+		if raw := OrgWeightsResolver(orgID); len(raw) > 0 {
+			weights = make(map[risk.Category]float64, len(raw))
+			for k, v := range raw {
+				weights[risk.Category(k)] = v
+			}
+		}
+	}
+	var signalOverrides map[string]int
+	if OrgSignalWeightsResolver != nil {
+		signalOverrides = OrgSignalWeightsResolver(orgID)
+	}
+
+	safeVersion := MinimumSafeVersion(report)
+	if promoted := promoteToUpgradeAvailable(report, report.Risk, safeVersion, weights, signalOverrides); promoted != nil {
+		// The tree pass owns these three; a re-evaluation of the root
+		// input cannot reproduce them, so carry them across explicitly.
+		promoted.Resolution.TransitiveBlame = report.Risk.Resolution.TransitiveBlame
+		promoted.Resolution.TransitiveSeverity = report.Risk.Resolution.TransitiveSeverity
+		promoted.RolledUp = report.Risk.RolledUp
+		report.Risk = promoted
+	}
+	report.Risk.ApplyKnownFix(safeVersion)
 }

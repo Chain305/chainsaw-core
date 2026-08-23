@@ -55,6 +55,17 @@ func WithTransport(fn func(*http.Transport) http.RoundTripper) DefaultOption {
 	return func(c *defaultClientConfig) { c.transportFn = fn }
 }
 
+// AllowPrivateUpstreams reports whether the operator has opted out of the
+// SafeDialer SSRF block via CHAINSAW_ALLOW_PRIVATE_UPSTREAMS=1.
+//
+// Exported so that callers which pre-validate a target URL *before* the
+// dial (create-time admin-config validation, e.g. an SSO issuer_url) can
+// honour exactly the same escape hatch the dial-time guard honours. If
+// the two disagreed, an operator running a self-hosted IdP on RFC1918
+// would be blocked at save time by a check the dialer would have let
+// through — or, worse, the reverse.
+func AllowPrivateUpstreams() bool { return allowPrivateUpstreams() }
+
 func defaultConfig() defaultClientConfig {
 	return defaultClientConfig{
 		timeout:             30 * time.Second,
@@ -74,6 +85,27 @@ func defaultConfig() defaultClientConfig {
 // transport's MaxIdleConnsPerHost of 2 forces fresh TLS handshakes on
 // every concurrent request beyond the second, which adds 100-300ms of
 // latency per cold call against a distant registry.
+//
+// SECURITY — New is NOT SSRF-safe on its own. The transport it returns
+// dials with a plain net.Dialer, so any egress path whose target URL is
+// attacker- or tenant-influenced (an org admin's OIDC issuer, a SAML
+// metadata URL, a webhook target, a Jira base_url, a SIEM endpoint) can
+// be pointed at RFC1918 / loopback / link-local space. On a typical
+// Kubernetes deployment that reaches the API server, the database, and
+// the proxy itself — all of which sit on addresses the guard blocks.
+//
+// Any NEW egress path must install the SSRF guard, one of two ways:
+//
+//   - Factory.NewClient with NewFactory(cfg, WithSafeDialer(true)) — for
+//     repository-remote style clients; or
+//   - New(WithTransport(func(base *http.Transport) http.RoundTripper {
+//     base.DialContext = NewSafeDialer(nil).DialContext; return base }))
+//     — for one-off clients. See internal/webhook/dispatcher.go,
+//     internal/connector/jira/client.go and internal/server/authapi's
+//     ssoSafeHTTPClient for the three in-tree precedents.
+//
+// Bare New (no safe dialer) is only appropriate for a pinned,
+// compile-time-constant host that no tenant can influence.
 func New(opts ...DefaultOption) *http.Client {
 	cfg := defaultConfig()
 	for _, o := range opts {

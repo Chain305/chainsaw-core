@@ -302,6 +302,21 @@ type FacetCounts struct {
 	ArtifactScan int           `json:"artifactScan"`
 	TrustBuckets []FacetBucket `json:"trustBuckets"` // low (<40), medium (40-70), high (70-100)
 	Last24h      int           `json:"last24h"`
+	// StalePending counts rows whose verdict and trust score came from a
+	// superseded matcher epoch — the aggregate companion to
+	// SearchRow.MatcherStale.
+	//
+	// It is a COMPANION, not a subtraction: every other count on this
+	// struct still includes these rows. Excluding them would silently
+	// under-report the cache and stop the sidebar reconciling with the
+	// table it filters, which is the failure mode the disclosure exists
+	// to avoid. Read this as "of the Total above, this many are awaiting
+	// recompute", never as "Total minus this is the real number".
+	//
+	// No omitempty: zero is the answer an operator most wants to see
+	// (nothing pending), so it must be present on the wire rather than
+	// indistinguishable from an older server that does not send it.
+	StalePending int `json:"stalePending"`
 }
 
 // FacetBucket is one labeled cell in a facet list — label + count.
@@ -347,6 +362,27 @@ type SearchRow struct {
 	// Rolled-up overall score (0-100) from the v2 evaluation. Pointer so
 	// a true zero score is distinguishable from "not evaluated".
 	OverallScore *int `json:"overallScore,omitempty"`
+	// MatcherStale reports that this row's Verdict, OverallScore and
+	// TrustScore were produced by a superseded generation of the matcher
+	// and risk engine — the same condition Report.MatcherStale() names,
+	// read off the persisted row rather than off a decoded Report.
+	//
+	// The list DISCLOSES this rather than hiding it. Filtering stale rows
+	// out of Search would empty the operator's entire package inventory
+	// for as long as it takes the refresher to walk it — and the
+	// refresher only ever reaches coordinates with a package_metadata row,
+	// so rows written by the CLI lockfile scanner, `intel scan`,
+	// transitive fan-out or a public lookup would never come back at all.
+	// A row that is present but marked is strictly more honest than a row
+	// that silently vanishes, and it keeps the facet totals reconcilable
+	// with the table underneath them.
+	//
+	// Consumers must not read Verdict / OverallScore / TrustScore as a
+	// current judgement when this is true. The detail page for the same
+	// coordinate turns a stale row into a 404 and rescans, so a UI that
+	// renders these values unqualified is promising something the next
+	// click will refuse to show.
+	MatcherStale bool `json:"matcherStale,omitempty"`
 }
 
 // ChecksumRequest is the input to Service.VerifyChecksum — the fail-closed

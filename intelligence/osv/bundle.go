@@ -353,6 +353,13 @@ func CanonicalEcosystem(ecosystem string) string {
 		return "nuget"
 	case "composer", "packagist":
 		return "packagist"
+	case "pub":
+		// OSV: "Pub" (Dart / Flutter). Verified 2026-08-23 that the
+		// upstream bucket is exactly "Pub" — "Dart" and lowercase "pub"
+		// both 404. The switch lower-cases its input first, so an
+		// advisory whose ecosystem field reads "Pub" folds onto the same
+		// key as the "pub" the repository format emits.
+		return "pub"
 	case "go", "gomod":
 		// OSV: "Go". gomod is the caller-facing alias the proxy resolver
 		// emits for Go module advisories. Go module paths are
@@ -608,8 +615,8 @@ func earliestFixAbove(ecosystem string, fixedVersions []string, introduced strin
 //	                normalised away — both shapes show up in registry
 //	                version strings.
 func compareVersions(ecosystem, a, b string) (int, error) {
-	a = strings.TrimSpace(a)
-	b = strings.TrimSpace(b)
+	a = normalizeVersionPrefix(a)
+	b = normalizeVersionPrefix(b)
 	switch CanonicalEcosystem(ecosystem) {
 	case "nuget":
 		va, err := parseNuGet(a)
@@ -642,6 +649,19 @@ func compareVersions(ecosystem, a, b string) (int, error) {
 		}
 		return va.Compare(vb), nil
 	case "maven", "packagist":
+		// mvn.NewVersion accepts ANY string: a leading non-numeric run
+		// is read as a qualifier and sorts below numeric versions, so
+		// "swiftmailer-6.2.5" compares as though it were less than
+		// "5.4.5" — a confident, nil-error, inverted answer. Refuse
+		// instead. An error here becomes `undecidable` in
+		// advisoryAffectsEx, which LookupEx deliberately keeps out of
+		// the `cleared` bucket, so an unorderable coordinate can never
+		// veto a real advisory. Maven's own meta-versions ("RELEASE",
+		// "LATEST") land here too, which is correct: they name no
+		// concrete point to compare a bound against.
+		if err := requireNumericLead("maven", a, b); err != nil {
+			return 0, err
+		}
 		va, err := mvn.NewVersion(a)
 		if err != nil {
 			return 0, err
@@ -665,6 +685,67 @@ func compareVersions(ecosystem, a, b string) (int, error) {
 		}
 		return va.Compare(vb), nil
 	}
+}
+
+// requireNumericLead rejects operands that do not begin with a digit
+// after prefix normalisation. Only the Maven-family parser needs this:
+// SemVer, PEP 440, Gem and NuGet all reject a non-numeric lead with a
+// real error, while mvn.NewVersion silently reinterprets it as a
+// qualifier and returns an inverted ordering. See the call site.
+func requireNumericLead(family, a, b string) error {
+	for _, v := range [2]string{a, b} {
+		if v == "" || v[0] < '0' || v[0] > '9' {
+			return fmt.Errorf("%s: version %q does not begin with a digit; refusing to order it", family, v)
+		}
+	}
+	return nil
+}
+
+// normalizeVersionPrefix trims whitespace and strips ONE leading "v"/"V"
+// when a digit follows it.
+//
+// WHY THIS IS NOT COSMETIC. Before this existed, compareVersions answered
+// CONFIDENTLY AND WRONGLY whenever its two operands disagreed about
+// carrying the prefix — and returned a nil error, so every caller's
+// error branch was blind to it. Measured 2026-08-23:
+//
+//	compareVersions("composer", "5.4.5", "v6.3.0")            = +1  WRONG
+//	compareVersions("composer", "5.4.5", "swiftmailer-6.2.5") = +1  WRONG
+//	compareVersions("composer", "v6.3.0", "v5.4.5")           = +1  right
+//	compareVersions("composer", "6.3.0", "5.4.5")             = +1  right
+//
+// Right when BOTH operands carry the prefix, right when NEITHER does,
+// wrong only when they disagree. The cause is the dispatch table: the
+// `default` branch launders the prefix through parseSemver, but
+// maven/packagist hand the raw string to mvn.NewVersion, which reads a
+// leading "v" as a QUALIFIER and sorts qualifier-led versions BELOW
+// numeric ones — inverting the comparison.
+//
+// This is a range-matching correctness bug, not just a display one:
+// advisoryAffectsEx compares the queried version against `introduced`,
+// `fixed` and `lastAffected` (see the three call sites below), so an
+// inverted result silently mis-evaluates a CVE bound — attaching an
+// advisory that does not apply, or clearing one that does. The mixed
+// case is routine rather than exotic: Go module versions are canonically
+// v-prefixed while OSV bounds frequently are not, and 166 of 6,511
+// production coordinates (2.5%) carry a non-numeric-leading version.
+//
+// Normalising BOTH operands identically preserves ordering for
+// same-shaped inputs (the two "right" rows above are unchanged) and
+// repairs it for mixed ones. Anything that still does not lead with a
+// digit — a package-name-prefixed tag like "swiftmailer-6.2.5", a
+// date-stamped docker tag — is left untouched here and refused
+// downstream (see requireNumericLead for the Maven family, whose parser
+// would otherwise accept it as a qualifier), surfacing as UNDECIDABLE. That is the
+// safe outcome by construction: LookupEx keeps undecidable out of the
+// `cleared` bucket precisely so an unparseable version can never veto a
+// real advisory.
+func normalizeVersionPrefix(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && (v[0] == 'v' || v[0] == 'V') && v[1] >= '0' && v[1] <= '9' {
+		return v[1:]
+	}
+	return v
 }
 
 // parseSemver wraps Masterminds/semver with a lenient input filter so

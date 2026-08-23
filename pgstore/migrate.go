@@ -2265,6 +2265,36 @@ func (s *Store) migrateSchema() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_flywheel_published_entry ON flywheel_published(ecosystem, package_name, package_version, version DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_flywheel_published_malware_id ON flywheel_published(malware_id)`,
+
+		// intelligence_reports is keyed (ecosystem, package_name, version)
+		// so its PRIMARY KEY cannot serve a lookup that knows the package
+		// and version but NOT the ecosystem. Two read paths do exactly
+		// that, because their driving rows carry no ecosystem column:
+		//   - GET /api/findings?kev=true, which resolves each finding
+		//     coordinate's CISA-KEV state (internal/server/findings_api.go,
+		//     kevCoverageForOrg).
+		//   - hydrateLeaderboardClosure in internal/server/leaderboard_api.go,
+		//     which was already running this shape unindexed.
+		// Both were sequential scans of the whole intel cache. This index
+		// makes them index lookups. The KEV flag itself lives inside the
+		// `report` JSONB (report -> 'vulnerabilities' ->> 'knownExploited')
+		// and is deliberately NOT indexed: the JSONB extraction only ever
+		// runs on rows this index already narrowed to the caller's own
+		// coordinates, so it is a per-row expression, not a table scan.
+		`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_pkg_version ON intelligence_reports(package_name, version)`,
+		// …and a PARTIAL index over the KEV predicate itself, because the
+		// index above alone is not enough. Measured on a synthetic 50k-row
+		// cache (Postgres 16): with only the plain index the planner
+		// hash-joins and SEQUENTIALLY SCANS intelligence_reports to apply
+		// the JSONB filter — 7.3ms / 1119 shared buffers at 50k rows, and
+		// that grows linearly with the cache. With this partial index the
+		// same query becomes a Bitmap Index Scan: 0.22ms / 106 buffers.
+		//
+		// Partial (not a plain expression index) because CISA's catalog is
+		// small — a few thousand CVEs, so a few thousand coordinates at
+		// most — which means the index stays tiny no matter how large the
+		// cache grows, and non-KEV writes never touch it.
+		`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_kev ON intelligence_reports(package_name, version) WHERE (report -> 'vulnerabilities' ->> 'knownExploited') = 'true'`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

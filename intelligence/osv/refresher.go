@@ -70,6 +70,11 @@ const (
 // is os.Open at https://osv-vulnerabilities.storage.googleapis.com/<name>/all.zip
 var DefaultEcosystems = []string{
 	"npm", "PyPI", "crates.io", "RubyGems", "NuGet", "Packagist", "Maven", "Go",
+	// "Pub" is Dart/Flutter. Added 2026-08-23: the deployment stores
+	// pub coordinates (repository format "pub") but the feed was never
+	// fetched, so those packages got no advisory matching at all. The
+	// bucket name is case-sensitive — "Dart" and "pub" both 404.
+	"Pub",
 }
 
 // SwapFunc receives a freshly-loaded Index. The provider in

@@ -12,12 +12,25 @@ type Options struct {
 	// Now overrides time.Now for deterministic tests. Nil = real clock.
 	Now func() time.Time
 
-	// SafeUpgradeVersion is populated by the caller when they have
-	// already determined a newer safe version exists for this package.
-	// When non-empty AND the overall score is in the
-	// upgrade-available band, the verdict resolves to UpgradeAvailable
-	// with this string as SafeVersion. The intelligence package fills
-	// this from the intelligence_latest_probes table.
+	// SafeUpgradeVersion is the version of THIS package that the caller
+	// has independently PROVEN clears every advisory currently affecting
+	// the installed coordinate. When non-empty the verdict resolves to
+	// UpgradeAvailable with this string as SafeVersion.
+	//
+	// This field moves enforcement. A promoted node stops being Blocked
+	// in internal/decision, drops from "critical" to "low" in the
+	// lockfile scan, leaves blockedNodes in the transitive rollup, and
+	// lands in the warn exit-code bucket in `intel scan`. Callers MUST
+	// therefore pass UpgradePromotionEligible(eval) == true before
+	// setting it, and MUST derive the string from per-advisory fix data
+	// (intelligence.MinimumSafeVersion), never from a bare
+	// "latest version" probe — the latest version of a malicious or
+	// still-unpatched package is not a safe one.
+	//
+	// The only production writer is
+	// intelligence.ComputeTrustScoreForOrg; see
+	// core/intelligence/trustscore.go (promoteToUpgradeAvailable) for
+	// the three gates that gate it.
 	SafeUpgradeVersion string
 
 	// Alternative is populated by the caller when a curated replacement
@@ -56,10 +69,18 @@ const categoryBase = 100
 // verdict thresholds — kept as package-level consts so tests and docs share
 // the same cutoffs with the decision table.
 const (
-	thresholdQuarantine = 30 // overall < 30 → quarantine or upgrade-available
+	thresholdQuarantine = 30 // overall < 30 → quarantine (never upgrade-available)
 	thresholdWarn       = 60 // 30..59 → warn
 	// >= 60 → allow
 )
+
+// ThresholdQuarantine is the exported band-1 cutoff. Callers that gate an
+// upgrade-available promotion need the same number the decision table
+// uses; exporting it stops the gate and the table from drifting apart.
+const ThresholdQuarantine = thresholdQuarantine
+
+// ThresholdWarn is the exported band-2 cutoff. See ThresholdQuarantine.
+const ThresholdWarn = thresholdWarn
 
 // EvaluatePackage runs every registered signal and compound rule against
 // the Input, computes per-category and overall scores, and resolves a
@@ -527,6 +548,111 @@ func resolveVerdict(overall int, primitives, compound map[string]FiredSignal, op
 		Verdict: VerdictAllow,
 		Summary: "Package shows no blocking risk signals.",
 	}
+}
+
+// upgradeVetoCategories are the risk categories whose NEGATIVE signals
+// describe a defect that shipping a newer version of the SAME package
+// cannot repair. A newer release of a malicious, typosquatted,
+// compromised-maintainer, install-hook-bearing, or byte-tampered package
+// is still all of those things — "just upgrade" is the wrong advice and
+// the promotion it drives (quarantine → upgrade_available → Monitored at
+// the proxy) would be a real fail-open.
+//
+// The gate is keyed on CATEGORY, not on an id list, so a signal added to
+// registry_supplychain.go / registry_quality.go in a later PR inherits
+// the veto without anyone remembering to extend a list here:
+//
+//	supply_chain — malware, typosquat, dependency confusion, account
+//	               takeover, install hooks, provenance/repo mismatch,
+//	               capability escalation, hidden unicode, AI-artifact
+//	               signals, the takeover and env-net-install compounds.
+//	quality      — checksum mismatch (tampered bytes) and version
+//	               anomaly (a suspicious release cadence).
+//
+// vulnerability, maintenance and license are deliberately NOT vetoes:
+// vulnerability is the risk an upgrade actually fixes, and the other two
+// are held to the dominance test in UpgradePromotionEligible instead.
+var upgradeVetoCategories = map[Category]struct{}{
+	CategorySupplyChain: {},
+	CategoryQuality:     {},
+}
+
+// UpgradePromotionEligible reports whether an already-computed Evaluation
+// may have its verdict promoted to VerdictUpgradeAvailable by a caller
+// that has independently PROVEN a safe version of the same package
+// exists (evidence gate — see intelligence.MinimumSafeVersion).
+//
+// This function owns two of the three promotion gates. The caller owns
+// the third (evidence).
+//
+//	(b) vulnerability-driven. No negative signal may have fired in a
+//	    vetoed category (upgradeVetoCategories), at least one negative
+//	    vulnerability signal MUST have fired, and the vulnerability
+//	    category's total deficit must STRICTLY EXCEED every other
+//	    category's. A package whose score is really being driven by
+//	    abandonment or a license problem does not get told "just
+//	    upgrade" — its verdict stays exactly what it is today.
+//
+//	(c) not the bottom band. An overall below ThresholdQuarantine is the
+//	    engine's "this is not a triage case" band; resolveVerdict's own
+//	    table calls it quarantine territory. Sub-30 never becomes "just
+//	    upgrade". Note that vuln.kev carries MaxImpact 20, so a
+//	    known-exploited package is pinned into band 1 by construction and
+//	    can never be promoted — that is the intended reading of (c), not
+//	    an accident.
+//
+// Both DirectScore and RolledUp are checked so a transitively-dragged
+// node cannot be promoted on the strength of its direct score alone.
+//
+// A nil Evaluation, an Allow, or an Unknown ("we could not evaluate
+// this") is never eligible: there is no adverse verdict to improve, and
+// Unknown in particular must never be laundered into actionable advice.
+func UpgradePromotionEligible(ev *Evaluation) bool {
+	if ev == nil {
+		return false
+	}
+	switch ev.Verdict {
+	case VerdictWarn, VerdictQuarantine, VerdictReplace:
+		// Promotable: an adverse verdict that an upgrade could resolve.
+	default:
+		// Allow (nothing to improve) and Unknown (never evaluated).
+		return false
+	}
+
+	// (c) Bottom-band gate.
+	if ev.DirectScore.Overall < thresholdQuarantine || ev.RolledUp.Overall < thresholdQuarantine {
+		return false
+	}
+
+	// (b) Category gate. Walk the fired set off the persisted category
+	// buckets — computeCategoryScores and instantBlock both file
+	// primitives AND compound rules there, so this sees the same signals
+	// resolveVerdict saw.
+	deficit := make(map[Category]float64, len(CategoryWeights))
+	for _, cs := range ev.DirectScore.Categories {
+		for _, f := range cs.FiredSignals {
+			if f.Weight >= 0 {
+				continue // positive signals are credits, not risk drivers
+			}
+			if _, vetoed := upgradeVetoCategories[f.Category]; vetoed {
+				return false
+			}
+			deficit[f.Category] += -f.Weight
+		}
+	}
+	vuln := deficit[CategoryVulnerability]
+	if vuln <= 0 {
+		return false // nothing an upgrade of this package would fix
+	}
+	for cat, d := range deficit {
+		if cat == CategoryVulnerability {
+			continue
+		}
+		if d >= vuln {
+			return false // the dominant risk is not known CVEs
+		}
+	}
+	return true
 }
 
 // hasCriticalSignal returns true when any primitive or compound signal

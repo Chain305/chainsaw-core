@@ -238,3 +238,89 @@ func TestSeedNpmFamilyGuidesDocumentThePlaintextTokenFormat(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Guard (4): a guide that hands the reader a runnable POSIX `export` must
+// also hand a Windows reader an equivalent.
+//
+// The npm / Yarn / Bun guides already do this: every `export CHAINSAW_TOKEN=`
+// block is followed by a `**Windows (PowerShell):**` fence and, where the
+// tool has a cmd.exe story, a `**Windows (cmd.exe):**` one. Several other
+// guides shipped POSIX-only, which is a hard stop rather than a cosmetic
+// gap: a Flutter-on-Windows developer following the pub guide has no way to
+// set PUB_HOSTED_URL at all from the instructions given, and `export` is not
+// a command on either Windows shell.
+//
+// The check is deliberately keyed on `export`, not on the mere presence of a
+// `bash` fence. A `bash` fence that only runs the tool itself (`dotnet
+// restore`, `composer install`, `cargo build`) is fine to leave as-is: those
+// commands are identical on PowerShell. It is specifically the shell-builtin
+// environment assignment that has no Windows equivalent.
+// ---------------------------------------------------------------------------
+
+// posixExportLine matches a runnable POSIX environment assignment.
+var posixExportLine = regexp.MustCompile(`(?m)^\s*export\s+[A-Za-z_][A-Za-z0-9_]*=`)
+
+// powerShellForm is what satisfies the guard. Any ONE of these is enough —
+// a guide may reasonably use a fenced ```powershell block, or an inline
+// `$env:VAR = ...` / `setx` / `[Environment]::SetEnvironmentVariable(...)`
+// instruction in prose.
+var powerShellForm = regexp.MustCompile(
+	"(?i)(```powershell|\\$env:|\\bsetx\\b|\\[Environment\\]::SetEnvironmentVariable)")
+
+// windowsExemptGuides are the repositories whose guides may stay POSIX-only,
+// keyed to the reason. Each entry is a deliberate product decision, NOT a
+// backlog item.
+//
+// Prefer adding a genuine Windows path over adding an entry here. An
+// exemption is only correct when the ecosystem itself does not run on
+// Windows — every other guide that hands out an `export` has a working
+// PowerShell equivalent and must carry it.
+//
+// The single entry below is currently UNEXERCISED: the cocoapods-trunk
+// guide has no `export` line today, so the guard never reaches the lookup
+// for it. It is recorded anyway because the standing decision is easy to
+// lose: CocoaPods drives Xcode and its own documented cache-clear step is
+// `rm -rf ~/Library/Caches/CocoaPods`. If someone later adds an `export`
+// to that guide, this pre-answers the failure instead of prompting a
+// transliterated PowerShell block for a toolchain that cannot run there.
+var windowsExemptGuides = map[string]string{
+	"cocoapods-trunk": "CocoaPods requires Xcode; macOS-only by construction",
+}
+
+func TestSeedGuidesWithPosixExportAlsoCoverWindows(t *testing.T) {
+	t.Parallel()
+	requireMonorepoTree(t, "configs")
+	for _, path := range seedConfigPaths {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", path, err)
+		}
+		for _, repo := range cfg.Repositories {
+			guide := repo.ClientConfigurationGuide
+			if strings.TrimSpace(guide) == "" {
+				continue
+			}
+			if !posixExportLine.MatchString(guide) {
+				continue
+			}
+			if _, exempt := windowsExemptGuides[strings.ToLower(repo.Name)]; exempt {
+				continue
+			}
+			if powerShellForm.MatchString(guide) {
+				continue
+			}
+			t.Errorf("%s: the %q client_configuration_guide hands the reader a "+
+				"runnable POSIX `export` but never a Windows equivalent.\n"+
+				"`export` is not a command in PowerShell or cmd.exe, so a "+
+				"Windows developer cannot follow this guide at all. Add a "+
+				"**Windows (PowerShell):** fence using `$env:VAR = ...` "+
+				"(persisting with `setx` or "+
+				"`[Environment]::SetEnvironmentVariable`), matching the "+
+				"structure the npmjs guide already uses. If the ecosystem "+
+				"genuinely does not run on Windows, add %q to "+
+				"windowsExemptGuides with the reason.",
+				path, repo.Name, repo.Name)
+		}
+	}
+}

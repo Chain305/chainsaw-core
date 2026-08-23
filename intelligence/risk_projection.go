@@ -15,8 +15,11 @@ package intelligence
 // under-fires because legacy remains authoritative.
 
 import (
+	"strings"
+
 	"github.com/chain305/chainsaw-core/capability"
 	"github.com/chain305/chainsaw-core/hiddenunicode"
+	"github.com/chain305/chainsaw-core/intelligence/osv"
 	"github.com/chain305/chainsaw-core/risk"
 )
 
@@ -43,6 +46,27 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// INCOMPLETE and exits 2. Return immediately and carry no facts:
 	// half a fact set is what got us here.
 	if reason, ok := versionNotFoundReason(r); ok {
+		return risk.Input{
+			Ecosystem:          r.Identity.Ecosystem,
+			Package:            r.Identity.Package,
+			Version:            r.Identity.Version,
+			SignalsUnavailable: true,
+			UnavailableReason:  reason,
+		}
+	}
+
+	// Same treatment for a version string that can never be matched at
+	// all — an unresolved manifest property ("${slf4jVersion}"), our own
+	// synthetic "metadata" marker for a maven-metadata.xml upload, or a
+	// Maven resolver directive. Scoring these produced a clean Allow,
+	// which is the worst possible answer: the coordinate reads as
+	// scanned and safe while no advisory could ever attach to it. 27
+	// such rows were live in production on 2026-08-23.
+	//
+	// VerdictUnknown maps to Monitored, not Blocked
+	// (internal/decision/decision.go), so this stops them rendering as
+	// clean without refusing anything a user is trying to do.
+	if reason, ok := versionNotEvaluableReason(r); ok {
 		return risk.Input{
 			Ecosystem:          r.Identity.Ecosystem,
 			Package:            r.Identity.Package,
@@ -286,6 +310,22 @@ func versionNotFoundReason(r *Report) (string, bool) {
 	return "", false
 }
 
+// versionNotEvaluableReason reports whether the ingest guard stamped this
+// report as carrying a version that can never be matched against an
+// advisory range (see UnevaluableVersionReason). Phrased as a clause to
+// match versionNotFoundReason: it is rendered inside
+// UnavailableEvaluation's summary sentence.
+func versionNotEvaluableReason(r *Report) (string, bool) {
+	for _, w := range r.Observation.Warnings {
+		if w.Code == WarnVersionNotEvaluable {
+			return "the recorded version cannot be matched against any advisory range; " +
+				"it is an unresolved manifest property, a resolver directive, or an " +
+				"internal marker rather than a published version", true
+		}
+	}
+	return "", false
+}
+
 // projectActionsSection walks the report's Action findings (if any) and
 // flips the matching ActionRef* booleans / appends to the ref slices on
 // the risk.Input. Refs are deduped per-signal so a ref appearing in
@@ -346,6 +386,190 @@ func anyCVEFixAvailable(details []CVEDetail) bool {
 		}
 	}
 	return false
+}
+
+// MinimumSafeVersion returns the lowest version of THIS package that
+// clears EVERY CVE currently affecting it, or "" when no such version is
+// known.
+//
+// It is a DISPLAY-ONLY resolver. The value it returns must never be fed
+// to risk.Options.SafeUpgradeVersion: doing so would make the evaluator's
+// upgrade_available promotion branches fire, which weakens enforcement in
+// four places (internal/decision quarantine→Monitored, internal/scan
+// lockfile severity critical→low, the transitive rollup's blockedNodes
+// set, and the `intel scan` exit-code bucket). The verdict is not this
+// function's business; the sentence the UI prints next to it is.
+//
+// Algorithm:
+//
+//  1. The obligation set is Vulnerabilities.CVEs — the ids that actually
+//     affect this coordinate — minus ClearedCVEs. CVEDetails entries for
+//     ids outside that set are ignored: a fix for a CVE that does not
+//     affect us is not a bound on our upgrade.
+//  2. Every id in the obligation set must carry a CVEDetail with a
+//     non-empty FixedVersion. One id without a fix and we return "" —
+//     naming a "safe version" that is still vulnerable to the remaining
+//     CVE is a strictly worse failure than saying nothing, which is the
+//     whole reason this is a minimum-clearing-ALL and not a first-hit.
+//  3. The answer is the MAXIMUM of those per-CVE fixed versions under the
+//     ecosystem's own ordering (osv.CompareVersions — PEP 440 for PyPI,
+//     Gem for RubyGems, Maven for Maven/Composer, NuGet's four-segment
+//     order, SemVer elsewhere). Maximum, not minimum: a version below any
+//     one CVE's fix is still affected by that CVE.
+//  4. Any unparseable operand, or a result that is not STRICTLY GREATER
+//     than the installed version, yields "". Both are the same rule —
+//     never advise an upgrade we cannot prove is one.
+func MinimumSafeVersion(r *Report) string {
+	if r == nil || len(r.Vulnerabilities.CVEs) == 0 {
+		return ""
+	}
+
+	cleared := make(map[string]struct{}, len(r.Vulnerabilities.ClearedCVEs))
+	for _, id := range r.Vulnerabilities.ClearedCVEs {
+		cleared[normalizeCVEID(id)] = struct{}{}
+	}
+
+	// Latest fix wins within a duplicated id — providers occasionally
+	// merge two advisories for the same CVE with different backport
+	// branches, and the higher one is the one that clears both.
+	fixes := make(map[string]string, len(r.Vulnerabilities.CVEDetails))
+	eco := r.Identity.Ecosystem
+	for _, d := range r.Vulnerabilities.CVEDetails {
+		fv := strings.TrimSpace(d.FixedVersion)
+		if fv == "" {
+			continue
+		}
+		id := normalizeCVEID(d.CVE)
+		prev, seen := fixes[id]
+		if !seen {
+			fixes[id] = fv
+			continue
+		}
+		cmp, err := osv.CompareVersions(eco, fv, prev)
+		if err != nil {
+			// Undecidable duplicate — refuse the whole answer rather
+			// than silently keeping the arbitrary first one.
+			return ""
+		}
+		if cmp > 0 {
+			fixes[id] = fv
+		}
+	}
+
+	best := ""
+	obligations := 0
+	for _, raw := range r.Vulnerabilities.CVEs {
+		id := normalizeCVEID(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := cleared[id]; ok {
+			continue
+		}
+		obligations++
+		fv, ok := fixes[id]
+		if !ok {
+			return "" // this CVE has no known fix — there is no safe version
+		}
+		if best == "" {
+			best = fv
+			continue
+		}
+		cmp, err := osv.CompareVersions(eco, fv, best)
+		if err != nil {
+			return ""
+		}
+		if cmp > 0 {
+			best = fv
+		}
+	}
+	if obligations == 0 || best == "" {
+		return ""
+	}
+
+	// The advisory's fix must be ahead of what is installed. A fix at or
+	// below the installed version means the advisory data and the
+	// coordinate disagree; advising a downgrade would be worse than
+	// advising nothing.
+	installed := strings.TrimSpace(r.Identity.Version)
+	if installed == "" {
+		return ""
+	}
+	// osv.CompareVersions answers CONFIDENTLY AND WRONGLY when the two
+	// operands have mismatched prefix shapes. Measured against production
+	// data on 2026-08-23:
+	//
+	//	Compare("composer", "5.4.5", "v6.3.0")            = 1  (wrong)
+	//	Compare("composer", "5.4.5", "swiftmailer-6.2.5") = 1  (wrong)
+	//	Compare("composer", "v6.3.0", "v5.4.5")           = 1  (right)
+	//	Compare("composer", "6.3.0", "5.4.5")             = 1  (right)
+	//
+	// err is nil in every case, so the guard below cannot see it. Without
+	// this shape check the promotion advised downgrading swiftmailer from
+	// v6.3.0 to 5.4.5 — an older, still-vulnerable release — on real
+	// production coordinates.
+	//
+	// So: refuse unless both operands are shapes the comparator actually
+	// orders correctly. Refusing costs an upgrade hint on 2.5% of
+	// coordinates (166 of 6511 in prod carry a non-numeric-leading
+	// version, concentrated in docker/go/huggingface); getting it wrong
+	// costs a user a downgrade into a known CVE.
+	//
+	// UPDATE: the comparator itself was fixed in the following change —
+	// osv.compareVersions now normalises the prefix on both operands and
+	// the Maven family refuses a non-numeric lead (matcher epoch 3). So
+	// the inversion above no longer reaches here.
+	//
+	// This guard is kept anyway, deliberately. It is the last check
+	// before the product tells a human "upgrade to X", the single place
+	// where being wrong sends someone backwards into a known CVE, and it
+	// is two comparisons. Defence in depth at the point of advice costs
+	// nothing and does not depend on a distant invariant holding.
+	bestCmp, bestOK := comparableVersion(best)
+	installedCmp, installedOK := comparableVersion(installed)
+	if !bestOK || !installedOK {
+		return ""
+	}
+	cmp, err := osv.CompareVersions(eco, bestCmp, installedCmp)
+	if err != nil || cmp <= 0 {
+		return ""
+	}
+	return best
+}
+
+// comparableVersion normalizes v into a shape osv.CompareVersions orders
+// correctly, reporting false when no such shape exists.
+//
+// A single leading "v"/"V" is stripped. That is what actually fixes the
+// mixed-shape inversion: the comparator is right when BOTH operands carry
+// the prefix and right when NEITHER does, and wrong only when they
+// disagree — so normalizing both sides identically preserves ordering for
+// same-shaped inputs and repairs it for mixed ones. Go module versions are
+// canonically v-prefixed while advisory bounds frequently are not, so the
+// mixed case is routine, not exotic.
+//
+// Anything that still does not lead with a digit after stripping — a
+// package-name prefix ("swiftmailer-6.2.5"), a date-stamped docker tag, an
+// arbitrary label — is refused rather than trusted.
+func comparableVersion(v string) (string, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", false
+	}
+	if v[0] == 'v' || v[0] == 'V' {
+		v = v[1:]
+	}
+	if v == "" || v[0] < '0' || v[0] > '9' {
+		return "", false
+	}
+	return v, true
+}
+
+// normalizeCVEID upper-cases and trims an advisory id so the obligation
+// set and the detail list join on the same key. Feeds mix "CVE-2024-1"
+// and "cve-2024-1" shapes depending on provider.
+func normalizeCVEID(id string) string {
+	return strings.ToUpper(strings.TrimSpace(id))
 }
 
 // fixedCVEs returns the subset of CVE IDs with a known fix version, in

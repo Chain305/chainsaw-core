@@ -295,6 +295,25 @@ func TestPinnedVersion(t *testing.T) {
 		{"latest", ""}, // no digit
 		{"1, 2", ""},   // comma
 		{"1.X", ""},    // wildcard segment, capital
+
+		// Unresolved manifest properties. This function was the live
+		// producer of the ${...} coordinates found in production on
+		// 2026-08-23: the operator loop never listed '$'/'{'/'}', and
+		// hasDigit passes anything containing a digit, so these were
+		// warmed into intelligence_reports as though pinned. No advisory
+		// range can match such a coordinate, so the row read as
+		// scanned-and-clean while being unmatchable.
+		{"${jsr305.version}", ""},
+		{"${commons.lang3.version}", ""},
+		{"${slf4jVersion}", ""},
+		// Already rejected before the fix, by hasDigit — its absence from
+		// the production table is what identified this function as the
+		// producer rather than a lockfile parser. Pinned so the reason it
+		// is rejected cannot silently change.
+		{"${project.version}", ""},
+		// A real version that merely contains a brace-like character in a
+		// prerelease tag must still pass; the guard keys on "${".
+		{"1.2.3-beta1", "1.2.3-beta1"},
 	}
 	for _, tc := range cases {
 		if got := pinnedVersion(tc.in); got != tc.want {

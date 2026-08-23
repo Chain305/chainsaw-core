@@ -77,6 +77,18 @@ var okCodes = map[string]bool{
 var notApplicableCodes = map[string]bool{
 	"ecosystem_unsupported": true,
 	"needs_artifact":        true,
+	// version_not_evaluable: the coordinate's version component is not a
+	// version at all — an uninterpolated `${…}` build property, our
+	// synthetic maven-metadata marker, a Maven meta-version. No advisory
+	// source APPLIES to it, which is what not_applicable means; it is not
+	// an outage (unavailable) and it is not our bug (error).
+	//
+	// Classified deliberately rather than left to the StatusError default,
+	// because "the source failed" is the one thing that did not happen
+	// here. It never blocks either way — the refusal that IS warranted
+	// comes from the marked, unevaluated report, not from the coverage
+	// gate. See core/intelligence/version_evaluable.go.
+	"version_not_evaluable": true,
 }
 
 // StatusForWarnCode normalizes a raw provider warn code into a Status.

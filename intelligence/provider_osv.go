@@ -165,6 +165,7 @@ var supportedOSVEcosystems = map[string]struct{}{
 	"nuget":    {},
 	"composer": {}, "packagist": {},
 	"go": {}, "gomod": {},
+	"pub": {},
 }
 
 // Supports reports whether the OSV feed covers the given ecosystem.

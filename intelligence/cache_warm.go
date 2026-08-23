@@ -201,6 +201,29 @@ func pinnedVersion(constraint string) string {
 	if hasWildcardSegment(v) {
 		return ""
 	}
+	// Reject an unresolved manifest property. Maven and Gradle POMs
+	// routinely declare a dependency as <version>${slf4jVersion}</version>,
+	// and provider_registrymetadata takes the constraint verbatim from the
+	// raw POM without interpolating it. The operator loop above does not
+	// list '$', '{' or '}', and hasDigit below passes anything containing a
+	// digit — so "${jsr305.version}" and "${commons.lang3.version}" both
+	// survived and were warmed into intelligence_reports as though they
+	// were pinned versions.
+	//
+	// That is a SILENT BLIND SPOT: no advisory range can ever match such a
+	// coordinate, so it sat in the inventory reading as scanned-and-clean.
+	// Three such rows were live in production on 2026-08-23. The fingerprint
+	// that identified this function as the producer is that
+	// "${project.version}" contains NO digit, so hasDigit already rejected
+	// it — and it is correspondingly absent from that table, while the
+	// digit-bearing placeholders are present.
+	//
+	// intelligence.UnevaluableVersionReason is the shared definition of
+	// "cannot be matched"; this is the same rule applied early, so the
+	// warmer never creates the row in the first place.
+	if strings.Contains(v, unresolvedPropertyMarker) {
+		return ""
+	}
 	// Optional leading 'v' — some manifests carry it on pinned versions.
 	if len(v) > 1 && (v[0] == 'v' || v[0] == 'V') {
 		v = v[1:]

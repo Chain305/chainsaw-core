@@ -1,6 +1,9 @@
 package risk
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // EngineVersion is stamped onto every Evaluation so downstream consumers
 // (API clients, Sonatype/JFrog plugins, the divergence dashboard) can
@@ -146,6 +149,66 @@ type Evaluation struct {
 	Resolution    Resolution `json:"resolution"`
 	EvaluatedAt   time.Time  `json:"evaluatedAt"`
 	EngineVersion string     `json:"engineVersion"`
+}
+
+// noFixSummaries maps every Resolution.Summary the evaluator emits that
+// ASSERTS no fix exists to the sentence that replaces it once a patched
+// version is known. Keyed on the exact strings resolveVerdict produces
+// (evaluator.go) — resolution_display_test.go drives resolveVerdict and
+// fails if any of them drifts, so this table cannot rot silently.
+//
+// The replacements keep the verdict's posture word-for-word: a
+// quarantine still says manual review is required. The only thing that
+// changes is that the sentence stops claiming a fix does not exist when
+// the corpus knows one does.
+var noFixSummaries = map[string]string{
+	"High-risk package with no known safe version or alternative. Manual review required.": "High-risk package. Patched in %s — upgrade and re-scan. Manual review required until then.",
+	"Critical signal present with no upgrade or alternative path. Manual review required.": "Critical signal present. Patched in %s — upgrade and re-scan. Manual review required until then.",
+	"Package is high-risk with no safe version. Consider an alternative.":                  "Package is high-risk. Patched in %s — upgrade and re-scan, or consider an alternative.",
+}
+
+// ApplyKnownFix records a patched version on a Resolution for DISPLAY,
+// and corrects a Summary that asserts no such version exists.
+//
+// It deliberately does NOT touch Verdict. The engine's upgrade_available
+// promotion is driven by Options.SafeUpgradeVersion at evaluation time
+// and reaches four enforcement surfaces (internal/decision,
+// internal/scan's lockfile severity, the transitive rollup's blocked-node
+// set, and the CLI exit-code bucket). Populating the display field after
+// the fact keeps the enforcement answer byte-identical while the page
+// stops printing a false sentence. See the caller,
+// intelligence.MinimumSafeVersion, for how the version is derived.
+//
+// safeVersion == "" is a no-op: "we could not establish a version that
+// clears every CVE" must render as today's output, not as a blank
+// advisory.
+func (r *Resolution) ApplyKnownFix(safeVersion string) {
+	if r == nil || safeVersion == "" {
+		return
+	}
+	// An evaluation that never ran carries no advice. VerdictUnknown means
+	// the facts were unavailable — for a coordinate the registry never
+	// published, the CVE rows on the report describe a DIFFERENT version,
+	// so an upgrade line derived from them would be fiction attached to a
+	// "not evaluated" result.
+	if r.Verdict == VerdictUnknown {
+		return
+	}
+	r.SafeVersion = safeVersion
+	r.PatchAdvisory = "Patched in " + safeVersion + " — upgrade and re-scan."
+	if replacement, ok := noFixSummaries[r.Summary]; ok {
+		r.Summary = fmt.Sprintf(replacement, safeVersion)
+	}
+}
+
+// ApplyKnownFix is the Evaluation-level convenience wrapper. Same
+// display-only contract: Verdict, DirectScore, and RolledUp are never
+// read or written.
+func (e *Evaluation) ApplyKnownFix(safeVersion string) {
+	if e == nil {
+		return
+	}
+	e.Resolution.ApplyKnownFix(safeVersion)
 }
 
 // gradeForScore maps a 0-100 score to a letter grade. Thresholds chosen

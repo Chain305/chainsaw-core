@@ -289,6 +289,12 @@ func (s *DefaultService) Get(ctx context.Context, orgID string, key Key) (*Repor
 }
 
 // Search delegates to the store.
+//
+// Unlike Get, the rows it returns are self-describing about matcher
+// staleness: Store.Search stamps SearchRow.MatcherStale on every row, so a
+// caller does not have to decode a Report to know whether a listed verdict is
+// current. The row is still returned either way — the list surface discloses,
+// it does not hide. See SearchRow.MatcherStale.
 func (s *DefaultService) Search(ctx context.Context, q SearchQuery) (*SearchResults, error) {
 	if s.store == nil {
 		return &SearchResults{}, nil
@@ -297,6 +303,10 @@ func (s *DefaultService) Search(ctx context.Context, q SearchQuery) (*SearchResu
 }
 
 // Facets delegates to the store.
+//
+// The returned counts include matcher-stale rows in every bucket and report
+// how many of them there are in FacetCounts.StalePending, so the sidebar
+// reconciles with the list rather than quietly counting a smaller cache.
 func (s *DefaultService) Facets(ctx context.Context, orgID string) (*FacetCounts, error) {
 	if s.store == nil {
 		return &FacetCounts{}, nil
@@ -340,6 +350,26 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			MatcherEpoch:  CurrentMatcherEpoch,
 		},
 	}
+
+	// Ingest gate: stamp the coordinate BEFORE the fan-out when its
+	// version can never be ordered against an advisory range (`${…}`
+	// build properties, the synthetic maven-metadata marker, Maven
+	// meta-versions, empty). See version_evaluable.go for the rule and
+	// for why this marks rather than refuses.
+	//
+	// Stamped here, at the top of runFanout, rather than only in
+	// Store.Upsert, because this is the one place BOTH persisted and
+	// ephemeral Reports pass through — the artifact-upload path returns
+	// its Report to the caller without ever touching the store, and an
+	// unmarked one would read to that caller as scanned-and-clean.
+	// Store.Upsert re-runs the same idempotent stamp so a Report built by
+	// something other than a Scan cannot land unmarked either.
+	//
+	// The providers still run. They are the source of the identity,
+	// registry and artifact facts that make a marked row worth keeping,
+	// and suppressing them here would trade a documented blind spot for
+	// an undocumented one.
+	markUnevaluableVersion(report, now)
 
 	// Fan out providers in tiered phases:
 	//   - Tier 1+2 run in parallel first (no `prior`),
@@ -624,6 +654,12 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	// the cache or risk evaluation aren't populated yet.
 	if s.store != nil {
 		evaluateTransitiveRisk(ctx, s.store, req.OrgID, report)
+		// The overlay above replaces report.Risk.Verdict and .Resolution
+		// wholesale from a bare-Options tree evaluation, which drops the
+		// upgrade promotion and the known-fix display fields established
+		// by ComputeTrustScoreForOrg. Restore them under the same gates,
+		// now judged against the post-transitive evaluation.
+		ReapplyKnownFixAfterTransitive(report, req.OrgID)
 	}
 
 	// Async transitive enqueue: fire detached Scans for each direct

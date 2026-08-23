@@ -677,7 +677,45 @@ type ObservationSection struct {
 //	1 — initial epoch (2026-08-22). Establishes the baseline and retires
 //	    every row written before it, which is the set carrying the two
 //	    defects named above.
-const CurrentMatcherEpoch = 1
+//	2 — upgrade_available promotion (2026-08-23). risk.Options.
+//	    SafeUpgradeVersion is now populated by ComputeTrustScoreForOrg
+//	    for packages whose risk is CVE-driven and whose every advisory
+//	    has a published fix, so those coordinates resolve to
+//	    upgrade_available instead of bare quarantine/warn. That is a
+//	    verdict change for UNCHANGED coordinates — exactly the bump
+//	    discipline above — and it is enforcement-visible
+//	    (internal/decision Blocked→Monitored, internal/scan
+//	    critical→low). Every row written at epoch 1 replays the old
+//	    verdict until it is rescanned.
+//
+//	3 — osv.compareVersions normalises a leading "v"/"V" on BOTH
+//	    operands and the Maven-family branch now refuses a
+//	    non-numeric lead instead of reading it as a qualifier. The old
+//	    code answered confidently and wrongly whenever the two
+//	    operands disagreed about carrying the prefix, with a nil
+//	    error, so advisoryAffectsEx mis-evaluated `introduced` /
+//	    `fixed` / `lastAffected` bounds. Measured against the 166
+//	    production coordinates whose version does not start with a
+//	    digit: 51 comparisons changed answer — all Composer vX.Y.Z
+//	    tags, and in the FALSE-NEGATIVE direction (a version that
+//	    compared as BELOW an `introduced` bound, and so cleared the
+//	    advisory, now correctly compares above it). A further 156
+//	    became undecidable; every one of those is a junk coordinate
+//	    (unresolved Maven POM placeholders like "${slf4jVersion}",
+//	    the literal "metadata", one name-prefixed tag), which the old
+//	    code was silently ordering against real advisory bounds.
+//	    This changes which CVEs attach to a coordinate, so every
+//	    epoch-2 row must be recomputed.
+//	4 — the Pub (Dart/Flutter) ecosystem is now downloaded, canonicalised
+//	    and supported. Coordinates with ecosystem "pub" previously got NO
+//	    advisory matching at all: the feed was never fetched and
+//	    CanonicalEcosystem returned "", so canonicalKey produced "" and
+//	    Lookup found nothing. They were absent rather than false-clean
+//	    (osvProvider.Run shape 2 declines to stamp a Vulns section for an
+//	    uncovered package), but they were uncovered. 6 such rows were live
+//	    in production on 2026-08-23. Advisories can now attach to them, so
+//	    every epoch-3 pub row must be recomputed.
+const CurrentMatcherEpoch = 4
 
 // MatcherStale reports whether this Report was produced by a superseded
 // generation of the matcher or risk engine, and so must not be served from
@@ -742,6 +780,29 @@ const (
 	// not_found, it is a real answer from the source, not an outage, so
 	// it must not trip the opt-in fail-closed coverage gate.
 	WarnVersionNotFound = "version_not_found"
+
+	// WarnVersionNotEvaluable is stamped by the ingest gate in
+	// version_evaluable.go when the coordinate's VERSION component can
+	// never be ordered against an advisory range — an uninterpolated
+	// `${…}` build property, our synthetic `metadata` marker for
+	// maven-metadata.xml uploads, a Maven meta-version, or an empty
+	// string.
+	//
+	// It is a statement about the COORDINATE, not about the package, and
+	// that is what distinguishes it from its two neighbours:
+	// WarnVersionNotFound means the registry answered and the version was
+	// not published; WarnVulnRangeUndecidable means one advisory's bound
+	// could not be ordered on this occasion. This code means we never had
+	// a version to evaluate at all, and no future matcher improvement
+	// will change that.
+	//
+	// It exists because the row is otherwise indistinguishable from a
+	// clean one: it carries a collected_at, warning_count 0, is_malicious
+	// false, and no advisory can ever attach to it. Every list surface
+	// therefore counted it as scanned. The Message carries the reason
+	// code (see UnevaluableVersion*) so a consumer can render why without
+	// re-deriving the rule.
+	WarnVersionNotEvaluable = "version_not_evaluable"
 
 	// Transitive-risk visibility codes. Emitted by evaluateTransitiveRisk
 	// when a direct dep cannot be folded into the rolled-up score, so

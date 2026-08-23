@@ -79,7 +79,48 @@ type Store struct {
 // A nil *pgstore.Store is allowed (tests), in which case every method
 // returns ErrNotFound or noop-upserts.
 func NewStore(db *pgstore.Store) *Store {
-	return &Store{sql: db}
+	s := &Store{sql: db}
+	// Install the probe-backed corroborator used by the
+	// upgrade_available promotion gate. ComputeTrustScoreForOrg runs
+	// with no context and no store handle, so the seam is a
+	// package-level hook (same shape as OrgWeightsResolver); this is
+	// the only place a real store exists early enough to fill it.
+	// Last-writer-wins is harmless — every Store points at the same
+	// intelligence_latest_probes table.
+	LatestVersionCorroborator = s.latestVersionCorroborator
+	return s
+}
+
+// latestVersionCorroborator answers the promotion gate's "is this fix
+// version actually published?" question from the daily probe row.
+//
+// It is deliberately conservative: an errored probe, an empty
+// latest_version, or a probe past its fresh_until returns ok=false, which
+// the caller reads as "no corroboration available" rather than as a veto.
+// A stale probe must not veto a real fix, and must not endorse one
+// either.
+//
+// The 2s budget bounds the cost this adds to the scan hot path. The gate
+// only reaches here for a package that already passed the evidence and
+// category gates AND whose Report carries no Release.LatestVersion, which
+// is a small slice of scans.
+func (s *Store) latestVersionCorroborator(ecosystem, pkg string) (string, bool) {
+	if s == nil || s.sql == nil || s.sql.DB() == nil {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	probe, err := s.GetLatestVersionProbe(ctx, "", ecosystem, pkg)
+	if err != nil || probe == nil {
+		return "", false
+	}
+	if probe.Error != "" || strings.TrimSpace(probe.LatestVersion) == "" {
+		return "", false
+	}
+	if !probe.FreshUntil.IsZero() && time.Now().After(probe.FreshUntil) {
+		return "", false
+	}
+	return probe.LatestVersion, true
 }
 
 // Get returns the cached Report, or ErrNotFound if no row exists.
@@ -241,6 +282,29 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	if s == nil || s.sql == nil || s.sql.DB() == nil || r == nil {
 		return nil
 	}
+
+	// Ingest choke point. A coordinate whose version can never be ordered
+	// against an advisory range (`${…}` build property, the synthetic
+	// maven-metadata marker, a Maven meta-version, empty) is persisted —
+	// deliberately, see markUnevaluableVersion for the store-vs-refuse
+	// reasoning — but it is persisted MARKED, so it can never be read back
+	// as scanned-and-clean.
+	//
+	// This is the last gate before a Report becomes a row, and every
+	// writer reaches it: the proxy hot path, the refresher, the scan
+	// worker, the dependency enqueuer, and anything a future producer
+	// adds. runFanout already stamps the Scan path; this call is what
+	// makes the guarantee hold for a Report that was built by hand
+	// instead. It is idempotent, so the double-stamp is a no-op.
+	//
+	// The stamp lands before both consumers of r.Observation.Warnings
+	// below: mergeReportPayload marshals them into the report JSONB, and
+	// warning_count is written as len(r.Observation.Warnings) — so a
+	// SQL-level consumer sees warning_count > 0 without decoding the blob.
+	//
+	// This mutates the caller's Report on purpose: a caller that inspects
+	// what it just persisted should see the same warning the row carries.
+	markUnevaluableVersion(r, r.Observation.CollectedAt)
 
 	// Wrap the read-then-write in a transaction so a concurrent Upsert
 	// for the same key cannot race between SELECT and INSERT. The
@@ -661,6 +725,16 @@ func vulnSectionEmpty(v VulnSection) bool {
 // Search returns rows for the admin UI list view. Keyset pagination uses
 // the opaque Cursor token encoded as base64(collected_at|ecosystem|package|version).
 // q.OrgID is ignored — see the package-level comment.
+//
+// Matcher staleness is DISCLOSED, not filtered. Every row is returned
+// regardless of the epoch that produced it, and each one carries
+// SearchRow.MatcherStale so the caller can mark it. An epoch predicate in the
+// WHERE clause would be the wrong trade three times over: the whole inventory
+// would disappear for as long as a recompute takes, the facet totals would
+// stop reconciling with the paged table, and the keyset cursor would skip over
+// rows that reappear mid-scroll as the refresher catches up. Filtering on
+// TrustScore and sorting on it still use the persisted values — a stale row
+// keeps its place in the ordering and its place in the counts, and says so.
 func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, error) {
 	if s == nil || s.sql == nil || s.sql.DB() == nil {
 		return &SearchResults{}, nil
@@ -763,18 +837,30 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, erro
 	// decodeCursor stays stable.
 	orderBy := sortToOrderBy(q.Sort)
 
+	// matcherEpochExpr reads the epoch that produced this row. It is NOT a
+	// WHERE predicate, deliberately — see SearchRow.MatcherStale for why the
+	// list discloses staleness instead of filtering on it. The epoch lives
+	// inside the report JSONB (Report.Observation.MatcherEpoch, tag
+	// `matcherEpoch,omitempty`) rather than in a denormalised column, so the
+	// `omitempty` case — every row written before the field existed — yields
+	// SQL NULL and must land on 0, which is below every real epoch and
+	// therefore always stale. NULLIF guards the empty string so a
+	// hand-edited row can never abort the whole query on a cast error.
+	const matcherEpochExpr = `COALESCE(NULLIF(report->'observation'->>'matcherEpoch', '')::int, 0)`
+
 	query := fmt.Sprintf(`
 		SELECT ecosystem, package_name, version, collected_at, fresh_until,
 		       COALESCE(trust_score,0), COALESCE(max_cvss,0),
 		       is_malicious, is_typosquat, has_artifact_scan, warning_count,
 		       COALESCE(typosquat_confidence,''),
 		       risk_evaluation->>'verdict',
-		       (risk_evaluation->'rolledUp'->>'overall')::int
+		       (risk_evaluation->'rolledUp'->>'overall')::int,
+		       %s
 		FROM intelligence_reports
 		WHERE %s
 		ORDER BY %s
 		LIMIT $%d
-	`, whereClause, orderBy, idx)
+	`, matcherEpochExpr, whereClause, orderBy, idx)
 
 	rows, err := s.sql.DB().QueryContext(ctx, query, args...)
 	if err != nil {
@@ -787,16 +873,22 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, erro
 		var row SearchRow
 		var verdict sql.NullString
 		var overallScore sql.NullInt64
+		var rowEpoch int
 		if err := rows.Scan(
 			&row.Ecosystem, &row.Package, &row.Version,
 			&row.CollectedAt, &row.FreshUntil,
 			&row.TrustScore, &row.MaxCVSS,
 			&row.IsMalicious, &row.IsTyposquat, &row.HasArtifactScan, &row.WarningCount,
 			&row.TyposquatConfidence,
-			&verdict, &overallScore,
+			&verdict, &overallScore, &rowEpoch,
 		); err != nil {
 			return nil, fmt.Errorf("intelligence: scan search row: %w", err)
 		}
+		// Same comparison as Report.MatcherStale(), against the persisted
+		// epoch rather than a decoded Report — Search never materialises the
+		// Report, and reading the JSONB blob per row just to call the method
+		// would undo the point of the denormalised list query.
+		row.MatcherStale = rowEpoch < CurrentMatcherEpoch
 		if verdict.Valid {
 			row.Verdict = verdict.String
 		}
@@ -910,6 +1002,10 @@ type LatestVersionProbe struct {
 // SearchQuery are NOT applied — the facet counts are always over the
 // full cache so the sidebar shows "what's available to filter on" rather
 // than "what's left after my current filter". orgID is ignored.
+//
+// Matcher-stale rows are counted in every bucket exactly as they were, and
+// additionally counted once in StalePending. See FacetCounts.StalePending for
+// why disclosure beats subtraction here.
 func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) {
 	_ = orgID
 	if s == nil || s.sql == nil || s.sql.DB() == nil {
@@ -917,6 +1013,13 @@ func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) 
 	}
 	out := &FacetCounts{}
 
+	// The stale count is an ADDITIONAL cell, not a filter on the others.
+	// Every count below still spans the whole table — Total, the trust
+	// buckets and the signal counts all keep including matcher-stale rows,
+	// because the sidebar's job is to reconcile with the list beside it and
+	// that list still shows them (marked). StalePending answers "how much of
+	// this is awaiting recompute" without moving any of the other numbers.
+	// See FacetCounts.StalePending.
 	row := s.sql.DB().QueryRowContext(ctx, `
 		SELECT
 		  COUNT(*),
@@ -928,14 +1031,17 @@ func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) 
 		  COUNT(*) FILTER (WHERE collected_at > NOW() - INTERVAL '24 hours'),
 		  COUNT(*) FILTER (WHERE trust_score IS NOT NULL AND trust_score < 40),
 		  COUNT(*) FILTER (WHERE trust_score IS NOT NULL AND trust_score >= 40 AND trust_score < 70),
-		  COUNT(*) FILTER (WHERE trust_score IS NOT NULL AND trust_score >= 70)
+		  COUNT(*) FILTER (WHERE trust_score IS NOT NULL AND trust_score >= 70),
+		  COUNT(*) FILTER (
+		    WHERE COALESCE(NULLIF(report->'observation'->>'matcherEpoch', '')::int, 0) < $1
+		  )
 		FROM intelligence_reports
-	`)
+	`, CurrentMatcherEpoch)
 	var lowTrust, medTrust, highTrust int
 	if err := row.Scan(
 		&out.Total, &out.Malicious, &out.Typosquat, &out.HasCVE,
 		&out.HasWarnings, &out.ArtifactScan, &out.Last24h,
-		&lowTrust, &medTrust, &highTrust,
+		&lowTrust, &medTrust, &highTrust, &out.StalePending,
 	); err != nil {
 		return nil, fmt.Errorf("intelligence: facets aggregate: %w", err)
 	}
