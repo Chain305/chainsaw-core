@@ -1,6 +1,7 @@
 package intelligence
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -134,5 +135,177 @@ func TestScanCallsReapplyKnownFixAfterTransitive(t *testing.T) {
 		t.Fatalf("ReapplyKnownFixAfterTransitive is called BEFORE "+
 			"evaluateTransitiveRisk (offsets %d vs %d); the overlay would then "+
 			"clobber it again", reapply, overlay)
+	}
+}
+
+// --- Descendant-level promotion (the remaining half of the same defect) ---
+//
+// ReapplyKnownFixAfterTransitive above fixes the ROOT. It cannot fix the
+// descendants: EvaluateTree re-derives every node from its risk.Input, so
+// a dependency that had legitimately earned upgrade_available in its own
+// scan came back as bare quarantine inside somebody else's tree, stayed
+// in computeTransitiveSeverity's blockedNodes set, and inflated the
+// parent's persisted TransitiveSeverity.BlockedCount — reporting a
+// dependency with a published fix for every advisory affecting it as
+// unfixable.
+//
+// The evidence is per-node and honest: lookupDepReport already returns
+// the descendant's OWN cached *Report, so MinimumSafeVersion and
+// upgradeCandidateCorroborated are asked about that coordinate exactly as
+// ComputeTrustScoreForOrg asks them about the root. Nothing is borrowed
+// from the parent.
+
+// fixableDepReport is a dependency whose every advisory has a published
+// fix — the descendant analogue of fixableReport().
+func fixableDepReport(eco, pkg, ver, latest string) *Report {
+	r := newReport(eco, pkg, ver)
+	r.Release.LatestVersion = latest
+	r.Metadata.LicenseExpression = "MIT"
+	r.Vulnerabilities = VulnSection{
+		IsVulnerable: true,
+		CVSSScore:    9.8,
+		CVEs:         []string{"CVE-2024-1", "CVE-2024-2"},
+		CVEDetails: []CVEDetail{
+			{CVE: "CVE-2024-1", FixedVersion: "1.1.0", FixAvailable: true},
+			{CVE: "CVE-2024-2", FixedVersion: latest, FixAvailable: true},
+		},
+	}
+	return r
+}
+
+func rootWithDep(depName, constraint string) *Report {
+	root := newReport("npm", "app", "0.0.1")
+	root.Metadata.LicenseExpression = "MIT"
+	root.Dependencies.Direct = []DependencyRef{{Name: depName, Constraint: constraint}}
+	return root
+}
+
+// (1) A descendant with a proven safe upgrade promotes, drops out of the
+// blocked tally, and stops being reported to the parent as unfixable.
+func TestTransitiveRisk_DescendantWithKnownFixLeavesBlockedCount(t *testing.T) {
+	store := newFakeStore()
+	dep := fixableDepReport("npm", "lib", "1.0.0", "1.2.0")
+	store.put("npm", "lib", "1.0.0", dep)
+
+	// Precondition: this coordinate promotes on its own, in its own scan.
+	solo := fixableDepReport("npm", "lib", "1.0.0", "1.2.0")
+	ComputeTrustScore(solo)
+	if solo.Risk.Verdict != risk.VerdictUpgradeAvailable {
+		t.Fatalf("precondition: standalone verdict = %q, want upgrade_available — "+
+			"this test is about a verdict the descendant ALREADY earned", solo.Risk.Verdict)
+	}
+
+	root := rootWithDep("lib", "1.0.0")
+	ComputeTrustScore(root)
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	ts := root.Risk.Resolution.TransitiveSeverity
+	if ts.BlockedCount != 0 {
+		t.Errorf("BlockedCount = %d, want 0 — the dependency has a published fix "+
+			"for every advisory affecting it, so it is not a blocked dependency",
+			ts.BlockedCount)
+	}
+	// The CVEs themselves are still reported. Promotion changes "can this
+	// be fixed", never "is there a CVE".
+	if ts.CriticalCount == 0 {
+		t.Errorf("CriticalCount = 0 — a transitive critical CVE must still be " +
+			"counted and must still drive the root's verdict")
+	}
+	// And the dependency is still surfaced in the alerts tab.
+	if len(root.Risk.Resolution.TransitiveBlame) == 0 {
+		t.Errorf("TransitiveBlame empty — a fixable dependency is still worth showing")
+	}
+}
+
+// (2) The same graph with a malware-flagged dependency: no promotion, and
+// the parent still sees it as blocked.
+func TestTransitiveRisk_MaliciousDescendantStillBlocks(t *testing.T) {
+	store := newFakeStore()
+	dep := fixableDepReport("npm", "lib", "1.0.0", "1.2.0")
+	dep.SupplyChain.MalwareStatus = "malicious"
+	dep.SupplyChain.MalwareID = "OSV-MAL-TEST"
+	store.put("npm", "lib", "1.0.0", dep)
+
+	root := rootWithDep("lib", "1.0.0")
+	ComputeTrustScore(root)
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	ts := root.Risk.Resolution.TransitiveSeverity
+	if ts.BlockedCount != 1 {
+		t.Errorf("BlockedCount = %d, want 1 — a newer release of a malicious "+
+			"package is still malicious and must never promote", ts.BlockedCount)
+	}
+	if ts.MalwareCount != 1 {
+		t.Errorf("MalwareCount = %d, want 1", ts.MalwareCount)
+	}
+	// The transitive malware finding must still drive the root's verdict.
+	if root.Risk.Verdict == risk.VerdictAllow {
+		t.Errorf("root verdict = allow with a malicious dependency")
+	}
+}
+
+// (3) A KEV dependency never promotes. vuln.kev carries MaxImpact 20, so
+// a known-exploited package is pinned to band 1 by construction.
+func TestTransitiveRisk_KEVDescendantNeverPromotes(t *testing.T) {
+	store := newFakeStore()
+	dep := fixableDepReport("npm", "lib", "1.0.0", "1.2.0")
+	dep.Vulnerabilities.KnownExploited = true
+	store.put("npm", "lib", "1.0.0", dep)
+
+	root := rootWithDep("lib", "1.0.0")
+	ComputeTrustScore(root)
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if got := root.Risk.Resolution.TransitiveSeverity.BlockedCount; got != 1 {
+		t.Errorf("BlockedCount = %d, want 1 — a known-exploited dependency is "+
+			"pinned to band 1 and band 1 never becomes \"just upgrade\"", got)
+	}
+}
+
+// (4) The parent's own safe version must never be handed to a descendant.
+// Root and dependency both fixable, with DIFFERENT fix versions: each must
+// carry its own.
+func TestTransitiveRisk_RootEvidenceDoesNotLeakToDescendant(t *testing.T) {
+	store := newFakeStore()
+	// This dependency has an advisory with NO published fix, so
+	// MinimumSafeVersion refuses it — there is no safe version of THIS
+	// package, whatever the root's own fix data says.
+	dep := fixableDepReport("npm", "lib", "1.0.0", "1.2.0")
+	dep.Vulnerabilities.CVEDetails[1] = CVEDetail{CVE: "CVE-2024-2"} // fix unknown
+	store.put("npm", "lib", "1.0.0", dep)
+
+	root := fixableReport()
+	root.Observation.MatcherEpoch = CurrentMatcherEpoch
+	root.Dependencies.Direct = []DependencyRef{{Name: "lib", Constraint: "1.0.0"}}
+	ComputeTrustScore(root)
+	if root.Risk.Resolution.SafeVersion == "" {
+		t.Fatal("precondition: the root itself must have a safe version for this " +
+			"test to prove the descendant did not borrow it")
+	}
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if got := root.Risk.Resolution.TransitiveSeverity.BlockedCount; got != 1 {
+		t.Errorf("BlockedCount = %d, want 1 — the dependency has an advisory with "+
+			"no published fix; the ROOT's safe version is not evidence about it", got)
+	}
+}
+
+// (5) A candidate the registry has not published is refused, per node.
+// The descendant's advisory names a fix above the descendant's own
+// advertised latest, so the upgrade we would recommend is not installable.
+func TestTransitiveRisk_DescendantUncorroboratedCandidateRefused(t *testing.T) {
+	store := newFakeStore()
+	dep := fixableDepReport("npm", "lib", "1.0.0", "1.2.0")
+	// Registry only ever published 1.1.0; the advisory names 1.2.0.
+	dep.Release.LatestVersion = "1.1.0"
+	store.put("npm", "lib", "1.0.0", dep)
+
+	root := rootWithDep("lib", "1.0.0")
+	ComputeTrustScore(root)
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if got := root.Risk.Resolution.TransitiveSeverity.BlockedCount; got != 1 {
+		t.Errorf("BlockedCount = %d, want 1 — the named fix is not published, so "+
+			"promoting would unblock the package while sending the user to a 404", got)
 	}
 }

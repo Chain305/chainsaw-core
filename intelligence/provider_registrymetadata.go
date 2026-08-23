@@ -1228,6 +1228,20 @@ type mavenPOM struct {
 			Optional   string `xml:"optional"`
 		} `xml:"dependency"`
 	} `xml:"dependencies"`
+	// Properties is the POM's own <properties> block. Its children are
+	// user-chosen element names (<slf4jVersion>1.7.36</slf4jVersion>), so
+	// it cannot be modelled as named fields — `xml:",any"` collects each
+	// child with its tag in XMLName. See resolveMavenVersion.
+	Properties struct {
+		Entries []mavenPOMProperty `xml:",any"`
+	} `xml:"properties"`
+}
+
+// mavenPOMProperty is one <properties> child: the element name is the
+// property name, the character data is its value.
+type mavenPOMProperty struct {
+	XMLName xml.Name
+	Value   string `xml:",chardata"`
 }
 
 // mavenPOMSCM mirrors the three URL-bearing children of a POM's <scm>
@@ -1345,6 +1359,203 @@ func normalizeMavenSCMConnection(raw string) string {
 	return strings.TrimSuffix(url, ".git")
 }
 
+// -- Maven property interpolation -------------------------------------
+//
+// A POM routinely declares a dependency version indirectly:
+//
+//	<properties><slf4jVersion>1.7.36</slf4jVersion></properties>
+//	...
+//	<dependency>…<version>${slf4jVersion}</version></dependency>
+//
+// This provider used to copy that `<version>` into DependencyRef.Constraint
+// verbatim. Two things then went wrong downstream: the placeholder was warmed
+// into intelligence_reports as though it were a pinned version (three such
+// rows were live in production on 2026-08-23, reading as scanned-and-clean),
+// and after cache_warm.pinnedVersion learned to refuse `${`, the dependency
+// stopped being warmed at all — real transitive coverage silently dropped for
+// a shape Maven projects use constantly.
+//
+// Resolving the placeholder against the SAME DOCUMENT fixes both: the common
+// case yields a concrete version that can be warmed and matched, and anything
+// still unresolved keeps its placeholder text so pinnedVersion and
+// UnevaluableVersionReason continue to refuse it.
+//
+// WHAT IS DELIBERATELY OUT OF SCOPE. Maven's real interpolation model is the
+// *effective* POM: properties inherited from a parent POM (and from that
+// parent's parent, up to a corporate BOM), from an active <profile>, from
+// dependencyManagement, from settings.xml, and from the JVM/environment.
+// Resolving those needs the whole POM hierarchy — fetch the parent, merge,
+// recurse, decide which profiles are active — which is a project in its own
+// right (upstream Trivy dedicates an entire package to it). This function
+// deliberately does none of it. A property this document does not itself
+// declare stays unresolved, and unresolved stays refused: a WRONG version is
+// far worse than a missing one, because it silently attaches advisories to a
+// release the project never depended on.
+
+// maxMavenPropertyDepth caps how many substitution passes resolveMavenVersion
+// will make. It exists purely to terminate pathological input — a
+// self-referential property (<a>${a}</a>), a two-property cycle
+// (<a>${b}</a><b>${a}</a>), or a deliberately deep nest in a hostile POM.
+// Real POMs nest one or two levels (${foo.version} → ${project.version}); 8
+// is comfortably beyond anything legitimate and small enough that a malicious
+// document cannot buy meaningful CPU with it.
+const maxMavenPropertyDepth = 8
+
+// maxMavenPropertyLen caps the length of an intermediate expansion. A version
+// string is a handful of bytes; a value that grows past this is either
+// nonsense or an attempt at expansion blow-up, and either way the result
+// cannot be a version.
+const maxMavenPropertyLen = 512
+
+// mavenPOMProperties flattens a POM's <properties> block into a lookup map.
+// Whitespace is trimmed from both the name and the value, and entries with an
+// empty name are dropped. Later duplicates win, matching Maven's
+// last-declaration-wins behaviour for repeated elements.
+func mavenPOMProperties(pom *mavenPOM) map[string]string {
+	if pom == nil || len(pom.Properties.Entries) == 0 {
+		return nil
+	}
+	props := make(map[string]string, len(pom.Properties.Entries))
+	for _, e := range pom.Properties.Entries {
+		name := strings.TrimSpace(e.XMLName.Local)
+		if name == "" {
+			continue
+		}
+		props[name] = strings.TrimSpace(e.Value)
+	}
+	return props
+}
+
+// mavenProjectVersionAliases are the built-in property names that refer to
+// the POM's own <version>. `project.version` is the modern spelling;
+// `pom.version` is the Maven 2 spelling, still widespread in the wild; bare
+// `version` is the deprecated implicit form. All three are answered from the
+// same document, so resolving them needs no hierarchy.
+var mavenProjectVersionAliases = []string{"project.version", "pom.version", "version"}
+
+// resolveMavenVersion interpolates `${…}` placeholders in a POM dependency
+// version using ONLY properties declared in the same document, plus the
+// project's own version for the aliases above.
+//
+// Returns the resolved version when every placeholder could be substituted.
+// Returns `raw` UNCHANGED when any placeholder is unresolvable, cyclic, or
+// nested past maxMavenPropertyDepth — deliberately, so the caller stores the
+// literal `${…}` text. That text is what makes the gap visible: pinnedVersion
+// refuses it (so no bogus row is warmed) and UnevaluableVersionReason marks
+// it (so it cannot read as scanned-and-clean). Substituting a guess, or
+// blanking the constraint, would both hide the unresolved manifest instead.
+//
+// A `props` entry whose own value contains `${…}` is itself expanded, which
+// is why this is a loop rather than a single pass.
+func resolveMavenVersion(raw string, props map[string]string, projectVersion string) string {
+	v := strings.TrimSpace(raw)
+	if !strings.Contains(v, unresolvedPropertyMarker) {
+		return v
+	}
+	projectVersion = strings.TrimSpace(projectVersion)
+
+	cur := v
+	for depth := 0; depth < maxMavenPropertyDepth; depth++ {
+		next, ok := expandMavenProperties(cur, props, projectVersion)
+		if !ok {
+			// A placeholder named something this document does not declare.
+			// No number of further passes can help.
+			return v
+		}
+		if !strings.Contains(next, unresolvedPropertyMarker) {
+			return strings.TrimSpace(next)
+		}
+		if next == cur {
+			// No progress: self-reference (<a>${a}</a>) or a cycle that has
+			// come back around to a value it already produced.
+			return v
+		}
+		if len(next) > maxMavenPropertyLen {
+			return v
+		}
+		cur = next
+	}
+	// Still unresolved after the cap — a longer cycle, or a nest deeper than
+	// anything legitimate. Treated exactly like an unresolvable property.
+	return v
+}
+
+// expandMavenProperties performs ONE substitution pass over s, replacing each
+// `${name}` with its value. ok is false as soon as a placeholder names
+// something neither `props` nor the project-version aliases can answer, and
+// also for a malformed placeholder (`${` with no closing brace) — in both
+// cases the caller gives up rather than emitting a half-substituted string.
+func expandMavenProperties(s string, props map[string]string, projectVersion string) (string, bool) {
+	var b strings.Builder
+	for {
+		start := strings.Index(s, unresolvedPropertyMarker)
+		if start < 0 {
+			b.WriteString(s)
+			return b.String(), true
+		}
+		end := strings.Index(s[start:], "}")
+		if end < 0 {
+			// Truncated placeholder. UnevaluableVersionReason detects on the
+			// `${` substring precisely so this shape is caught too; refusing
+			// here keeps the two consistent.
+			return "", false
+		}
+		end += start
+		name := strings.TrimSpace(s[start+len(unresolvedPropertyMarker) : end])
+		val, ok := lookupMavenProperty(name, props, projectVersion)
+		if !ok {
+			return "", false
+		}
+		b.WriteString(s[:start])
+		b.WriteString(val)
+		s = s[end+1:]
+	}
+}
+
+// lookupMavenProperty answers a single property name from the same document.
+// A declared <properties> entry wins over the built-in project-version
+// aliases, matching Maven: an explicit declaration shadows the implicit one.
+// An entry declared with an EMPTY value is not an answer — Maven would
+// interpolate it to nothing and produce a versionless dependency, which is
+// not a version we can evaluate.
+func lookupMavenProperty(name string, props map[string]string, projectVersion string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	if v, ok := props[name]; ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v), true
+	}
+	for _, alias := range mavenProjectVersionAliases {
+		if name == alias && projectVersion != "" {
+			return projectVersion, true
+		}
+	}
+	return "", false
+}
+
+// mavenProjectVersion is the value `${project.version}` resolves to for this
+// document. Preference order:
+//
+//	<project><version>   — the POM's own declaration, the authoritative one;
+//	<parent><version>    — what Maven inherits when the child omits its own.
+//	                       This is NOT parent-POM resolution: the element is
+//	                       literally in this document, so no fetch is needed;
+//	requestedVersion     — the version whose .pom we just fetched. The
+//	                       artifact path encodes it, so it is correct by
+//	                       construction, and it is the backstop for a POM
+//	                       that declares neither of the above.
+func mavenProjectVersion(pom *mavenPOM, requestedVersion string) string {
+	if pom != nil {
+		if v := strings.TrimSpace(pom.Version); v != "" && !strings.Contains(v, unresolvedPropertyMarker) {
+			return v
+		}
+		if v := strings.TrimSpace(pom.Parent.Version); v != "" && !strings.Contains(v, unresolvedPropertyMarker) {
+			return v
+		}
+	}
+	return strings.TrimSpace(requestedVersion)
+}
+
 func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string) (PartialReport, error) {
 	group, artifact, classifier := splitMavenCoordinate(pkg)
 	if group == "" || artifact == "" {
@@ -1423,13 +1634,18 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 		pr.People = people
 	}
 	d := depCollector{}
+	// Interpolate `${…}` versions against this document's own <properties>
+	// and its project version. Anything that cannot be resolved from this
+	// document keeps its literal placeholder — see resolveMavenVersion.
+	props := mavenPOMProperties(&pom)
+	projectVersion := mavenProjectVersion(&pom, ver)
 	for _, dep := range pom.Dependencies.Dependency {
 		if dep.GroupID == "" || dep.ArtifactID == "" {
 			continue
 		}
 		ref := DependencyRef{
 			Name:       dep.GroupID + ":" + dep.ArtifactID,
-			Constraint: strings.TrimSpace(dep.Version),
+			Constraint: resolveMavenVersion(dep.Version, props, projectVersion),
 		}
 		switch {
 		case strings.EqualFold(dep.Optional, "true"):

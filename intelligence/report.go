@@ -715,7 +715,23 @@ type ObservationSection struct {
 //	    uncovered package), but they were uncovered. 6 such rows were live
 //	    in production on 2026-08-23. Advisories can now attach to them, so
 //	    every epoch-3 pub row must be recomputed.
-const CurrentMatcherEpoch = 4
+//	5 — the upgrade promotion now survives the transitive tree pass for
+//	    DESCENDANTS, not just the root (2026-08-23). EvaluateTree
+//	    re-derives every node from its risk.Input, so a dependency that
+//	    had legitimately earned upgrade_available in its own scan was
+//	    re-evaluated as bare quarantine inside a parent's tree, stayed in
+//	    computeTransitiveSeverity's blockedNodes set, and inflated the
+//	    parent's persisted Risk.Resolution.TransitiveSeverity.blockedCount
+//	    — a dependency with a published fix for every advisory affecting
+//	    it was reported to the user as unfixable. Each descendant now
+//	    carries its OWN evidence into the tree pass
+//	    (risk.Options.PerNodeSafeUpgrade, filled from that descendant's
+//	    own cached Report) and is re-gated on its OWN signals and band, so
+//	    malware-flagged and KEV-pinned descendants stay blocked. Verdicts
+//	    and blockedCount therefore change for UNCHANGED coordinates,
+//	    which is exactly what this counter is for; every epoch-4 row with
+//	    resolvable dependencies must be recomputed.
+const CurrentMatcherEpoch = 5
 
 // MatcherStale reports whether this Report was produced by a superseded
 // generation of the matcher or risk engine, and so must not be served from

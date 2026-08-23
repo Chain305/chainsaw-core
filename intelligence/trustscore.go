@@ -387,9 +387,15 @@ func deref(p *bool) bool {
 // A package can therefore only keep its promotion here if it still earns
 // it after its dependency graph has been accounted for.
 //
-// WHY NOT pass SafeUpgradeVersion into EvaluateTree instead: that applies
-// the ROOT's safe version to every descendant node, promoting dependencies
-// on evidence that belongs to their parent.
+// WHY NOT pass SafeUpgradeVersion into EvaluateTree instead: that field is
+// a single string, so it would apply the ROOT's safe version to every
+// descendant node, promoting dependencies on evidence that belongs to
+// their parent. Descendants get their own promotion through
+// risk.Options.PerNodeSafeUpgrade instead — one proven version per node,
+// each derived from that node's own cached Report and each re-gated on
+// that node's own signals (see evaluateTransitiveRisk and
+// risk.promoteNodeInTree). This function stays the ROOT's owner, because
+// only here are the gates re-run against the post-overlay evaluation.
 func ReapplyKnownFixAfterTransitive(report *Report, orgID string) {
 	if report == nil || report.Risk == nil {
 		return

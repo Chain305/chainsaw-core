@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/chain305/chainsaw-core/depgraph"
 )
 
 // Options tunes evaluator behaviour. Zero value means production defaults;
@@ -32,6 +34,29 @@ type Options struct {
 	// core/intelligence/trustscore.go (promoteToUpgradeAvailable) for
 	// the three gates that gate it.
 	SafeUpgradeVersion string
+
+	// PerNodeSafeUpgrade carries ONE PROVEN SAFE VERSION PER NODE and is
+	// read only by EvaluateTree. It exists because SafeUpgradeVersion is
+	// a single string applied to whatever evaluation it is passed to:
+	// handing a tree pass the ROOT's safe version would advertise one
+	// package's fix as every descendant's, which is a fabricated verdict
+	// for every node but one. A map keyed on the node makes each entry
+	// what it claims to be — the version of THAT coordinate that clears
+	// THAT coordinate's advisories.
+	//
+	// An entry is a candidate, never a decision. EvaluateTree still runs
+	// the same gates promoteToUpgradeAvailable runs for the root: the
+	// node's own UpgradePromotionEligible (which vetoes on the node's own
+	// supply_chain / quality signals and on the node's own band), and a
+	// re-evaluation whose scores must come back identical. A malicious or
+	// KEV-pinned descendant therefore stays blocked no matter what its
+	// parent looks like, and no matter what this map says.
+	//
+	// The only production writer is
+	// intelligence.evaluateTransitiveRisk, which fills it from each
+	// descendant's OWN cached Report via intelligence.MinimumSafeVersion.
+	// Nil (the zero value) reproduces pre-existing behaviour exactly.
+	PerNodeSafeUpgrade map[depgraph.Key]string
 
 	// Alternative is populated by the caller when a curated replacement
 	// package is known. Used when Verdict would otherwise be Replace.

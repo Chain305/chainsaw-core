@@ -132,6 +132,29 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 		rootKey: ProjectToRiskInput(report),
 	}
 
+	// nodeSafe is the per-descendant upgrade evidence the tree pass needs
+	// so a dependency that legitimately earned upgrade_available in its
+	// OWN scan is not re-derived as bare quarantine inside somebody
+	// else's tree — which would leave it in blockedNodes and inflate the
+	// parent's "N blocked dependencies" count with a dependency that has
+	// a published fix.
+	//
+	// The evidence is per-node and comes from the descendant's OWN
+	// cached Report, which the BFS below already holds: lookupDepReport
+	// returns the very *Report the risk.Input was projected from, so
+	// MinimumSafeVersion and upgradeCandidateCorroborated can be asked
+	// about that node exactly as ComputeTrustScoreForOrg asks them about
+	// the root. Nothing is invented and nothing is borrowed from the
+	// parent.
+	//
+	// The ROOT is deliberately absent from this map.
+	// ReapplyKnownFixAfterTransitive owns the root's promotion, and it
+	// re-runs the gates against the OVERLAID evaluation (i.e. after the
+	// more-conservative secondEval has been folded in), which is
+	// strictly more conservative than promoting the root inside the tree
+	// pass would be.
+	nodeSafe := make(map[depgraph.Key]string)
+
 	// visited collapses self-references and case-drifted duplicates so
 	// the same (eco, name, resolved-version) triple yields exactly one
 	// node and one edge in the graph. Seeded with the root so an A→A
@@ -225,6 +248,15 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 			graph.AddEdge(entry.parent, depKey)
 			if depReport != nil {
 				inputs[depKey] = ProjectToRiskInput(depReport)
+				// This descendant's own evidence, on this descendant's
+				// own coordinate. Empty (the common case) means "no
+				// version of this package is provably clear of every
+				// advisory that still affects it" and the node keeps
+				// whatever verdict the engine gives it.
+				if sv := MinimumSafeVersion(depReport); sv != "" &&
+					upgradeCandidateCorroborated(depReport, sv) {
+					nodeSafe[depKey] = sv
+				}
 				// Enqueue this node's own Direct deps for the next
 				// BFS level — but only if we haven't reached the
 				// configured max depth. A nil/empty Direct list
@@ -268,7 +300,7 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 		return
 	}
 
-	te := risk.EvaluateTree(graph, inputs, risk.Options{})
+	te := risk.EvaluateTree(graph, inputs, risk.Options{PerNodeSafeUpgrade: nodeSafe})
 	rootEval := te.ByKey[rootKey]
 	if rootEval == nil {
 		return
@@ -917,6 +949,16 @@ func candidateVersions(constraint string) []string {
 // MalwareCount and BlockedCount track distinct descendants, not signal
 // fire counts, so a single malicious package pulled in via two parents
 // still counts once.
+//
+// BlockedCount reads the verdict the tree pass FINISHED with, which
+// includes each descendant's own upgrade promotion (see nodeSafe in
+// evaluateTransitiveRisk). A dependency with a published fix for every
+// advisory affecting it resolves to upgrade_available and is therefore
+// not counted as blocked — the count means "dependencies with no way
+// out", not "dependencies with a CVE". The severity tiers above are
+// unchanged by promotion on purpose: a transitive critical CVE is still
+// a transitive critical CVE, fix or no fix, and it must keep driving the
+// root's verdict through the sc.transitive_* signals.
 func computeTransitiveSeverity(te *risk.TreeEvaluation, rootKey depgraph.Key) risk.TransitiveSeverity {
 	if te == nil {
 		return risk.TransitiveSeverity{}

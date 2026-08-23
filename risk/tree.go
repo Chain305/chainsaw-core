@@ -102,6 +102,13 @@ func EvaluateTree(graph *depgraph.Graph, inputs map[depgraph.Key]Input, opts Opt
 	// Pass 1: score every node individually. DirectScore is authoritative
 	// after this pass; RolledUp is provisional (equals DirectScore) and
 	// will be rewritten in pass 2.
+	//
+	// effective records the Input each node was ACTUALLY scored with
+	// (which is not always inputs[k] — see the synthesis branch below).
+	// Pass 2 needs it to re-evaluate a promotion candidate against the
+	// very same facts, so a promotion can never be built on a different
+	// input than the verdict it is replacing.
+	effective := make(map[depgraph.Key]Input, len(graph.Nodes))
 	for k := range graph.Nodes {
 		in := inputs[k]
 		// If caller didn't supply an Input for this key, synthesize one
@@ -118,6 +125,7 @@ func EvaluateTree(graph *depgraph.Graph, inputs map[depgraph.Key]Input, opts Opt
 			in = Input{Ecosystem: k.Ecosystem, Package: k.Name, Version: k.Version}
 		}
 		ev := EvaluatePackage(in, opts)
+		effective[k] = in
 		te.ByKey[k] = ev
 	}
 
@@ -168,6 +176,15 @@ func EvaluateTree(graph *depgraph.Graph, inputs map[depgraph.Key]Input, opts Opt
 			// UI consumers can explain the rolled-up delta.
 			ev.Resolution.TransitiveBlame = blame
 		}
+
+		// Per-node upgrade promotion, judged LAST so every gate sees the
+		// node's FINAL state: its own fired signals, its own direct
+		// score, and the rolled-up score its own descendants produced. A
+		// node dragged into the bottom band by its dependencies fails
+		// gate (c) here and stays blocked, exactly as
+		// intelligence.ReapplyKnownFixAfterTransitive keeps the root
+		// honest after the same rollup.
+		promoteNodeInTree(k, ev, effective[k], opts)
 	}
 
 	// Pass 3: build the tree view keyed on Graph's Roots order.
@@ -243,6 +260,74 @@ func EvaluateTree(graph *depgraph.Graph, inputs map[depgraph.Key]Input, opts Opt
 		}
 	}
 	return te
+}
+
+// promoteNodeInTree gives ONE node in a tree its own upgrade-available
+// decision, on its own evidence, and mutates ev in place when it earns
+// one. It is the tree-pass twin of
+// intelligence.promoteToUpgradeAvailable and enforces the same gates in
+// the same order:
+//
+//	(a) EVIDENCE — a per-node candidate supplied by the caller in
+//	    Options.PerNodeSafeUpgrade. The caller derives it from THAT
+//	    node's own advisory fix data (intelligence.MinimumSafeVersion on
+//	    the node's own cached Report) and corroborates it against THAT
+//	    node's registry-advertised latest. No entry, no promotion.
+//	(b)+(c) UpgradePromotionEligible on THIS node's evaluation — the
+//	    supply_chain / quality veto, the vulnerability-dominance test,
+//	    and the bottom-band check. Because it runs after pass 2 the band
+//	    check reads the node's post-rollup RolledUp, so a node whose own
+//	    dependencies dragged it under ThresholdQuarantine is refused.
+//	    A malware-flagged descendant fires sc.known_malicious and is
+//	    vetoed outright; a KEV descendant carries MaxImpact 20 and is
+//	    pinned into band 1, so neither can ever be promoted — whatever
+//	    the parent's verdict is.
+//
+// The re-evaluation is a second pure EvaluatePackage call on the SAME
+// Input with the SAME weights, so the scores must come back identical;
+// the guards below refuse the promotion if the engine ever disagrees.
+// Promotion moves the VERDICT and nothing else — the rolled-up score and
+// the transitive blame the tree pass computed are carried across
+// verbatim, because a re-evaluation of a single node cannot reproduce
+// them.
+func promoteNodeInTree(k depgraph.Key, ev *Evaluation, in Input, opts Options) {
+	if ev == nil || len(opts.PerNodeSafeUpgrade) == 0 {
+		return
+	}
+	safeVersion := opts.PerNodeSafeUpgrade[k]
+	if safeVersion == "" {
+		return
+	}
+	if !UpgradePromotionEligible(ev) {
+		return
+	}
+	nodeOpts := opts
+	nodeOpts.PerNodeSafeUpgrade = nil
+	nodeOpts.SafeUpgradeVersion = safeVersion
+	promoted := EvaluatePackage(in, nodeOpts)
+	if promoted == nil || promoted.Verdict != VerdictUpgradeAvailable {
+		return
+	}
+	if promoted.Resolution.SafeVersion != safeVersion {
+		return
+	}
+	// The option we flipped must not move a score. If it did, something
+	// other than the verdict branch is in play and the safe answer is
+	// the un-promoted one.
+	if promoted.DirectScore.Overall != ev.DirectScore.Overall {
+		return
+	}
+	// Keep the ORIGINAL score objects, not the re-evaluation's copies.
+	// They are equal by construction (same Input, same weights, and the
+	// guard above proves it for Overall), but pass 2 is still walking
+	// te.ByKey and other nodes' rollups read this node's DirectScore —
+	// reusing the object makes the pass provably order-independent
+	// instead of order-independent-by-argument.
+	promoted.DirectScore = ev.DirectScore
+	promoted.RolledUp = ev.RolledUp
+	promoted.Resolution.TransitiveBlame = ev.Resolution.TransitiveBlame
+	promoted.Resolution.TransitiveSeverity = ev.Resolution.TransitiveSeverity
+	*ev = *promoted
 }
 
 // rollupForNode applies max-with-depth-decay aggregation for one node.

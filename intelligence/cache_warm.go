@@ -202,13 +202,27 @@ func pinnedVersion(constraint string) string {
 		return ""
 	}
 	// Reject an unresolved manifest property. Maven and Gradle POMs
-	// routinely declare a dependency as <version>${slf4jVersion}</version>,
-	// and provider_registrymetadata takes the constraint verbatim from the
-	// raw POM without interpolating it. The operator loop above does not
+	// routinely declare a dependency as <version>${slf4jVersion}</version>.
+	// provider_registrymetadata used to take that constraint verbatim from
+	// the raw POM without interpolating it. The operator loop above does not
 	// list '$', '{' or '}', and hasDigit below passes anything containing a
 	// digit — so "${jsr305.version}" and "${commons.lang3.version}" both
 	// survived and were warmed into intelligence_reports as though they
 	// were pinned versions.
+	//
+	// The producer now interpolates: resolveMavenVersion
+	// (provider_registrymetadata.go) substitutes properties the POM declares
+	// itself, so the common shape arrives here already concrete and IS
+	// warmed. What still reaches this branch is the genuinely unresolvable
+	// remainder — a property inherited from a parent POM or a profile, which
+	// resolving would need the whole POM hierarchy for and which
+	// resolveMavenVersion deliberately leaves alone.
+	//
+	// This guard therefore stays as the BACKSTOP rather than becoming dead
+	// code. It is the last thing between an un-interpolated string and a
+	// cache row, and it must hold even if a future caller — a new lockfile
+	// parser, an SBOM import — forgets to interpolate. Unresolved is
+	// unresolved, wherever it came from.
 	//
 	// That is a SILENT BLIND SPOT: no advisory range can ever match such a
 	// coordinate, so it sat in the inventory reading as scanned-and-clean.

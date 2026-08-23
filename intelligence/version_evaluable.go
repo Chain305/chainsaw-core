@@ -347,14 +347,22 @@ var unevaluableVersionCountSQL = fmt.Sprintf(`
 // intelligence_reports carry a version the ingest gate now refuses,
 // bucketed by (ecosystem, reason) and ordered largest bucket first.
 //
-// READ-ONLY, AND THAT IS THE WHOLE POINT. There is deliberately no
-// companion cleanup here. A DELETE would destroy the only evidence that a
-// producer is emitting uninterpolated manifests, and the rows are not
-// dangerous in themselves once they are marked — they are misleading, and
-// the marker is what fixes the misleading part. Size the population first,
-// find the producer, then decide. Modelled on
-// pgstore.StaleRepositoryGuideCounts, which took the same
-// count-before-you-mutate shape.
+// READ-ONLY, AND THAT IS THE WHOLE POINT — this function does not mutate,
+// and it is the thing to run first. Size the population, find the producer,
+// then decide. Modelled on pgstore.StaleRepositoryGuideCounts, which took
+// the same count-before-you-mutate shape.
+//
+// A cleanup now exists as a SEPARATE, opt-in call —
+// Store.PurgeUnevaluableCoordinates (version_evaluable_cleanup.go, backed by
+// core/pgstore/migrate_unevaluable_coordinates.go). It was withheld while the
+// rows were the only evidence that a producer was emitting uninterpolated
+// manifests. That objection has been answered: the producer is fixed
+// (resolveMavenVersion interpolates same-document POM properties), the ingest
+// gate marks anything that still gets through, and THIS query re-derives its
+// population from the stored coordinate rather than from a marker — so a
+// future producer's rows show up here whether or not the cleanup has ever
+// run. Deleting no longer costs the evidence. It is still opt-in, still not
+// wired into boot, and still to be run only after reading this count.
 //
 // Note the asymmetry with the ingest gate: rows written BEFORE this change
 // carry no WarnVersionNotEvaluable stamp, so this query re-derives the
