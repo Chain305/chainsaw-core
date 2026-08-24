@@ -921,43 +921,62 @@ func expandLockfile(bin string, args []string) []packageSpec {
 			return nil
 		}
 		// package-lock.json / npm-shrinkwrap.json (v2/v3, error-returning parser).
+		// The integrity variant, not the coordinates-only one: the SRI
+		// strings in this file are the guard's ONLY expected digests that
+		// live outside the npm cache it reads the bytes from. See
+		// packageSpec.Integrity.
+		//
+		// lockNamesInstalled, NOT pr-scan's report-row mode. The guard turns
+		// each name into an npm cache key and a registry coordinate, so a
+		// nested entry has to resolve to the package npm installs there
+		// ("color-convert") and not to its dedup location
+		// ("node-sass-legacy/node_modules/color-convert"), which matches
+		// nothing and forced every nested entry into the fallback cache scan.
+		// See lockNameMode in pr_scan.go for why the two modes exist.
 		for _, f := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
 			if data, err := os.ReadFile(f); err == nil {
-				if deps, perr := parsePackageLockJSON(data); perr == nil && len(deps) > 0 {
-					return depsToSpecs("npm", deps)
+				// Coordinates, NOT the name->version map. A real npm tree
+				// installs the same name at several versions (40 such names
+				// in a measured ui_new lockfile), and the map form both drops
+				// ~5% of installed coordinates and picks a different survivor
+				// each run, because Go randomises map iteration. For a byte
+				// scan that means non-reproducible coverage. See
+				// parsePackageLockCoordinates.
+				if coords, perr := parsePackageLockCoordinates(data); perr == nil && len(coords) > 0 {
+					return coordsToSpecs("npm", coords)
 				}
 			}
 		}
 		// pnpm / yarn (single-return parsers).
 		if data, err := os.ReadFile("pnpm-lock.yaml"); err == nil {
 			if deps := parsePNPMLock(data); len(deps) > 0 {
-				return depsToSpecs("npm", deps)
+				return depsToSpecs("npm", deps, nil)
 			}
 		}
 		if data, err := os.ReadFile("yarn.lock"); err == nil {
 			if deps := parseYarnLock(data); len(deps) > 0 {
-				return depsToSpecs("npm", deps)
+				return depsToSpecs("npm", deps, nil)
 			}
 		}
 	case "go":
 		// `go get` (no module) / `go mod download` → scan the resolved go.sum.
 		if data, err := os.ReadFile("go.sum"); err == nil {
 			if deps := parseGoSum(data); len(deps) > 0 {
-				return depsToSpecs("go", deps)
+				return depsToSpecs("go", deps, nil)
 			}
 		}
 	case "cargo":
 		// `cargo add`/`cargo install`/`cargo build` (no named crate) → scan Cargo.lock.
 		if data, err := os.ReadFile("Cargo.lock"); err == nil {
 			if deps := parseCargoLock(data); len(deps) > 0 {
-				return depsToSpecs("cargo", deps)
+				return depsToSpecs("cargo", deps, nil)
 			}
 		}
 	case "gem":
 		// `gem install` from a Gemfile.lock (bundler-resolved tree).
 		if data, err := os.ReadFile("Gemfile.lock"); err == nil {
 			if deps := parseGemfileLock(data); len(deps) > 0 {
-				return depsToSpecs("rubygems", deps)
+				return depsToSpecs("rubygems", deps, nil)
 			}
 		}
 	case "pip":
@@ -1004,11 +1023,39 @@ func parseRequirementsLines(data []byte) []packageSpec {
 	return specs
 }
 
-// depsToSpecs converts a name→version map (from a lockfile parser) into specs.
-func depsToSpecs(ecosystem string, deps map[string]string) []packageSpec {
+// depsToSpecs converts a name→version map (from a lockfile parser) into specs,
+// attaching the lockfile's own integrity anchor for each coordinate.
+//
+// integrity is keyed on "<name>@<version>" (lockIntegrityKey) and may be nil —
+// most lockfile formats the guard reads carry no per-package digest the guard
+// can use. A missing entry yields an empty packageSpec.Integrity, which means
+// "no anchor" downstream and never "verified"; see packageSpec.Integrity for
+// what that costs and why the gap is honest rather than fixable offline.
+// coordsToSpecs converts full lockfile coordinates into specs. Unlike
+// depsToSpecs it cannot lose a duplicate name, because nothing is keyed on
+// name alone.
+func coordsToSpecs(ecosystem string, coords []lockCoordinate) []packageSpec {
+	specs := make([]packageSpec, 0, len(coords))
+	for _, c := range coords {
+		specs = append(specs, packageSpec{
+			Ecosystem: ecosystem,
+			Name:      c.Name,
+			Version:   c.Version,
+			Integrity: c.Integrity,
+		})
+	}
+	return specs
+}
+
+func depsToSpecs(ecosystem string, deps, integrity map[string]string) []packageSpec {
 	specs := make([]packageSpec, 0, len(deps))
 	for name, version := range deps {
-		specs = append(specs, packageSpec{Ecosystem: ecosystem, Name: name, Version: version})
+		specs = append(specs, packageSpec{
+			Ecosystem: ecosystem,
+			Name:      name,
+			Version:   version,
+			Integrity: integrity[lockIntegrityKey(name, version)],
+		})
 	}
 	return specs
 }
@@ -1077,7 +1124,35 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 	if notice := GuardPolicyNotice(); notice != "" {
 		fmt.Fprintf(out, "%s  %s  %s\n", tag, c(ansiYellow, "! policy"), sanitizeForTerminal(notice))
 	}
+	// THE POLICY MONITOR LINE. A non-blocking verdict from the policy decision
+	// point — the operator's own rule, or the built-in degraded-analysis
+	// default — reaches the user through exactly this one renderer, whether it
+	// arrived as the verdict itself (v.Severity) or riding another verdict
+	// (v.PolicySeverity, see guardVerdict). One renderer so the two routes
+	// cannot drift into two different-looking lines for the same fact.
+	//
+	// NOT suppressed by --quiet, and BOUNDED instead. Same reasoning as the
+	// waiver notice: a rule someone deliberately wrote, firing, is not chatter,
+	// and CI is where --quiet is actually used. But unlike a waiver its volume
+	// is not bounded by a human typing entries — the built-in rule can fire on
+	// every package at once if the cache index scan truncates — so after
+	// guardPolicyLineBudget lines the rest collapse into a single count. Loud,
+	// and still readable on a 900-package install.
+	policyShown, policySuppressed, mismatchCount := 0, 0, 0
+	policyLine := func(spec packageSpec, reason string) {
+		if policyShown >= guardPolicyLineBudget {
+			policySuppressed++
+			return
+		}
+		policyShown++
+		fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+			tag, c(ansiYellow, "! policy"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(spec))),
+			sanitizeForTerminal(reason), c(ansiDim, "(policy monitor — allowed, not a refusal)"))
+	}
 	for _, v := range verdicts {
+		if v.DigestMismatch {
+			mismatchCount++
+		}
 		// THE WAIVER NOTICE, printed BESIDE whatever the verdict turned out to
 		// be rather than as one of its arms — a coordinate can be both waived by
 		// name and blocked on its bytes, and the operator needs both lines.
@@ -1096,6 +1171,13 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 				tag, c(ansiYellow, "~ waived"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))),
 				sanitizeForTerminal(v.WaivedReason),
 				c(ansiDim, "(a local allowlist entry cleared this — undo: chainsaw guard allow --remove "+guardHintCoordinate(v.Spec)+")"))
+		}
+		// The ride-along half of the policy line: a monitor verdict that lost
+		// the verdict slot to another warn. The switch below renders the other
+		// half; the guard here keeps a verdict that IS the policy verdict from
+		// printing twice.
+		if v.PolicySeverity != "" && v.Severity != guardSeverityPolicy {
+			policyLine(v.Spec, v.PolicyReason)
 		}
 		switch {
 		case v.Block:
@@ -1140,13 +1222,64 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 			fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
 				tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason),
 				c(ansiDim, "(name-similarity only — allowed, not a refusal)"))
-		case v.Severity == guardSeverityTyposquatMedium || v.Severity == "behavioral-medium":
+		case v.Severity == guardSeverityTyposquatMedium || v.Severity == guardSeverityBehavioralMedium:
 			// Medium-confidence ALLOW warning is chatter — gated by --quiet.
 			if !isQuiet {
 				fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
 					tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason), c(ansiDim, "(medium confidence — allowed)"))
 			}
+		case v.Severity == guardSeverityPolicy:
+			// A NON-BLOCKING policy verdict. There was no arm for this, and no
+			// default either, so the entire deliverable of the policy wave —
+			// the built-in degraded-analysis rule answering "monitor" — was
+			// computed, returned by evaluate(), and then fell off the end of
+			// this switch printing nothing at all. The one arm that did fire
+			// for guardSeverityPolicy was v.Block.
+			policyLine(v.Spec, v.Reason)
+		case v.Severity == "":
+			// A clean allow. The only verdict this printer should say nothing
+			// about, and it is now the only one that CAN be silent.
+		default:
+			// THE ROOT CAUSE, closed. A severity no arm above knows is a lane
+			// this printer has not been taught about — which is exactly how a
+			// policy monitor verdict became invisible. Silence is the one
+			// response that is never right: a verdict a lane bothered to
+			// produce and nobody can read is a verdict that does not exist.
+			//
+			// Deliberately not --quiet-suppressed. An unrecognised severity is
+			// by definition unclassified, so there is no basis for calling it
+			// chatter, and the failure mode this arm exists to prevent is
+			// precisely a silent one.
+			fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+				tag, c(ansiYellow, "! warning"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason),
+				c(ansiDim, "(severity "+sanitizeForTerminal(v.Severity)+" — allowed)"))
 		}
 	}
 
+	if policySuppressed > 0 {
+		fmt.Fprintf(out, "%s  %s  %s\n", tag, c(ansiYellow, "! policy"),
+			fmt.Sprintf("and %d more package(s) matched a policy monitor rule (allowed, not refusals)", policySuppressed))
+	}
+	// THE DIGEST-MISMATCH SUMMARY. "The bytes in this machine's cache are not
+	// the bytes the lockfile pins" is a qualitatively different operator signal
+	// from "the scan did not finish", which is why guardDigestMismatch is
+	// counted apart from guardAnalysisIncomplete — and it had no operator-facing
+	// reader at all, leaving that counter's own stated rationale unmet. One
+	// line, only when non-zero, never suppressed.
+	//
+	// Counted off the VERDICTS, not off guardDigestMismatch: this printer's
+	// output must be a function of its arguments. Reading the process counter
+	// made a clean allow print an integrity warning inherited from an earlier
+	// invocation — caught by TestPrinterHasNoSilentSeverity's own control case.
+	if n := mismatchCount; n > 0 {
+		fmt.Fprintf(out, "%s  %s  %s\n", tag, c(ansiYellow, "! integrity"),
+			fmt.Sprintf("%d artifact(s) in the local package cache did not match the digest the lockfile pins — those bytes were NOT analyzed", n))
+	}
 }
+
+// guardPolicyLineBudget caps how many individual policy-monitor lines one
+// install prints before the rest collapse into a count. Five is enough to see
+// the shape of the problem (which packages, which rule) without turning a
+// truncated cache index scan on a 900-package `npm ci` into 900 lines of
+// identical text that a reader will scroll past.
+const guardPolicyLineBudget = 5

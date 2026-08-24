@@ -18,6 +18,11 @@ package cli
 // Note: pr-scan evaluates added/upgraded dependencies with offline heuristics
 // only — it does not consult the server. Run `chainsaw scan` for full signals.
 //
+// The heuristics themselves only ever emit severity "warn". Exit 20 without
+// --strict comes from the policy decision point (policy.SurfacePR — see the
+// "Policy decision point" section below), where an operator rule raises a
+// specific signal to block while the rest stay warn.
+//
 // Supported ecosystems (covers ~90 % of real-world PRs):
 //   - npm:      package.json, package-lock.json, npm-shrinkwrap.json,
 //     pnpm-lock.yaml, yarn.lock
@@ -31,6 +36,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,9 +44,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
+	"github.com/chain305/chainsaw-core/policy"
+	"github.com/chain305/chainsaw-core/policy/dsl"
+	"github.com/chain305/chainsaw-core/policyengine"
 	"github.com/chain305/chainsaw-core/typosquat"
 )
 
@@ -651,19 +661,103 @@ func lockEntryNameNested(path string) string {
 	return ""
 }
 
-// lockEntryName resolves a package-lock "packages" key to a package name.
-func lockEntryName(path string) string {
+// lockNameMode selects how a package-lock "packages" key becomes a name.
+//
+// The two consumers of this parser want different answers, and conflating them
+// was a live defect. pr-scan produces REPORT ROWS and its row identity is
+// deliberately the first-node_modules form (see prScanNestedLockNames: changing
+// it moves the noise floor on a merge gate, which is a product decision that is
+// gated on measurement). The GUARD produces a lookup key into npm's own cache,
+// where the only name that exists is the one npm installs.
+//
+// Feeding the guard the report name produced coordinates like
+// "node-sass-legacy/node_modules/color-convert", which cannot match any cache
+// key — a GUARANTEED O(1) miss on every nested entry, dropping straight into
+// the fallback scan whose basename matching was the false-allow in BLOCKER 3.
+// The measurement gate on pr-scan's rows says nothing about the guard surface
+// it was wired into.
+type lockNameMode uint8
+
+const (
+	// lockNamesReport is pr-scan's row identity — the shipped behaviour,
+	// gated by prScanNestedLockNames. Do not change it here.
+	lockNamesReport lockNameMode = iota
+	// lockNamesInstalled is the name npm actually installs at that path,
+	// which is the only name a cache lookup or a registry fetch can use.
+	lockNamesInstalled
+)
+
+// lockEntryName resolves a package-lock "packages" key to a package name for
+// pr-scan's report rows.
+func lockEntryName(path string) string { return lockEntryNameFor(lockNamesReport, path) }
+
+// lockEntryNameFor resolves a package-lock "packages" key under an explicit
+// mode. Returns "" when the entry has no installed identity (a workspace root
+// or a local path with no node_modules boundary) — such an entry has no
+// registry tarball, so the guard has nothing to look up and skipping it is the
+// honest answer rather than inventing a coordinate.
+func lockEntryNameFor(mode lockNameMode, path string) string {
+	if mode == lockNamesInstalled {
+		return lockEntryNameNested(path)
+	}
 	if prScanNestedLockNames {
 		return lockEntryNameNested(path)
 	}
 	return strings.TrimPrefix(path, "node_modules/")
 }
 
-// parsePackageLockJSON extracts the flat packages map from package-lock.json v2/v3.
-// Falls back to a best-effort v1 parse (dependencies key).
+// parsePackageLockJSON extracts the flat name→version map from
+// package-lock.json v2/v3. Falls back to a best-effort v1 parse (dependencies
+// key).
+//
+// Thin wrapper over parsePackageLockIntegrityJSON for the callers that only
+// want coordinates (pr-scan's diff comparison). The guard's install path wants
+// the integrity strings too — see packageSpec.Integrity.
 func parsePackageLockJSON(data []byte) (map[string]string, error) {
+	versions, _, err := parsePackageLockIntegrityJSON(data)
+	return versions, err
+}
+
+// parsePackageLockIntegrityJSON parses package-lock.json v2/v3 (with a v1
+// fallback) into name→version AND "<name>@<version>"→integrity.
+//
+// The integrity map is the point. Every lockfile entry npm resolves from a
+// registry carries an "integrity" field — the SRI string ("sha512-<base64>")
+// npm itself verifies the tarball against before unpacking. The guard used to
+// throw it away at this boundary, which left the byte-acquisition layer with no
+// expected digest that lives OUTSIDE the package-manager cache it reads from.
+// See packageSpec.Integrity for the attack that gap enables and for the
+// coverage limit (lockfile-driven installs only).
+//
+// KEYED ON name@version, NOT name, deliberately. A lockfile routinely holds the
+// same package at several paths and several VERSIONS (nested duplicate trees).
+// The version map is last-writer-wins over randomised Go map iteration, so a
+// name-keyed integrity map could pair the surviving version with a DIFFERENT
+// entry's digest — manufacturing a digest mismatch on a perfectly clean
+// install. Keying on the coordinate makes the pairing exact by construction.
+//
+// A coordinate that appears twice with DIFFERENT integrity strings is poisoned
+// to "" (no anchor) rather than resolved by a coin flip: an anchor that might
+// be the wrong one is worse than no anchor, because it produces a degraded
+// signal on a package nobody tampered with.
+//
+// Entries with no integrity (a `file:`/`link:` local path, a git dependency, a
+// workspace root) are simply absent from the map; "" downstream means "no
+// anchor", never "verified".
+//
+// The name-resolution MODE is the caller's, not this function's: pr-scan's
+// report rows and the guard's cache-lookup coordinates are different questions
+// about the same file. See lockNameMode.
+func parsePackageLockIntegrityJSON(data []byte) (map[string]string, map[string]string, error) {
+	return parsePackageLockIntegrityJSONMode(data, lockNamesReport)
+}
+
+// parsePackageLockIntegrityJSONMode is parsePackageLockIntegrityJSON with the
+// name-resolution mode made explicit. The guard's install path passes
+// lockNamesInstalled; every pr-scan caller keeps lockNamesReport.
+func parsePackageLockIntegrityJSONMode(data []byte, mode lockNameMode) (map[string]string, map[string]string, error) {
 	if data == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var root struct {
 		LockfileVersion int `json:"lockfileVersion"`
@@ -672,19 +766,33 @@ func parsePackageLockJSON(data []byte) (map[string]string, error) {
 			// "name" while the map key holds the alias
 			// ("node_modules/react": {"name": "electorn"}). Reading only the key
 			// scans the innocent alias and never the package npm installs.
-			Name     string `json:"name"`
-			Version  string `json:"version"`
-			Resolved string `json:"resolved"`
+			Name      string `json:"name"`
+			Version   string `json:"version"`
+			Resolved  string `json:"resolved"`
+			Integrity string `json:"integrity"`
 		} `json:"packages"`
 		Dependencies map[string]struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
+			Name      string `json:"name"`
+			Version   string `json:"version"`
+			Integrity string `json:"integrity"`
 		} `json:"dependencies"`
 	}
 	if err := json.Unmarshal(stripUTF8BOM(data), &root); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make(map[string]string)
+	integrity := make(map[string]string)
+	record := func(name, version, sri string) {
+		if sri == "" {
+			return
+		}
+		k := lockIntegrityKey(name, version)
+		if prev, seen := integrity[k]; seen && prev != sri {
+			integrity[k] = "" // conflicting anchors: no anchor, see the doc above
+			return
+		}
+		integrity[k] = sri
+	}
 	if len(root.Packages) > 0 {
 		for path, pkg := range root.Packages {
 			if pkg.Version == "" || path == "" {
@@ -692,12 +800,13 @@ func parsePackageLockJSON(data []byte) (map[string]string, error) {
 			}
 			name := pkg.Name
 			if name == "" {
-				name = lockEntryName(path)
+				name = lockEntryNameFor(mode, path)
 			}
 			if name == "" {
 				continue
 			}
 			out[name] = pkg.Version
+			record(name, pkg.Version, pkg.Integrity)
 		}
 	} else {
 		for key, dep := range root.Dependencies {
@@ -709,9 +818,146 @@ func parsePackageLockJSON(data []byte) (map[string]string, error) {
 				name = key
 			}
 			out[name] = dep.Version
+			record(name, dep.Version, dep.Integrity)
 		}
 	}
+	return out, integrity, nil
+}
+
+// lockIntegrityKey builds the coordinate key the lockfile-integrity map uses.
+// One function so the writer (parsePackageLockIntegrityJSON) and the reader
+// (depsToSpecs) cannot drift on the separator.
+func lockIntegrityKey(name, version string) string { return name + "@" + version }
+
+// lockCoordinate is one installed (name, version) pair with the lockfile's
+// own integrity string for exactly that pair.
+type lockCoordinate struct {
+	Name      string
+	Version   string
+	Integrity string
+}
+
+// parsePackageLockCoordinates returns EVERY installed coordinate in a
+// package-lock, without collapsing duplicates.
+//
+// ── WHY THIS EXISTS AND WHY THE MAP FORM CANNOT BE USED HERE ─────────
+//
+// parsePackageLockIntegrityJSONMode returns map[name]version. A real npm
+// tree installs the SAME NAME AT SEVERAL VERSIONS routinely — a measured
+// ui_new lockfile carries 40 such names (minimatch at four versions,
+// react-is and ansi-styles at three) and a landing lockfile carries 46.
+// Collapsing them through a bare-name map does two bad things at once:
+// it silently drops ~5% of installed coordinates (924 entries became
+// 851), and because Go randomises map iteration, WHICH version survives
+// changes between runs of the same binary over the same file. Parsing
+// one file 25 times produced minimatch@10.2.5 eleven times and
+// minimatch@3.1.5 four times.
+//
+// For pr-scan's report rows that is survivable: a row is a human-facing
+// finding about a name. For the GUARD it is not. The guard turns each
+// coordinate into a cache key and analyses the bytes it finds, so a
+// collapsed map means the byte scan silently skips real installed
+// packages and is not reproducible run to run — a security control whose
+// coverage is a coin flip and whose gaps never appear twice in a bug
+// report.
+//
+// The integrity map was already keyed name@version for exactly this
+// reason (see the note on record()). The version side was not. This
+// returns coordinates so neither side can collapse.
+func parsePackageLockCoordinates(data []byte) ([]lockCoordinate, error) {
+	if data == nil {
+		return nil, nil
+	}
+	var root struct {
+		Packages map[string]struct {
+			// An aliased dependency records the REAL package in "name" while
+			// the map key holds the alias. Same rule as the map parser: an
+			// explicit name always wins over the path.
+			Name      string `json:"name"`
+			Version   string `json:"version"`
+			Integrity string `json:"integrity"`
+		} `json:"packages"`
+		Dependencies map[string]struct {
+			Name      string `json:"name"`
+			Version   string `json:"version"`
+			Integrity string `json:"integrity"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(stripUTF8BOM(data), &root); err != nil {
+		return nil, err
+	}
+
+	// Keyed name@version, so the same name at several versions survives as
+	// several coordinates. Conflicting SRIs for ONE coordinate collapse to
+	// no anchor rather than a coin flip, matching record() in the map
+	// parser: a wrong anchor manufactures a digest mismatch on a clean
+	// install, which is worse than no anchor at all.
+	byCoord := make(map[string]*lockCoordinate)
+	add := func(name, version, sri string) {
+		if name == "" || version == "" {
+			return
+		}
+		k := lockIntegrityKey(name, version)
+		cur, seen := byCoord[k]
+		if !seen {
+			byCoord[k] = &lockCoordinate{Name: name, Version: version, Integrity: sri}
+			return
+		}
+		if cur.Integrity == "" || sri == "" || cur.Integrity == sri {
+			if cur.Integrity == "" {
+				cur.Integrity = sri
+			}
+			return
+		}
+		cur.Integrity = "" // conflicting anchors for one coordinate
+	}
+
+	if len(root.Packages) > 0 {
+		for path, pkg := range root.Packages {
+			if path == "" {
+				continue
+			}
+			name := pkg.Name
+			if name == "" {
+				name = lockEntryNameFor(lockNamesInstalled, path)
+			}
+			add(name, pkg.Version, pkg.Integrity)
+		}
+	} else {
+		for key, dep := range root.Dependencies {
+			name := dep.Name
+			if name == "" {
+				name = key
+			}
+			add(name, dep.Version, dep.Integrity)
+		}
+	}
+
+	out := make([]lockCoordinate, 0, len(byCoord))
+	for _, c := range byCoord {
+		out = append(out, *c)
+	}
+	// Stable order: map iteration above is randomised by design, and a
+	// security control whose coverage order varies per run cannot be
+	// diffed between two runs.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Version < out[j].Version
+	})
 	return out, nil
+}
+
+// splitLockIntegrityKey reverses lockIntegrityKey. It splits on the LAST
+// "@" so a scoped name (@babel/core@7.24.0) round-trips; splitting on the
+// first would yield ("", "babel/core@7.24.0").
+func splitLockIntegrityKey(key string) (name, version string, ok bool) {
+	at := strings.LastIndex(key, "@")
+	if at <= 0 || at == len(key)-1 {
+		return "", "", false
+	}
+	return key[:at], key[at+1:], true
 }
 
 // parsePackageJSONDeps extracts declared dependencies from package.json
@@ -1071,6 +1317,23 @@ func evaluatePREntry(e rawEntry) prScanEntry {
 	}
 
 	signals := prOfflineSignals(e)
+
+	// Policy runs AFTER the offline heuristics, and its output joins the
+	// SAME slice. Two consequences, both deliberate:
+	//
+	//   1. A rule can key on what the heuristics found (see
+	//      prScanPolicyInput), because they have already run.
+	//   2. `policy:<rule_id>` rows ride the existing signals array, so
+	//      the chainsaw.pr-scan/v1 schema, the SARIF writer
+	//      (prScanToSARIF builds one rule per signal id and maps
+	//      severity "block" → SARIF level "error") and the Action's PR
+	//      comment (jq over `.signals | map(.id + ": " + .reason)`) all
+	//      carry them with no schema bump and no new rendering code.
+	//
+	// The append is the tighten-only fold in its final form: the verdict
+	// loop below is a max over severities, so a policy signal can only
+	// ever raise the verdict, never lower one the heuristics set.
+	signals = append(signals, prScanPolicyLane(context.Background(), e, signals)...)
 	out.Signals = signals
 
 	for _, s := range signals {
@@ -1123,6 +1386,239 @@ func prOfflineSignals(e rawEntry) []prScanSignal {
 	}
 
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Policy decision point — policy.SurfacePR
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS. Every signal prOfflineSignals emits is severity
+// "warn". The "block" branch in evaluatePREntry was therefore dead code
+// and exit 20 was unreachable except via --strict. That is not a
+// cosmetic gap: the shipped Guard Action defaults to
+// `pr-scan-fail-on: block`, which gates on exit 20 — so an operator who
+// set `mode: block` believed they had a merge gate and had a PR
+// comment. The documented alternative, "warn", fails essentially every
+// PR that adds a dependency, because sc.new_dep fires on every new
+// dependency. There was no middle setting.
+//
+// A Rego rule at SurfacePR is that middle setting: `block if
+// input.isSuspectedTyposquat` while sc.new_dep stays a warn. Same rule
+// language, same bundle, same CHAINSAW_POLICY_BUNDLE variable as the
+// proxy and the guard.
+//
+// THE BOUNDARY — identical to the guard's (see guard_policy.go).
+// Policy TIGHTENS, never loosens. The baseline stays exactly as
+// permissive as it was: with no bundle and no built-in rule firing, the
+// report is byte-identical and exit 10 behaviour is unchanged, and
+// --strict semantics are untouched. An operator who wants to SILENCE
+// sc.new_dep is asking policy to LOOSEN, and that is deliberately not
+// granted here — the way there is to leave the baseline permissive
+// (`pr-scan-fail-on: block`) and raise the specific signals they care
+// about to block.
+//
+// FAIL POSTURE — also identical. A bundle that will not compile, or a
+// configured bundle that is not there, falls back to the built-in
+// defaults, is COUNTED via GuardPolicyLoadFailureCount, and never
+// gates. A broken rule file is one operator's mistake; it must not
+// wedge every PR in the org.
+
+var (
+	prScanPolicyOnce   sync.Once
+	prScanPolicyEngine *policyengine.Engine
+)
+
+// prScanPolicySignalPrefix namespaces policy findings inside the
+// signals array. "sc." ids are Chainsaw's own heuristics; "policy:" ids
+// name a rule the operator (or the built-in bundle) wrote, and the
+// suffix is the rule_id verbatim so a reader can grep their bundle for
+// it. Kept distinct so neither namespace can ever shadow the other.
+const prScanPolicySignalPrefix = "policy:"
+
+// prScanTyposquatSignalID is the id checkTyposquat emits AND the id
+// prScanPolicyInput reads to derive input.isSuspectedTyposquat. Sharing
+// the constant is what stops a rename in one place from silently
+// un-populating the other — the failure mode would be invisible, since
+// a rule keyed on isSuspectedTyposquat would simply stop firing.
+const prScanTyposquatSignalID = "sc.typosquat_low"
+
+// prScanPolicy compiles the built-in bundle plus any operator bundle,
+// once per process, WITHOUT the guard's trust-on-first-use pin. See
+// policyBundlePin in guard_policy.go for why an ephemeral CI runner
+// must not pin.
+func prScanPolicy() *policyengine.Engine {
+	prScanPolicyOnce.Do(func() {
+		var notice string
+		prScanPolicyEngine, notice = loadCLIPolicy(skipBundlePin)
+		// DO NOT discard this notice. A merge gate is the surface where a
+		// silently-degraded bundle is worst: the operator who set
+		// `mode: block` is not watching a terminal, and a typo'd .rego
+		// would otherwise produce a permanently green PR check with no
+		// signal on any channel — no comment, no stderr, no exit code.
+		// The counter this used to lean on (GuardPolicyLoadFailureCount)
+		// has no production reader, so "it is counted" was true in code
+		// and void in practice.
+		//
+		// stderr, not the report: the report is a machine-readable
+		// artifact whose schema (chainsaw.pr-scan/v1) is consumed by the
+		// SARIF writer and the Action's jq, and a bundle-load failure is
+		// not a finding about any package. pr-scan already speaks on
+		// stderr for read and parse failures.
+		if notice != "" {
+			fmt.Fprintf(os.Stderr, "pr-scan: %s\n", notice)
+		}
+	})
+	return prScanPolicyEngine
+}
+
+// prScanPolicyResetForTest clears the memoized engine so a test can
+// exercise a different bundle. Never called in production.
+func prScanPolicyResetForTest() {
+	prScanPolicyOnce = sync.Once{}
+	prScanPolicyEngine = nil
+}
+
+// prScanPolicyInput projects what pr-scan knows about a coordinate onto
+// the canonical policy.Input. Fields pr-scan cannot observe stay
+// zero-valued, which is the documented contract.
+//
+// ── READ THIS BEFORE "FIXING" IT TO MATCH THE GUARD ──────────────────
+//
+// guardPolicyInput deliberately OMITS the guard's own Go-lane verdicts
+// (isKnownMalicious, isSuspectedTyposquat). That is correct THERE and
+// wrong HERE, and the difference is not style — it is which lanes
+// return before policy runs.
+//
+// The guard's malicious/typosquat lanes BLOCK and return. Policy never
+// sees those packages, so restating the verdicts could only re-derive a
+// decision already made while creating a second place for the two to
+// disagree.
+//
+// pr-scan's lanes never block. checkTyposquat emits a warn and
+// evaluation continues to policy every time. So restating the typosquat
+// finding is the ONLY way a rule can key on it — omit it and
+// `input.isSuspectedTyposquat` is permanently undefined at SurfacePR,
+// which silently makes the single most useful PR-time rule a no-op.
+//
+// Do not "harmonize" this with the guard. The lanes are shaped
+// differently and the inputs follow the lanes.
+//
+// TestPRScanPolicyInput_PopulatedFieldContract pins the exact field set.
+func prScanPolicyInput(e rawEntry, signals []prScanSignal) policy.Input {
+	in := policy.Input{
+		Surface:          policy.SurfacePR,
+		RepositoryFormat: strings.ToLower(e.Ecosystem),
+		PackageName:      e.Name,
+		PackageVersion:   e.Version,
+	}
+	for _, s := range signals {
+		if s.ID == prScanTyposquatSignalID {
+			in.IsSuspectedTyposquat = true
+		}
+	}
+	return in
+}
+
+// prScanPolicyLane runs the policy decision point for one coordinate
+// and returns the signals to append. nil when policy had nothing to
+// say, which is the common case and the default-off path.
+func prScanPolicyLane(ctx context.Context, e rawEntry, signals []prScanSignal) []prScanSignal {
+	eng := prScanPolicy()
+	if eng == nil {
+		return nil
+	}
+	dec, err := eng.DecideInput(ctx, prScanPolicyInput(e, signals))
+	if err != nil {
+		// Fail open and COUNT it — see FAIL POSTURE above.
+		//
+		// Reachability note: policyengine.DecideInput swallows a Rego
+		// RUNTIME error internally (it logs and folds an allow) and
+		// returns a nil error today, so in practice the counted
+		// failures are compile-time and missing-bundle ones raised
+		// inside loadCLIPolicy. This branch stays because the facade's
+		// signature permits an error and a silent gate failure is the
+		// one outcome that must never be possible here.
+		guardPolicyLoadFailures.Add(1)
+		return nil
+	}
+
+	var out []prScanSignal
+	for _, v := range dec.Violations {
+		sev, ok := prScanPolicySeverity(v.Action)
+		if !ok {
+			// allow / notify_owner carry no enforcement weight
+			// (dsl.strictness ranks them at allow), so there is
+			// nothing to report on a merge gate.
+			continue
+		}
+		msg := v.Message
+		if msg == "" {
+			msg = "refused by policy"
+		}
+		out = append(out, prScanSignal{
+			ID:       prScanPolicySignalID(v.RuleID),
+			Severity: sev,
+			Reason:   msg,
+		})
+	}
+
+	// The emitted rows must reach the action the engine folded with
+	// dsl.Stricter. Per-violation projection can fall short of it —
+	// an action with no violation carrying it, or every violation
+	// filtered out — and under-reporting the decision on a merge gate
+	// is the failure that matters. Add the decisive row back rather
+	// than quietly reporting less than was decided.
+	if sev, ok := prScanPolicySeverity(dec.Action); ok && !prScanSignalsReach(out, sev) {
+		out = append(out, prScanSignal{
+			ID:       prScanPolicySignalID(""),
+			Severity: sev,
+			Reason:   "refused by policy",
+		})
+	}
+	return out
+}
+
+// prScanPolicySignalID renders the signal id for a policy violation.
+// A rule that names itself is traceable; an unnamed one still has to be
+// visible, so it degrades to the bare prefix rather than vanishing.
+func prScanPolicySignalID(ruleID string) string {
+	if ruleID == "" {
+		return strings.TrimSuffix(prScanPolicySignalPrefix, ":")
+	}
+	return prScanPolicySignalPrefix + ruleID
+}
+
+// prScanPolicySeverity maps a policy action onto pr-scan's two
+// severities. ok=false means the action carries no enforcement weight
+// and produces no row.
+//
+// block and quarantine both land on "block": pr-scan has no quarantine
+// concept and a merge gate cannot half-refuse a dependency, so the
+// stricter reading is the only safe one.
+func prScanPolicySeverity(a dsl.Action) (string, bool) {
+	switch a {
+	case dsl.ActionBlock, dsl.ActionQuarantine:
+		return "block", true
+	case dsl.ActionMonitor:
+		return "warn", true
+	default:
+		return "", false
+	}
+}
+
+// prScanSignalsReach reports whether signals already carry at least the
+// given severity, using the same block > warn ordering evaluatePREntry
+// folds with.
+func prScanSignalsReach(signals []prScanSignal, severity string) bool {
+	for _, s := range signals {
+		if s.Severity == "block" {
+			return true
+		}
+		if s.Severity == severity {
+			return true
+		}
+	}
+	return false
 }
 
 // wellKnownPackages is a curated set of extremely-targeted packages that are
@@ -1296,7 +1792,7 @@ func checkTyposquat(ecosystem, name string) (prScanSignal, bool) {
 		dist := typosquat.DamerauLevenshtein(compareName, known)
 		if dist == 1 {
 			return prScanSignal{
-				ID:       "sc.typosquat_low",
+				ID:       prScanTyposquatSignalID,
 				Severity: "warn",
 				Reason:   fmt.Sprintf("name distance to %q = 1 (possible typosquat)", known),
 			}, true

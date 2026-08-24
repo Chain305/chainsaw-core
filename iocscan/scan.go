@@ -116,6 +116,12 @@ var (
 	// textual's docs example for key handling. A test that asserts a URL is
 	// blocked necessarily contains that URL.
 	//
+	// The same premise fails for stealer_string, and the test path was the only
+	// one guarded until 2026-08-24. textual@8.2.8 hard-blocked on a docs
+	// example that defines a RichLog subclass named KeyLogger — `\bkeylogg` in
+	// a file the package documents with, never runs. Both tiers now consult
+	// this predicate.
+	//
 	// A hit in one of these paths is downgraded to a WARNING rather than
 	// dropped. This is a deliberate, bounded loss: a payload hidden under
 	// `tests/` still warns, still appears in the report, and is still caught by
@@ -179,7 +185,17 @@ func findExfilHost(body string) string {
 
 // Scan reports the strongest IOC across a package's source files.
 func Scan(files map[string][]byte) Result {
+	// Stealer evidence is tracked in two buckets, shipping and non-shipping,
+	// for the same reason weakExfil exists below: a stealer string inside the
+	// package's own tests, its docs examples, or a vendored tree is not
+	// evidence that the package steals anything. textual@8.2.8 hard-blocked
+	// because docs/examples/guide/input/key03.py defines a RichLog subclass
+	// named KeyLogger, which hits keyloggerRE's `\bkeylogg`; textual has no
+	// stealer match anywhere in its shipping code.
+	//
+	// The shipping bucket always wins — see the tier-2 branch below.
 	stealerHit, stealerFile := false, ""
+	weakStealerHit, weakStealerFile := false, ""
 	sinkOrSend := false
 
 	// weakExfil records an exfil-host hit seen ONLY in test / docs / vendored
@@ -213,13 +229,24 @@ func Scan(files map[string][]byte) Result {
 		}
 		if credStoreRE.MatchString(body) || tokenGrabRE.MatchString(body) ||
 			walletRE.MatchString(body) || keyloggerRE.MatchString(body) {
-			stealerHit, stealerFile = true, name
+			if isNonShippingPath(name) {
+				if !weakStealerHit {
+					weakStealerHit, weakStealerFile = true, name
+				}
+			} else {
+				stealerHit, stealerFile = true, name
+			}
 		}
 	}
 
 	// Tier 2: a stealer string only counts when the package also has a sink or
 	// makes a network call — the coupling that separates a stealer from a
 	// legitimate browser/forensics reader.
+	//
+	// Shipping code first, so a genuine hit is never masked by a test/docs one
+	// found earlier in the (randomised) map walk. Only when the stealer
+	// evidence is EXCLUSIVELY non-shipping does the hit degrade to a warning,
+	// mirroring the exfil tier's weakExfil.
 	if stealerHit && sinkOrSend {
 		return Result{Detected: true, Kind: "stealer_string", Detail: stealerFile}
 	}
@@ -233,11 +260,21 @@ func Scan(files map[string][]byte) Result {
 		return Result{Detected: true, Kind: "reputation_host", Detail: detail}
 	}
 
-	// Weakest tier last: an exfil host seen only in test/docs/vendored content.
+	// Weakest tier last: an indicator seen only in test/docs/vendored content.
 	// Reported so it is never silently dropped, flagged Weak so no caller
-	// mistakes it for shipping-code evidence.
+	// mistakes it for shipping-code evidence. Both weak kinds sit BELOW the
+	// reputation tier deliberately — a shipping-code reputation hit is stronger
+	// evidence than an indicator in a docs example, whatever its kind.
 	if weakExfil != nil {
 		return *weakExfil
+	}
+	if weakStealerHit && sinkOrSend {
+		return Result{
+			Detected: true,
+			Kind:     "stealer_string",
+			Detail:   weakStealerFile + " (test/docs/vendored path — not shipping code)",
+			Weak:     true,
+		}
 	}
 	return Result{}
 }

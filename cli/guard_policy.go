@@ -15,6 +15,12 @@ package cli
 // This claims policy.SurfaceRuntime, which was RESERVED with no
 // production caller. Nothing keyed on it, so there is no migration.
 //
+// It also hosts loadCLIPolicy, the bundle loader every CLI surface
+// shares. pr-scan (policy.SurfacePR, see pr_scan.go) calls it with
+// skipBundlePin; the guard calls it with pinBundle. Everything else in
+// this file — the load-failure counter, the fail posture, the
+// tighten-only boundary — applies to both surfaces verbatim.
+//
 // ── THE BOUNDARY ────────────────────────────────────────────────────
 //
 // Policy TIGHTENS, never loosens. The lane below can raise a verdict
@@ -86,7 +92,14 @@ const guardPolicyBundleEnv = "CHAINSAW_POLICY_BUNDLE"
 var guardPolicyLoadFailures atomic.Uint64
 
 // GuardPolicyLoadFailureCount reports bundle-compile failures since
-// process start. Exposed for tests and `chainsaw status`.
+// process start.
+//
+// Exposed for tests. The OPERATOR-facing surface is the one-time policy
+// notice printGuardVerdicts prints — `chainsaw status` does not read this
+// and never did, so the old comment named a reader that does not exist.
+// Every increment below now also produces a notice, which is what makes the
+// counter's own stated rationale ("a silent degradation nobody can see is a
+// degradation nobody fixes") actually true rather than aspirational.
 func GuardPolicyLoadFailureCount() uint64 { return guardPolicyLoadFailures.Load() }
 
 var (
@@ -108,63 +121,105 @@ func GuardPolicyNotice() string {
 
 // guardPolicyBundleSources resolves the operator bundle location:
 // CHAINSAW_POLICY_BUNDLE when set, else <config home>/policy. Returns
-// nil when neither exists — the no-bundle-present case, where the
+// nil sources when neither exists — the no-bundle-present case, where the
 // built-in rules run alone. Per the 2026-08-24 ruling the guard falls
 // back to defaults rather than refusing to enforce, so that a
 // `curl | sh` install works on first use without a bundle step.
-func guardPolicyBundleSources() []string {
+//
+// The second return is a user-facing problem string, "" when there is
+// nothing to say. A configured-but-absent bundle was counted and
+// otherwise SILENT: the operator exported CHAINSAW_POLICY_BUNDLE with a
+// typo, believed they had a policy, and the install output was
+// byte-identical to a machine that had never heard of policy. Counting a
+// thing nobody reads is not reporting it.
+func guardPolicyBundleSources() ([]string, string) {
 	if p := strings.TrimSpace(os.Getenv(guardPolicyBundleEnv)); p != "" {
 		if _, err := os.Stat(p); err == nil {
-			return []string{p}
+			return []string{p}, ""
 		}
 		// Configured and absent is worth counting: the operator
 		// believes they have a policy and they do not.
 		guardPolicyLoadFailures.Add(1)
-		return nil
+		return nil, guardPolicyBundleEnv + " points at " + p + ", which does not exist; running built-in defaults only"
 	}
 	if dir := configDir(); dir != "" {
 		p := filepath.Join(dir, "policy")
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			return []string{p}
+			return []string{p}, ""
 		}
 	}
-	return nil
+	return nil, ""
 }
 
-// guardPolicy compiles the built-in bundle together with any operator
-// bundle, once per process. A guard process is one install, so a
-// sync.Once is the whole lifecycle.
+// policyBundlePin selects whether loading the CLI policy bundle also
+// reconciles the trust-on-first-use pin in the config home.
+//
+// pinBundle is right for the guard: it runs on a durable workstation,
+// so "the operator bundle I enforced yesterday is gone" is a real,
+// detectable downgrade and the pin is what makes it detectable (see
+// guard_policy_pin.go, "THE HOLE").
+//
+// skipBundlePin is right for pr-scan. A CI runner is ephemeral: the
+// filesystem is new every job, so there is never a prior pin, the
+// removal check can only ever answer "first run", and writing the pin
+// would leave a durability record on a disk that is discarded seconds
+// later. Running the TOFU machinery there would not be a weaker
+// version of the guard's protection — it would be a meaningless one
+// with a side effect. The repo's own bundle is version-controlled;
+// removal shows up in the diff, which is the PR surface's equivalent
+// of the pin.
+type policyBundlePin bool
+
+const (
+	pinBundle     policyBundlePin = true
+	skipBundlePin policyBundlePin = false
+)
+
+// loadCLIPolicy compiles the built-in bundle together with any operator
+// bundle and returns the engine plus a one-time user-facing notice
+// (empty when there is nothing to say, which is the common case).
 //
 // A compile error falls back to the built-in bundle alone rather than
 // to no policy at all: an operator's syntax error should cost them
 // their own rules, not the defaults.
+//
+// Shared by every CLI surface that routes through the policy decision
+// point. Callers memoize — one CLI process is one install or one PR
+// scan, so a sync.Once is the whole lifecycle.
+func loadCLIPolicy(pin policyBundlePin) (*policyengine.Engine, string) {
+	ctx := context.Background()
+	sources, notice := guardPolicyBundleSources()
+	haveOperator := len(sources) > 0
+	eng, err := builtin.Engine(ctx, sources)
+	if err != nil {
+		guardPolicyLoadFailures.Add(1)
+		// An operator bundle that will not compile is NOT the same
+		// as no operator bundle: they shipped rules and those rules
+		// are broken. Keep haveOperator true so the TOFU pin does
+		// not read this as the bundle having been removed, and
+		// carry the compile error to the user — a silent fallback
+		// to defaults is how a typo becomes a permanent downgrade.
+		notice = "policy bundle failed to compile; running built-in defaults only: " + err.Error()
+		if eng, err = builtin.Engine(ctx, nil); err != nil {
+			// The embedded bundle itself failed to compile.
+			// TestBuiltinCompiles exists to make this
+			// unreachable in a shipped binary.
+			return nil, notice
+		}
+	}
+	if pin == pinBundle {
+		if n := observeGuardPolicyBundle(eng.Digest(), bundleSourceLabel(sources), len(eng.Modules()), haveOperator); n != "" && notice == "" {
+			notice = n
+		}
+	}
+	return policyengine.New(policyengine.Config{DSL: eng}), notice
+}
+
+// guardPolicy compiles the guard's engine once per process, pinning the
+// bundle it saw.
 func guardPolicy() *policyengine.Engine {
 	guardPolicyOnce.Do(func() {
-		ctx := context.Background()
-		sources := guardPolicyBundleSources()
-		haveOperator := len(sources) > 0
-		eng, err := builtin.Engine(ctx, sources)
-		if err != nil {
-			guardPolicyLoadFailures.Add(1)
-			// An operator bundle that will not compile is NOT the same
-			// as no operator bundle: they shipped rules and those rules
-			// are broken. Keep haveOperator true so the TOFU pin does
-			// not read this as the bundle having been removed, and
-			// carry the compile error to the user — a silent fallback
-			// to defaults is how a typo becomes a permanent downgrade.
-			guardPolicyNotice = "policy bundle failed to compile; running built-in defaults only: " + err.Error()
-			if eng, err = builtin.Engine(ctx, nil); err != nil {
-				// The embedded bundle itself failed to compile.
-				// TestBuiltinCompiles exists to make this
-				// unreachable in a shipped binary.
-				guardPolicyEngine = nil
-				return
-			}
-		}
-		if notice := observeGuardPolicyBundle(eng.Digest(), bundleSourceLabel(sources), len(eng.Modules()), haveOperator); notice != "" && guardPolicyNotice == "" {
-			guardPolicyNotice = notice
-		}
-		guardPolicyEngine = policyengine.New(policyengine.Config{DSL: eng})
+		guardPolicyEngine, guardPolicyNotice = loadCLIPolicy(pinBundle)
 	})
 	return guardPolicyEngine
 }
@@ -203,10 +258,18 @@ func guardPolicyInput(spec packageSpec, acq acquireResult, bv behavioralVerdict)
 		PackageName:      spec.Name,
 		PackageVersion:   spec.Version,
 		// The fact the acquireResult split exists to produce: the
-		// guard tried to analyze the artifact and could not finish.
-		// See acquireResult in guard_artifact.go for why this is not
-		// the same as "the package was not cached".
-		SignalsUnavailable: acq == acquireIncomplete,
+		// guard tried to analyze the artifact and could not honestly
+		// say it analyzed the right bytes. See acquireResult in
+		// guard_artifact.go for why this is not the same as "the
+		// package was not cached".
+		//
+		// degraded() rather than a comparison against one constant:
+		// acquireDigestMismatch (the archive did not hash to the
+		// lockfile's integrity, or to the one npm's own index claims)
+		// is a SECOND degraded outcome, and a `== acquireIncomplete`
+		// test would have silently exempted it — a fact nothing asks
+		// about is a fact that allows the install.
+		SignalsUnavailable: acq.degraded(),
 	}
 	// Behavioral findings that did not themselves block are still
 	// facts a rule may want to raise on (e.g. an org that treats any

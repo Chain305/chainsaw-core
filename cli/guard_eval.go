@@ -213,6 +213,41 @@ type packageSpec struct {
 	Ecosystem string
 	Name      string
 	Version   string // "" when the user didn't pin one
+
+	// Integrity is the Subresource-Integrity string the PROJECT'S OWN
+	// lockfile records for this coordinate ("sha512-<base64>"), or "" when
+	// no such anchor exists.
+	//
+	// WHY IT IS HERE. The byte-acquisition layer used to verify nothing:
+	// npmCacheArtifactBytes read cacache by the path the integrity string in
+	// npm's OWN index computes to, and treated "the path resolved" as proof
+	// the bytes were the ones npm would install. That binding is
+	// self-referential — an attacker who can write the cache controls both
+	// the address and the "expected" value — and it is defeated by an
+	// attack that needs no cleverness: overwrite the content file with
+	// benign bytes, the guard analyzes those and ALLOWs, npm's own
+	// ssri.checkData rejects them on read, pacote catches EINTEGRITY, calls
+	// cleanupCached(), refetches the REAL tarball from the registry, and
+	// installs it. Analysis was never bound to execution. The realistic
+	// delivery is a restored or shared CI npm cache (actions/cache on
+	// ~/.npm, an NFS mount, a Docker layer) that a lower-privileged job can
+	// write.
+	//
+	// The lockfile is the one expected digest in the tree that the cache
+	// cannot rewrite, so it is the anchor the guard compares against — see
+	// readCacacheContent and fetchArtifactBytes in guard_artifact.go.
+	//
+	// HONEST COVERAGE LIMIT: this field is only ever populated for
+	// LOCKFILE-DRIVEN installs (`npm ci`, or `npm install` with a
+	// package-lock.json present). A bare `npm install some-new-pkg` has no
+	// lockfile entry for the new coordinate and therefore NO anchor here —
+	// nothing short of a registry packument round-trip could supply one, and
+	// the guard deliberately avoids that round-trip to keep the offline
+	// guarantee. On that path the guard falls back to hashing the bytes and
+	// checking them against npm's own index integrity (which catches the
+	// content-file-overwrite attack above but not an attacker who rewrites
+	// the index too). Stated plainly rather than papered over.
+	Integrity string
 }
 
 func (s packageSpec) String() string {
@@ -284,6 +319,45 @@ type guardVerdict struct {
 	// and CI log both are — and leave the telemetry stream alone.
 	WaivedSeverity string
 	WaivedReason   string
+
+	// PolicySeverity and PolicyReason carry a NON-BLOCKING policy verdict
+	// that could not be the verdict itself because another warn-tier lane
+	// had already claimed it. Empty when policy said nothing, and empty
+	// when policy's verdict IS this verdict (Severity == guardSeverityPolicy)
+	// — printGuardVerdicts renders one policy line from whichever of the two
+	// carries it, never both.
+	//
+	// They exist because the policy verdict used to be DROPPED outright:
+	// evaluate() only promoted it when `pendingWarn.Severity == ""`, so an
+	// operator's monitor rule was silently discarded on any package that had
+	// also drawn a typosquat-medium or behavioral-medium warn. A rule the
+	// operator wrote is not interchangeable with a heuristic warn and must
+	// not lose a race to one — and the coordinates where both fire are
+	// precisely the interesting ones.
+	//
+	// A policy BLOCK never rides here: blocks return as the verdict, because
+	// policy tightens and a refusal is the verdict. See guard_policy.go,
+	// THE BOUNDARY.
+	PolicySeverity string
+	PolicyReason   string
+
+	// DigestMismatch records that byte acquisition returned
+	// acquireDigestMismatch for this coordinate: the guard DID get bytes and
+	// they are not the bytes that will be installed.
+	//
+	// It rides the verdict rather than being read off guardDigestMismatch (the
+	// process counter) because the printer's output must be a function of the
+	// verdicts it is handed. A process counter is correct in production — one
+	// guard process is one install — and wrong everywhere else, including in
+	// any long-lived process, where an earlier install's mismatch would print
+	// beside a later install's clean verdicts.
+	//
+	// It is NOT folded into Severity: the policy lane already speaks for this
+	// package (builtin/degraded-analysis covers both degraded outcomes), and
+	// what the operator additionally needs is the distinction between "the scan
+	// did not finish" and "the cache and the lockfile disagree about what this
+	// package is". Only the second warrants looking at the machine.
+	DigestMismatch bool
 }
 
 // localGuard holds the offline signal engines. Build once per invocation; the
@@ -499,8 +573,19 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	// event. A waiver that produces no output at all is what this closure exists
 	// to stop: it made one line of local JSON an invisible, permanent hole.
 	var waived guardVerdict
-	withWaiver := func(v guardVerdict) guardVerdict {
+	// policyWarn holds a non-blocking POLICY verdict that lost the pendingWarn
+	// slot to another lane. It rides the returned verdict rather than replacing
+	// it — see guardVerdict.PolicySeverity for why losing it was a defect.
+	var policyWarn guardVerdict
+	// digestMismatch records the acquireDigestMismatch outcome for this spec so
+	// the printer can report it without reading process-global state.
+	digestMismatch := false
+	withNotices := func(v guardVerdict) guardVerdict {
 		v.WaivedSeverity, v.WaivedReason = waived.Severity, waived.Reason
+		v.DigestMismatch = digestMismatch
+		if v.Severity != guardSeverityPolicy {
+			v.PolicySeverity, v.PolicyReason = policyWarn.Severity, policyWarn.Reason
+		}
 		return v
 	}
 
@@ -615,17 +700,16 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	// is the normal shape for an unstaged, uncached package, and the feed /
 	// typosquat / metadata lanes above already ran.
 	//
-	// acquireIncomplete does NOT yet change the verdict, and that is deliberate
-	// rather than an oversight. It means acquisition was attempted and could
-	// not finish (budget exhausted, truncated walk, transport failure, present-
-	// but-unreadable artifact) — a materially different fact from a miss, and
-	// the one an attacker can drive. Per the 2026-08-24 ruling in
+	// acquireIncomplete does NOT change the verdict IN THIS STEP, and that is
+	// deliberate rather than an oversight. It means acquisition was attempted
+	// and could not finish (a truncated cache index scan, a transport failure,
+	// a present-but-unreadable artifact) — a materially different fact from a
+	// miss, and the one an attacker can drive. Per the 2026-08-24 ruling in
 	// docs/plan_competitive_depth.md, whether that warns or blocks is a POLICY
-	// question, not a Go constant and not a per-surface table. The guard has no
-	// PDP wired today (SurfaceRuntime is RESERVED — see core/policy/input.go),
-	// so this step produces the fact and stops. Wiring guard_eval to
-	// policyengine.DecideInput and mapping acquireIncomplete onto
-	// input.signalsUnavailable is the next step in that plan.
+	// question, not a Go constant and not a per-surface table. So this step
+	// produces the FACT and the policy decision point below consumes it, via
+	// guardPolicyInput's input.signalsUnavailable. That PDP is wired — see
+	// guard_policy.go, which claims policy.SurfaceRuntime.
 	//
 	// Do not "fix" this by hardcoding a block here — that reintroduces exactly
 	// the per-surface hardcoding the ruling exists to prevent.
@@ -635,13 +719,21 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	case len(data) > 0:
 		behavioral = analyzeArtifact(spec.Ecosystem, data)
 		if behavioral.Block {
-			return withWaiver(guardVerdict{Spec: spec, Block: true, Severity: behavioral.Severity, Reason: behavioral.Reason})
+			return withNotices(guardVerdict{Spec: spec, Block: true, Severity: behavioral.Severity, Reason: behavioral.Reason})
 		}
 		if behavioral.Severity != "" && pendingWarn.Severity == "" {
 			pendingWarn = guardVerdict{Spec: spec, Block: false, Severity: behavioral.Severity, Reason: behavioral.Reason}
 		}
-	case acq == acquireIncomplete:
+	case acq.degraded():
 		guardAnalysisIncomplete.Add(1)
+		if acq == acquireDigestMismatch {
+			// Counted separately as well as in the aggregate: "the bytes on
+			// this machine are not the bytes the lockfile pins" is a
+			// qualitatively different operator signal from "the cache walk
+			// ran out of budget", and it would be invisible folded in.
+			guardDigestMismatch.Add(1)
+			digestMismatch = true
+		}
 	}
 
 	// Policy decision point. Runs LAST, after every Go lane has had its
@@ -654,19 +746,29 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	// a degraded analysis warns or blocks is decided by a rule, and the
 	// built-in default bundle answers "monitor" so the degradation is
 	// visible without hard-failing anyone's install.
+	//
+	// A policy MONITOR verdict is never discarded. It becomes the verdict when
+	// nothing else claimed the warn slot, and otherwise rides the verdict that
+	// did (policyWarn -> guardVerdict.PolicySeverity). The previous code kept
+	// only the first case, so an operator's own monitor rule vanished on any
+	// package that had also drawn a typosquat-medium or behavioral-medium warn:
+	// a rule someone deliberately wrote, silently losing a race to a heuristic.
+	// printGuardVerdicts renders exactly one policy line either way.
 	if pv, ok := guardPolicyLane(ctx, spec, acq, behavioral); ok {
-		if pv.Block {
-			return withWaiver(pv)
-		}
-		if pendingWarn.Severity == "" {
+		switch {
+		case pv.Block:
+			return withNotices(pv)
+		case pendingWarn.Severity == "":
 			pendingWarn = pv
+		default:
+			policyWarn = pv
 		}
 	}
 
 	if pendingWarn.Severity != "" {
-		return withWaiver(pendingWarn)
+		return withNotices(pendingWarn)
 	}
-	return withWaiver(guardVerdict{Spec: spec, Block: false})
+	return withNotices(guardVerdict{Spec: spec, Block: false})
 }
 
 func supplementalInstallAdvisory(spec packageSpec) (string, bool) {

@@ -231,3 +231,85 @@ func TestScan_LocalStateProseIsNotACredentialPath(t *testing.T) {
 		t.Errorf("a real Chrome Local State path coupled with a send must still fire; got %+v", r)
 	}
 }
+
+// TestScan_StealerInNonShippingPathIsWeak extends the tests/docs/vendored
+// downgrade to tier 2. Until 2026-08-24 isNonShippingPath was consulted ONLY on
+// the exfil_host path, so a stealer string anywhere in the archive — including
+// a docs example — produced a full-strength hard block.
+//
+// The live case was textual@8.2.8: docs/examples/guide/input/key03.py defines a
+// RichLog subclass named `KeyLogger`, which hits keyloggerRE's `\bkeylogg`.
+// textual couples trivially (any `.send(` or `fetch(` satisfies netSendRE) and
+// has NO stealer match anywhere in its shipping code, so a documentation class
+// name refused the install.
+//
+// WHY THE ASYMMETRY MATTERS. The two directions are not symmetric and must be
+// pinned separately, because the attacker's move against this downgrade is to
+// put the payload under a path that LOOKS non-shipping. The downgrade is only
+// safe because it is scoped to packages whose stealer evidence is EXCLUSIVELY
+// non-shipping: one match in real code and the verdict goes back to full
+// strength, regardless of how many test-path matches accompany it. A weak-wins
+// bug would be invisible in the FP number (it only ever lowers the rate) and
+// would silently open exactly that hole — so "shipping stays strong" is the
+// assertion that guards the fix, not the fix itself.
+func TestScan_StealerInNonShippingPathIsWeak(t *testing.T) {
+	// keyloggerRE + a netSendRE-satisfying line, i.e. the coupled tier-2 shape.
+	payload := "class KeyLogger(RichLog):\n    def on_key(self, event):\n        self.write(event)\n        self.post_message(x)\n        fetch(url)\n"
+
+	weak := []string{
+		"textual-8.2.8/docs/examples/guide/input/key03.py",
+		"pkg-1.0/tests/test_keys.py",
+		"pkg-1.0/examples/demo.py",
+		"pkg-1.0/vendor/thing/keys.js",
+		"pkg-1.0/pkg/keys_test.go",
+	}
+	for _, name := range weak {
+		t.Run("weak/"+name, func(t *testing.T) {
+			r := Scan(map[string][]byte{name: []byte(payload)})
+			if !r.Detected {
+				t.Fatalf("indicator should still be REPORTED, not dropped: %s", name)
+			}
+			if r.Kind != "stealer_string" {
+				t.Fatalf("kind = %q, want stealer_string (%s)", r.Kind, r.Detail)
+			}
+			if !r.Weak {
+				t.Errorf("stealer hit in non-shipping path should be Weak (warn, not block): %s", name)
+			}
+		})
+	}
+
+	shipping := []string{
+		"pkg-1.0/src/pkg/keys.py",
+		"pkg-1.0/pkg/grab.js",
+		"pkg-1.0/setup.py",
+	}
+	for _, name := range shipping {
+		t.Run("shipping/"+name, func(t *testing.T) {
+			r := Scan(map[string][]byte{name: []byte(payload)})
+			if !r.Detected || r.Kind != "stealer_string" || r.Weak {
+				t.Errorf("stealer hit in shipping code must stay dispositive "+
+					"(Detected && !Weak): %s got %+v", name, r)
+			}
+		})
+	}
+}
+
+// TestScan_ShippingStealerWinsOverWeakStealer — the tier-2 counterpart of
+// TestScan_ShippingHitWinsOverWeakHit. A package carrying the stealer string in
+// BOTH a docs example and its shipping code must still hard-block, whichever
+// file the randomised map walk reaches first.
+func TestScan_ShippingStealerWinsOverWeakStealer(t *testing.T) {
+	payload := []byte("class KeyLogger:\n    pass\n" + `p = "~/Library/Application Support/Google/Chrome/Local State"` + "\nfetch(url)\n")
+	for i := 0; i < 50; i++ { // map iteration order is randomised; repeat
+		r := Scan(map[string][]byte{
+			"p/docs/examples/key03.py": payload,
+			"p/p/real.py":              payload,
+		})
+		if !r.Detected || r.Kind != "stealer_string" || r.Weak {
+			t.Fatalf("shipping-code stealer hit must win over the docs-path hit; got %+v", r)
+		}
+		if r.Detail != "p/p/real.py" {
+			t.Fatalf("Detail should name the shipping file, got %q", r.Detail)
+		}
+	}
+}

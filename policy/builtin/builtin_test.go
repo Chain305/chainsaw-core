@@ -3,6 +3,7 @@ package builtin
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/chain305/chainsaw-core/policy"
@@ -123,4 +124,55 @@ func writeRego(t *testing.T, dir, name, body string) {
 
 func writeFile(dir, name, body string) error {
 	return os.WriteFile(dir+"/"+name, []byte(body), 0o644)
+}
+
+// TestDegradedAnalysisMessageCoversBothCauses pins a property the
+// message text must keep, because nothing else did and it was wrong once.
+//
+// input.signalsUnavailable is ONE bool set by two different facts:
+// acquireIncomplete (the analyzer could not finish) and
+// acquireDigestMismatch (it finished, and the bytes disagreed with the
+// lockfile anchor). Rego cannot distinguish them, so any message that
+// asserts which one happened is false half the time. The original text
+// said "the bytes were not fully inspected" — false for a mismatch,
+// where the bytes were read in full and were simply the wrong bytes.
+//
+// This asserts the shape, not the wording: the message must not claim
+// the bytes went unread. Rewording is fine; re-narrowing is not.
+func TestDegradedAnalysisMessageCoversBothCauses(t *testing.T) {
+	eng, err := Engine(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := eng.Decide(context.Background(), policy.Input{
+		Surface:            policy.SurfaceRuntime,
+		PackageName:        "some-pkg",
+		PackageVersion:     "1.0.0",
+		SignalsUnavailable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dec.Violations) != 1 {
+		t.Fatalf("want exactly the builtin violation, got %+v", dec.Violations)
+	}
+	msg := strings.ToLower(dec.Violations[0].Message)
+
+	// Phrases that assert the analyzer never read the bytes. Each is
+	// false on the digest-mismatch path.
+	for _, banned := range []string{
+		"not fully inspected",
+		"were not inspected",
+		"never inspected",
+		"not read",
+	} {
+		if strings.Contains(msg, banned) {
+			t.Errorf("message claims the bytes went unread (%q), which is false for a digest mismatch: %q",
+				banned, dec.Violations[0].Message)
+		}
+	}
+	// And it must still say something actionable about installation.
+	if !strings.Contains(msg, "install") {
+		t.Errorf("message should tell the operator this is about what gets installed, got %q", dec.Violations[0].Message)
+	}
 }

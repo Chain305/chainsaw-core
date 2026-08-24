@@ -19,6 +19,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -160,8 +161,16 @@ func TestParsePackageLockJSON_NestedNamesTyposquatFPRate(t *testing.T) {
 		totalSignals, totalScanned, rate*100, blocking)
 
 	// The hard requirement: part B must never put a real popular package on a
-	// BLOCKING verdict. pr-scan emits no "block" severity at all today, so this
-	// also guards against a future promotion landing without a re-measurement.
+	// BLOCKING verdict.
+	//
+	// This assertion used to be nearly vacuous and said so: pr-scan emitted no
+	// "block" severity at all, so nothing could fail it. That changed when
+	// SurfacePR was wired to the policy DSL (see prScanPolicyLane in
+	// pr_scan.go) — a rule can now raise a signal to "block" and make exit 20
+	// reachable. The measurement below is still the HEURISTIC path with no
+	// bundle loaded, which is exactly the baseline that must stay permissive:
+	// policy tightens on top of it, so a popular package blocking HERE would
+	// mean the floor itself moved.
 	if blocking != 0 {
 		t.Fatalf("%d real popular packages would BLOCK under part B — do not enable it", blocking)
 	}
@@ -267,5 +276,168 @@ func TestParsePackageLockJSON_BOMTolerated(t *testing.T) {
 	}
 	if got["chalk"] != "5.3.0" {
 		t.Errorf("got %v", got)
+	}
+}
+
+// TestLockNameModeSplitsGuardFromReport is BLOCKER 3's aggravating factor: the
+// guard's install path was wired through the parser in pr-scan's REPORT-ROW
+// naming mode, so a nested entry became "node-sass-legacy/node_modules/
+// color-convert" — a coordinate no npm cache key and no registry URL can ever
+// match. Guaranteed O(1) miss, guaranteed fall-through to the fallback scan,
+// and the fallback scan matched on tarball basename alone.
+//
+// The 40-line rationale on prScanNestedLockNames reasons entirely about
+// pr-scan's report rows and their noise floor on a merge gate. It says nothing
+// about the guard surface it had been wired into, and the two want different
+// answers. This test pins that they get different answers.
+func TestLockNameModeSplitsGuardFromReport(t *testing.T) {
+	const lock = `{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "": {"name": "root", "version": "0.0.0"},
+	    "node_modules/color-convert": {"version": "2.0.1", "integrity": "sha512-AAA="},
+	    "node_modules/node-sass-legacy/node_modules/color-convert": {"version": "1.9.3", "integrity": "sha512-BBB="},
+	    "node_modules/@scope/pkg": {"version": "3.0.0", "integrity": "sha512-CCC="}
+	  }
+	}`
+
+	report, _, err := parsePackageLockIntegrityJSONMode([]byte(lock), lockNamesReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// pr-scan's shipped row identity, unchanged. Flipping it is the product
+	// decision prScanNestedLockNames gates; this fix must not make it silently.
+	wantNested := "node-sass-legacy/node_modules/color-convert"
+	if prScanNestedLockNames {
+		wantNested = "color-convert"
+	}
+	if _, ok := report[wantNested]; !ok {
+		t.Fatalf("pr-scan report naming changed: %v does not contain %q", lockNameKeys(report), wantNested)
+	}
+
+	installed, integrity, err := parsePackageLockIntegrityJSONMode([]byte(lock), lockNamesInstalled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The guard sees the name npm actually installs, at both paths.
+	if _, ok := installed["color-convert"]; !ok {
+		t.Fatalf("the guard must resolve a nested entry to the installed name, got %v", lockNameKeys(installed))
+	}
+	if _, ok := installed["node-sass-legacy/node_modules/color-convert"]; ok {
+		t.Fatalf("the guard must never see a dedup path as a package name, got %v", lockNameKeys(installed))
+	}
+	if got := installed["@scope/pkg"]; got != "3.0.0" {
+		t.Fatalf("a scoped entry must keep its scope, got %q", got)
+	}
+	// The integrity map is keyed on the same names, or the anchor never pairs.
+	if integrity[lockIntegrityKey("color-convert", installed["color-convert"])] == "" {
+		t.Fatalf("the lockfile anchor must be reachable under the installed name, got %v", integrity)
+	}
+	// The workspace root has no installed identity and no registry tarball, so
+	// the guard skips it rather than inventing a coordinate.
+	if _, ok := installed["root"]; ok {
+		t.Fatal("the workspace root must not become a guard spec")
+	}
+}
+
+func lockNameKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestParsePackageLockCoordinates_DuplicateNamesAllSurvive is the
+// regression pin for the defect that made the guard's byte scan
+// non-reproducible.
+//
+// The guard used to consume map[name]version. A real npm tree installs
+// the same name at several versions routinely — a measured ui_new
+// lockfile carries 40 such names, a landing lockfile 46 — so the map
+// dropped ~5% of installed coordinates (924 entries became 851), and
+// because Go randomises map iteration, WHICH version survived changed
+// between runs of the same binary over the same bytes.
+//
+// TestLockNameModeSplitsGuardFromReport builds this exact fixture and
+// asserts only that the KEY exists. That is why the defect lived: the
+// test could not see it. This one asserts the versions.
+func TestParsePackageLockCoordinates_DuplicateNamesAllSurvive(t *testing.T) {
+	lock := []byte(`{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "": {"name": "root", "version": "1.0.0"},
+	    "node_modules/color-convert": {"version": "2.0.1", "integrity": "sha512-AAAA=="},
+	    "node_modules/pkg-a/node_modules/color-convert": {"version": "1.9.3", "integrity": "sha512-BBBB=="},
+	    "node_modules/pkg-b/node_modules/color-convert": {"version": "0.5.3", "integrity": "sha512-CCCC=="},
+	    "node_modules/solo": {"version": "3.0.0", "integrity": "sha512-DDDD=="}
+	  }
+	}`)
+
+	coords, err := parsePackageLockCoordinates(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	for _, c := range coords {
+		got[c.Name+"@"+c.Version] = c.Integrity
+	}
+	for _, want := range []struct{ coord, sri string }{
+		{"color-convert@2.0.1", "sha512-AAAA=="},
+		{"color-convert@1.9.3", "sha512-BBBB=="},
+		{"color-convert@0.5.3", "sha512-CCCC=="},
+		{"solo@3.0.0", "sha512-DDDD=="},
+	} {
+		sri, ok := got[want.coord]
+		if !ok {
+			t.Errorf("coordinate %s was dropped — the guard would never analyze it", want.coord)
+			continue
+		}
+		if sri != want.sri {
+			t.Errorf("%s anchored to %q, want %q — a wrong anchor manufactures a digest mismatch on a clean install",
+				want.coord, sri, want.sri)
+		}
+	}
+	if len(coords) != 4 {
+		t.Errorf("got %d coordinates, want 4: %+v", len(coords), coords)
+	}
+
+	// Determinism. The old map form produced a different survivor per run,
+	// so guard coverage was a coin flip and a gap never reproduced twice.
+	first := fmt.Sprintf("%v", coords)
+	for i := 0; i < 20; i++ {
+		again, err := parsePackageLockCoordinates(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := fmt.Sprintf("%v", again); s != first {
+			t.Fatalf("non-deterministic across parses of identical bytes:\n first: %s\n now:   %s", first, s)
+		}
+	}
+}
+
+// TestParsePackageLockCoordinates_ConflictingAnchorsCollapse: two entries
+// claiming the SAME coordinate with different SRIs must yield NO anchor,
+// not an arbitrary one. A wrong anchor is worse than none — it
+// manufactures a digest mismatch on an honest install.
+func TestParsePackageLockCoordinates_ConflictingAnchorsCollapse(t *testing.T) {
+	lock := []byte(`{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "node_modules/dup": {"version": "1.0.0", "integrity": "sha512-AAAA=="},
+	    "node_modules/x/node_modules/dup": {"version": "1.0.0", "integrity": "sha512-ZZZZ=="}
+	  }
+	}`)
+	coords, err := parsePackageLockCoordinates(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(coords) != 1 {
+		t.Fatalf("one coordinate expected, got %+v", coords)
+	}
+	if coords[0].Integrity != "" {
+		t.Errorf("conflicting anchors must collapse to none, got %q", coords[0].Integrity)
 	}
 }

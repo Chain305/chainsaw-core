@@ -19,12 +19,139 @@ import (
 )
 
 // printedLines runs the real printer against a buffer.
+//
+// The config-home and bundle isolation is not optional: printGuardVerdicts
+// calls GuardPolicyNotice, which loads the policy bundle and reconciles the
+// TOFU pin under configDir(). Without it a developer who has a bundle
+// installed would have every run of these tests write into their real
+// ~/.chainsaw — and would get different output than CI. Same defect S1
+// documents in guard_policy_test.go.
 func printedLines(t *testing.T, quiet bool, verdicts ...guardVerdict) string {
 	t.Helper()
 	t.Setenv("NO_COLOR", "1")
+	t.Setenv("CHAINSAW_CONFIG_HOME", t.TempDir())
+	t.Setenv(guardPolicyBundleEnv, "")
+	guardPolicyResetForTest()
+	t.Cleanup(guardPolicyResetForTest)
 	var b strings.Builder
 	printGuardVerdicts(&b, "chainsaw", verdicts, quiet)
 	return b.String()
+}
+
+// TestPrinterHasNoSilentSeverity is BLOCKER 1, and it is written as a TOTALITY
+// assertion rather than as one case per severity — because the defect was not a
+// missing case, it was a switch with no default.
+//
+// What shipped: printGuardVerdicts had arms for v.Block, the server- prefix,
+// typosquat-demoted, and (typosquat-medium || behavioral-medium). No arm for
+// guardSeverityPolicy below block level, and no default. So the entire
+// deliverable of the policy wave — evaluate() computing a builtin/degraded-
+// analysis MONITOR verdict, winning the pendingWarn slot, and returning it —
+// produced EMPTY OUTPUT. Driving the real printer:
+//
+//	policy-monitor -> ""
+//	policy-block   -> "✗ blocked … refused by policy"
+//
+// The only verdict that may print nothing is a clean allow.
+func TestPrinterHasNoSilentSeverity(t *testing.T) {
+	spec := packageSpec{Ecosystem: "npm", Name: "x", Version: "1.0.0"}
+	severities := []string{
+		guardSeverityPolicy,
+		guardSeverityTyposquatDemoted,
+		guardSeverityTyposquatMedium,
+		guardSeverityBehavioralMedium,
+		guardSeverityBehavioralHigh,
+		serverSeverityPrefix + "medium",
+		"coverage",
+		"a-severity-from-2027", // the future lane the default arm exists for
+	}
+	for _, sev := range severities {
+		for _, quiet := range []bool{false, true} {
+			out := printedLines(t, quiet, guardVerdict{Spec: spec, Severity: sev, Reason: "because"})
+			// server- rows and medium-confidence chatter are the DELIBERATE
+			// --quiet suppressions (INVARIANT D); everything else must speak.
+			chatter := sev == guardSeverityTyposquatMedium ||
+				sev == guardSeverityBehavioralMedium ||
+				strings.HasPrefix(sev, serverSeverityPrefix)
+			if quiet && chatter {
+				continue
+			}
+			if out == "" {
+				t.Errorf("severity %q (quiet=%v) printed NOTHING — a verdict a lane produced and nobody can read is a verdict that does not exist", sev, quiet)
+			}
+		}
+	}
+	// And the one verdict that must stay silent, so the assertion above is a
+	// real constraint rather than "print something for everything".
+	if out := printedLines(t, false, guardVerdict{Spec: spec}); out != "" {
+		t.Errorf("a clean allow must print nothing, got %q", out)
+	}
+}
+
+// TestPolicyMonitorPrintsFromEitherRoute pins the two routes a non-blocking
+// policy verdict can arrive by — as the verdict itself, or riding another
+// verdict (guardVerdict.PolicySeverity) — rendering one line each and never
+// two for the same package.
+func TestPolicyMonitorPrintsFromEitherRoute(t *testing.T) {
+	spec := packageSpec{Ecosystem: "npm", Name: "x", Version: "1.0.0"}
+
+	asVerdict := printedLines(t, false, guardVerdict{
+		Spec: spec, Severity: guardSeverityPolicy, Reason: "not fully inspected (policy rule builtin/degraded-analysis)",
+	})
+	if n := strings.Count(asVerdict, "! policy"); n != 1 {
+		t.Fatalf("policy verdict printed %d policy lines, want 1: %q", n, asVerdict)
+	}
+
+	rideAlong := printedLines(t, false, guardVerdict{
+		Spec: spec, Severity: guardSeverityTyposquatMedium, Reason: "looks like a typosquat",
+		PolicySeverity: guardSeverityPolicy, PolicyReason: "not fully inspected (policy rule builtin/degraded-analysis)",
+	})
+	if n := strings.Count(rideAlong, "! policy"); n != 1 {
+		t.Fatalf("ride-along printed %d policy lines, want 1: %q", n, rideAlong)
+	}
+	if !strings.Contains(rideAlong, "typosquat") {
+		t.Fatalf("the verdict that WON the slot must still print alongside the policy line: %q", rideAlong)
+	}
+	// A policy line survives --quiet: it is an operator's own rule firing, not
+	// chatter, and CI is where --quiet is actually used.
+	if q := printedLines(t, true, guardVerdict{
+		Spec: spec, Severity: guardSeverityTyposquatMedium, Reason: "looks like a typosquat",
+		PolicySeverity: guardSeverityPolicy, PolicyReason: "not fully inspected",
+	}); !strings.Contains(q, "! policy") {
+		t.Fatalf("--quiet must not eat a policy verdict, got %q", q)
+	}
+	// Belt and braces: a verdict carrying BOTH must still print one line.
+	both := printedLines(t, false, guardVerdict{
+		Spec: spec, Severity: guardSeverityPolicy, Reason: "r",
+		PolicySeverity: guardSeverityPolicy, PolicyReason: "r",
+	})
+	if n := strings.Count(both, "! policy"); n != 1 {
+		t.Fatalf("both routes set printed %d policy lines, want 1: %q", n, both)
+	}
+}
+
+// TestPolicyMonitorLinesAreBounded pins the volume trade. The line is
+// deliberately not --quiet-suppressed, so its volume has to be bounded some
+// other way: the built-in degraded-analysis rule can fire on every package at
+// once if the cache index scan truncates, and 900 identical lines is a form of
+// silence too.
+func TestPolicyMonitorLinesAreBounded(t *testing.T) {
+	var verdicts []guardVerdict
+	const n = 60
+	for i := 0; i < n; i++ {
+		verdicts = append(verdicts, guardVerdict{
+			Spec:     packageSpec{Ecosystem: "npm", Name: "pkg", Version: "1.0.0"},
+			Severity: guardSeverityPolicy, Reason: "not fully inspected",
+		})
+	}
+	out := printedLines(t, false, verdicts...)
+	shown := strings.Count(out, "(policy monitor")
+	if shown != guardPolicyLineBudget {
+		t.Fatalf("printed %d individual policy lines, want the %d-line budget: %q", shown, guardPolicyLineBudget, out)
+	}
+	if !strings.Contains(out, "and 55 more package(s) matched a policy monitor rule") {
+		t.Fatalf("the suppressed remainder must be reported as a count, not dropped: %q", out)
+	}
 }
 
 // TestQuietKeepsGateDemotedTyposquats is the regression test for the silence.
@@ -168,5 +295,37 @@ func TestGuardAllowlistSeverityDemotedIsNotABlock(t *testing.T) {
 	res := typosquat.DetectionResult{SimilarTo: "nan", Distance: 1, Method: "edit-distance", TargetRank: 1476}
 	if guardTyposquatBlockGate.allowsD1Block("npm", "nano", res) {
 		t.Fatal("fixture regressed: nano must be demoted")
+	}
+}
+
+// TestIntegritySummaryIsScopedToTheseVerdicts pins both halves of the
+// digest-mismatch line: it appears when a verdict carries the fact, and it does
+// NOT appear otherwise.
+//
+// The second half is the one that caught a defect in this very change: the
+// summary was first written to read GuardDigestMismatchCount, a PROCESS
+// counter. That is correct in production — one guard process is one install —
+// and wrong for any other caller, so a clean allow printed an integrity warning
+// inherited from an earlier invocation. A printer's output has to be a function
+// of its arguments.
+func TestIntegritySummaryIsScopedToTheseVerdicts(t *testing.T) {
+	spec := packageSpec{Ecosystem: "npm", Name: "swapped", Version: "1.0.0"}
+
+	with := printedLines(t, true, guardVerdict{Spec: spec, Severity: guardSeverityPolicy, Reason: "r", DigestMismatch: true})
+	if !strings.Contains(with, "! integrity") || !strings.Contains(with, "1 artifact(s)") {
+		t.Fatalf("a digest mismatch must be reported, and --quiet must not eat it: %q", with)
+	}
+
+	without := printedLines(t, true, guardVerdict{Spec: spec, Severity: guardSeverityPolicy, Reason: "r"})
+	if strings.Contains(without, "! integrity") {
+		t.Fatalf("verdicts carrying no mismatch must produce no integrity line, got %q", without)
+	}
+
+	two := printedLines(t, false,
+		guardVerdict{Spec: spec, Severity: guardSeverityPolicy, Reason: "r", DigestMismatch: true},
+		guardVerdict{Spec: spec, Severity: guardSeverityPolicy, Reason: "r", DigestMismatch: true},
+		guardVerdict{Spec: spec})
+	if !strings.Contains(two, "2 artifact(s)") {
+		t.Fatalf("the count must reflect only the verdicts passed in, got %q", two)
 	}
 }

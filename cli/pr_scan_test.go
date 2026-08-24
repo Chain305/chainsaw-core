@@ -850,3 +850,101 @@ func newPRScanTestCmd() *spfcobra.Command {
 	cmd.Flags().Bool("strict", false, "")
 	return cmd
 }
+
+// TestParsePackageLockIntegrityJSON pins the anchor the whole TOCTOU fix hangs
+// off: package-lock.json's per-entry "integrity" string reaches the caller
+// instead of being dropped at the parse boundary. Before this the guard had NO
+// expected digest that lived outside the npm cache it read the bytes from — see
+// packageSpec.Integrity.
+func TestParsePackageLockIntegrityJSON(t *testing.T) {
+	const lock = `{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "": {"name": "root", "version": "1.0.0"},
+	    "node_modules/chalk": {"version": "4.1.2", "integrity": "sha512-Chalk=="},
+	    "node_modules/localdep": {"version": "0.0.0"},
+	    "node_modules/aliased": {"name": "electorn", "version": "9.9.9", "integrity": "sha512-Alias=="}
+	  }
+	}`
+	versions, integrity, err := parsePackageLockIntegrityJSON([]byte(lock))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if versions["chalk"] != "4.1.2" {
+		t.Fatalf("chalk version = %q, want 4.1.2", versions["chalk"])
+	}
+	if got := integrity[lockIntegrityKey("chalk", "4.1.2")]; got != "sha512-Chalk==" {
+		t.Fatalf("chalk integrity = %q, want sha512-Chalk== — the lockfile anchor is being dropped", got)
+	}
+	// An aliased entry anchors on the REAL package name, matching the name the
+	// version map records (G5b) — otherwise the anchor would never be found.
+	if got := integrity[lockIntegrityKey("electorn", "9.9.9")]; got != "sha512-Alias==" {
+		t.Fatalf("aliased integrity = %q, want sha512-Alias==", got)
+	}
+	// No integrity (a file:/link: dependency, a workspace root) means NO
+	// anchor, never a silently-verified one.
+	if got, ok := integrity[lockIntegrityKey("localdep", "0.0.0")]; ok {
+		t.Fatalf("an entry with no integrity must be absent from the map, got %q", got)
+	}
+	// The thin wrapper still returns exactly the coordinates it always did.
+	plain, err := parsePackageLockJSON([]byte(lock))
+	if err != nil {
+		t.Fatalf("parsePackageLockJSON: %v", err)
+	}
+	if len(plain) != len(versions) || plain["chalk"] != "4.1.2" {
+		t.Fatalf("wrapper drifted from the integrity parser: %v vs %v", plain, versions)
+	}
+}
+
+// TestParsePackageLockIntegrityJSON_ConflictingCoordinateHasNoAnchor pins the
+// false-positive guard. A lockfile can hold the same coordinate at several
+// paths; if two disagree on the digest, resolving that by Go's randomised map
+// iteration would hand the guard an anchor that is right on some runs and wrong
+// on others — manufacturing a digest mismatch on a clean install. No anchor is
+// the correct answer.
+func TestParsePackageLockIntegrityJSON_ConflictingCoordinateHasNoAnchor(t *testing.T) {
+	const lock = `{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "node_modules/dup": {"name": "dup", "version": "1.0.0", "integrity": "sha512-AAAA=="},
+	    "node_modules/dup-alias": {"name": "dup", "version": "1.0.0", "integrity": "sha512-BBBB=="},
+	    "node_modules/fine": {"name": "fine", "version": "2.0.0", "integrity": "sha512-CCCC=="},
+	    "node_modules/fine-alias": {"name": "fine", "version": "2.0.0", "integrity": "sha512-CCCC=="}
+	  }
+	}`
+	// Run it a few times: the failure mode this pins is iteration-order
+	// dependent, so a single pass could pass by luck.
+	for i := 0; i < 20; i++ {
+		_, integrity, err := parsePackageLockIntegrityJSON([]byte(lock))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if got := integrity[lockIntegrityKey("dup", "1.0.0")]; got != "" {
+			t.Fatalf("conflicting anchors must collapse to none, got %q", got)
+		}
+		// Agreeing duplicates keep their anchor — the poison is for disagreement.
+		if got := integrity[lockIntegrityKey("fine", "2.0.0")]; got != "sha512-CCCC==" {
+			t.Fatalf("agreeing duplicates must keep the anchor, got %q", got)
+		}
+	}
+}
+
+// TestParsePackageLockIntegrityJSON_V1 covers the "dependencies" fallback shape.
+func TestParsePackageLockIntegrityJSON_V1(t *testing.T) {
+	const lock = `{
+	  "lockfileVersion": 1,
+	  "dependencies": {
+	    "chalk": {"version": "4.1.2", "integrity": "sha512-V1Chalk=="}
+	  }
+	}`
+	versions, integrity, err := parsePackageLockIntegrityJSON([]byte(lock))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if versions["chalk"] != "4.1.2" {
+		t.Fatalf("chalk version = %q", versions["chalk"])
+	}
+	if got := integrity[lockIntegrityKey("chalk", "4.1.2")]; got != "sha512-V1Chalk==" {
+		t.Fatalf("v1 integrity = %q, want sha512-V1Chalk==", got)
+	}
+}

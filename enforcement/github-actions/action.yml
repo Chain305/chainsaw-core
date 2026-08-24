@@ -93,6 +93,22 @@ inputs:
       signal `sc.new_dep` fires on EVERY newly added dependency, so "warn"
       fails essentially every PR that adds a dependency. Has no effect in
       `mode: warn`.
+
+      WHAT PRODUCES EXIT 20. Every built-in pr-scan heuristic emits
+      severity "warn", so with no policy bundle the default "block"
+      threshold gates on nothing: the PR is commented on, never failed.
+      Exit 20 comes from a Rego rule at `surface == "pr"` returning
+      action "block" (or "quarantine"). Point `CHAINSAW_POLICY_BUNDLE` at
+      a directory of `.rego` files — or commit them to `<config
+      home>/policy` — and raise the specific signals you want to gate on,
+      e.g. `block if input.isSuspectedTyposquat`, while `sc.new_dep`
+      stays a warn. Policy tightens only: a rule can raise a verdict and
+      can never clear one, so this cannot be used to silence a heuristic.
+      pr-scan populates five input fields (`surface`, `ecosystem`,
+      `package`, `version`, `isSuspectedTyposquat`) — it reads a git
+      diff, so a rule keyed on `input.cvss` or `input.isKnownMalicious`
+      is undefined here and never fires. A bundle that will not compile
+      falls back to the built-in defaults and never gates the job.
     required: false
     default: "block"
   attribution:
@@ -416,10 +432,12 @@ runs:
           fi
 
           # ── manifest/lockfile diff summary ───────────────────────────
-          # `blocking` counts entries whose verdict is "block". pr-scan runs
-          # offline heuristics only and none of its signals carry
-          # severity "block" today, so this counter reads 0 on every offline
-          # run — the pr-scan gate keys on the exit code, not on this number.
+          # `blocking` counts entries whose verdict is "block". No built-in
+          # pr-scan heuristic emits severity "block", so this counter reads 0
+          # unless a policy rule at `surface == "pr"` raised a signal (those
+          # arrive in the report as `policy:<rule_id>` rows in the same
+          # signals array, and render below with no special-casing). The
+          # pr-scan gate keys on the exit code, not on this number.
           if [ "${PR_SCAN_RAN:-}" = "true" ]; then
             case "${PR_SCAN_RC:-0}" in
               0|10|20|30) ;;

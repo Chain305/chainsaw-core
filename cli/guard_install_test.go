@@ -184,3 +184,68 @@ func TestParseNpmSpecResolvesAlias(t *testing.T) {
 		}
 	}
 }
+
+// TestExpandLockfileCarriesNpmIntegrity is the end-to-end half of the anchor
+// plumbing: a real `npm ci`-shaped expansion must arrive at the guard with the
+// lockfile's integrity attached, not just name+version. depsToSpecs used to
+// discard everything but the coordinate, which is why the byte-acquisition
+// layer had nothing outside the npm cache to check against.
+func TestExpandLockfileCarriesNpmIntegrity(t *testing.T) {
+	dir := chdirTemp(t)
+	const lock = `{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "": {"name": "root", "version": "1.0.0"},
+	    "node_modules/chalk": {"version": "4.1.2", "integrity": "sha512-Chalk=="},
+	    "node_modules/nolock": {"version": "0.1.0"}
+	  }
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(lock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	specs := expandLockfile("npm", []string{"ci"})
+	if len(specs) == 0 {
+		t.Fatal("expandLockfile returned nothing for a valid package-lock.json")
+	}
+	found := false
+	for _, s := range specs {
+		switch s.Name {
+		case "chalk":
+			found = true
+			if s.Integrity != "sha512-Chalk==" {
+				t.Fatalf("chalk spec integrity = %q, want sha512-Chalk== — the anchor is dropped between the lockfile and the guard", s.Integrity)
+			}
+		case "nolock":
+			if s.Integrity != "" {
+				t.Fatalf("an entry with no lockfile integrity must carry no anchor, got %q", s.Integrity)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("chalk missing from the expanded specs")
+	}
+}
+
+// TestDepsToSpecsPairsIntegrityWithTheRightVersion pins that the anchor is
+// keyed on the coordinate, not the bare name. A name-keyed map would let a
+// duplicate entry's digest attach to a different version's spec and produce a
+// digest mismatch on a package nobody touched.
+func TestDepsToSpecsPairsIntegrityWithTheRightVersion(t *testing.T) {
+	deps := map[string]string{"pkg": "2.0.0"}
+	integrity := map[string]string{
+		lockIntegrityKey("pkg", "1.0.0"): "sha512-Old==",
+		lockIntegrityKey("pkg", "2.0.0"): "sha512-New==",
+	}
+	specs := depsToSpecs("npm", deps, integrity)
+	if len(specs) != 1 {
+		t.Fatalf("want 1 spec, got %d", len(specs))
+	}
+	if specs[0].Integrity != "sha512-New==" {
+		t.Fatalf("integrity = %q, want the 2.0.0 anchor sha512-New==", specs[0].Integrity)
+	}
+	// A nil integrity map (every non-npm lockfile parser) is legal and yields
+	// no anchor rather than panicking.
+	if got := depsToSpecs("cargo", map[string]string{"serde": "1.0.0"}, nil); got[0].Integrity != "" {
+		t.Fatalf("nil integrity map must yield no anchor, got %q", got[0].Integrity)
+	}
+}

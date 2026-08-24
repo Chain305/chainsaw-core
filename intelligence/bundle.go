@@ -67,7 +67,7 @@ const BundleManifestSchema = "chainsaw.intel-bundle/v1"
 const BundleEnvVar = "CHAINSAW_INTEL_BUNDLE_PATH"
 
 // BundleIdentityEnvVar overrides the expected Sigstore signer identity
-// regexp (defaults to the chainsaw-release-signer pattern). Used by
+// regexp (defaults to the release.yml workflow pattern). Used by
 // operators publishing their own internal bundles.
 const BundleIdentityEnvVar = "CHAINSAW_INTEL_BUNDLE_IDENTITY"
 
@@ -86,18 +86,23 @@ const BundleSkipVerifyEnvVar = "CHAINSAW_INTEL_BUNDLE_SKIP_VERIFY"
 // authenticity (Fulcio cert chain + Rekor transparency-log inclusion +
 // OIDC issuer + signer-identity regexp), on top of the always-on digest
 // binding. It is OFF by default because today's bundles ship a
-// digest-only sidecar, not a bot-minted unified Sigstore bundle; flipping
-// it on before the chainsaw-release-signer bot cutover would hard-fail
-// every current bundle and regress offline/airgap operators. Once the
-// signer bot lands and bundles ship a real .sigstore, this becomes the
-// recommended posture (and eventually the default — see the cutover
-// checklist in docs). Accepts the same truthy values as the other
-// chainsaw bool env vars (1/true/yes/on).
+// digest-only sidecar rather than a real unified Sigstore bundle;
+// flipping it on before a release.yml run publishes one would hard-fail
+// every current bundle and regress offline/airgap operators.
+//
+// What is missing is a WORKFLOW RUN, not a bot account: the signer
+// identity is release.yml's own workflow ref, which already matches
+// DefaultIntelSignerIdentityRegexp. Actions billing is off org-wide by
+// founder decision, so no run has published one. Once a release.yml run
+// ships a real .sigstore, this becomes the recommended posture (and
+// eventually the default — see the cutover checklist in docs). Accepts
+// the same truthy values as the other chainsaw bool env vars
+// (1/true/yes/on).
 const BundleStrictVerifyEnvVar = "CHAINSAW_INTEL_BUNDLE_STRICT_VERIFY"
 
 // DefaultIntelSignerOIDCIssuer is the OIDC issuer the intel-bundle signer
-// authenticates against. Mirrors X1 / the policy bundle: both bots use
-// GitHub Actions OIDC. Operators publishing their own bundles from a
+// authenticates against. Mirrors X1 / the policy bundle: both signing
+// workflows use GitHub Actions OIDC. Operators publishing their own bundles from a
 // different CI override it via BundleVerifyOptions.IssuerURL.
 const DefaultIntelSignerOIDCIssuer = "https://token.actions.githubusercontent.com"
 
@@ -351,7 +356,7 @@ func envTruthy(name string) bool {
 //     after the sidecar was written), NOT authenticity (who wrote it):
 //     a self-publisher can still mint a sidecar carrying the matching
 //     digest. This is the SAFE DEFAULT and the only layer today's
-//     not-yet-bot-signed bundles can satisfy.
+//     not-yet-signed bundles can satisfy.
 //
 //  2. FULL SIGSTORE AUTHENTICITY (strict only). When `strict` is set
 //     (BundleVerifyOptions.RequireAuthenticity or
@@ -361,10 +366,13 @@ func envTruthy(name string) bool {
 //     inclusion proof, OIDC issuer, and signer-IDENTITY regexp
 //     (identityRegexp / DefaultIntelSignerIdentityRegexp). This is the
 //     same pipeline signing.VerifyBundle runs for the OPA policy bundle.
-//     It is OFF by default until the chainsaw-release-signer bot lands
-//     and bundles ship a real .sigstore — flipping it on before then
-//     would hard-fail every current bundle and regress offline/airgap
-//     operators (see the function-level env-var doc).
+//     It is OFF by default until a release.yml run publishes a real
+//     .sigstore — flipping it on before then would hard-fail every
+//     current bundle and regress offline/airgap operators (see the
+//     function-level env-var doc). NOTE: the sidecar must come from
+//     cosign v3+. cosign v2's `sign-blob --bundle` emits the legacy
+//     shape, which has no messageSignature.messageDigest at all, so it
+//     fails LAYER 1 and offline mode refuses to start.
 //
 // Note the digest-only sidecars shipped today are NOT parseable as a
 // unified Sigstore bundle, so strict mode correctly rejects them: that
@@ -445,7 +453,7 @@ func verifyBundleAuthenticity(ctx context.Context, sigPath string, data, digest 
 	}
 
 	// Identity pinning: the cert is valid + the signature covers the
-	// bundle, but is the signer the right bot?
+	// bundle, but is the signer the right workflow?
 	wantIssuer := issuerURL
 	if wantIssuer == "" {
 		wantIssuer = DefaultIntelSignerOIDCIssuer
@@ -505,8 +513,8 @@ func (b *Bundle) Verified() bool {
 // authenticity — the strict layer: Fulcio cert chain + Rekor inclusion +
 // OIDC issuer + signer-identity regexp — as opposed to only the always-on
 // digest binding. False means the bundle is at most integrity-bound
-// (digest-checked) — the safe default until the chainsaw-release-signer
-// bot cutover — or that verification was skipped. Always false when
+// (digest-checked) — the safe default until a release.yml run publishes
+// a signed bundle — or that verification was skipped. Always false when
 // Verified() is false. Safe on nil.
 func (b *Bundle) Authenticated() bool {
 	if b == nil {

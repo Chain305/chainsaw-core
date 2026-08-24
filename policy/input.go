@@ -19,8 +19,14 @@ const (
 	// accepting it — is NOT evidence that an enforcement point
 	// consumes it. Do not advertise enforcement at a RESERVED surface
 	// in customer-facing copy until a callsite lands. Wired today:
-	// Proxy, Publish, Deploy, Runtime.
-	SurfacePR      SurfaceTag = "pr"      // GitHub-Actions PR check — RESERVED: pr_scan.go enforces, but does not route through the policy DSL
+	// PR, Proxy, Publish, Deploy, Runtime.
+	//
+	// A wired surface populates only the fields it can honestly
+	// observe. PR is the sparsest — pr-scan reads a git diff, so a
+	// rule keyed on a field it cannot know (input.cvss,
+	// input.isKnownMalicious) is undefined there and silently never
+	// fires. TestPRScanPolicyInput_PopulatedFieldContract pins that set.
+	SurfacePR      SurfaceTag = "pr"      // GitHub-Actions PR check — wired (core/cli/pr_scan.go, prScanPolicyLane)
 	SurfaceProxy   SurfaceTag = "proxy"   // registry proxy fetch — wired (internal/server/policy_dsl_load.go)
 	SurfacePublish SurfaceTag = "publish" // pre-publish gate — wired (internal/server/upload.go, artifact_scan.go)
 	SurfacePromote SurfaceTag = "promote" // env→env promotion gate — RESERVED: no production caller

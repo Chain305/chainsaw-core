@@ -33,35 +33,66 @@ package chainsaw.policy
 
 # --- degraded-analysis --------------------------------------------
 #
-# input.signalsUnavailable is set when byte acquisition returned
-# acquireIncomplete: the guard tried to analyze the artifact and could
-# not finish — walk budget exhausted, a truncated cache scan, a
-# transport failure, or an artifact present at a resolved content-
-# addressed path that would not read. See acquireResult in
-# core/cli/guard_artifact.go.
+# input.signalsUnavailable is set for EITHER degraded byte-acquisition
+# outcome — see acquireResult.degraded() in core/cli/guard_artifact.go,
+# which is the single predicate this input is projected from:
 #
-# This is materially different from "the package was not cached", and
-# it is the difference an attacker can drive: exhausting the shared
-# walk budget earlier in the same process used to buy exactly the same
-# silent ALLOW as a package the guard was never asked about.
+#   acquireIncomplete    — the guard tried to analyze the artifact and
+#                          could not finish: a truncated cache index
+#                          scan, a transport failure, or an artifact
+#                          present at a resolved content-addressed path
+#                          that would not read.
+#   acquireDigestMismatch — the guard DID get bytes and they are not the
+#                          bytes that will be installed: the archive did
+#                          not hash to the project's lockfile integrity,
+#                          or to the one npm's own index claims.
+#
+# Naming only the first (as this comment used to) understates the rule:
+# an operator reading it would not know that shipping it at "block" also
+# refuses a cache/lockfile digest disagreement.
+#
+# Both are materially different from "the package was not cached", and
+# the first is the difference an attacker can drive: exhausting the
+# shared index-scan budget earlier in the same process used to buy
+# exactly the same silent ALLOW as a package the guard was never asked
+# about.
 #
 # DEFAULT ACTION IS monitor, NOT block.
 #
-#   Blocking by default would hard-fail installs on every machine with
-#   a large enough package cache to exhaust the walk budget — a silent
-#   posture change for every existing free-guard user, on a surface
-#   whose entire job is to not surprise people. Monitor makes the
-#   degradation visible, which is the actual defect being fixed, and
-#   preserves the "never hard-fail an install" guarantee.
+#   Blocking by default would hard-fail installs on every machine whose
+#   package cache the scan cannot finish — a silent posture change for
+#   every existing free-guard user, on a surface whose entire job is to
+#   not surprise people. Monitor makes the degradation visible, which is
+#   the actual defect being fixed, and preserves the "never hard-fail an
+#   install" guarantee.
 #
 #   An operator who wants fail-closed coverage ships a bundle with the
 #   same rule at "block". That is the ruling working as intended: the
 #   posture is a policy edit, not a code change, and it is expressed
 #   once rather than per surface.
+#
+#   BEFORE SHIPPING THAT RULE, read the budget note on
+#   guardCacheWalkMaxFiles. This default was measured against a real
+#   9,859-file ~/.npm/_cacache: with the pre-2026-08-24 scan budget a
+#   third of an HONEST 90-package install set this input, so the same
+#   rule at "block" would have refused a third of a clean `npm ci`. The
+#   scan is now memoized and completes, and the measured rate on that
+#   cache is 0 — but the rule is only as safe as the cache it runs
+#   against, so measure yours before you turn it into a refusal.
+# WHY THE MESSAGE IS GENERIC, and must stay that way. This rule keys on
+# input.signalsUnavailable, which is a single bool. It is set by BOTH
+# acquireIncomplete (the analyzer could not finish) and
+# acquireDigestMismatch (the analyzer finished and the bytes disagreed
+# with the lockfile anchor). Rego cannot tell those apart, so a message
+# naming only one of them is wrong half the time — the earlier text said
+# "the bytes were not fully inspected", which is false for a mismatch,
+# where they were read in full and simply were not the right bytes.
+# The specific fact is surfaced separately by the guard's own
+# "! integrity" line, which is driven by guardVerdict.DigestMismatch.
 decision contains {
 	"action":             "monitor",
 	"rule_id":            "builtin/degraded-analysis",
-	"message":            "behavioral analysis did not complete for this artifact; the bytes were not fully inspected",
+	"message":            "this artifact was not confirmed as the bytes that will be installed: analysis did not complete, or the bytes did not match the lockfile digest",
 	"exception_eligible": true,
 } if {
 	input.signalsUnavailable == true
