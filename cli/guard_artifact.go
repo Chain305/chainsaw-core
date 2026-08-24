@@ -432,14 +432,82 @@ func shallowerArchivePath(a, b string) bool {
 	return a < b
 }
 
+// acquireResult reports WHY the byte-acquisition layer produced no bytes.
+// The distinction is load-bearing and was previously collapsed: every path
+// returned a bare nil, so "there was nothing to analyze" and "we should have
+// been able to analyze and couldn't" were indistinguishable at the call site.
+//
+// That collapse is a bypass primitive. A cache miss is not attacker-
+// influenceable — the package simply isn't staged or cached. A truncated walk,
+// a transport failure, or an unreadable file at a resolved content-addressed
+// path IS: an attacker who can exhaust the walk budget or wedge the read gets
+// the same silent ALLOW as a package the guard was never asked about.
+//
+// Splitting the two does NOT decide what happens next. Per the 2026-08-24
+// ruling in docs/plan_competitive_depth.md, warn-vs-block on acquireIncomplete
+// is a policy question (it maps onto input.signalsUnavailable, which already
+// exists), not a Go constant and not a per-surface table. This type only
+// produces the fact honestly; guard_eval.go decides.
+type acquireResult uint8
+
+const (
+	// acquireOK — bytes were returned.
+	acquireOK acquireResult = iota
+	// acquireMiss — there were no bytes to analyze. Wrong ecosystem for this
+	// source, an unpinned spec, no cache directory, or the coordinate is
+	// genuinely not in the index. Benign and common; the guard's other lanes
+	// (feed, typosquat, metadata) still ran.
+	acquireMiss
+	// acquireIncomplete — acquisition was attempted and could not finish.
+	// Budget exhausted before or during a walk, a transport failure, a
+	// corrupt cache index, or an unreadable file at a path that resolved.
+	// The guard cannot say the bytes are clean; it can only say it did not
+	// get to look at them.
+	acquireIncomplete
+)
+
+// worse returns the more severe of two results, ordered
+// acquireOK < acquireMiss < acquireIncomplete. Used to fold the per-source
+// results in guardArtifactBytes: one source failing to complete outranks
+// another simply not having the package.
+func (r acquireResult) worse(o acquireResult) acquireResult {
+	if o > r {
+		return o
+	}
+	return r
+}
+
+// guardAnalysisIncomplete counts, per process, how many times byte
+// acquisition returned acquireIncomplete — the guard wanted to analyze an
+// artifact and could not finish. Same reasoning as
+// internal/server.EnforcementFailOpenCount: a silent degradation that is only
+// ever inferred is invisible in aggregate, and a sustained rate means the
+// behavioral lane is not running for reasons nobody chose. Process-local
+// atomic, no dependency on the subsystem being counted.
+//
+// Counting is NOT enforcement. The verdict stays unchanged until the guard has
+// a policy decision point — see the block comment at the call site in
+// guard_eval.go.
+var guardAnalysisIncomplete atomic.Uint64
+
+// GuardAnalysisIncompleteCount returns the cumulative acquireIncomplete count
+// since process start. Exposed for tests and for `chainsaw status`.
+func GuardAnalysisIncompleteCount() uint64 { return guardAnalysisIncomplete.Load() }
+
 // localArtifactBytes returns a pre-staged tarball for spec from
-// CHAINSAW_GUARD_ARTIFACT_DIR, or nil (fail-open) when the dir is unset, the
-// file is absent, or it can't be read. Looks for <eco>/<name>-<version>.* and,
-// when the spec is unpinned, <eco>/<name>.* as a fallback.
-func localArtifactBytes(spec packageSpec) []byte {
+// CHAINSAW_GUARD_ARTIFACT_DIR. Looks for <eco>/<name>-<version>.* and, when the
+// spec is unpinned, <eco>/<name>.* as a fallback.
+//
+// Every no-bytes path here is acquireMiss, deliberately. The probe loop tries
+// many candidate paths and most are absent by design, so a failed ReadFile
+// cannot be told apart from a file that was never staged without an extra stat
+// per candidate. The staging directory is operator-controlled — an attacker who
+// can make a staged file unreadable can equally delete it — so the ambiguity
+// buys nothing and the cheaper read stays.
+func localArtifactBytes(spec packageSpec) ([]byte, acquireResult) {
 	dir := strings.TrimSpace(os.Getenv(guardArtifactDirEnv))
 	if dir == "" {
-		return nil
+		return nil, acquireMiss
 	}
 	eco := strings.ToLower(spec.Ecosystem)
 	name := strings.ReplaceAll(spec.Name, "/", "-") // scoped npm names -> filesystem-safe
@@ -454,12 +522,12 @@ func localArtifactBytes(spec packageSpec) []byte {
 			for _, ext := range []string{".tgz", ".tar.gz", ".gem", ".zip", ".whl", ".crate"} {
 				p := filepath.Join(dir, ed, base+ext)
 				if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
-					return data
+					return data, acquireOK
 				}
 			}
 		}
 	}
-	return nil
+	return nil, acquireMiss
 }
 
 // ecoArtifactAliases returns the ecosystem subdirectory names to try when
@@ -490,25 +558,30 @@ func ecoArtifactAliases(eco string) []string {
 // guardArtifactBytes returns a package's archive bytes from the best available
 // source, in order of least to most intrusive: an operator-staged dir
 // (CHAINSAW_GUARD_ARTIFACT_DIR), then npm's on-disk cache (both fully offline),
-// then — only when deep mode is explicitly enabled — a network fetch. nil
-// (fail-open) when no source has it; behavioral analysis simply doesn't run.
-func guardArtifactBytes(spec packageSpec) []byte {
-	if b := localArtifactBytes(spec); len(b) > 0 {
-		return b
+// then — only when deep mode is explicitly enabled — a network fetch.
+//
+// The second return folds every source's result: bytes from any source is
+// acquireOK; otherwise the WORST result any source reported wins. One source
+// failing to complete outranks another simply not having the package, because
+// "the npm cache walk ran out of budget" is a materially different fact from
+// "this is a cargo package so the npm source didn't apply" — and only the first
+// is attacker-influenceable. See acquireResult.
+func guardArtifactBytes(spec packageSpec) ([]byte, acquireResult) {
+	worst := acquireOK
+	for _, src := range []func(packageSpec) ([]byte, acquireResult){
+		localArtifactBytes,
+		npmCacheArtifactBytes,
+		cargoCacheArtifactBytes,
+		pipCacheArtifactBytes,
+		fetchArtifactBytes,
+	} {
+		b, res := src(spec)
+		if len(b) > 0 {
+			return b, acquireOK
+		}
+		worst = worst.worse(res)
 	}
-	if b := npmCacheArtifactBytes(spec); len(b) > 0 {
-		return b
-	}
-	if b := cargoCacheArtifactBytes(spec); len(b) > 0 {
-		return b
-	}
-	if b := pipCacheArtifactBytes(spec); len(b) > 0 {
-		return b
-	}
-	if b := fetchArtifactBytes(spec); len(b) > 0 {
-		return b
-	}
-	return nil
+	return nil, worst
 }
 
 // cargoCacheArtifactBytes reads a pinned crate's .crate archive straight out of
@@ -518,34 +591,40 @@ func guardArtifactBytes(spec packageSpec) []byte {
 // (a gzip tarball analyzeArtifact("cargo", …) already unpacks). The
 // <registry-hash> segment is an opaque per-source hash, so we can't template the
 // exact path — a BOUNDED one-level walk under registry/cache/ matches the crate
-// by filename. Fully offline (local disk only). nil on any miss — fail-open.
-func cargoCacheArtifactBytes(spec packageSpec) []byte {
+// by filename. Fully offline (local disk only).
+//
+// Budget exhaustion — whether checked before the walk or hit partway through —
+// is acquireIncomplete, not acquireMiss: the walk did not get to see the whole
+// cache, so "not found" is unproven. This is the case an attacker can drive by
+// spending the process-wide budget earlier in the same run.
+func cargoCacheArtifactBytes(spec packageSpec) ([]byte, acquireResult) {
 	if !strings.EqualFold(spec.Ecosystem, "cargo") || spec.Version == "" {
-		return nil // need a pinned version to match the crate file deterministically
+		return nil, acquireMiss // need a pinned version to match the crate file deterministically
 	}
 	home := strings.TrimSpace(os.Getenv("CARGO_HOME"))
 	if home == "" {
 		h, err := os.UserHomeDir()
 		if err != nil || h == "" {
-			return nil
+			return nil, acquireMiss
 		}
 		home = filepath.Join(h, ".cargo")
 	}
 	cacheRoot := filepath.Join(home, "registry", "cache")
 	if fi, err := os.Stat(cacheRoot); err != nil || !fi.IsDir() {
-		return nil
+		return nil, acquireMiss
 	}
 	want := spec.Name + "-" + spec.Version + ".crate"
 	// One level of <registry-hash> subdirs, each holding the .crate files.
 	// Bounded by the same PROCESS-WIDE budget as the npm fallback walk so a
 	// giant cache can't turn a single `cargo build` into a stat storm.
 	if guardCacheWalk.exhausted() {
-		return nil
+		return nil, acquireIncomplete
 	}
 	start := time.Now()
 	defer func() { guardCacheWalk.spend(time.Since(start)) }()
 	deadline := start.Add(guardCacheWalk.remaining())
 	var found []byte
+	truncated := false
 	_ = filepath.WalkDir(cacheRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || found != nil {
 			return nil
@@ -554,18 +633,31 @@ func cargoCacheArtifactBytes(spec packageSpec) []byte {
 			return nil
 		}
 		if guardCacheWalk.exhausted() || time.Now().After(deadline) {
+			truncated = true
 			return fs.SkipAll
 		}
 		guardCacheWalk.chargeFile()
 		if strings.EqualFold(filepath.Base(p), want) {
-			if data, rerr := os.ReadFile(p); rerr == nil && len(data) > 0 {
+			data, rerr := os.ReadFile(p)
+			if rerr == nil && len(data) > 0 {
 				found = data
 				return fs.SkipAll
 			}
+			// Filename matched and the read failed: the crate is here and we
+			// could not look at it. Not a miss.
+			truncated = true
+			return fs.SkipAll
 		}
 		return nil
 	})
-	return found
+	switch {
+	case len(found) > 0:
+		return found, acquireOK
+	case truncated:
+		return nil, acquireIncomplete
+	default:
+		return nil, acquireMiss
+	}
 }
 
 // pipCacheArtifactBytes reads a pinned wheel out of pip's on-disk HTTP/wheel
@@ -577,33 +669,35 @@ func cargoCacheArtifactBytes(spec packageSpec) []byte {
 // hit mainly feeds the hidden-unicode and embedded-IOC detectors (which read the
 // package's source bodies) rather than the install-script detector. Still worth
 // it — those are exactly the in-no-feed-yet payloads the byte scan exists for.
-// nil on any miss — fail-open.
-func pipCacheArtifactBytes(spec packageSpec) []byte {
+// Budget exhaustion, before or during the walk, is acquireIncomplete — see
+// cargoCacheArtifactBytes for why.
+func pipCacheArtifactBytes(spec packageSpec) ([]byte, acquireResult) {
 	if !strings.EqualFold(spec.Ecosystem, "pip") && !strings.EqualFold(spec.Ecosystem, "pypi") {
-		return nil
+		return nil, acquireMiss
 	}
 	if spec.Version == "" {
-		return nil // need a pinned version to match the wheel deterministically
+		return nil, acquireMiss // need a pinned version to match the wheel deterministically
 	}
 	root := pipCacheDir()
 	if root == "" {
-		return nil
+		return nil, acquireMiss
 	}
 	wheels := filepath.Join(root, "wheels")
 	if fi, err := os.Stat(wheels); err != nil || !fi.IsDir() {
-		return nil
+		return nil, acquireMiss
 	}
 	// PEP 503 normalization of the distribution name for the wheel filename:
 	// lowercase, runs of -_. collapsed to a single _.
 	prefix := pep503WheelName(spec.Name) + "-" + spec.Version + "-"
 	// Shares the process-wide fallback-walk budget with the npm and cargo walks.
 	if guardCacheWalk.exhausted() {
-		return nil
+		return nil, acquireIncomplete
 	}
 	start := time.Now()
 	defer func() { guardCacheWalk.spend(time.Since(start)) }()
 	deadline := start.Add(guardCacheWalk.remaining())
 	var found []byte
+	truncated := false
 	_ = filepath.WalkDir(wheels, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || found != nil {
 			return nil
@@ -612,19 +706,31 @@ func pipCacheArtifactBytes(spec packageSpec) []byte {
 			return nil
 		}
 		if guardCacheWalk.exhausted() || time.Now().After(deadline) {
+			truncated = true
 			return fs.SkipAll
 		}
 		guardCacheWalk.chargeFile()
 		base := filepath.Base(p)
 		if strings.HasSuffix(strings.ToLower(base), ".whl") && strings.HasPrefix(strings.ToLower(base), prefix) {
-			if data, rerr := os.ReadFile(p); rerr == nil && len(data) > 0 {
+			data, rerr := os.ReadFile(p)
+			if rerr == nil && len(data) > 0 {
 				found = data
 				return fs.SkipAll
 			}
+			// Wheel matched and the read failed: present but unreadable.
+			truncated = true
+			return fs.SkipAll
 		}
 		return nil
 	})
-	return found
+	switch {
+	case len(found) > 0:
+		return found, acquireOK
+	case truncated:
+		return nil, acquireIncomplete
+	default:
+		return nil, acquireMiss
+	}
 }
 
 // pipCacheDir resolves pip's cache root: $PIP_CACHE_DIR when set, else the
@@ -699,11 +805,17 @@ func deepFetchEnabled() bool {
 
 // fetchArtifactBytes downloads a pinned package's archive for analysis when deep
 // mode is on. npm and cargo only — their archive URLs template from name+version
-// with no metadata round-trip. Time-boxed, size-capped, and fail-open: any
-// error, non-200, or oversize body yields nil and the install proceeds.
-func fetchArtifactBytes(spec packageSpec) []byte {
+// with no metadata round-trip. Time-boxed and size-capped.
+//
+// A 404 is acquireMiss: the pinned coordinate is genuinely not on this
+// registry, which is the normal shape for a private package resolved against
+// the public default. Every OTHER failure — request build, transport, non-404
+// status, body read — is acquireIncomplete, because the fetch was attempted
+// and did not complete. A network attacker who can reset the connection must
+// not be able to buy the same silence as a package that simply isn't there.
+func fetchArtifactBytes(spec packageSpec) ([]byte, acquireResult) {
 	if !deepFetchEnabled() || spec.Version == "" {
-		return nil
+		return nil, acquireMiss
 	}
 	var url string
 	switch strings.ToLower(spec.Ecosystem) {
@@ -718,7 +830,7 @@ func fetchArtifactBytes(spec packageSpec) []byte {
 		base := strings.TrimRight(envOr(guardCargoBaseEnv, "https://static.crates.io"), "/")
 		url = fmt.Sprintf("%s/crates/%s/%s-%s.crate", base, spec.Name, spec.Name, spec.Version)
 	default:
-		return nil
+		return nil, acquireMiss
 	}
 	// Opt-in deep mode reaches the network: name the egress host once on stderr
 	// and record a local audit entry so an operator who accepted the trade can
@@ -728,22 +840,25 @@ func fetchArtifactBytes(spec packageSpec) []byte {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil
+		return nil, acquireIncomplete
 	}
 	req.Header.Set("User-Agent", "chainsaw-guard")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil
+		return nil, acquireIncomplete
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, acquireMiss
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		return nil, acquireIncomplete
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, guardFetchMaxBytes))
 	if err != nil {
-		return nil
+		return nil, acquireIncomplete
 	}
-	return data
+	return data, acquireOK
 }
 
 // deepFetchEgressNoticeOnce makes the human-facing egress notice fire at most
@@ -788,15 +903,20 @@ func envOr(name, def string) string {
 // npmCacheArtifactBytes reads a pinned npm package's tarball straight out of
 // npm's on-disk content-addressable cache (cacache), so behavioral analysis
 // works with zero pre-staging on any machine that has already fetched the
-// package. Fully offline (local disk only). Returns nil on any miss or parse
-// problem — never errors, so the guard stays fail-open.
-func npmCacheArtifactBytes(spec packageSpec) []byte {
+// package. Fully offline (local disk only). Never errors.
+//
+// This is the digest-bound path: the integrity string comes from npm's own
+// index and addresses the content store, so the bytes analyzed here are the
+// bytes npm will install. An integrity that RESOLVES but whose content cannot
+// be read is therefore acquireIncomplete, never acquireMiss — the artifact is
+// present and the guard failed to look at it.
+func npmCacheArtifactBytes(spec packageSpec) ([]byte, acquireResult) {
 	if !strings.EqualFold(spec.Ecosystem, "npm") || spec.Version == "" {
-		return nil // need a pinned version to match the cache key deterministically
+		return nil, acquireMiss // need a pinned version to match the cache key deterministically
 	}
 	cacache := npmCacacheDir()
 	if cacache == "" {
-		return nil
+		return nil, acquireMiss
 	}
 	// npm's cache key is the tarball URL; its path ends in /-/<base>-<ver>.tgz.
 	// For scoped names (@scope/pkg) the file base is the last segment only.
@@ -815,13 +935,18 @@ func npmCacheArtifactBytes(spec packageSpec) []byte {
 	// We try the configured registry and the public default (npm keys on whatever
 	// registry it resolved).
 	wantKeySuffix := "/-/" + last + "-" + spec.Version + ".tgz"
+	worst := acquireMiss
 	for _, reg := range npmCacheRegistryCandidates() {
 		url := fmt.Sprintf("%s/%s/-/%s-%s.tgz", reg, spec.Name, last, spec.Version)
 		key := "make-fetch-happen:request-cache:" + url
 		if integrity := cacacheIntegrityForKey(indexDir, key); integrity != "" {
-			if b := readCacacheContent(cacache, integrity); len(b) > 0 {
-				return b
+			b, res := readCacacheContent(cacache, integrity)
+			if len(b) > 0 {
+				return b, acquireOK
 			}
+			// The index resolved and the content did not. Remember that even
+			// if a later candidate registry misses outright.
+			worst = worst.worse(res)
 		}
 	}
 
@@ -829,12 +954,17 @@ func npmCacheArtifactBytes(spec packageSpec) []byte {
 	// on a registry/URL shape we didn't template (private mirror with auth in the
 	// URL, a non-default port, etc.). Rather than ship a broken O(1), fall back to
 	// a BOUNDED scan (capped files + a short deadline) that matches by key suffix.
-	// Still fail-open: a miss just means behavioral analysis doesn't run.
-	integrity := findNpmCacheIntegrity(indexDir, wantKeySuffix)
+	// A miss here means behavioral analysis doesn't run; a TRUNCATED walk means
+	// the miss is unproven, and findNpmCacheIntegrity reports which it was.
+	integrity, walkRes := findNpmCacheIntegrity(indexDir, wantKeySuffix)
 	if integrity == "" {
-		return nil
+		return nil, worst.worse(walkRes)
 	}
-	return readCacacheContent(cacache, integrity)
+	b, res := readCacacheContent(cacache, integrity)
+	if len(b) > 0 {
+		return b, acquireOK
+	}
+	return nil, worst.worse(res)
 }
 
 // npmCacheRegistryCandidates returns the registry bases to template the cache
@@ -967,6 +1097,11 @@ func (b *cacheWalkBudget) spend(d time.Duration) {
 // files exposes the shared counter (test hook).
 func (b *cacheWalkBudget) files() int64 { return b.filesRead.Load() }
 
+// exhaustForTest spends the whole file allowance in one step (test hook), so a
+// test can exercise the budget-exhausted branch without staging thousands of
+// index files. Never called in production.
+func (b *cacheWalkBudget) exhaustForTest() { b.filesRead.Store(guardCacheWalkMaxFiles) }
+
 // reset clears the shared allowance (test hook). Never called in production —
 // a guard process is one install.
 func (b *cacheWalkBudget) reset() {
@@ -982,11 +1117,12 @@ func (b *cacheWalkBudget) reset() {
 // shared PROCESS-WIDE with the cargo and pip walks — a cap hit just yields ""
 // (fail-open, so later specs simply get no behavioral scan; see the budget's
 // tradeoff note). Best-effort: any read/parse error skipped.
-func findNpmCacheIntegrity(indexDir, wantKeySuffix string) string {
+func findNpmCacheIntegrity(indexDir, wantKeySuffix string) (string, acquireResult) {
 	if guardCacheWalk.exhausted() {
-		return ""
+		return "", acquireIncomplete
 	}
 	found := ""
+	truncated := false
 	start := time.Now()
 	defer func() { guardCacheWalk.spend(time.Since(start)) }()
 	deadline := start.Add(guardCacheWalk.remaining())
@@ -995,6 +1131,7 @@ func findNpmCacheIntegrity(indexDir, wantKeySuffix string) string {
 			return nil
 		}
 		if guardCacheWalk.exhausted() || time.Now().After(deadline) {
+			truncated = true
 			return fs.SkipAll
 		}
 		guardCacheWalk.chargeFile()
@@ -1021,31 +1158,44 @@ func findNpmCacheIntegrity(indexDir, wantKeySuffix string) string {
 		}
 		return nil
 	})
-	return found
+	switch {
+	case found != "":
+		return found, acquireOK
+	case truncated:
+		return "", acquireIncomplete
+	default:
+		return "", acquireMiss
+	}
 }
 
 // readCacacheContent maps an integrity string to cacache's content-addressed
 // path and returns the bytes. cacache stores content at
 // content-v2/<algo>/<hex[0:2]>/<hex[2:4]>/<hex[4:]> where hex is the digest.
-// nil on any decode/read failure.
-func readCacacheContent(cacache, integrity string) []byte {
+//
+// Every failure here is acquireIncomplete, and the caller only reaches this
+// function with an integrity string npm's own index produced. A malformed
+// integrity means a corrupt index; an unreadable file at a path that computed
+// cleanly means the artifact is present and unreadable. Neither is "there is
+// nothing to analyze" — in both cases npm has bytes it intends to install and
+// the guard did not get to see them.
+func readCacacheContent(cacache, integrity string) ([]byte, acquireResult) {
 	// Integrity may list multiple algos space-separated; take the first.
 	first := strings.Fields(integrity)
 	if len(first) == 0 {
-		return nil
+		return nil, acquireIncomplete
 	}
 	algo, b64, ok := strings.Cut(first[0], "-")
 	if !ok || algo == "" || b64 == "" {
-		return nil
+		return nil, acquireIncomplete
 	}
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil || len(raw) < 3 {
-		return nil
+		return nil, acquireIncomplete
 	}
 	h := hex.EncodeToString(raw)
 	p := filepath.Join(cacache, "content-v2", algo, h[0:2], h[2:4], h[4:])
 	if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
-		return data
+		return data, acquireOK
 	}
-	return nil
+	return nil, acquireIncomplete
 }

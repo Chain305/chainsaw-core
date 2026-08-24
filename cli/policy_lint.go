@@ -646,35 +646,26 @@ func lintPolicy(file string, e rawPolicyEntry) []lintFinding {
 	return out
 }
 
-// checkStandaloneCodesmell mirrors rejectStandaloneContextOnlyConditions
-// in internal/policy/store.go: a policy whose ONLY signal is one of
-// the five demoted codesmell conditions (with no identifier, scope, or
-// other condition) is an error.
+// checkStandaloneCodesmell reports the same finding the save-time validator
+// rejects on: a policy whose ONLY signal is one of the five demoted codesmell
+// conditions, with no other condition, identifier, or scope.
+//
+// It delegates the whole decision to policy.StandaloneContextOnlyViolation —
+// the same function core/policy/store.go's
+// rejectStandaloneContextOnlyConditions calls — so the two surfaces cannot
+// disagree; only the message formatting is local. The look-alike this replaced
+// carried its own copy of the old ConditionsUsedBy-based predicate and
+// inherited its false rejections, so `chainsaw policy lint` reported errors on
+// valid policies before the operator ever reached the API.
 func checkStandaloneCodesmell(file string, e rawPolicyEntry) *lintFinding {
-	used := policy.ConditionsUsedBy(e.policy.Conditions)
-	if len(used) == 0 {
-		return nil
-	}
-	var contextOnly []policy.ConditionType
-	hasOther := false
-	for _, c := range used {
-		if policy.IsContextOnlyCondition(c) {
-			contextOnly = append(contextOnly, c)
-		} else {
-			hasOther = true
-		}
-	}
-	if len(contextOnly) == 0 || hasOther {
-		return nil
-	}
-	if policy.HasMeaningfulIdentifier(e.policy.Identifier) || policy.HasMeaningfulScope(e.policy.Scope) {
+	contextOnly := policy.StandaloneContextOnlyViolation(e.policy.Conditions, e.policy.Identifier, e.policy.Scope)
+	if len(contextOnly) == 0 {
 		return nil
 	}
 	names := make([]string, len(contextOnly))
 	for i, c := range contextOnly {
 		names[i] = string(c)
 	}
-	sort.Strings(names)
 	return &lintFinding{
 		File:     file,
 		Line:     e.line,

@@ -1066,6 +1066,17 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 		return s
 	}
 	g := glyphs()
+	// THE POLICY-BUNDLE NOTICE. Printed once per install, before the
+	// verdicts, and never suppressed by --quiet — same reasoning as the
+	// waiver notice below. "The operator bundle this machine used to
+	// enforce is gone" and "your bundle no longer compiles" are both
+	// states where the guard is running WEAKER rules than the operator
+	// believes, and both are silent by construction otherwise: an absent
+	// bundle and a never-configured one produce byte-identical output.
+	// Volume is bounded — one line, only when the state is abnormal.
+	if notice := GuardPolicyNotice(); notice != "" {
+		fmt.Fprintf(out, "%s  %s  %s\n", tag, c(ansiYellow, "! policy"), sanitizeForTerminal(notice))
+	}
 	for _, v := range verdicts {
 		// THE WAIVER NOTICE, printed BESIDE whatever the verdict turned out to
 		// be rather than as one of its arms — a coordinate can be both waived by

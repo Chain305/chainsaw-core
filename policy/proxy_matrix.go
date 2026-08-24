@@ -36,6 +36,11 @@ const (
 type ConditionType string
 
 const (
+	// ConditionScorecard is a documentation-only column: no Conditions
+	// field maps to it, so ConditionsUsedBy can never emit it. It exists
+	// so the matrix records that OpenSSF Scorecard is wired for no
+	// ecosystem (every row is SupportNone). Giving it a Conditions field
+	// would mean shipping a policy knob that can never fire.
 	ConditionScorecard    ConditionType = "Scorecard"
 	ConditionMalwareIndex ConditionType = "MalwareIndex"
 	ConditionEPSS         ConditionType = "EPSS"
@@ -110,6 +115,21 @@ const (
 	ConditionFirstTimeCollaborator ConditionType = "FirstTimeCollaborator"
 	ConditionSuspiciousRepoStars   ConditionType = "SuspiciousRepoStars"
 	ConditionMaintainerAccountAge  ConditionType = "MaintainerAccountAge"
+
+	// AI artifacts (Wave 6). Each maps 1:1 onto a Conditions field
+	// hydrated by the Tier-2 AI providers in
+	// internal/intelligence/premium/provider_aiartifact.go
+	// (pickle_scan / model_card / agent_tool). Support is narrow by
+	// construction: pickle + model-card signals need model weights or a
+	// model card, and the agent-tool signals need a package.json /
+	// pyproject.toml entry point, so only huggingface, npm and pip
+	// populate any of them.
+	ConditionDangerousPickle              ConditionType = "DangerousPickle"
+	ConditionUnsafeSerializationFormat    ConditionType = "UnsafeSerializationFormat"
+	ConditionModelCardInjection           ConditionType = "ModelCardInjection"
+	ConditionAgentToolDangerousCapability ConditionType = "AgentToolDangerousCapability"
+	ConditionMCPServerDeclared            ConditionType = "MCPServerDeclared"
+	ConditionPromptTemplateInjection      ConditionType = "PromptTemplateInjection"
 )
 
 // contextOnlyConditions enumerates Wave-3 codesmell signals whose base
@@ -311,6 +331,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportPartial,
 		ConditionFirstTimeCollaborator: SupportPartial,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportPartial, // GitHub-account heuristic, opt-in, warns on every result
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone, // no pickle weights in npm tarballs
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportFull, // package.json mcpServers/bin/keywords
+		ConditionMCPServerDeclared:            SupportFull,
+		ConditionPromptTemplateInjection:      SupportFull,
 	},
 	EcoPyPI: {
 		ConditionScorecard:                  SupportNone,
@@ -364,6 +392,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportPartial,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportPartial,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportFull, // pickle weights do ship inside sdists/wheels
+		ConditionUnsafeSerializationFormat:    SupportFull,
+		ConditionModelCardInjection:           SupportNone, // no model card in a PyPI distribution
+		ConditionAgentToolDangerousCapability: SupportFull, // pyproject.toml [project.entry-points."mcp.server"]
+		ConditionMCPServerDeclared:            SupportFull,
+		ConditionPromptTemplateInjection:      SupportFull,
 	},
 	EcoMaven: {
 		ConditionScorecard:                  SupportNone,
@@ -425,6 +461,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	// EcoPub (Dart/Flutter, pub.dev). A first-class proxied ecosystem
 	// (own resolver/facet/transformer; internal/repository.FormatPub).
@@ -497,6 +541,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoCargo: {
 		ConditionScorecard:                  SupportNone,
@@ -551,6 +603,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportPartial,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoComposer: {
 		ConditionScorecard:                  SupportNone,
@@ -606,6 +666,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportPartial,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoRubyGems: {
 		ConditionScorecard:                  SupportNone,
@@ -660,6 +728,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportPartial,
 		ConditionFirstTimeCollaborator: SupportPartial,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportPartial,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoNuGet: {
 		ConditionScorecard:                  SupportNone,
@@ -715,6 +791,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoGo: {
 		ConditionScorecard:                  SupportNone,
@@ -770,6 +854,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoHuggingFace: {
 		ConditionScorecard:                  SupportNone,
@@ -822,6 +914,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportNone,
+		ConditionMaintainerAccountAge:  SupportPartial,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportFull, // pickle_scan over model weights
+		ConditionUnsafeSerializationFormat:    SupportFull,
+		ConditionModelCardInjection:           SupportFull,
+		ConditionAgentToolDangerousCapability: SupportNone, // no package.json / pyproject.toml entry point
+		ConditionMCPServerDeclared:            SupportNone, // no package.json / pyproject.toml entry point
+		ConditionPromptTemplateInjection:      SupportFull, // datasets tagged `prompt`
 	},
 	EcoCocoaPods: {
 		ConditionScorecard:                  SupportNone,
@@ -877,6 +977,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoSwift: {
 		ConditionScorecard:                  SupportNone,
@@ -929,6 +1037,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportPartial,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoDocker: {
 		ConditionScorecard:                  SupportNone,
@@ -981,6 +1097,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportNone,
+		ConditionMaintainerAccountAge:  SupportPartial, // Docker Hub user endpoint
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoAPT: {
 		ConditionScorecard:                  SupportNone,
@@ -1034,6 +1158,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportNone,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoYum: {
 		ConditionScorecard:                  SupportNone,
@@ -1084,6 +1216,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportNone,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 	EcoDNF: {
 		ConditionScorecard:                  SupportNone,
@@ -1134,6 +1274,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionNonExistentAuthor:     SupportNone,
 		ConditionFirstTimeCollaborator: SupportNone,
 		ConditionSuspiciousRepoStars:   SupportNone,
+		ConditionMaintainerAccountAge:  SupportNone,
+		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
 	},
 }
 
@@ -1248,6 +1396,19 @@ func ConditionsUsedBy(c Conditions) []ConditionType {
 	if c.InstallScriptFetchesRemote != nil {
 		used = append(used, ConditionInstallScriptFetchesRemote)
 	}
+	// Each of these three has had a ConditionType and 16 SupportMatrix rows
+	// since it landed, but no mapping here — so every consumer of
+	// ConditionsUsedBy (the policy.rule.skipped audit event, `chainsaw policy
+	// lint`, policy preflight) was blind to them.
+	if c.ImportTimeExecution != nil {
+		used = append(used, ConditionImportTimeExecution)
+	}
+	if c.MaliciousIOC != nil {
+		used = append(used, ConditionMaliciousIOC)
+	}
+	if c.BuildRsExecutes != nil {
+		used = append(used, ConditionBuildRsExecutes)
+	}
 	if c.PublisherChanged != nil {
 		used = append(used, ConditionPublisherChanged)
 	}
@@ -1345,6 +1506,25 @@ func ConditionsUsedBy(c Conditions) []ConditionType {
 	}
 	if c.MaintainerAccountAgeDaysMax != nil {
 		used = append(used, ConditionMaintainerAccountAge)
+	}
+	// AI artifacts (Wave 6).
+	if c.DangerousPickle != nil {
+		used = append(used, ConditionDangerousPickle)
+	}
+	if c.UnsafeSerializationFormat != nil {
+		used = append(used, ConditionUnsafeSerializationFormat)
+	}
+	if c.ModelCardInjection != nil {
+		used = append(used, ConditionModelCardInjection)
+	}
+	if c.AgentToolDangerousCapability != nil {
+		used = append(used, ConditionAgentToolDangerousCapability)
+	}
+	if c.MCPServerDeclared != nil {
+		used = append(used, ConditionMCPServerDeclared)
+	}
+	if c.PromptTemplateInjection != nil {
+		used = append(used, ConditionPromptTemplateInjection)
 	}
 	// Trust score is a composite signal derived from the others; it doesn't
 	// map directly to a matrix column, so we don't check it here.

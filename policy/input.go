@@ -14,12 +14,18 @@ import (
 type SurfaceTag string
 
 const (
-	SurfacePR      SurfaceTag = "pr"      // GitHub-Actions PR check
-	SurfaceProxy   SurfaceTag = "proxy"   // registry proxy fetch
-	SurfacePublish SurfaceTag = "publish" // pre-publish gate
-	SurfacePromote SurfaceTag = "promote" // env→env promotion gate — RESERVED: enum value exists but no production caller of Decide yet; do not advertise promote-time enforcement in customer-facing copy until a callsite lands
-	SurfaceDeploy  SurfaceTag = "deploy"  // k8s admission webhook
-	SurfaceRuntime SurfaceTag = "runtime" // package-manager install hook
+	// RESERVED tags below carry no production caller of Decide. The
+	// enum value being defined — and `chainsaw policy gate <tag>`
+	// accepting it — is NOT evidence that an enforcement point
+	// consumes it. Do not advertise enforcement at a RESERVED surface
+	// in customer-facing copy until a callsite lands. Wired today:
+	// Proxy, Publish, Deploy, Runtime.
+	SurfacePR      SurfaceTag = "pr"      // GitHub-Actions PR check — RESERVED: pr_scan.go enforces, but does not route through the policy DSL
+	SurfaceProxy   SurfaceTag = "proxy"   // registry proxy fetch — wired (internal/server/policy_dsl_load.go)
+	SurfacePublish SurfaceTag = "publish" // pre-publish gate — wired (internal/server/upload.go, artifact_scan.go)
+	SurfacePromote SurfaceTag = "promote" // env→env promotion gate — RESERVED: no production caller
+	SurfaceDeploy  SurfaceTag = "deploy"  // k8s admission webhook — wired (enforcement/k8s-admission/cmd/server/main.go)
+	SurfaceRuntime SurfaceTag = "runtime" // package-manager install hook — wired (core/cli/guard_policy.go, offline guard)
 )
 
 // AllSurfaces enumerates every supported enforcement surface in a

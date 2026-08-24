@@ -114,6 +114,24 @@ func TestBenignFalseBlockRate(t *testing.T) {
 	// red — which is how a gate gets muted, and a muted gate is worse than no
 	// gate. Lower them as the rate improves; never raise one to make a build
 	// pass without recording why here.
+	//
+	// WHY 0.59 AND NOT 0.58. The gate is `got > max`, and the measured rate is
+	// 5/860 = 0.5814%. A ceiling of exactly 0.58 fails on the clean, current
+	// measurement — a red test on arrival, which is the muted-gate outcome the
+	// paragraph above exists to prevent. 0.59 admits today's 5 and fails at 6
+	// (0.6977%), which is the intended behaviour: no headroom for a new false
+	// block, no false alarm for the existing ones.
+	//
+	// A PERCENTAGE CEILING ON A CORPUS THAT MOVES. This budget divides by the
+	// corpus size, and build-benign-corpus.sh does not always produce the same
+	// corpus — it truncates manifest.jsonl at start and appends from twelve
+	// parallel workers, so a re-entered build silently yielded 739 packages
+	// instead of 860 during the 2026-08-24 run. At 739 the same 5 false blocks
+	// read 0.68% and this gate fires with nothing having regressed. If that
+	// happens, check the logged package count FIRST: a rate change with no
+	// change to the BLOCKED list is a corpus artifact, not a detector
+	// regression. minBenignCorpusForBudget only rules out a smoke corpus; it
+	// does not pin the size.
 	if total < minBenignCorpusForBudget {
 		t.Logf("corpus of %d is below the %d-package floor — reporting only, budgets not enforced",
 			total, minBenignCorpusForBudget)
@@ -141,13 +159,31 @@ const (
 	//                   matching the English phrase "local state" in comments
 	//   1.05% -> 0.81%  downgraded an exfil_host hit to a warning when its only
 	//                   evidence is in tests/, docs examples, or vendored code
+	//   0.81% -> 0.58%  required exfilHostRE matches to begin at a real host
+	//                   boundary (2026-08-24). Several alternatives are bare
+	//                   hostnames with nothing to anchor them, so under (?i)
+	//                   they matched inside ordinary words: prompt_toolkit's
+	//                   "Keys.BracketedPaste." hit `dPaste.`, and litellm's
+	//                   deliberately-neutered docstring placeholder
+	//                   "nothooks.slack.com" hit `hooks.slack.com/services/`.
+	//                   See hostBoundaryOK in core/iocscan/scan.go.
 	//
-	// The residual 7 are exfil_host and stealer_string hits inside genuine
-	// shipping code — tqdm's documented Telegram progress bar, litellm's Slack
-	// alerting, ipython's dpaste magic. Blocking those is arguably correct
-	// behaviour for a supply-chain guard; narrowing further would need a
-	// per-package allowlist, which is exactly what an attacker targets.
-	maxBenignFalseBlockPct = 1.00
+	// The residual 5 are exfil_host and stealer_string hits inside genuine
+	// shipping code — tqdm's documented Telegram progress bar, ipython's dpaste
+	// magic, huggingface-hub's webhook.site reference. Blocking those is
+	// arguably correct behaviour for a supply-chain guard; narrowing further
+	// would need a per-package allowlist, which is exactly what an attacker
+	// targets.
+	//
+	// PAIRED CATCH-RATE for the 0.81% -> 0.58% step, measured on the same
+	// 238-sample DataDog corpus with -count=1 (the Go test cache will happily
+	// replay a stale arm — check for "(cached)" before trusting an A/B):
+	// 105/238 = 44.1% -> 104/238 = 43.7%. The one lost sample is
+	// pypi:litellm@1.82.7, and it was blocked on that SAME nothooks.slack.com
+	// docstring — boilerplate present in clean litellm releases too. Whatever
+	// makes 1.82.7 malicious, the own-bytes scanners never detected it; the
+	// block was coincidental. No real detection was traded away.
+	maxBenignFalseBlockPct = 0.59
 
 	// minBenignCorpusForBudget keeps a 10-package smoke corpus from asserting a
 	// percentage. Rebuild the real one with

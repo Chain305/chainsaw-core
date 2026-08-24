@@ -161,6 +161,24 @@ type Options struct {
 	// an empty engine that always returns ActionAllow.
 	Sources []string
 
+	// Modules carries in-memory rego sources as name -> body. They
+	// compile alongside anything Sources discovers, and the name is
+	// what appears in Modules() and in compile diagnostics.
+	//
+	// This exists so a bundle can be compiled into the binary
+	// (go:embed) rather than read from disk — the built-in default
+	// policy that runs when an operator has shipped no bundle of their
+	// own. Sources cannot serve that case: it reads through os.ReadFile
+	// and would force a temp-dir write on every process start, which
+	// fails outright on a read-only filesystem and is the wrong shape
+	// for a default that must always be available.
+	//
+	// A name collision between Modules and a discovered file is a
+	// compile error from rego, not a silent override. Keep embedded
+	// module names namespaced (e.g. "chainsaw:builtin/<name>.rego") so
+	// an operator's on-disk bundle can never collide with one.
+	Modules map[string]string
+
 	// Query overrides the default decision query. Callers should
 	// almost always leave this empty.
 	Query string
@@ -175,7 +193,7 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(files) == 0 {
+	if len(files) == 0 && len(opts.Modules) == 0 {
 		return &Engine{}, nil
 	}
 
@@ -192,6 +210,16 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 		}
 		regoOpts = append(regoOpts, rego.Module(f, string(src)))
 	}
+	// Sorted so compile diagnostics and Modules() are deterministic —
+	// map iteration order would otherwise vary per process.
+	inline := make([]string, 0, len(opts.Modules))
+	for name := range opts.Modules {
+		inline = append(inline, name)
+	}
+	sort.Strings(inline)
+	for _, name := range inline {
+		regoOpts = append(regoOpts, rego.Module(name, opts.Modules[name]))
+	}
 
 	r := rego.New(regoOpts...)
 	pq, err := r.PrepareForEval(ctx)
@@ -201,8 +229,8 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 
 	return &Engine{
 		prepared: pq,
-		digest:   sourceDigest(files),
-		modules:  files,
+		digest:   bundleDigest(files, opts.Modules, inline),
+		modules:  append(append([]string{}, files...), inline...),
 	}, nil
 }
 
@@ -341,6 +369,38 @@ func discover(sources []string) ([]string, error) {
 // the digest is for human reproducibility, not cryptographic
 // integrity (signing rides outside this package).
 var digestMu sync.Mutex
+
+// bundleDigest extends sourceDigest over the in-memory modules so an
+// audit row names the exact rule set even when part of it is compiled
+// into the binary. Embedded bodies hash by (name, body) directly —
+// there is no file to re-read.
+func bundleDigest(paths []string, modules map[string]string, names []string) string {
+	if len(modules) == 0 {
+		return sourceDigest(paths)
+	}
+	digestMu.Lock()
+	defer digestMu.Unlock()
+	h := newHasher()
+	for _, p := range paths {
+		h.WriteString(p)
+		h.WriteString("\x00")
+		data, err := os.ReadFile(p)
+		if err != nil {
+			h.WriteString("err:")
+			h.WriteString(err.Error())
+			continue
+		}
+		h.Write(data)
+		h.WriteString("\x01")
+	}
+	for _, n := range names {
+		h.WriteString(n)
+		h.WriteString("\x00")
+		h.WriteString(modules[n])
+		h.WriteString("\x01")
+	}
+	return h.Hex()
+}
 
 func sourceDigest(paths []string) string {
 	digestMu.Lock()

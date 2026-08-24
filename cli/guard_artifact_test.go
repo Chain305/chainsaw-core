@@ -316,16 +316,16 @@ func TestLocalArtifactBytes(t *testing.T) {
 
 	// Unset env -> nil (fail-open, behavioral analysis off).
 	t.Setenv(guardArtifactDirEnv, "")
-	if b := localArtifactBytes(packageSpec{Ecosystem: "npm", Name: "evil", Version: "1.0.0"}); b != nil {
+	if b, _ := localArtifactBytes(packageSpec{Ecosystem: "npm", Name: "evil", Version: "1.0.0"}); b != nil {
 		t.Fatalf("unset dir must return nil, got %d bytes", len(b))
 	}
 
 	t.Setenv(guardArtifactDirEnv, dir)
-	if b := localArtifactBytes(packageSpec{Ecosystem: "npm", Name: "evil", Version: "1.0.0"}); !bytes.Equal(b, want) {
+	if b, _ := localArtifactBytes(packageSpec{Ecosystem: "npm", Name: "evil", Version: "1.0.0"}); !bytes.Equal(b, want) {
 		t.Fatalf("pinned lookup = %q, want %q", b, want)
 	}
 	// Missing package -> nil.
-	if b := localArtifactBytes(packageSpec{Ecosystem: "npm", Name: "absent", Version: "9.9.9"}); b != nil {
+	if b, _ := localArtifactBytes(packageSpec{Ecosystem: "npm", Name: "absent", Version: "9.9.9"}); b != nil {
 		t.Fatalf("missing artifact must return nil, got %d bytes", len(b))
 	}
 }
@@ -354,7 +354,7 @@ func TestLocalArtifactBytes_EcosystemAliases(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv(guardArtifactDirEnv, dir)
-			if b := localArtifactBytes(packageSpec{Ecosystem: tc.eco, Name: "evil", Version: "1.0.0"}); !bytes.Equal(b, want) {
+			if b, _ := localArtifactBytes(packageSpec{Ecosystem: tc.eco, Name: "evil", Version: "1.0.0"}); !bytes.Equal(b, want) {
 				t.Fatalf("eco %q staged under %q/ = %q, want %q (alias lookup failed)", tc.eco, tc.dirName, b, want)
 			}
 		})
@@ -419,14 +419,14 @@ func TestFetchArtifactBytes_FailsOpenOnServerError(t *testing.T) {
 	t.Setenv(guardDeepFetchEnv, "1")
 	t.Setenv(guardNpmRegistryEnv, srv.URL)
 	spec := packageSpec{Ecosystem: "npm", Name: "net-evil", Version: "4.0.0"}
-	if b := fetchArtifactBytes(spec); b != nil {
+	if b, _ := fetchArtifactBytes(spec); b != nil {
 		srv.Close()
 		t.Fatalf("a 500 from the registry must fail open (nil), got %d bytes", len(b))
 	}
 
 	// And a dead server (connection refused) must also fail open, not error out.
 	srv.Close()
-	if b := fetchArtifactBytes(spec); b != nil {
+	if b, _ := fetchArtifactBytes(spec); b != nil {
 		t.Fatalf("a closed/unreachable server must fail open (nil), got %d bytes", len(b))
 	}
 }
@@ -479,12 +479,12 @@ func TestNpmCacheArtifactBytes(t *testing.T) {
 	t.Setenv("npm_config_cache", root)
 	t.Setenv(guardArtifactDirEnv, "") // force the cache path, not the staged dir
 
-	got := npmCacheArtifactBytes(packageSpec{Ecosystem: "npm", Name: "cached-evil", Version: "3.0.0"})
+	got, _ := npmCacheArtifactBytes(packageSpec{Ecosystem: "npm", Name: "cached-evil", Version: "3.0.0"})
 	if !bytes.Equal(got, tgz) {
 		t.Fatalf("npm cache read returned %d bytes, want the staged %d", len(got), len(tgz))
 	}
 	// Unpinned or missing -> nil (fail-open).
-	if b := npmCacheArtifactBytes(packageSpec{Ecosystem: "npm", Name: "cached-evil"}); b != nil {
+	if b, _ := npmCacheArtifactBytes(packageSpec{Ecosystem: "npm", Name: "cached-evil"}); b != nil {
 		t.Errorf("unpinned spec must not resolve from cache, got %d bytes", len(b))
 	}
 	// And the guard blocks it end-to-end via the cache, no staging dir.
@@ -512,21 +512,21 @@ func TestCargoCacheArtifactBytes(t *testing.T) {
 	t.Setenv("CARGO_HOME", home)
 	t.Setenv(guardArtifactDirEnv, "") // force the cache path, not the staged dir
 
-	got := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate", Version: "2.0.0"})
+	got, _ := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate", Version: "2.0.0"})
 	if !bytes.Equal(got, crate) {
 		t.Fatalf("cargo cache read returned %d bytes, want the staged %d", len(got), len(crate))
 	}
 	// Unpinned -> nil (fail-open).
-	if b := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate"}); b != nil {
+	if b, _ := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate"}); b != nil {
 		t.Errorf("unpinned spec must not resolve from cache, got %d bytes", len(b))
 	}
 	// Missing crate -> nil.
-	if b := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "absent", Version: "9.9.9"}); b != nil {
+	if b, _ := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "absent", Version: "9.9.9"}); b != nil {
 		t.Errorf("missing crate must return nil, got %d bytes", len(b))
 	}
 	// Missing CARGO_HOME dir -> nil (fail-open).
 	t.Setenv("CARGO_HOME", filepath.Join(home, "does-not-exist"))
-	if b := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate", Version: "2.0.0"}); b != nil {
+	if b, _ := cargoCacheArtifactBytes(packageSpec{Ecosystem: "cargo", Name: "cached-crate", Version: "2.0.0"}); b != nil {
 		t.Errorf("missing cargo cache dir must return nil, got %d bytes", len(b))
 	}
 	t.Setenv("CARGO_HOME", home)
@@ -561,21 +561,21 @@ func TestPipCacheArtifactBytes(t *testing.T) {
 
 	// Name given with a dash resolves via PEP 503 normalization to the underscore
 	// wheel filename.
-	got := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg", Version: "1.2.3"})
+	got, _ := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg", Version: "1.2.3"})
 	if !bytes.Equal(got, whl) {
 		t.Fatalf("pip cache read returned %d bytes, want the staged %d", len(got), len(whl))
 	}
 	// Unpinned -> nil (fail-open).
-	if b := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg"}); b != nil {
+	if b, _ := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg"}); b != nil {
 		t.Errorf("unpinned spec must not resolve from cache, got %d bytes", len(b))
 	}
 	// Missing wheel -> nil.
-	if b := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "absent", Version: "9.9.9"}); b != nil {
+	if b, _ := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "absent", Version: "9.9.9"}); b != nil {
 		t.Errorf("missing wheel must return nil, got %d bytes", len(b))
 	}
 	// Missing cache dir -> nil (fail-open).
 	t.Setenv("PIP_CACHE_DIR", filepath.Join(root, "does-not-exist"))
-	if b := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg", Version: "1.2.3"}); b != nil {
+	if b, _ := pipCacheArtifactBytes(packageSpec{Ecosystem: "pip", Name: "cached-pkg", Version: "1.2.3"}); b != nil {
 		t.Errorf("missing pip cache dir must return nil, got %d bytes", len(b))
 	}
 	t.Setenv("PIP_CACHE_DIR", root)
@@ -629,7 +629,7 @@ func TestGuardCacheWalkBudgetIsProcessWide(t *testing.T) {
 	for i := 0; i < specs; i++ {
 		// Every one of these misses the O(1) lookup and falls through to the
 		// walk — the exact shape of a fresh `npm ci` against a private registry.
-		_ = npmCacheArtifactBytes(packageSpec{
+		_, _ = npmCacheArtifactBytes(packageSpec{
 			Ecosystem: "npm",
 			Name:      fmt.Sprintf("absent-pkg-%d", i),
 			Version:   "1.0.0",
@@ -645,14 +645,69 @@ func TestGuardCacheWalkBudgetIsProcessWide(t *testing.T) {
 			specs, shards*perShard, guardCacheWalk.files())
 	}
 	// The tradeoff, asserted rather than assumed: with the budget spent, a
-	// later walk returns nothing and the guard simply gets no bytes.
-	if got := findNpmCacheIntegrity(indexDir, "/-/filler0-0-1.0.0.tgz"); got != "" {
-		t.Fatalf("exhausted budget must yield no integrity (fail-open), got %q", got)
+	// later walk returns no integrity. It must ALSO report acquireIncomplete,
+	// not acquireMiss — the entry is in the index and the walk never reached
+	// it, so "not found" is unproven. This is the distinction that stops a
+	// budget-exhaustion bypass from buying the same silence as an uncached
+	// package; see acquireResult in guard_artifact.go.
+	got, res := findNpmCacheIntegrity(indexDir, "/-/filler0-0-1.0.0.tgz")
+	if got != "" {
+		t.Fatalf("exhausted budget must yield no integrity, got %q", got)
 	}
-	// A fresh invocation (new process, or an explicit reset) walks again.
+	if res != acquireIncomplete {
+		t.Fatalf("exhausted budget must report acquireIncomplete, got %v — a truncated walk is not a miss", res)
+	}
+	// A fresh invocation (new process, or an explicit reset) walks again, and
+	// a real hit reports acquireOK.
 	guardCacheWalk.reset()
-	if got := findNpmCacheIntegrity(indexDir, "/-/filler0-0-1.0.0.tgz"); got != "sha512-nope" {
+	got, res = findNpmCacheIntegrity(indexDir, "/-/filler0-0-1.0.0.tgz")
+	if got != "sha512-nope" {
 		t.Fatalf("a fresh budget must find the entry, got %q", got)
+	}
+	if res != acquireOK {
+		t.Fatalf("a found entry must report acquireOK, got %v", res)
+	}
+}
+
+// TestAcquireResult_MissVsIncomplete pins the split that the whole type exists
+// for: a package that is simply not cached reports acquireMiss, while the same
+// lookup under an exhausted walk budget reports acquireIncomplete. Before the
+// split both returned a bare nil and the call site could not tell them apart —
+// which made budget exhaustion a silent-ALLOW primitive.
+func TestAcquireResult_MissVsIncomplete(t *testing.T) {
+	npmCache := t.TempDir()
+	t.Setenv("npm_config_cache", npmCache)
+	// npmCacacheDir resolves <npm_config_cache>/_cacache, not the bare dir.
+	cacache := filepath.Join(npmCache, "_cacache")
+	if err := os.MkdirAll(filepath.Join(cacache, "index-v5"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	guardCacheWalk.reset()
+	t.Cleanup(guardCacheWalk.reset)
+
+	spec := packageSpec{Ecosystem: "npm", Name: "not-cached", Version: "1.0.0"}
+
+	// Fresh budget, empty index: a genuine miss.
+	if b, res := npmCacheArtifactBytes(spec); len(b) != 0 || res != acquireMiss {
+		t.Fatalf("uncached package with a fresh budget: want (nil, acquireMiss), got (%d bytes, %v)", len(b), res)
+	}
+
+	// Same lookup, budget spent: the walk cannot prove absence.
+	guardCacheWalk.exhaustForTest()
+	if b, res := npmCacheArtifactBytes(spec); len(b) != 0 || res != acquireIncomplete {
+		t.Fatalf("uncached package with an exhausted budget: want (nil, acquireIncomplete), got (%d bytes, %v)", len(b), res)
+	}
+
+	// Wrong ecosystem is always a miss — never attacker-influenceable.
+	guardCacheWalk.reset()
+	if b, res := cargoCacheArtifactBytes(spec); len(b) != 0 || res != acquireMiss {
+		t.Fatalf("npm spec against the cargo source: want (nil, acquireMiss), got (%d bytes, %v)", len(b), res)
+	}
+
+	// A corrupt integrity string resolved from the index is incomplete, not a
+	// miss: npm has bytes it intends to install and the guard cannot read them.
+	if b, res := readCacacheContent(cacache, "sha512-!!!not-base64!!!"); len(b) != 0 || res != acquireIncomplete {
+		t.Fatalf("corrupt integrity: want (nil, acquireIncomplete), got (%d bytes, %v)", len(b), res)
 	}
 }
 
@@ -706,13 +761,13 @@ func TestFetchArtifactBytes_DeepMode(t *testing.T) {
 
 	// Off by default: no network, no bytes — the offline guarantee holds.
 	t.Setenv(guardDeepFetchEnv, "")
-	if b := fetchArtifactBytes(spec); b != nil {
+	if b, _ := fetchArtifactBytes(spec); b != nil {
 		t.Fatalf("deep mode off must return nil (offline), got %d bytes", len(b))
 	}
 
 	// On: fetches the pinned tarball and the analyzer blocks it.
 	t.Setenv(guardDeepFetchEnv, "1")
-	got := fetchArtifactBytes(spec)
+	got, _ := fetchArtifactBytes(spec)
 	if !bytes.Equal(got, tgz) {
 		t.Fatalf("deep fetch returned %d bytes, want %d", len(got), len(tgz))
 	}
@@ -720,7 +775,7 @@ func TestFetchArtifactBytes_DeepMode(t *testing.T) {
 		t.Fatalf("fetched malware must block, got %+v", v)
 	}
 	// Unpinned never fetches (URL not deterministic).
-	if b := fetchArtifactBytes(packageSpec{Ecosystem: "npm", Name: "net-evil"}); b != nil {
+	if b, _ := fetchArtifactBytes(packageSpec{Ecosystem: "npm", Name: "net-evil"}); b != nil {
 		t.Fatalf("unpinned spec must not fetch, got %d bytes", len(b))
 	}
 }

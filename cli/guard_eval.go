@@ -606,15 +606,60 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	}
 
 	// Offline behavioral analysis: when the package's actual bytes are staged
-	// locally (CHAINSAW_GUARD_ARTIFACT_DIR), run the real detectors over them.
-	// This catches a malicious install script or hidden-unicode payload that's
-	// in no feed yet — the thing a name+version lookup structurally cannot.
-	// Fail-open: nil bytes or a clean read just falls through to ALLOW.
-	if data := guardArtifactBytes(spec); len(data) > 0 {
-		if bv := analyzeArtifact(spec.Ecosystem, data); bv.Block {
-			return withWaiver(guardVerdict{Spec: spec, Block: true, Severity: bv.Severity, Reason: bv.Reason})
-		} else if bv.Severity != "" && pendingWarn.Severity == "" {
-			pendingWarn = guardVerdict{Spec: spec, Block: false, Severity: bv.Severity, Reason: bv.Reason}
+	// locally (CHAINSAW_GUARD_ARTIFACT_DIR) or already in a package-manager
+	// cache, run the real detectors over them. This catches a malicious install
+	// script or hidden-unicode payload that's in no feed yet — the thing a
+	// name+version lookup structurally cannot.
+	//
+	// acquireMiss falls through to ALLOW: there were no bytes to analyze, which
+	// is the normal shape for an unstaged, uncached package, and the feed /
+	// typosquat / metadata lanes above already ran.
+	//
+	// acquireIncomplete does NOT yet change the verdict, and that is deliberate
+	// rather than an oversight. It means acquisition was attempted and could
+	// not finish (budget exhausted, truncated walk, transport failure, present-
+	// but-unreadable artifact) — a materially different fact from a miss, and
+	// the one an attacker can drive. Per the 2026-08-24 ruling in
+	// docs/plan_competitive_depth.md, whether that warns or blocks is a POLICY
+	// question, not a Go constant and not a per-surface table. The guard has no
+	// PDP wired today (SurfaceRuntime is RESERVED — see core/policy/input.go),
+	// so this step produces the fact and stops. Wiring guard_eval to
+	// policyengine.DecideInput and mapping acquireIncomplete onto
+	// input.signalsUnavailable is the next step in that plan.
+	//
+	// Do not "fix" this by hardcoding a block here — that reintroduces exactly
+	// the per-surface hardcoding the ruling exists to prevent.
+	data, acq := guardArtifactBytes(spec)
+	var behavioral behavioralVerdict
+	switch {
+	case len(data) > 0:
+		behavioral = analyzeArtifact(spec.Ecosystem, data)
+		if behavioral.Block {
+			return withWaiver(guardVerdict{Spec: spec, Block: true, Severity: behavioral.Severity, Reason: behavioral.Reason})
+		}
+		if behavioral.Severity != "" && pendingWarn.Severity == "" {
+			pendingWarn = guardVerdict{Spec: spec, Block: false, Severity: behavioral.Severity, Reason: behavioral.Reason}
+		}
+	case acq == acquireIncomplete:
+		guardAnalysisIncomplete.Add(1)
+	}
+
+	// Policy decision point. Runs LAST, after every Go lane has had its
+	// say, and can only tighten: a rule may raise a verdict the lanes
+	// allowed, and can never clear one they blocked (the blocking lanes
+	// have already returned above). See guard_policy.go, THE BOUNDARY.
+	//
+	// This is where acquireIncomplete becomes actionable. The Go lanes
+	// deliberately do not act on it — per the 2026-08-24 ruling, whether
+	// a degraded analysis warns or blocks is decided by a rule, and the
+	// built-in default bundle answers "monitor" so the degradation is
+	// visible without hard-failing anyone's install.
+	if pv, ok := guardPolicyLane(ctx, spec, acq, behavioral); ok {
+		if pv.Block {
+			return withWaiver(pv)
+		}
+		if pendingWarn.Severity == "" {
+			pendingWarn = pv
 		}
 	}
 

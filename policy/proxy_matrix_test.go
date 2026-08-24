@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -89,6 +90,17 @@ func TestSupportMatrixMatchesMarkdown(t *testing.T) {
 		"nonexistent author":            ConditionNonExistentAuthor,
 		"first-time collaborator":       ConditionFirstTimeCollaborator,
 		"suspicious repo stars":         ConditionSuspiciousRepoStars,
+		"import-time execution":         ConditionImportTimeExecution,
+		"malicious ioc":                 ConditionMaliciousIOC,
+		"build.rs executes":             ConditionBuildRsExecutes,
+		"maintainer account age":        ConditionMaintainerAccountAge,
+		// AI artifacts (Wave 6).
+		"dangerous pickle":                ConditionDangerousPickle,
+		"unsafe serialization format":     ConditionUnsafeSerializationFormat,
+		"model card injection":            ConditionModelCardInjection,
+		"agent tool dangerous capability": ConditionAgentToolDangerousCapability,
+		"mcp server declared":             ConditionMCPServerDeclared,
+		"prompt template injection":       ConditionPromptTemplateInjection,
 	}
 
 	if len(rows[0].cells) != len(columnToCondition) {
@@ -275,4 +287,105 @@ func findMatrixMarkdown(t *testing.T) string {
 	// (rather than fail) when it is absent so the public repo's suite is green.
 	t.Skipf("POLICY_PROXY_MATRIX.md not found above %s — monorepo-only consistency check", start)
 	return ""
+}
+
+// conditionsNotMatrixMapped enumerates Conditions fields that
+// ConditionsUsedBy does not map to a matrix ConditionType, with the reason.
+// Every entry is a deliberate decision or a recorded gap — a field that is
+// neither mapped nor listed here fails TestEveryConditionFieldIsMatrixMapped.
+//
+// This is the guard that would have caught the Wave-6 AI conditions: they
+// shipped as working policy gates (evaluator.go) with no ConditionType, so
+// ConditionsUsedBy silently returned nothing for them and every downstream
+// consumer — the policy.rule.skipped audit event, `chainsaw policy lint`,
+// policy preflight, and rejectStandaloneContextOnlyConditions — went blind.
+var conditionsNotMatrixMapped = map[string]string{
+	// --- By design -------------------------------------------------------
+	"Ecosystems":                  "scoping selector, not a signal — it narrows which ecosystems a rule applies to",
+	"TrustScoreMin":               "composite derived from other signals; no single matrix column",
+	"TrustScoreMax":               "composite derived from other signals; no single matrix column",
+	"PublishVelocityThreshold24h": "threshold parameter for PublishVelocityAnomaly, which is mapped",
+	"RequireSLSALevel":            "attestation substrate; provenance availability is covered by ConditionHasProvenance",
+	"RequireBuilderID":            "attestation substrate; see RequireSLSALevel",
+	"RequireBuilderIssuer":        "attestation substrate; see RequireSLSALevel",
+	"RequireSourceRepo":           "attestation substrate; see RequireSLSALevel",
+	"RequireTransparencyLog":      "attestation substrate; see RequireSLSALevel",
+	"RequireAttestation":          "attestation substrate; see RequireSLSALevel",
+	"ForbidCacheStale":            "cache-freshness gate; not an ecosystem-support question",
+}
+
+// TestEveryConditionFieldIsMatrixMapped reflects over every Conditions field
+// and asserts it either resolves to at least one matrix ConditionType via
+// ConditionsUsedBy, or is explicitly listed in conditionsNotMatrixMapped.
+//
+// Adding a Conditions field without doing one or the other fails here, which
+// is the point: a policy condition that the matrix cannot see is a rule that
+// can be silently inert with no warning to the operator.
+func TestEveryConditionFieldIsMatrixMapped(t *testing.T) {
+	t.Parallel()
+
+	ct := reflect.TypeOf(Conditions{})
+	if ct.NumField() == 0 {
+		t.Fatal("Conditions has no fields — struct reflection broke")
+	}
+
+	for i := 0; i < ct.NumField(); i++ {
+		field := ct.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			var c Conditions
+			v := reflect.ValueOf(&c).Elem().Field(i)
+			if !setNonZero(v) {
+				t.Skipf("unsupported field kind %s — extend setNonZero", field.Type.Kind())
+			}
+
+			used := ConditionsUsedBy(c)
+			reason, excused := conditionsNotMatrixMapped[field.Name]
+
+			switch {
+			case len(used) > 0 && excused:
+				t.Errorf("field %s is now mapped to %v — remove it from conditionsNotMatrixMapped (was: %s)",
+					field.Name, used, reason)
+			case len(used) == 0 && !excused:
+				t.Errorf("field %s maps to no matrix ConditionType.\n"+
+					"Either add a ConditionType + SupportMatrix rows + a ConditionsUsedBy mapping, "+
+					"or add %q to conditionsNotMatrixMapped with a reason.",
+					field.Name, field.Name)
+			}
+		})
+	}
+}
+
+// setNonZero puts a non-zero, non-nil value into v so ConditionsUsedBy's
+// nil/len checks fire. Reports false for a kind it doesn't handle.
+func setNonZero(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Ptr:
+		v.Set(reflect.New(v.Type().Elem()))
+		elem := v.Elem()
+		switch elem.Kind() {
+		case reflect.Bool:
+			elem.SetBool(true)
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			elem.SetInt(1)
+		case reflect.Float32, reflect.Float64:
+			elem.SetFloat(1)
+		case reflect.String:
+			elem.SetString("x")
+		default:
+			return false
+		}
+		return true
+	case reflect.Slice:
+		s := reflect.MakeSlice(v.Type(), 1, 1)
+		if s.Index(0).Kind() == reflect.String {
+			s.Index(0).SetString("x")
+		}
+		v.Set(s)
+		return true
+	default:
+		return false
+	}
 }

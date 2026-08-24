@@ -3,6 +3,7 @@ package policy
 import (
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -533,6 +534,67 @@ func TestValidatePolicyRejectsStandaloneContextOnlyConditions(t *testing.T) {
 			identifier: Identifier{TargetPackageName: "left-pad"},
 			wantErr:    false,
 		},
+		// Regression: the six AI-artifact conditions (Wave 6) are real
+		// gateable signals, but they had no ConditionType constant and
+		// were therefore invisible to ConditionsUsedBy. That made
+		// rejectStandaloneContextOnlyConditions compute
+		// used == [UsesEval] for the pairing below, leave
+		// hasGateableCondition false, and reject a perfectly valid
+		// policy. Each AI condition is exercised as a pairing so a
+		// future partial mapping can't regress one of them silently.
+		{
+			name: "UsesEval paired with DangerousPickle allowed",
+			conditions: Conditions{
+				UsesEval:        boolPtr(true),
+				DangerousPickle: boolPtr(true),
+			},
+			wantErr: false,
+		},
+		{
+			name: "UsesEval paired with UnsafeSerializationFormat allowed",
+			conditions: Conditions{
+				UsesEval:                  boolPtr(true),
+				UnsafeSerializationFormat: boolPtr(true),
+			},
+			wantErr: false,
+		},
+		{
+			name: "UsesEval paired with ModelCardInjection allowed",
+			conditions: Conditions{
+				UsesEval:           boolPtr(true),
+				ModelCardInjection: boolPtr(true),
+			},
+			wantErr: false,
+		},
+		{
+			name: "UsesEval paired with AgentToolDangerousCapability allowed",
+			conditions: Conditions{
+				UsesEval:                     boolPtr(true),
+				AgentToolDangerousCapability: boolPtr(true),
+			},
+			wantErr: false,
+		},
+		{
+			name: "UsesEval paired with MCPServerDeclared allowed",
+			conditions: Conditions{
+				UsesEval:          boolPtr(true),
+				MCPServerDeclared: boolPtr(true),
+			},
+			wantErr: false,
+		},
+		{
+			name: "UsesEval paired with PromptTemplateInjection allowed",
+			conditions: Conditions{
+				UsesEval:                boolPtr(true),
+				PromptTemplateInjection: boolPtr(true),
+			},
+			wantErr: false,
+		},
+		{
+			name:       "DangerousPickle standalone allowed",
+			conditions: Conditions{DangerousPickle: boolPtr(true)},
+			wantErr:    false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -654,5 +716,132 @@ func TestGraceDaysAndPendingApprovalRoundTrip(t *testing.T) {
 	}
 	if gotPending.CreatedBy != "user-requester" {
 		t.Fatalf("Get().CreatedBy = %q, want user-requester", gotPending.CreatedBy)
+	}
+}
+
+// TestContextOnlyFieldsMatchConditionTypes keeps the two context-only lists in
+// step: contextOnlyConditionFields (struct-field names, used by
+// HasGateableConstraint) and contextOnlyConditions (ConditionType keys, used by
+// IsContextOnlyCondition). They describe the same five signals through
+// different lenses, so a signal added to one and not the other would either
+// escape the standalone gate or be un-nameable in the error message.
+func TestContextOnlyFieldsMatchConditionTypes(t *testing.T) {
+	t.Parallel()
+
+	if len(contextOnlyConditionFields) != len(contextOnlyConditions) {
+		t.Fatalf("contextOnlyConditionFields has %d entries, contextOnlyConditions has %d",
+			len(contextOnlyConditionFields), len(contextOnlyConditions))
+	}
+
+	ct := reflect.TypeOf(Conditions{})
+	for name := range contextOnlyConditionFields {
+		field, ok := ct.FieldByName(name)
+		if !ok {
+			t.Errorf("contextOnlyConditionFields names %q, which is not a Conditions field", name)
+			continue
+		}
+		var c Conditions
+		if !setNonZero(reflect.ValueOf(&c).Elem().FieldByIndex(field.Index)) {
+			t.Errorf("could not populate %s", name)
+			continue
+		}
+		used := ConditionsUsedBy(c)
+		if len(used) != 1 {
+			t.Errorf("%s maps to %v; expected exactly one ConditionType", name, used)
+			continue
+		}
+		if !IsContextOnlyCondition(used[0]) {
+			t.Errorf("%s maps to %s, which IsContextOnlyCondition rejects", name, used[0])
+		}
+	}
+}
+
+// TestNonConstrainingFieldsAreGenuinelyInert validates the
+// nonConstrainingConditionFields declaration instead of trusting it: a field
+// listed there must not be able to change matchesConditions on its own, under
+// any of the probe contexts below. If a future field is added to that map by
+// mistake, HasGateableConstraint would stop counting a real constraint and the
+// standalone-codesmell validator would start falsely rejecting again.
+func TestNonConstrainingFieldsAreGenuinelyInert(t *testing.T) {
+	t.Parallel()
+
+	probes := []struct {
+		name string
+		ctx  EvaluationContext
+	}{
+		{"zero", EvaluationContext{}},
+		{"high publish velocity", EvaluationContext{PublishVelocity24h: 10_000}},
+		{"zero publish velocity, anomaly false", EvaluationContext{PublishVelocity24h: 0}},
+	}
+
+	ct := reflect.TypeOf(Conditions{})
+	for name := range nonConstrainingConditionFields {
+		field, ok := ct.FieldByName(name)
+		if !ok {
+			t.Errorf("nonConstrainingConditionFields names %q, which is not a Conditions field", name)
+			continue
+		}
+		var c Conditions
+		if !setNonZero(reflect.ValueOf(&c).Elem().FieldByIndex(field.Index)) {
+			t.Errorf("could not populate %s", name)
+			continue
+		}
+		for _, p := range probes {
+			got := matchesConditions(p.ctx, c)
+			want := matchesConditions(p.ctx, Conditions{})
+			if got != want {
+				t.Errorf("%s changed matchesConditions under probe %q (%v vs %v with empty conditions) — it constrains on its own and must not be listed as non-constraining",
+					name, p.name, got, want)
+			}
+		}
+	}
+}
+
+// TestStandaloneContextOnlyAcceptsEveryRealConstraint is the regression guard
+// for the predicate bug. rejectStandaloneContextOnlyConditions used to ask
+// ConditionsUsedBy ("does this condition have a proxy-matrix column?") as a
+// proxy for "does this policy have another constraint?", and so rejected 14
+// valid pairings — the whole attestation substrate, TrustScoreMin/Max,
+// ForbidCacheStale, Ecosystems, and three conditions that simply had no
+// mapping. This walks EVERY Conditions field, pairs it with UsesEval, and
+// asserts the pairing is accepted unless the field is itself context-only or a
+// bare parameter.
+func TestStandaloneContextOnlyAcceptsEveryRealConstraint(t *testing.T) {
+	t.Parallel()
+
+	ct := reflect.TypeOf(Conditions{})
+	for i := 0; i < ct.NumField(); i++ {
+		field := ct.Field(i)
+		if field.PkgPath != "" || field.Name == "UsesEval" {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			t.Parallel()
+
+			var c Conditions
+			v := reflect.ValueOf(&c).Elem()
+			if !setNonZero(v.Field(i)) {
+				t.Skipf("unsupported field kind %s", field.Type.Kind())
+			}
+			v.FieldByName("UsesEval").Set(reflect.ValueOf(boolPtr(true)))
+
+			_, isContextOnly := contextOnlyConditionFields[field.Name]
+			_, isParam := nonConstrainingConditionFields[field.Name]
+			wantErr := isContextOnly || isParam
+
+			err := validatePolicy(Policy{
+				Mode:       ModeBlock,
+				Status:     StatusEnabled,
+				Conditions: c,
+			})
+			switch {
+			case wantErr && err == nil:
+				t.Errorf("UsesEval + %s was accepted; %s cannot constrain on its own so the pairing must be rejected",
+					field.Name, field.Name)
+			case !wantErr && err != nil:
+				t.Errorf("UsesEval + %s was rejected (%v); %s is a real constraint and the pairing must be accepted",
+					field.Name, err, field.Name)
+			}
+		})
 	}
 }

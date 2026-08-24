@@ -127,9 +127,17 @@ func runPolicyEval(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// runPolicyGate is the surface-aware command — the entry point every
-// PR check / proxy fetch / publish hook / promotion gate / deploy
-// admission webhook / runtime install hook ultimately calls.
+// runPolicyGate is the surface-aware CI/CLI gate command: it evaluates
+// the bundle against a fixture with `input.surface` set to args[0].
+//
+// It is NOT what the enforcement surfaces call. The wired surfaces reach
+// Decide through their own paths — proxy via
+// internal/server/policy_dsl_load.go, publish via internal/server/upload.go
+// and artifact_scan.go, deploy via enforcement/k8s-admission/cmd/server.
+// The surface validation below checks membership in policy.AllSurfaces(),
+// which includes RESERVED tags with no production caller (pr, promote,
+// runtime — see core/policy/input.go). Accepting a tag here therefore
+// says nothing about whether an enforcement point consumes it.
 func runPolicyGate(cmd *cobra.Command, args []string) error {
 	surface := policy.SurfaceTag(args[0])
 	valid := false

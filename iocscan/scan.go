@@ -47,6 +47,27 @@ const maxFileSize = 2 << 20 // 2 MiB per file
 var (
 	// exfilHostRE: dedicated exfil/OOB sinks — near-zero legitimate use inside
 	// a published package. Webhooks, paste/anon-file drops, tunnels, OOB hosts.
+	//
+	// MATCHES ARE NOT DISPOSITIVE ON THEIR OWN — every hit must pass
+	// hostBoundaryOK. Several alternatives here are bare hostnames with no
+	// scheme or path to anchor them (`dpaste\.`, `ghostbin\.`, `transfer\.sh`,
+	// `file\.io/`, `gofile\.io`, `oshi\.at`, `oast\.(fun|site|...)`), and under
+	// (?i) with no leading boundary they match INSIDE ordinary identifiers:
+	//
+	//   Keys.BracketedPaste.   -> dPaste.      (prompt_toolkit, a real block)
+	//   ./profile.io/index     -> file.io/
+	//   fileTransfer.sh        -> Transfer.sh
+	//   toast.live             -> oast.live
+	//   roast.pro              -> oast.pro
+	//   logofile.io            -> gofile.io
+	//   yoshi.at               -> oshi.at
+	//   myGhostbin.render()    -> Ghostbin.
+	//
+	// This is the same defect class as the `Local State` prose match documented
+	// on credStoreRE below, and the same fix: require the indicator to appear in
+	// the context a real one appears in. Go's regexp is RE2 and has no
+	// lookbehind, so the boundary is enforced in code rather than in the pattern
+	// — see findExfilHost.
 	exfilHostRE = regexp.MustCompile(`(?i)discord(?:app)?\.com/api/webhooks/|ptb\.discord\.com/api/webhooks/|api\.telegram\.org/bot|hooks\.slack\.com/services/|webhook\.site/|requestbin\.(?:net|com)|pipedream\.net|\.ngrok(?:-free)?\.(?:io|app)|pastebin\.com/raw/|paste\.ee/|hastebin\.com|ghostbin\.|transfer\.sh|anonfiles\.com|gofile\.io|file\.io/|0x0\.st|oshi\.at|burpcollaborator\.net|\.interactsh\.com|oast\.(?:fun|site|pro|live|online)|dpaste\.`)
 
 	// credStoreRE / tokenGrabRE / walletRE / keyloggerRE: stealer building
@@ -109,6 +130,53 @@ var (
 // shipping code. See nonShippingPathRE for why this distinction exists.
 func isNonShippingPath(name string) bool { return nonShippingPathRE.MatchString(name) }
 
+// hostBoundaryOK reports whether an exfilHostRE match starting at `start`
+// begins where a hostname can actually begin, rather than in the middle of a
+// longer word. See exfilHostRE for the false blocks this prevents.
+//
+// A real exfil host is always preceded by something that ends the previous
+// token — a scheme's "//", a quote, whitespace, "=", "@", "(" — or by "." when
+// it carries a subdomain. It is never preceded by a letter, digit, "-" or "_",
+// because that would make it a DIFFERENT host: xdpaste.com is not dpaste.com.
+//
+// Two carve-outs, both load-bearing:
+//
+//   - A match that starts with "." anchors its own boundary (`\.ngrok\.io`,
+//     `\.interactsh\.com`). Those are written to consume the separating dot
+//     precisely so they attach to any subdomain, so the character before them
+//     is EXPECTED to be alphanumeric — "foo.ngrok.io". Rejecting those would
+//     delete a real detection.
+//   - A match at offset 0 has nothing before it and is accepted.
+func hostBoundaryOK(body string, start int, match string) bool {
+	if start == 0 || strings.HasPrefix(match, ".") {
+		return true
+	}
+	switch c := body[start-1]; {
+	case c >= 'a' && c <= 'z',
+		c >= 'A' && c <= 'Z',
+		c >= '0' && c <= '9',
+		c == '-', c == '_':
+		return false
+	}
+	return true
+}
+
+// findExfilHost returns the first exfilHostRE match in body that begins at a
+// real host boundary, or "" when none does.
+//
+// It scans ALL matches rather than testing only the first: a file can mention
+// "BracketedPaste." near the top and embed a genuine sink lower down, and
+// rejecting the first match must not blind the scan to the second.
+func findExfilHost(body string) string {
+	for _, loc := range exfilHostRE.FindAllStringIndex(body, -1) {
+		m := body[loc[0]:loc[1]]
+		if hostBoundaryOK(body, loc[0], m) {
+			return m
+		}
+	}
+	return ""
+}
+
 // Scan reports the strongest IOC across a package's source files.
 func Scan(files map[string][]byte) Result {
 	stealerHit, stealerFile := false, ""
@@ -129,7 +197,7 @@ func Scan(files map[string][]byte) Result {
 		// package actually ships and runs. In its own tests, docs examples, or
 		// vendored third-party trees it is downgraded to a warning — see
 		// nonShippingPathRE.
-		if m := exfilHostRE.FindString(body); m != "" {
+		if m := findExfilHost(body); m != "" {
 			hit := Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + strings.TrimSpace(m)}
 			if !isNonShippingPath(name) {
 				return hit

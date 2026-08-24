@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1530,6 +1531,126 @@ func hasPolicyConstraint(policy Policy) bool {
 	return hasPolicyIdentifier(policy.Identifier) || hasPolicyCondition(policy.Conditions) || hasPolicyScope(policy.Scope)
 }
 
+// contextOnlyConditionFields names the Conditions STRUCT FIELDS of the five
+// demoted Wave-3 codesmell signals. contextOnlyConditions (proxy_matrix.go) is
+// keyed by ConditionType — the matrix column — but HasGateableConstraint has to
+// reflect over struct fields, so the same five are listed here by field name.
+// TestContextOnlyFieldsMatchConditionTypes asserts the two stay in step.
+var contextOnlyConditionFields = map[string]struct{}{
+	"UsesEval":         {},
+	"NetworkAccess":    {},
+	"ShellAccess":      {},
+	"FilesystemAccess": {},
+	"EnvVarAccess":     {},
+}
+
+// nonConstrainingConditionFields names Conditions fields that cannot gate an
+// install on their own — they only parameterise another condition, so a policy
+// "paired" with one of them is not actually constrained by it.
+//
+// PublishVelocityThreshold24h is the only one: the evaluator reads it solely
+// inside the `if cond.PublishVelocityAnomaly != nil` branch, so a
+// threshold-only policy is inert by construction.
+//
+// VersionAnomalyKinds and HiddenUnicodeKinds look like parameters but are NOT
+// listed here: each is evaluated in its own `len(...) > 0` branch outside the
+// parent bool, so either one gates on its own.
+// TestNonConstrainingFieldsAreGenuinelyInert validates every entry here
+// against the evaluator rather than trusting the declaration.
+var nonConstrainingConditionFields = map[string]struct{}{
+	"PublishVelocityThreshold24h": {},
+}
+
+// HasGateableConstraint reports whether c carries at least one constraint that
+// is not a demoted context-only codesmell signal and is not a bare parameter.
+//
+// This asks the question the standalone-codesmell check actually needs
+// answered: "does this policy narrow anything besides the noisy signals?" The
+// previous implementation approximated it with ConditionsUsedBy — "does this
+// condition have a proxy-matrix column?" — which is a different question, and
+// wrongly rejected 14 valid pairings, including the whole attestation
+// substrate and `usesEval + trustScoreMin` (the exact composite the
+// contextOnlyConditions doc comment promises is allowed).
+//
+// Reflection is deliberate: a newly added Conditions field counts as a real
+// constraint by default, which is the safe direction here — this is an
+// alert-fatigue guard, not a security control, and a policy that saves can
+// only add gating, never remove it.
+func HasGateableConstraint(c Conditions) bool {
+	v := reflect.ValueOf(c)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" {
+			continue // unexported
+		}
+		if _, skip := contextOnlyConditionFields[f.Name]; skip {
+			continue
+		}
+		if _, skip := nonConstrainingConditionFields[f.Name]; skip {
+			continue
+		}
+		if conditionFieldIsSet(v.Field(i)) {
+			return true
+		}
+	}
+	return false
+}
+
+// conditionFieldIsSet reports whether a Conditions field carries a value the
+// evaluator would act on: a non-nil pointer, or a non-empty slice.
+func conditionFieldIsSet(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Pointer:
+		return !v.IsNil()
+	case reflect.Slice, reflect.Map:
+		return v.Len() > 0
+	default:
+		return !v.IsZero()
+	}
+}
+
+// ContextOnlyConditionsUsed returns the demoted context-only conditions a
+// policy gates on, sorted, for use in operator-facing messages.
+func ContextOnlyConditionsUsed(c Conditions) []ConditionType {
+	out := make([]ConditionType, 0, len(contextOnlyConditionFields))
+	for _, cond := range ConditionsUsedBy(c) {
+		if IsContextOnlyCondition(cond) {
+			out = append(out, cond)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// StandaloneContextOnlyViolation is the single decision behind both the
+// save-time validator and `chainsaw policy lint`. It returns the demoted
+// context-only conditions a policy gates on when they are its ONLY constraint,
+// or nil when the policy is acceptable.
+//
+// Both surfaces call this rather than re-deriving the sequence. They previously
+// kept look-alike copies, and the copies drifted twice: once on wildcard
+// identifiers (see TestPolicyLint_WildcardIdentifierIsNotAPairing) and once on
+// the ConditionsUsedBy-based constraint predicate. Only the message formatting
+// is surface-specific now.
+func StandaloneContextOnlyViolation(c Conditions, identifier Identifier, scope Scope) []ConditionType {
+	contextOnly := ContextOnlyConditionsUsed(c)
+	if len(contextOnly) == 0 {
+		return nil
+	}
+	// Any non-context-only constraint is a valid pairing.
+	if HasGateableConstraint(c) {
+		return nil
+	}
+	// An identifier or scope is fine as a pairing — the context-only
+	// condition is then narrowing an already-scoped policy rather than
+	// firing globally.
+	if hasPolicyIdentifier(identifier) || hasPolicyScope(scope) {
+		return nil
+	}
+	return contextOnly
+}
+
 // rejectStandaloneContextOnlyConditions enforces that the noisy Wave-3
 // codesmell signals (UsesEval, NetworkAccess, ShellAccess, FilesystemAccess,
 // EnvVarAccess) cannot be used as the sole gate on a policy. Their estimated
@@ -1538,30 +1659,12 @@ func hasPolicyConstraint(policy Policy) bool {
 // the Report and as inputs to trustscore / composite policies — they just
 // must be paired with at least one other constraint.
 func rejectStandaloneContextOnlyConditions(policy Policy) error {
-	used := ConditionsUsedBy(policy.Conditions)
-	if len(used) == 0 {
+	offending := StandaloneContextOnlyViolation(policy.Conditions, policy.Identifier, policy.Scope)
+	if len(offending) == 0 {
 		return nil
 	}
-	contextOnlyUsed := make([]ConditionType, 0, len(used))
-	hasGateableCondition := false
-	for _, c := range used {
-		if IsContextOnlyCondition(c) {
-			contextOnlyUsed = append(contextOnlyUsed, c)
-		} else {
-			hasGateableCondition = true
-		}
-	}
-	if len(contextOnlyUsed) == 0 || hasGateableCondition {
-		return nil
-	}
-	// An identifier or scope is fine as a pairing — the context-only
-	// condition is then narrowing an already-scoped policy rather than
-	// firing globally.
-	if hasPolicyIdentifier(policy.Identifier) || hasPolicyScope(policy.Scope) {
-		return nil
-	}
-	names := make([]string, len(contextOnlyUsed))
-	for i, c := range contextOnlyUsed {
+	names := make([]string, len(offending))
+	for i, c := range offending {
 		names[i] = string(c)
 	}
 	return fmt.Errorf("policy uses only context-only condition(s) %v as a standalone gate; these signals are too noisy to enforce alone — pair them with another condition, an identifier, or a scope, or use them via trustscore/composite expressions", names)
