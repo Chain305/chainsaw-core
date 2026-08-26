@@ -14,6 +14,13 @@ package cli
 // deliberately NOT 10, because "the tool was prevented from looking" must not
 // be reported as "a bypass was found".
 //
+// P8-27 — the verdict is produced by emitAndGateInto, so the gate is the last
+// statement on every non-error path and no rendering choice can reach a
+// `return` ahead of it. That is the structural form of the fix scan-remote's
+// S1 applied after `--json` had silently disarmed its gate on every
+// invocation. Two explicit knobs sit on the gate: --exit-zero (report without
+// gating) and --fail-on-unscanned (default ON here — see runScanRepo).
+//
 // This is a pragmatic grep — a full Gradle / Maven AST parser is out
 // of scope. False positives are surfaced as suggestions ("committed
 // .npmrc — ensure registry is Chainsaw-pointed") rather than hard
@@ -124,12 +131,43 @@ Exit codes:
      rule applies to could not be read (a tree that was not fully inspected
      is not reported as clean)
 
+The exit gate applies to EVERY output format. Choosing --json (or a repo-wide
+--format json) is a rendering decision and never weakens the verdict.
+
+Gate control:
+  --exit-zero              report findings but always exit 0 (monitor mode)
+  --fail-on-unscanned      exit 2 when a candidate file could not be inspected.
+                           ON by default; pass --fail-on-unscanned=false to
+                           downgrade that case to a warning on stderr.
+
 Files larger than 4 MiB are not inspected and are reported as skipped.
 
 Intended for CI preflight ("required status check").`,
 		RunE: runScanRepo,
 	}
-	cmd.Flags().Bool("json", false, "emit JSON output")
+	// P8-27 — no local --json here. The root persistent --json (root.go) is
+	// documented as sugar for --format=json and useJSON/resolveFormat read it;
+	// a local shadow made the two flags two different variables and is the
+	// mechanism behind scan-remote's S1 gate-disarm. `policy gate` had the
+	// same shadow removed for the same reason.
+	//
+	// --fail-on-unscanned DEFAULTS ON here, which is the one place this
+	// command's semantics deviate from `chainsaw scan`'s. It is not a
+	// difference of posture but of history: scan-repo has ALWAYS exited 2 on
+	// an uninspectable candidate (X2), unconditionally and with no way to opt
+	// out. Registering the flag default-off would silently disarm a shipped
+	// fail-closed gate — a security regression dressed as a consistency fix.
+	// So the default preserves today's behaviour exactly and the flag adds
+	// only the escape hatch that did not exist. `scan`'s default stays OFF
+	// because its gate has never been armed and flipping it would break
+	// existing CI on upgrade (scan.go's L-05).
+	addScanGateFlags(cmd, scanGateFlags{
+		FailOnUnscanned:        true,
+		FailOnUnscannedDefault: true,
+		FailOnUnscannedUsage:   "Exit 2 when a candidate file could not be inspected (default: on; pass =false to warn only)",
+		ExitZero:               true,
+		ExitZeroUsage:          "Always exit 0, even when bypass files are found (report-only mode)",
+	})
 	rootCmd.AddCommand(cmd)
 }
 
@@ -233,34 +271,48 @@ func runScanRepo(cmd *cobra.Command, args []string) error {
 	// the caller should not have to rely on that).
 	sort.Strings(report.Unreadable)
 
-	if useJSON(cmd) {
-		// S9 — honor --output. cmd.OutOrStdout() stays the fallback so tests
-		// that capture via cmd.SetOut keep working.
-		_ = encodeJSON(outWriterOr(cmd, cmd.OutOrStdout()), report)
-	} else {
-		printScanReport(cmd, report)
-	}
-
-	// Y3/Y4 — returned, not os.Exit'd. The bare exit skipped Execute()'s
-	// telemetry flush entirely, so a drift-detecting scan-repo (the outcome CI
-	// cares about) emitted zero cli.session.completed events. doctorExitDrift
-	// (10) is unchanged — ExitCodeError carries arbitrary codes — and Err
-	// stays nil so renderError adds nothing to the report already printed.
-	if len(report.Findings) > 0 {
-		return &ExitCodeError{Code: doctorExitDrift}
-	}
-	// X2 — a tree with no findings but with candidate files we could not read
-	// is NOT provably clean, so it must not exit 0. ExitOpError(2) rather than
-	// doctorExitDrift(10): nothing was found, the tool was prevented from
-	// looking. Findings win when both are present (10 is the stronger signal
-	// and the one CI keys on).
-	if len(report.Unreadable) > 0 {
-		return &ExitCodeError{
-			Code: ExitOpError,
-			Err:  fmt.Errorf("%d candidate file(s) could not be inspected; the tree is not provably clean", len(report.Unreadable)),
-		}
-	}
-	return nil
+	// P8-27 — render, THEN gate, on every format. The two branches below used
+	// to be followed by three bare `return`s; nothing structural stopped a
+	// future format branch from returning early and taking the verdict with
+	// it, which is exactly how scan-remote's --json disarmed its own gate.
+	// emitAndGateInto makes the ordering an invariant of the helper instead of
+	// a property of this function's statement order.
+	//
+	// S9 — the JSON sink still honors --output, with cmd.OutOrStdout() as the
+	// fallback so tests that capture via cmd.SetOut keep working.
+	//
+	// Y3/Y4 — the codes are RETURNED, not os.Exit'd. A bare exit skipped
+	// Execute()'s telemetry flush entirely, so a drift-detecting scan-repo
+	// (the outcome CI cares about) emitted zero cli.session.completed events.
+	// doctorExitDrift (10) is unchanged — ExitCodeError carries arbitrary
+	// codes — and Err stays nil on the findings path so renderError adds
+	// nothing to the report already printed.
+	return emitAndGateInto(cmd, cmd.OutOrStdout(), report,
+		func() error { printScanReport(cmd, report); return nil },
+		func() error {
+			// Monitor mode. Deliberately does NOT cover the nonexistent-path
+			// exit above: --exit-zero suppresses a VERDICT, never a failure to
+			// run at all.
+			if scanExitZero(cmd) {
+				return nil
+			}
+			if len(report.Findings) > 0 {
+				return &ExitCodeError{Code: doctorExitDrift}
+			}
+			// X2 — a tree with no findings but with candidate files we could
+			// not read is NOT provably clean, so it must not exit 0.
+			// ExitOpError(2) rather than doctorExitDrift(10): nothing was
+			// found, the tool was prevented from looking. Findings win when
+			// both are present (10 is the stronger signal and the one CI keys
+			// on). Armed by default — see the flag registration above.
+			if len(report.Unreadable) > 0 && resolveFailOnUnscanned(cmd, true) {
+				return &ExitCodeError{
+					Code: ExitOpError,
+					Err:  fmt.Errorf("%d candidate file(s) could not be inspected; the tree is not provably clean", len(report.Unreadable)),
+				}
+			}
+			return nil
+		})
 }
 
 // inspectFile runs the full rule set over one file's contents and

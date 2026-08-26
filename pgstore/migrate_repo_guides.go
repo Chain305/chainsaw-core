@@ -71,6 +71,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -149,27 +150,46 @@ const staleRepositoryGuideCountSQL = `
 // pre-78f3548f guide prose, keyed by repository name. Read-only; run it
 // before BackfillStaleRepositoryGuides to size the change.
 //
-// The count is deliberately unfiltered by the caller's guide list: a name
-// that appears here but not in configs/seed.yaml is a repository the backfill
-// cannot repair (an operator-created proxy, or one dropped from the seed),
-// and seeing it is more useful than silently excluding it.
+// The raw SQL count is deliberately unfiltered by the caller's guide list.
+// The three-way split below is applied in Go, because "matches the stale
+// predicate" and "the backfill can do something about it" are different
+// questions and the answer to the second one is not in the database.
+//
 // repairable reports whether the backfill could actually change a row for
-// this repository — i.e. whether its SEED guide contains the freshness
-// marker at all.
+// this repository — i.e. whether the replacement prose the caller supplied
+// for it contains the freshness marker at all.
 //
-// Not every guide uses it. docker-hub and swift address the bare host
-// rather than the /chainproxy path, so their prose contains no
-// "your-chainsaw-base" token and never will. The stale predicate keys on
-// the marker's ABSENCE, so those rows match it permanently while the
-// UPDATE correctly leaves them alone (the replacement text is byte-identical
-// to what is already stored). The first production run of this backfill
-// reported "stale rows found total=63 by_repository=map[docker-hub:38
-// swift:25]" alongside "rows_updated=0" — a true statement of the predicate
-// and a completely misleading statement about the system, printed on every
-// boot.
+// HISTORY, and the correction (P8-28). cef96422 introduced this filter to
+// stop a permanent phantom count: the first production run reported "stale
+// rows found total=63 by_repository=map[docker-hub:38 swift:25]" next to
+// "rows_updated=0", on every boot. The comment it shipped with said
+// docker-hub and swift "address the bare host rather than the /chainproxy
+// path, so their prose contains no `your-chainsaw-base` token and never
+// will". That is true of docker-hub and FALSE of swift — the swift guide is
+// full of the token (see the retired_repository_guides entry in
+// configs/seed.yaml). Swift was excluded for an entirely different reason:
+// 5373b2ff deleted it from `repositories:`, so it was not in the caller's
+// guide list at all, and a name that is not in the list can never be in
+// repairable() no matter what its prose says.
 //
-// Counting only what the UPDATE can act on makes the two numbers agree, so
-// a non-zero "found" with a zero "updated" becomes a real signal again.
+// The two exclusions therefore mean opposite things and must not share a
+// bucket:
+//
+//	markerless — seed guide EXISTS, carries no marker (docker-hub). Every
+//	             row matches the stale predicate forever, and the UPDATE
+//	             leaves them alone whenever the stored text already equals
+//	             the replacement. Counting them is the phantom.
+//	orphaned   — NO guide exists to replace the row with. Nothing can ever
+//	             repair it. Silently dropping these turned a visible problem
+//	             into an invisible one, which is why the caller logs the
+//	             bucket at WARN with the names.
+//
+// Orphans are not a swift-specific accident: any repository an operator
+// creates by hand, and any future seed deletion, lands here the same way.
+// The answer for a seeded-then-deleted repository is the
+// retired_repository_guides list, which keeps its prose reachable so it
+// stays in repairable(); the answer for an operator-created repository is
+// that the operator owns its guide.
 func repairable(guides []RepositoryGuide) map[string]struct{} {
 	out := make(map[string]struct{}, len(guides))
 	for _, g := range guides {
@@ -180,33 +200,102 @@ func repairable(guides []RepositoryGuide) map[string]struct{} {
 	return out
 }
 
-func (s *Store) StaleRepositoryGuideCounts(ctx context.Context, guides []RepositoryGuide) (map[string]int, error) {
+// knownGuideNames is every repository the caller supplied prose for,
+// whether or not that prose carries the marker. A stale row whose name is
+// absent from this set is an orphan.
+func knownGuideNames(guides []RepositoryGuide) map[string]struct{} {
+	out := make(map[string]struct{}, len(guides))
+	for _, g := range guides {
+		if strings.TrimSpace(g.Name) != "" {
+			out[g.Name] = struct{}{}
+		}
+	}
+	return out
+}
+
+// StaleGuideCounts is the stale population split by what can be done about
+// it. Each map is repository name -> row count across all orgs.
+type StaleGuideCounts struct {
+	// Repairable rows the backfill will rewrite on this boot.
+	Repairable map[string]int
+	// Markerless rows belong to a seeded repository whose prose carries no
+	// freshness marker, so they match the stale predicate permanently. The
+	// UPDATE still runs for them and still writes nothing while the stored
+	// text equals the replacement. Reported for diagnosis, not alarm.
+	Markerless map[string]int
+	// Orphaned rows have no seed guide at all. Nothing in this process can
+	// repair them; an operator has to.
+	Orphaned map[string]int
+}
+
+// Total is every stale row, across all three buckets.
+func (c StaleGuideCounts) Total() int {
+	n := 0
+	for _, m := range []map[string]int{c.Repairable, c.Markerless, c.Orphaned} {
+		for _, v := range m {
+			n += v
+		}
+	}
+	return n
+}
+
+// RepairableTotal is the population the UPDATE is allowed to touch — the
+// number that should agree with BackfillStaleRepositoryGuides's return.
+func (c StaleGuideCounts) RepairableTotal() int {
+	n := 0
+	for _, v := range c.Repairable {
+		n += v
+	}
+	return n
+}
+
+// OrphanNames lists the orphaned repository names in sorted order, for a
+// log line an operator can act on.
+func (c StaleGuideCounts) OrphanNames() []string {
+	out := make([]string, 0, len(c.Orphaned))
+	for name := range c.Orphaned {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s *Store) StaleRepositoryGuideCounts(ctx context.Context, guides []RepositoryGuide) (StaleGuideCounts, error) {
+	counts := StaleGuideCounts{
+		Repairable: map[string]int{},
+		Markerless: map[string]int{},
+		Orphaned:   map[string]int{},
+	}
 	if s == nil || s.db == nil {
-		return nil, nil
+		return counts, nil
 	}
 	repair := repairable(guides)
+	known := knownGuideNames(guides)
 	rows, err := s.ReadDB().QueryContext(ctx, staleRepositoryGuideCountSQL)
 	if err != nil {
-		return nil, fmt.Errorf("count stale repository guides: %w", err)
+		return counts, fmt.Errorf("count stale repository guides: %w", err)
 	}
 	defer rows.Close()
 
-	counts := map[string]int{}
 	for rows.Next() {
 		var name string
 		var n int
 		if err := rows.Scan(&name, &n); err != nil {
-			return nil, fmt.Errorf("scan stale repository guide count: %w", err)
+			return counts, fmt.Errorf("scan stale repository guide count: %w", err)
 		}
-		if _, ok := repair[name]; !ok {
-			// No marker in this repository's seed guide, so the
-			// backfill can never change it — see repairable.
-			continue
+		_, canRepair := repair[name]
+		_, isSeeded := known[name]
+		switch {
+		case canRepair:
+			counts.Repairable[name] = n
+		case isSeeded:
+			counts.Markerless[name] = n
+		default:
+			counts.Orphaned[name] = n
 		}
-		counts[name] = n
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate stale repository guide counts: %w", err)
+		return counts, fmt.Errorf("iterate stale repository guide counts: %w", err)
 	}
 	return counts, nil
 }

@@ -41,6 +41,9 @@ actions.
 <path> may be either a directory (the command walks <path>/.github/workflows/)
 or a single workflow YAML file.
 
+Output formats (--format, a global flag): text (the default), json, sarif.
+--json is sugar for --format=json. Every format honours --output.
+
 Exit codes:
   0 — no high-severity findings (low/medium are still reported)
   1 — at least one high-severity finding (suitable for ` + "`set -e`" + ` CI gates)`,
@@ -66,7 +69,18 @@ Exit codes:
 }
 
 func init() {
-	scanActionsCmd.Flags().String("format", "text", "Output format: text, json, or sarif")
+	// P8-27 — the local --format is GONE. It shadowed the root persistent
+	// --format with a DIFFERENT default ("text" vs "table"), which made this
+	// the one command where the global flag's documented default was not the
+	// one in effect, and — per the extraCommandFormats comment in root.go — a
+	// local shadow makes ownsGlobalFlag false and opts the command out of ALL
+	// --format validation, so `scan-actions . --format bogus` was checked only
+	// by this command's own ad-hoc switch.
+	//
+	// The vocabulary is preserved exactly by the extraCommandFormats allowlist
+	// (root.go), which keeps text/sarif legal while table|json validation
+	// applies again. runScanActions folds the root default "table" onto this
+	// command's human format "text", so the rendered output is unchanged.
 	rootCmd.AddCommand(scanActionsCmd)
 }
 
@@ -148,7 +162,10 @@ func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 	}
 
 	deps := githubactions.ScanDeps{
-		Typosquat: githubactions.NewTyposquatAdapter(typosquat.NewDetector(nil)),
+		// NewGitHubActionsDetector, not NewDetector: a detector with no
+		// loaded ecosystem returns a zero result for every Action and the
+		// scan reports clean. See its doc comment.
+		Typosquat: githubactions.NewTyposquatAdapter(typosquat.NewGitHubActionsDetector(nil)),
 		Malware:   githubactions.NewMalwareAdapter(malware.NewGitHubActionsFeed()),
 		// KnownPublishers nil -> Scan uses DefaultKnownPublishers().
 	}

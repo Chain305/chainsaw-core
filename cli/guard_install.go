@@ -508,6 +508,18 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 
 	ctx := context.Background()
 	verdicts, blocked := guard.evaluateAll(ctx, specs)
+	// Byte-scan coverage is reported HERE, after evaluation, and not with the
+	// notices above — because before evaluation nobody knows whether it ran.
+	// The notice this replaced was derived from two env vars read at guard
+	// construction and claimed "behavioral byte scan not run" on every machine
+	// with a warm npm/cargo/pip cache, while the guard was reading those exact
+	// bytes. See localGuard.byteScanNotice. Same --quiet rule as every other
+	// notice: it is context, never a refusal.
+	if !isQuiet {
+		if n := guard.byteScanNotice(); n != "" {
+			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, n))
+		}
+	}
 	if onlineVerdicts, onlineBlocked, notice := runServerInstallPreflight(ctx, specs); notice != "" {
 		if !isQuiet {
 			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, notice))

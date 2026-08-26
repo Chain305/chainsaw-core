@@ -329,30 +329,44 @@ func TestGroupAVersionNotFoundProbe(t *testing.T) {
 }
 
 // TestGroupAProbeSuppressedWithoutPositiveEvidence is the false-positive
-// guard the whole feature rests on. A package-level probe that 404s means
-// the package itself is absent (not_found is already the right, narrower
-// answer); a probe that 5xxs means the registry told us nothing at all.
-// Neither may be promoted into a claim that the version does not exist.
+// guard the whole feature rests on: neither a package-level 404 nor a
+// package-level outage may be promoted into a claim that the VERSION does
+// not exist. That assertion is unchanged and still correct.
+//
+// AMENDED for P8-04 with what happens INSTEAD. The original test said only
+// what must not happen, and the gap it left is the defect: a package-level
+// 404 kept the generic not_found, which risk_projection.go never consumes
+// and core/coverage classifies as OK, so `rubygems colourama` came back
+// ALLOW 96 (A) and `pypi requests-python` — a textbook slopsquat — ALLOW
+// 92 (A). The 404 case now asserts package_not_found; the outage cases
+// still assert the untouched not_found, because a 5xx says nothing about
+// whether anything exists.
 func TestGroupAProbeSuppressedWithoutPositiveEvidence(t *testing.T) {
 	tests := []struct {
 		name        string
 		probeStatus int // 0 = do not register the route at all (404)
 		why         string
+		// wantCode is the code that must be on the report instead of
+		// version_not_found.
+		wantCode string
 	}{
 		{
 			name:        "package-level 404",
 			probeStatus: 0,
-			why:         "the package itself is absent; not_found already says so",
+			why:         "the PACKAGE is absent — a stronger fact than a missing version, and it must be said",
+			wantCode:    WarnPackageNotFound,
 		},
 		{
 			name:        "package-level 500",
 			probeStatus: http.StatusInternalServerError,
 			why:         "absence of evidence is not evidence of absence — a registry outage must not break a build",
+			wantCode:    "not_found",
 		},
 		{
 			name:        "package-level 403",
 			probeStatus: http.StatusForbidden,
 			why:         "an auth wall tells us nothing about the version list",
+			wantCode:    "not_found",
 		},
 	}
 
@@ -376,8 +390,12 @@ func TestGroupAProbeSuppressedWithoutPositiveEvidence(t *testing.T) {
 			if hasVersionNotFound(pr) {
 				t.Fatalf("marker emitted without positive evidence (%s): %+v", tc.why, pr.Warnings)
 			}
-			if !hasWarningCode(pr, "not_found") {
-				t.Fatalf("the original not_found must survive untouched, got %+v", pr.Warnings)
+			if !hasWarningCode(pr, tc.wantCode) {
+				t.Fatalf("want %s on the report (%s), got %+v", tc.wantCode, tc.why, pr.Warnings)
+			}
+			if tc.wantCode == WarnPackageNotFound && hasWarningCode(pr, "not_found") {
+				t.Fatalf("the generic not_found survived alongside the package_not_found "+
+					"marker; the projection would key on neither cleanly: %+v", pr.Warnings)
 			}
 		})
 	}

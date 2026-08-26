@@ -4,8 +4,12 @@ Chainsaw registers **76 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
-This page is generated from [`risk/registry.go`](../risk/registry.go) — the
-registry is the source of truth, not this table.
+[`risk/registry.go`](../risk/registry.go) is the source of truth, not this
+table. The counts on this page — the total, the category table and every
+`## Category (N)` heading — are pinned to the registry by a drift test
+(`risk.TestSignalCountMatchesMarkdown`), which also checks that each section
+lists as many rows as the registry has signals in that category. The prose in
+the "What it means" column is hand-written.
 
 **Where they run.** The full set is evaluated server-side. The offline install
 guard runs the subset that needs no external data: typosquat, known-malicious,
@@ -69,14 +73,14 @@ a configured server.
 | `sc.repo_missing` | medium | -12.00 | Source repo missing |
 | `sc.repo_ownership_mismatch` | high | -20.00 | Source repo ownership mismatch |
 | `sc.reserved_namespace_violation` | high | -25.00 | Reserved namespace violation |
-| `sc.shrinkwrap_present` | low | -10.00 | Bundled npm-shrinkwrap.json |
+| `sc.shrinkwrap_present` | low | -10.00 | Bundled dependency lockfile |
 | `sc.signature_verified` | info | 5.00 | Upstream signature verified |
 | `sc.slsa_level_bonus` | info | 0.00 | SLSA build level bonus |
 | `sc.suspicious_repo_stars` | high | -25.00 | Suspicious repo: low stars + young repo + young maintainer |
 | `sc.transitive_critical_vuln` | critical | -40.00 | Transitive critical vulnerability |
 | `sc.transitive_high_vuln` | high | -20.00 | Transitive high-severity vulnerability |
 | `sc.transitive_malware` | critical | -1000.00 | Malware in transitive closure |
-| `sc.typosquat_high` | high | -40.00 | Likely typosquat (high confidence) |
+| `sc.typosquat_high` | critical | -40.00 | Likely typosquat (high confidence) |
 | `sc.typosquat_low` | low | -8.00 | Name similarity to popular package (low confidence) |
 | `sc.typosquat_medium` | medium | -20.00 | Possible typosquat (medium confidence) |
 
@@ -101,7 +105,7 @@ a configured server.
 | `lic.policy_blocked` | high | -30.00 | License blocked by policy |
 | `lic.spdx_present` | info | 5.00 | SPDX license declared |
 | `license.ambiguous_classifier` | low | -10.00 | Ambiguous license expression |
-| `license.copyleft` | medium | -20.00 | Copyleft license |
+| `license.copyleft` | medium | -10.00 | Copyleft license |
 | `license.exception_present` | info | -5.00 | License carries a WITH exception |
 | `license.non_permissive` | medium | -20.00 | Non-permissive license |
 | `license.unidentified` | medium | -15.00 | Unidentified license |

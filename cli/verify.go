@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -38,7 +39,7 @@ func init() {
 	verifyCmd.Flags().String("cache-dir", "", "Optional Sigstore bundle cache directory (defaults to no caching)")
 	verifyCmd.Flags().Duration("cache-ttl", 24*time.Hour, "Cache entry TTL when --cache-dir is set")
 	verifyCmd.Flags().Bool("json", false, "Emit machine-readable JSON instead of the human chain summary")
-	verifyCmd.Flags().String("source-url", "", "Optional upstream URL hint for source-aware ecosystems (APT/DNF/YUM)")
+	verifyCmd.Flags().String("source-url", "", "Repository/registry base URL. REQUIRED for apt, yum, dnf and swift; an optional upstream hint elsewhere")
 	rootCmd.AddCommand(verifyCmd)
 }
 
@@ -48,6 +49,15 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
 	cacheTTL, _ := cmd.Flags().GetDuration("cache-ttl")
 	sourceURL, _ := cmd.Flags().GetString("source-url")
+
+	// Refuse the invocation BEFORE building a checker or dialling
+	// anything. Without --source-url these ecosystems can only report
+	// StatusUnavailable, which the human renderer used to spell
+	// "ecosystem does not expose attestations" — a false claim about APT,
+	// YUM, DNF and Swift, all of which do. See P8-47 / P8-48.
+	if err := requireSourceURL(ecosystem, sourceURL); err != nil {
+		return err
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	opts := []provenance.CheckerOption{}
@@ -59,6 +69,14 @@ func runVerify(cmd *cobra.Command, args []string) error {
 		opts = append(opts, provenance.WithSigstoreCache(cache))
 	}
 	checker := provenance.NewChecker(logger, opts...)
+	// Swift takes its registry base URL from Checker state rather than the
+	// per-call sourceURL, because swiftChecker is not a SourceAwareChecker.
+	// Without this the CLI could never reach a Swift registry at all: the
+	// server reads provenance.swift_registry_url from config, and the CLI
+	// has no config plumbing for it.
+	if isSwiftEcosystem(ecosystem) {
+		checker.WithSwiftRegistryURL(sourceURL)
+	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 	defer cancel()
@@ -101,6 +119,67 @@ func renderAndGateVerify(cmd *cobra.Command, ecosystem, pkgName, version string,
 	)
 }
 
+// sourceURLRequiredEcosystems are the ecosystems where (name, version)
+// alone cannot identify a trust domain, so a verification attempt is
+// impossible without --source-url.
+//
+// apt/yum/dnf: the repository URL determines which keyring signs the
+// metadata. swift: SE-0292 registries are not centrally hosted, so there
+// is no registry to query until one is named.
+//
+// Deliberately NOT a defaulted value. A default mirror is a guess, and a
+// guess that happens to carry a matching name+version walks a real
+// signed chain and returns VERIFIED for bytes the user never installed —
+// openssl 3.0.2 exists in both Ubuntu jammy and Debian. A false
+// attestation is strictly worse than a refused invocation. In the common
+// case the guess misses and the checker returns FAILED, the same status a
+// tampered package gets. See P8-47.
+var sourceURLRequiredEcosystems = map[string]string{
+	"apt":   "--source-url https://deb.debian.org/debian/dists/bookworm",
+	"yum":   "--source-url https://dl.fedoraproject.org/pub/fedora/linux/releases/40/Everything/x86_64/os",
+	"dnf":   "--source-url https://dl.fedoraproject.org/pub/fedora/linux/releases/40/Everything/x86_64/os",
+	"swift": "--source-url https://swift-registry.example.com",
+}
+
+func isSwiftEcosystem(ecosystem string) bool {
+	return strings.ToLower(strings.TrimSpace(ecosystem)) == "swift"
+}
+
+// requireSourceURL refuses the invocation with exit 4 (bad invocation)
+// when a source-aware ecosystem was asked for without --source-url.
+//
+// Exit 4, not exit 1: nothing was verified and nothing was refused —
+// the command was malformed. Collapsing that into the blocked/failed
+// exit code is how "you forgot a flag" ends up looking like "this
+// package has no provenance" in a CI log.
+func requireSourceURL(ecosystem, sourceURL string) error {
+	key := strings.ToLower(strings.TrimSpace(ecosystem))
+	example, needs := sourceURLRequiredEcosystems[key]
+	if !needs || strings.TrimSpace(sourceURL) != "" {
+		return nil
+	}
+	var what string
+	switch key {
+	case "swift":
+		what = "Swift Package Registries (SE-0292) are not centrally hosted, so there is no " +
+			"default registry to query"
+	default:
+		what = "the repository URL determines which keyring signs the metadata, and guessing a " +
+			"mirror could verify bytes you never installed"
+	}
+	detail := "chainsaw implements a verifier for it"
+	if key == "swift" {
+		detail = "chainsaw implements the SE-0391 CMS probe (full chain validation additionally " +
+			"needs provenance.swift_full_verify)"
+	}
+	return &ExitCodeError{Code: ExitUsage, Err: fmt.Errorf(
+		"chainsaw verify %s requires --source-url: %s.\n"+
+			"  %s does publish verifiable provenance and %s — but it cannot be reached "+
+			"from (package, version) alone.\n"+
+			"  Try: chainsaw verify %s <package> <version> %s",
+		key, what, key, detail, key, example)}
+}
+
 // verifyExitError maps a provenance status to the process exit-code
 // contract. Anything short of fully-verified is a gate failure, matching
 // the command's own help ("exits non-zero on any failure") — CI gates and
@@ -135,6 +214,7 @@ func verifyJSON(ecosystem, pkgName, version string, r provenance.Result) map[str
 		"status":          string(r.Status),
 		"verified":        r.Status == provenance.StatusVerified,
 		"attestationType": r.AttestationType,
+		"reason":          r.Reason,
 		"slsaLevel":       r.SLSALevel,
 		"builderId":       r.BuilderID,
 		"sourceRepo":      r.SourceRepo,
@@ -152,6 +232,43 @@ func verifyJSON(ecosystem, pkgName, version string, r provenance.Result) map[str
 	return out
 }
 
+// unavailableGloss turns a provenance Reason code into the one-line
+// gloss printed beside UNAVAILABLE.
+//
+// This line used to be the hardcoded "ecosystem does not expose
+// attestations" for every cause. That is true of cargo, composer and
+// cocoapods; it is FALSE of APT (which publishes signed InRelease
+// metadata), of Swift (SE-0391 CMS), and of any ecosystem chainsaw
+// simply has not written a checker for. Printing a claim about the
+// ecosystem when the real cause is a missing flag, unset config, or a
+// gap in chainsaw is the defect. See P8-47 / P8-48.
+func unavailableGloss(reason string) string {
+	switch reason {
+	case provenance.ReasonEcosystemNoStandard:
+		return "this ecosystem publishes no verifiable attestations"
+	case provenance.ReasonNoCheckerRegistered:
+		return "chainsaw has no checker for this ecosystem — a coverage gap, not an ecosystem property"
+	case provenance.ReasonNotConfigured:
+		return "required configuration is unset; nothing was attempted"
+	case provenance.ReasonSourceURLRequired:
+		return "no --source-url supplied; nothing was attempted"
+	case provenance.ReasonKeyringUnavailable:
+		return "no trusted keys available; trust could not be evaluated"
+	case provenance.ReasonInconclusive:
+		return "the chain could not be walked to a conclusion"
+	case provenance.ReasonOfflineMode, provenance.ReasonEcosystemDisabled:
+		return "verification is switched off by configuration"
+	case provenance.ReasonArtifactTooLarge:
+		return "artifact exceeds the verification size cap"
+	case provenance.ReasonUpstreamError:
+		return "upstream registry could not be reached"
+	case "":
+		return "no reason recorded"
+	default:
+		return reason
+	}
+}
+
 func printVerifyHuman(ecosystem, pkgName, version string, r provenance.Result) {
 	fmt.Printf("Verifying %s/%s@%s\n", ecosystem, pkgName, version)
 	switch r.Status {
@@ -162,11 +279,14 @@ func printVerifyHuman(ecosystem, pkgName, version string, r provenance.Result) {
 	case provenance.StatusMissing:
 		fmt.Println("  Status:        MISSING (ecosystem supports attestations; package has none)")
 	case provenance.StatusUnavailable:
-		fmt.Println("  Status:        UNAVAILABLE (ecosystem does not expose attestations)")
+		fmt.Printf("  Status:        UNAVAILABLE (%s)\n", unavailableGloss(r.Reason))
 	case provenance.StatusFailed:
 		fmt.Println("  Status:        FAILED")
 	default:
 		fmt.Printf("  Status:        %s\n", r.Status)
+	}
+	if r.Reason != "" {
+		fmt.Printf("  Reason:        %s\n", r.Reason)
 	}
 	if r.AttestationType != "" {
 		fmt.Printf("  Attestation:   %s\n", r.AttestationType)

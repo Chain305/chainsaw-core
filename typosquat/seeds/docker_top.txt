@@ -1,0 +1,182 @@
+# Curated seed list of Docker Hub OFFICIAL images for typosquat detection.
+#
+# Source: the `library/` directory of github.com/docker-library/official-images
+# (the authoritative registry of Docker Official Images — one file per image),
+# ranked by the `pull_count` reported by
+# https://hub.docker.com/v2/repositories/library/<name>/ at generation time.
+# Snapshot taken 2026-08-25: 144 images.
+#
+# WHY OFFICIAL IMAGES ONLY, AND NOT A POPULAR-IMAGES LIST
+#
+# Docker's namespace is far more edit-distance-dense than a flat registry
+# like npm: `<org>/<name>` coordinates put an unbounded number of legitimate
+# rebuilds (bitnami/redis, grafana/grafana, myco/nginx) one token away from
+# every short official name. Seeding those org-scoped names as *targets*
+# would flag their siblings as squats of each other. The official images are
+# the only Docker names that (a) are typed bare, (b) have a single
+# authoritative publisher, and (c) are actually impersonated in the wild —
+# `library/*` is the namespace an attacker squats. They are the corpus.
+#
+# Consequence, stated so nobody re-derives it as a bug: an org-scoped image
+# is NOT protected by this corpus, only measured against it. That is the
+# intended scope.
+#
+# Normalization: NormalizeDocker lowercases and strips a LEADING `library/`
+# only, so seeding the bare form covers both `alpine` and `library/alpine`.
+# Tags are not part of the name — `nginx:1.27-alpine` is checked as `nginx`
+# — so the `-alpine` / `-slim` variant space does not enter the index.
+#
+# Format:
+#   - Blank lines and lines starting with '#' are ignored.
+#   - One image name per line; LINE ORDER IS RANK (line 1 = rank 1).
+#     fetchSeed assigns Rank from position, so re-sorting this file changes
+#     TargetRank and therefore the detector's equidistant tie-break.
+#
+# Refresh cadence: hand-refreshed out-of-band, same posture as
+# seeds/go_top.txt and seeds/cocoapods_top.txt. Docker Hub's anonymous
+# pagination caps at 100 results, so the name list must come from the
+# official-images repository, not from the Hub listing endpoint.
+memcached
+nginx
+busybox
+alpine
+postgres
+redis
+ubuntu
+python
+node
+mysql
+mongo
+httpd
+rabbitmq
+docker
+traefik
+hello-world
+mariadb
+golang
+openjdk
+registry
+debian
+ruby
+wordpress
+php
+sonarqube
+haproxy
+influxdb
+nextcloud
+amazonlinux
+elasticsearch
+tomcat
+maven
+caddy
+eclipse-mosquitto
+telegraf
+bash
+adminer
+ghost
+kong
+solr
+zookeeper
+eclipse-temurin
+neo4j
+gradle
+mongo-express
+cassandra
+buildpack-deps
+perl
+nats
+percona
+composer
+kibana
+drupal
+couchdb
+logstash
+chronograf
+amazoncorretto
+rust
+matomo
+teamspeak
+fedora
+flink
+phpmyadmin
+couchbase
+joomla
+groovy
+rethinkdb
+rocket.chat
+redmine
+elixir
+erlang
+kapacitor
+odoo
+jruby
+mediawiki
+jetty
+oraclelinux
+rockylinux
+pypy
+clojure
+arangodb
+xwiki
+ros
+swift
+archlinux
+gcc
+znc
+hylang
+tomee
+haxe
+websphere-liberty
+sapmachine
+yourls
+varnish
+crate
+aerospike
+photon
+julia
+orientdb
+almalinux
+bonita
+open-liberty
+monica
+ibmjava
+fluentd
+ibm-semeru-runtimes
+r-base
+neurodebian
+storm
+irssi
+haskell
+plone
+backdrop
+lightstreamer
+clearlinux
+cirros
+notary
+geonetwork
+friendica
+convertigo
+postfixadmin
+emqx
+clickhouse
+php-zendserver
+gazebo
+dart
+spiped
+swipl
+eggdrop
+rakudo-star
+silverpeas
+spark
+mageia
+liquibase
+unit
+clefos
+alt
+hitch
+satosa
+krakend
+api-firewall
+azul-zulu
+nim
+espocrm

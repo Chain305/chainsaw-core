@@ -23,6 +23,34 @@ import (
 	"github.com/chain305/chainsaw-core/risk"
 )
 
+// projectedVersionCount answers "how many published versions do we know
+// about", preferring an explicit Maintenance.VersionCount and falling back
+// to the length of the version timeline.
+//
+// WHY THE FALLBACK EXISTS. Maintenance.VersionCount has exactly ONE writer
+// tree-wide — internal/intelligence/premium/provider_maintenance.go, whose
+// primary branch is literally `section.VersionCount = len(VersionTimeline)`.
+// The timeline itself is written by the CORE registry-metadata provider
+// (applyTimeline). So any build that fans out the core providers without the
+// premium set — the public core module, every core/... test, the offline
+// paths — held a full timeline and reported VersionCount 0.
+//
+// That is not a cosmetic gap. maint.very_new_package suppresses itself on
+// `VersionCount > 3` (core/risk/registry_maintenance.go), so a zeroed count
+// DISABLES A DAMPING GATE and the signal fires MORE. Measured on the 400-row
+// benign corpus before this fallback: 41% of the top-100 PyPI downloads,
+// boto3 among them, flagged "very new package". Deriving the count where the
+// timeline already sits costs nothing and removes the whole class.
+//
+// It cannot over-count: it is the same expression the premium provider uses,
+// and it only ever runs when nothing more authoritative was supplied.
+func projectedVersionCount(r *Report) int {
+	if r.Maintenance.VersionCount > 0 {
+		return r.Maintenance.VersionCount
+	}
+	return len(r.Maintenance.VersionTimeline)
+}
+
 // ProjectToRiskInput flattens a merged Report into the risk engine's
 // Input shape. Safe with a nil Report (returns the zero Input).
 func ProjectToRiskInput(r *Report) risk.Input {
@@ -45,14 +73,37 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// CLI's "NOT EVALUATED" render → `intel scan` counts it toward
 	// INCOMPLETE and exits 2. Return immediately and carry no facts:
 	// half a fact set is what got us here.
+	//
+	// ONE DELIBERATE, NARROW REVERSAL OF THAT RULE (P8-44). The "carry no
+	// facts" rule is right for every ADDITIVE fact — those are the ones
+	// whose partial set produces a score that measures its own blind
+	// spot. It was wrong for the two INSTANT-BLOCK facts, and the
+	// difference is structural rather than a matter of degree:
+	// risk.instantBlock is a closed short-circuit that ignores every
+	// other fact, does no additive math, and returns a fixed zero-score
+	// quarantine, so an otherwise-empty Input cannot corrupt it.
+	//
+	// Carrying them is not optional cleanliness — it is the whole fix.
+	// The malware provider is Tier 1 and needs no artifact, so it runs
+	// in parallel with registry metadata and its verdict IS in the
+	// merged Report by the time this projection runs (scanner.go's
+	// partialIsBlocking even short-circuits the fan-out on
+	// MalwareStatus == "malicious"). Dropping it here meant an
+	// unpublished or yanked MALICIOUS version — the case you most want
+	// flagged — came back NOT EVALUATED.
+	//
+	// TYPOSQUAT IS DELIBERATELY NOT CARRIED. It is not an instant block:
+	// it flows through the additive rollup, which needs exactly the
+	// facts that were never fetched, and since the band-1 boundary fix
+	// sc.typosquat_high quarantines — so carrying it would make a
+	// typo'd version pin on a merely near-popular name start blocking on
+	// an empty fact set. It is surfaced as TEXT on the unavailable
+	// evaluation's reason instead, where it informs without gating.
+	if reason, ok := packageNotFoundReason(r); ok {
+		return unavailableInput(r, reason)
+	}
 	if reason, ok := versionNotFoundReason(r); ok {
-		return risk.Input{
-			Ecosystem:          r.Identity.Ecosystem,
-			Package:            r.Identity.Package,
-			Version:            r.Identity.Version,
-			SignalsUnavailable: true,
-			UnavailableReason:  reason,
-		}
+		return unavailableInput(r, reason)
 	}
 
 	// Same treatment for a version string that can never be matched at
@@ -67,13 +118,33 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// (internal/decision/decision.go), so this stops them rendering as
 	// clean without refusing anything a user is trying to do.
 	if reason, ok := versionNotEvaluableReason(r); ok {
-		return risk.Input{
-			Ecosystem:          r.Identity.Ecosystem,
-			Package:            r.Identity.Package,
-			Version:            r.Identity.Version,
-			SignalsUnavailable: true,
-			UnavailableReason:  reason,
-		}
+		return unavailableInput(r, reason)
+	}
+
+	// THIRD unavailability arm, and the one without which P8-05's warning
+	// is inert (see advisory_coverage.go, trap 1). Seven ecosystems —
+	// huggingface, swift, cocoapods, docker, apt, yum, dnf — have no
+	// advisory feed at all, so nothing ever looked for a vulnerability in
+	// them. Every category then started at risk.categoryBase = 100 and the
+	// verdict came back ALLOW: 27 apt/yum/dnf runs produced a
+	// byte-identical `ALLOW 96 (A) / Vulnerability 100 A (0 findings)`,
+	// openssl 1.1.1k among them.
+	//
+	// Checked LAST of the three because it is the weakest claim. "This
+	// package does not exist" and "this version was never published" are
+	// facts about the coordinate; this one is a fact about US — our build
+	// has no feed — and when a report carries both, the coordinate fact is
+	// the more useful thing to print.
+	//
+	// Same Monitored-not-Blocked posture as its siblings: VerdictUnknown
+	// maps to Monitored in internal/decision, so this stops the rows
+	// rendering as clean without refusing anything a user is trying to do.
+	// It DOES move `chainsaw intel scan` from exit 0/1 to exit 2 for any
+	// lockfile containing one, via treeExitCode — that is the intended
+	// effect (an unevaluated node is not a passing node) and it needs its
+	// own count alongside the verdict delta.
+	if reason, ok := noAdvisorySourceReason(r); ok {
+		return unavailableInput(r, reason)
 	}
 
 	in := risk.Input{
@@ -150,7 +221,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		PublishedAt:      r.Release.PublishedAt,
 		LatestReleaseAt:  r.Maintenance.LatestReleaseAt,
 		LastRepoCommitAt: r.Maintenance.LastRepoCommitAt,
-		VersionCount:     r.Maintenance.VersionCount,
+		VersionCount:     projectedVersionCount(r),
 		MaintainerCount:  r.Maintenance.MaintainerCount,
 		// RepoArchived: pass the *bool through unchanged. Three-state
 		// preservation means downstream consumers can distinguish a
@@ -287,6 +358,69 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	return in
 }
 
+// unavailableInput builds the risk.Input for a coordinate whose facts
+// could not be obtained. It is the ONE place the "carry no facts" rule is
+// reversed, and it is reversed for exactly two fields.
+//
+// Every unavailability return in this file goes through here — today
+// versionNotFoundReason, versionNotEvaluableReason and
+// packageNotFoundReason. A fourth added later inherits the malware carry
+// automatically, which is the point: the defect this fixes was one of
+// three sibling returns being written without it and nothing joining
+// them. TestEveryUnavailableReturnCarriesMalware pins that.
+//
+// What is carried, and why only this:
+//
+//	IsKnownMalicious / MalwareID / MalwareSummary — the instant-block
+//	  fact. risk.EvaluatePackage answers it BEFORE the
+//	  SignalsUnavailable short-circuit (see the ORDERING INVARIANT note
+//	  in core/risk/evaluator.go), and instantBlock ignores every other
+//	  fact, so an empty Input cannot corrupt the result.
+//
+// What is NOT carried, deliberately:
+//
+//	IsSuspectedTyposquat — additive, not instant-block. It needs the
+//	  fact set that was never fetched, and sc.typosquat_high now
+//	  quarantines. Appended to the human-readable reason instead, so the
+//	  operator sees it without it gating anything.
+//	everything else — the packument-level fallbacks (maintainers, latest
+//	  release date, repo stars) that describe a DIFFERENT version.
+func unavailableInput(r *Report, reason string) risk.Input {
+	return risk.Input{
+		Ecosystem:          r.Identity.Ecosystem,
+		Package:            r.Identity.Package,
+		Version:            r.Identity.Version,
+		SignalsUnavailable: true,
+		UnavailableReason:  withTyposquatNote(r, reason),
+
+		IsKnownMalicious: r.SupplyChain.MalwareStatus == "malicious",
+		MalwareID:        r.SupplyChain.MalwareID,
+		MalwareSummary:   r.SupplyChain.MalwareSummary,
+	}
+}
+
+// withTyposquatNote appends the typosquat finding to an unavailability
+// reason as prose.
+//
+// The reason is rendered inside UnavailableEvaluation's summary sentence,
+// so this stays a clause: no leading capital, no trailing period, no em
+// dash. It is text and nothing else — it reaches no signal, no weight and
+// no verdict, which is precisely why it is safe to surface on a fact set
+// we already said we do not trust.
+func withTyposquatNote(r *Report, reason string) string {
+	if r.SupplyChain.TyposquatStatus != "suspected" {
+		return reason
+	}
+	note := "the name is also flagged as a suspected typosquat"
+	if similar := strings.TrimSpace(r.SupplyChain.TyposquatSimilarTo); similar != "" {
+		note += " of " + similar
+	}
+	if strings.TrimSpace(reason) == "" {
+		return note
+	}
+	return reason + "; " + note
+}
+
 // versionNotFoundReason reports whether any provider recorded positive
 // evidence that the requested version does not exist upstream, and
 // returns the operator-facing explanation to attach to the unavailable
@@ -305,6 +439,33 @@ func versionNotFoundReason(r *Report) (string, bool) {
 		if w.Code == WarnVersionNotFound {
 			return "version not found in the registry's published versions; " +
 				"check for a typo or a hallucinated version pin", true
+		}
+	}
+	return "", false
+}
+
+// packageNotFoundReason reports whether a provider recorded positive
+// evidence that the PACKAGE — not merely the requested version — does not
+// exist upstream (P8-04).
+//
+// Checked BEFORE versionNotFoundReason because it is the stronger and more
+// actionable claim: "there is no such package" tells the reader to look at
+// the NAME, where "that version was never published" points at the pin. A
+// report can in principle carry both.
+//
+// The wording stays non-accusatory for the same reason its sibling's does —
+// a private registry, a proxy that does not mirror the package, and a name
+// the model invented all produce this shape — but it does name the thing
+// worth naming, because a package that does not exist is exactly the
+// slopsquat surface. Rendered inside UnavailableEvaluation's summary
+// sentence, so it stays a clause: no leading capital, no trailing period,
+// no em dash.
+func packageNotFoundReason(r *Report) (string, bool) {
+	for _, w := range r.Observation.Warnings {
+		if w.Code == WarnPackageNotFound {
+			return "no package by this name was found in the registry; " +
+				"check the spelling, or whether the name was invented by a " +
+				"model rather than published", true
 		}
 	}
 	return "", false

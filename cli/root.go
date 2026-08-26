@@ -83,6 +83,14 @@ var globalResultFormats = map[string]bool{"table": true, "json": true}
 var extraCommandFormats = map[string]map[string]bool{
 	"chainsaw scan":    {"sarif": true}, // emitted by writeScanSARIF, core/cli/scan.go
 	"chainsaw pr-scan": {"sarif": true}, // emitted by writePRScanSARIF, core/cli/pr_scan.go
+	// P8-27 — scan-actions used to shadow --format with a local flag whose
+	// default was "text" against the root's "table". Deleting the shadow put
+	// it back inside both checks above; this entry preserves its vocabulary.
+	// "text" is this command's human format and is listed for the same reason
+	// the `report` family's is exempted — writeScanActionsText writes through
+	// outWriterOr, so `--format text --output R` genuinely produces the file
+	// (scan_actions.go's S9b).
+	"chainsaw scan-actions": {"text": true, "sarif": true},
 }
 
 // supportedFormatsFor renders the accepted --format vocabulary for a command

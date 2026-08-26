@@ -3,6 +3,7 @@ package cli
 import (
 	"archive/tar"
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -11,7 +12,9 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1421,4 +1424,344 @@ func TestLocalArtifactBytesHonoursTheLockfileAnchor(t *testing.T) {
 	if b, res := localArtifactBytes(spec); len(b) != 0 || res != acquireDigestMismatch {
 		t.Fatalf("staged bytes that disagree with the lockfile anchor: want (nil, acquireDigestMismatch), got (%d bytes, %v)", len(b), res)
 	}
+}
+
+// TestReadCacacheContentUnverifiedIndexIsNotOK is the reproduction of the
+// silent-skip defect. readCacacheContent ended with
+//
+//	if checked, match := verifySRI(data, indexIntegrity); checked && !match { … }
+//	if checked, match := verifySRI(data, expected);       checked && !match { … }
+//	return data, acquireOK
+//
+// so checked=false fell through BOTH guards and returned acquireOK on bytes
+// nothing had hashed — while the comment above the algorithm allowlist claimed
+// that call was "always CHECKED".
+//
+// The input that reaches it: the FIRST entry addresses the content and is
+// perfectly well-formed (so the allowlist passes and the path resolves), and a
+// LATER entry names a stronger algorithm with a malformed digest. verifySRI's
+// pass 1 raises `best` on the NAME, pass 2 finds nothing well-formed at that
+// rank, and returns checked=false. The allowlist only ever constrained the
+// first entry, which is why it never guaranteed what it claimed.
+func TestReadCacacheContentUnverifiedIndexIsNotOK(t *testing.T) {
+	payload := []byte("bytes the guard must not bless unverified")
+	sum := sha256.Sum256(payload)
+	b64 := base64.StdEncoding.EncodeToString(sum[:])
+	h := hex.EncodeToString(sum[:])
+
+	cacache := t.TempDir()
+	dir := filepath.Join(cacache, "content-v2", "sha256", h[0:2], h[2:4])
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, h[4:]), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// sha256 addresses the content and is valid; sha512 is named but malformed.
+	index := "sha256-" + b64 + " sha512-@@@notbase64@@@"
+	if checked, _ := verifySRI(payload, index); checked {
+		t.Fatalf("fixture is wrong: this SRI string must be UNcheckable, got checked=%v", checked)
+	}
+	b, res := readCacacheContent(cacache, index, "")
+	if res != acquireIncomplete {
+		t.Fatalf("content whose index integrity could not be verified must be acquireIncomplete, got %v", res)
+	}
+	if len(b) != 0 {
+		t.Fatalf("unverified bytes must not be handed to the analyzer, got %d bytes", len(b))
+	}
+	if !res.degraded() {
+		t.Fatal("an unverified read must count as degraded, or policy never sees it")
+	}
+
+	// The control: the SAME content with an index the guard CAN verify
+	// resolves normally. Without this half the assertion above would pass on a
+	// readCacacheContent that always reported acquireIncomplete.
+	if b, res := readCacacheContent(cacache, "sha256-"+b64, ""); res != acquireOK || !bytes.Equal(b, payload) {
+		t.Fatalf("a verifiable index entry must resolve, got (%d bytes, %v)", len(b), res)
+	}
+}
+
+// TestReadCacacheContentUnverifiableAnchorIsIncomplete is the lockfile-anchor
+// half. The two arguments are NOT symmetric and the asymmetry is the point:
+//
+//   - indexIntegrity is never legitimately absent on this path, so
+//     "could not check it" means a corrupt index → acquireIncomplete.
+//   - expected is legitimately absent all the time (packageSpec.Integrity is
+//     populated only on a lockfile-driven install), so absent → acquireOK,
+//     and only an anchor that was SUPPLIED and could not be checked degrades.
+func TestReadCacacheContentUnverifiableAnchorIsIncomplete(t *testing.T) {
+	payload := []byte("anchored bytes")
+	sum := sha512.Sum512(payload)
+	b64 := base64.StdEncoding.EncodeToString(sum[:])
+	h := hex.EncodeToString(sum[:])
+
+	cacache := t.TempDir()
+	dir := filepath.Join(cacache, "content-v2", "sha512", h[0:2], h[2:4])
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, h[4:]), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	index := "sha512-" + b64
+
+	// An anchor naming only an algorithm this build cannot recompute was
+	// supplied and could not be checked.
+	if b, res := readCacacheContent(cacache, index, "md5-YWJjZA=="); res != acquireIncomplete || len(b) != 0 {
+		t.Fatalf("an anchor that was supplied and could not be verified must be acquireIncomplete, got (%d bytes, %v)", len(b), res)
+	}
+	// Same for a malformed digest at the strongest named rank.
+	if b, res := readCacacheContent(cacache, index, "sha512-"+base64.StdEncoding.EncodeToString(sum[:10])); res != acquireIncomplete || len(b) != 0 {
+		t.Fatalf("a truncated anchor digest must be acquireIncomplete, not a mismatch, got (%d bytes, %v)", len(b), res)
+	}
+	// NO anchor is the common, honest case and must stay clean.
+	for _, absent := range []string{"", "   ", "\t\n"} {
+		if b, res := readCacacheContent(cacache, index, absent); res != acquireOK || !bytes.Equal(b, payload) {
+			t.Fatalf("no lockfile anchor (%q) must not degrade acquisition, got (%d bytes, %v)", absent, len(b), res)
+		}
+	}
+	// And a supplied, checkable, DISAGREEING anchor is still a mismatch, not
+	// an incomplete — the two facts stay apart.
+	other := sha512.Sum512([]byte("what the lockfile actually pins"))
+	if b, res := readCacacheContent(cacache, index, "sha512-"+base64.StdEncoding.EncodeToString(other[:])); res != acquireDigestMismatch || len(b) != 0 {
+		t.Fatalf("a disagreeing anchor must stay acquireDigestMismatch, got (%d bytes, %v)", len(b), res)
+	}
+}
+
+// TestAnchorVerdictSeparatesAbsentFromUnverifiable pins the helper the three
+// byte sources share, one row per outcome. The first row is the regression
+// guard that matters most: an anchor-free package — a git dep, a `file:` dep, a
+// bare `npm install newpkg`, every pnpm/yarn path — must report acquireOK. If
+// it ever reports degraded, builtin.rego warns on honest installs and a
+// fail-closed operator REFUSES them.
+func TestAnchorVerdictSeparatesAbsentFromUnverifiable(t *testing.T) {
+	data := []byte("the bytes that will run")
+	s512 := sha512.Sum512(data)
+	match512 := "sha512-" + base64.StdEncoding.EncodeToString(s512[:])
+	otherSum := sha512.Sum512([]byte("different bytes"))
+	wrong512 := "sha512-" + base64.StdEncoding.EncodeToString(otherSum[:])
+
+	cases := []struct {
+		name   string
+		anchor string
+		want   acquireResult
+	}{
+		{"no anchor at all", "", acquireOK},
+		{"whitespace-only anchor", "  \t ", acquireOK},
+		{"matching anchor", match512, acquireOK},
+		{"matching anchor with ?opts", match512 + "?size=23", acquireOK},
+		{"disagreeing anchor", wrong512, acquireDigestMismatch},
+		{"unknown algorithm only", "md5-YWJjZA==", acquireIncomplete},
+		{"truncated digest", "sha512-" + base64.StdEncoding.EncodeToString(s512[:10]), acquireIncomplete},
+		{"malformed strong entry beside a matching weak one", "sha512-@@@bad@@@ sha1-" + base64.StdEncoding.EncodeToString(func() []byte { s := sha1.Sum(data); return s[:] }()), acquireIncomplete},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := anchorVerdict(data, tc.anchor); got != tc.want {
+				t.Fatalf("anchorVerdict(%q) = %v, want %v", tc.anchor, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSRIRankCoversSHA384 pins the algorithm added alongside the fix. An
+// algorithm missing from sriRank is invisible to verifySRI's pass 1, so it
+// cannot raise `best` — which is a downgrade primitive: before sha384 was in
+// the table, "sha384-<mismatching> sha1-<matching>" verified OK on the sha1
+// entry. SRI names sha384 as first-class and ssri implements it, so a mirror or
+// a converted lockfile can legitimately put one in front of the guard.
+func TestSRIRankCoversSHA384(t *testing.T) {
+	data := []byte("the bytes that will run")
+	s384 := sha512.Sum384(data)
+	match384 := "sha384-" + base64.StdEncoding.EncodeToString(s384[:])
+	otherSum := sha512.Sum384([]byte("different bytes"))
+	wrong384 := "sha384-" + base64.StdEncoding.EncodeToString(otherSum[:])
+	s1 := sha1.Sum(data)
+	match1 := "sha1-" + base64.StdEncoding.EncodeToString(s1[:])
+
+	if checked, ok := verifySRI(data, match384); !checked || !ok {
+		t.Fatalf("a well-formed matching sha384 entry must verify, got (checked=%v, ok=%v)", checked, ok)
+	}
+	// The downgrade: a matching weak entry must not rescue a mismatching
+	// sha384 one.
+	if checked, ok := verifySRI(data, wrong384+" "+match1); !checked || ok {
+		t.Fatalf("sha384 must outrank sha1 and decide, got (checked=%v, ok=%v)", checked, ok)
+	}
+	// sha512 still outranks sha384.
+	otherS512 := sha512.Sum512([]byte("different bytes"))
+	if checked, ok := verifySRI(data, "sha512-"+base64.StdEncoding.EncodeToString(otherS512[:])+" "+match384); !checked || ok {
+		t.Fatalf("sha512 must outrank sha384 and decide, got (checked=%v, ok=%v)", checked, ok)
+	}
+	// And a sha384-only lockfile anchor is a real check, not a degraded one —
+	// which is what implementing it buys now that unverifiable anchors report
+	// acquireIncomplete.
+	if got := anchorVerdict(data, match384); got != acquireOK {
+		t.Fatalf("a sha384-only anchor must verify, got %v", got)
+	}
+	if got := anchorVerdict(data, wrong384); got != acquireDigestMismatch {
+		t.Fatalf("a disagreeing sha384-only anchor must be a mismatch, got %v", got)
+	}
+}
+
+// TestAnchorFreeRealPackageStillResolves is the end-to-end regression check on
+// REAL package bytes rather than a synthetic fixture: corpus tarballs staged
+// the way an operator stages one, and the same bytes planted in a fake npm
+// cacache, with NO lockfile anchor anywhere. Both sources must return the bytes
+// and acquireOK. This is the shape of the overwhelming majority of honest
+// installs and it is the thing the anchor change could plausibly have broken.
+func TestAnchorFreeRealPackageStillResolves(t *testing.T) {
+	pkgs := corpusBenignNpmPackages(t, 5)
+	if len(pkgs) == 0 {
+		t.Skip("benign corpus unavailable")
+	}
+	for _, pkg := range pkgs {
+		t.Run(pkg.Name, func(t *testing.T) {
+			real, err := os.ReadFile(pkg.File)
+			if err != nil {
+				t.Skipf("corpus tarball unavailable: %v", err)
+			}
+			// Integrity deliberately unset — this IS the anchor-free case.
+			spec := packageSpec{Ecosystem: "npm", Name: pkg.Name, Version: pkg.Version}
+
+			// (a) operator-staged source.
+			staged := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(staged, "npm"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(staged, "npm", pkg.Name+"-"+pkg.Version+".tgz"), real, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(guardArtifactDirEnv, staged)
+			if b, res := localArtifactBytes(spec); !bytes.Equal(b, real) || res != acquireOK {
+				t.Fatalf("an anchor-free staged package must resolve OK, got (%d bytes, %v)", len(b), res)
+			}
+
+			// (b) npm cacache source, through the full guardArtifactBytes fold.
+			t.Setenv(guardArtifactDirEnv, "")
+			t.Setenv("npm_config_cache", writeNpmCache(t, pkg.Name, pkg.Version, real))
+			t.Setenv(guardDeepFetchEnv, "")
+			resetGuardCacheIndexesForTest()
+			t.Cleanup(resetGuardCacheIndexesForTest)
+			b, res := guardArtifactBytes(spec)
+			if !bytes.Equal(b, real) || res != acquireOK {
+				t.Fatalf("an anchor-free cached package must resolve OK, got (%d bytes, %v)", len(b), res)
+			}
+			// And the bytes are still analyzable — a clean package must not block.
+			if v := analyzeArtifact("npm", b); v.Block {
+				t.Fatalf("a clean real package must not block, got %+v", v)
+			}
+		})
+	}
+}
+
+// corpusBenignNpmPackage is one row of the detection-eval benign corpus.
+type corpusBenignNpmPackage struct{ Name, Version, File string }
+
+// corpusBenignNpmPackages returns up to n UNSCOPED fetched npm packages from
+// the benign corpus manifest. Unscoped only, because writeNpmCacheFixture
+// templates the cache key as "<name>/-/<name>-<ver>.tgz" and npm uses the last
+// path segment for a scoped name — a fixture limitation, not a guard one.
+func corpusBenignNpmPackages(t *testing.T, n int) []corpusBenignNpmPackage {
+	t.Helper()
+	f, err := os.Open(filepath.Join("..", "..", "scripts", "detection-eval", "corpus-benign", "pkgs", "manifest.jsonl"))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []corpusBenignNpmPackage
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() && len(out) < n {
+		var row struct {
+			Ecosystem string `json:"ecosystem"`
+			Name      string `json:"name"`
+			Version   string `json:"version"`
+			File      string `json:"file"`
+			Fetched   bool   `json:"fetched"`
+		}
+		if json.Unmarshal(sc.Bytes(), &row) != nil {
+			continue
+		}
+		if row.Ecosystem != "npm" || !row.Fetched || row.Name == "" || row.Version == "" {
+			continue
+		}
+		if strings.Contains(row.Name, "/") {
+			continue
+		}
+		out = append(out, corpusBenignNpmPackage{row.Name, row.Version, row.File})
+	}
+	return out
+}
+
+// TestRealNpmCacheAnchorFreeReadsStayOK runs the same regression against the
+// developer's ACTUAL ~/.npm/_cacache when there is one, because a synthetic
+// fixture writes exactly the SRI shapes the fixture author thought of. Real
+// entries carry "?size=" options, sha1 integrity on pre-2017 packages, and
+// multi-entry shard files. None of them may report degraded on an anchor-free
+// read. Skips when there is no real cache (CI), and never writes to it.
+func TestRealNpmCacheAnchorFreeReadsStayOK(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home dir")
+	}
+	cacache := filepath.Join(home, ".npm", "_cacache")
+	if fi, serr := os.Stat(filepath.Join(cacache, "index-v5")); serr != nil || !fi.IsDir() {
+		t.Skip("no real npm cacache on this machine")
+	}
+	const want = 25
+	var integrities []string
+	_ = filepath.WalkDir(filepath.Join(cacache, "index-v5"), func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil || d.IsDir() {
+			return nil
+		}
+		if len(integrities) >= want {
+			return fs.SkipAll
+		}
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			tab := strings.IndexByte(line, '\t')
+			if tab < 0 {
+				continue
+			}
+			var entry struct {
+				Key       string `json:"key"`
+				Integrity string `json:"integrity"`
+			}
+			if json.Unmarshal([]byte(line[tab+1:]), &entry) != nil || entry.Integrity == "" {
+				continue
+			}
+			if _, _, ok := npmCacheKeyCoordinate(entry.Key); !ok {
+				continue // packument/audit entries have no tarball content
+			}
+			integrities = append(integrities, entry.Integrity)
+		}
+		return nil
+	})
+	if len(integrities) == 0 {
+		t.Skip("real cacache holds no tarball index entries")
+	}
+	ok := 0
+	for _, in := range integrities {
+		b, res := readCacacheContent(cacache, in, "") // no anchor: the common case
+		switch res {
+		case acquireOK:
+			if len(b) == 0 {
+				t.Fatalf("acquireOK with no bytes for %q", in)
+			}
+			ok++
+		case acquireDigestMismatch:
+			t.Fatalf("a real, untouched cache entry reported acquireDigestMismatch for %q — the check is wrong, not the cache", in)
+		case acquireIncomplete:
+			// Legitimate: npm's cache GC can drop content while the index
+			// entry survives. Not a verdict about the anchor change.
+		}
+	}
+	if ok == 0 {
+		t.Fatalf("no real cache entry resolved; %d entries all failed to read", len(integrities))
+	}
+	t.Logf("real cacache: %d/%d anchor-free reads returned acquireOK, 0 mismatches", ok, len(integrities))
 }

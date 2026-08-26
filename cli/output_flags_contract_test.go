@@ -42,7 +42,12 @@ var shadowedFormatCommands = []string{
 	"chainsaw report sla",
 	"chainsaw sbom diff",
 	"chainsaw sbom export",
-	"chainsaw scan-actions",
+	// P8-27 — "chainsaw scan-actions" was REMOVED from this set. Its local
+	// --format shadowed the root's with a different default ("text" vs
+	// "table") and, per the exemption above, opted the command out of --format
+	// validation entirely. It now rides the global flag with its extra
+	// vocabulary declared in extraCommandFormats, which keeps it inside BOTH
+	// checks. Do not re-add a local --format here to "fix" a rejected value.
 }
 
 func TestFormatValidation_ExemptSetIsExactlyTheShadowingCommands(t *testing.T) {

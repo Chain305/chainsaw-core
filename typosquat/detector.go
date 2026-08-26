@@ -214,7 +214,121 @@ func (d *Detector) LoadEcosystem(ecosystem string, packages []PopularPackage) {
 
 // Check analyzes a package name for potential typosquatting.
 // Returns a zero-value result (IsSuspected=false) if no issue is found.
-func (d *Detector) Check(_ context.Context, ecosystem, packageName string) DetectionResult {
+func (d *Detector) Check(ctx context.Context, ecosystem, packageName string) DetectionResult {
+	res := d.check(ctx, ecosystem, packageName)
+	if res.IsSuspected && res.Confidence != "low" {
+		switch {
+		case sameOwnerSibling(ecosystem, packageName, res.SimilarTo):
+			// DEMOTE, never silence. The similarity is real and still worth
+			// showing — `actions/chekout` IS one edit from `actions/checkout`
+			// and a reader should see that. What it is not is a reason to
+			// QUARANTINE, because the two names have the same publisher.
+			//
+			// Clearing outright was the first implementation and it deleted an
+			// existing contract: TestDetectorGitHubActions asserts
+			// IsSuspected+SimilarTo (not confidence) for exactly that pair.
+			// Demotion keeps the finding, keeps that test byte-identical, and
+			// moves the verdict from sc.typosquat_high (SevCritical, -40,
+			// blocking) to sc.typosquat_low (SevLow, -8, advisory).
+			res.Confidence = "low"
+		case moreEstablishedThanTarget(ecosystem, packageName, res.SimilarTo):
+			// Same shape, same reason, different structural fact: the
+			// direction of the impersonation claim. A typosquat is a LESS
+			// established package wearing the face of a MORE established one,
+			// and `ms` is not squatting `msw`. Demoted rather than cleared for
+			// the same reason as above — the two names really are one edit
+			// apart and a reader should see it — and keyed on a reviewed
+			// download ranking an attacker cannot buy into.
+			//
+			// Read established.go before touching this: in particular why
+			// corpus rank cannot answer the question, why a target-rank cutoff
+			// was rejected, and why this branch is unreachable on the install
+			// guard's path and so cannot move its published FP/recall numbers.
+			res.Confidence = "low"
+		}
+	}
+	return res
+}
+
+// ownerScopeSeparator returns the byte that separates the owner scope from
+// the package name, for ecosystems where the scope is an ACCOUNT BOUNDARY
+// enforced by a single host — i.e. where an attacker provably cannot publish
+// under the victim's scope.
+//
+//	github_actions  owner/name   a GitHub org or user; `actions/checkout` and
+//	                             `attacker/checkout` are different accounts
+//	swift           scope.name   SE-0292 identifier; for a git-hosted package
+//	                             the scope is the GitHub owner
+//
+// DELIBERATELY NOT LISTED, even though the shape fits: npm `@scope/name`,
+// Composer `vendor/package`, Maven `groupId:artifactId`, HuggingFace
+// `org/model`, Docker `org/name`. The argument applies to those too, but
+// their corpora have been firing in production for a long time and their
+// false-positive and recall numbers are published against the current
+// behaviour (core/cli/guard_typosquat_fp_eval_test.go,
+// guard_typosquat_recall_eval_test.go). Extending this exemption to them is
+// a separate change that has to re-measure both halves of that trade. The
+// two ecosystems here had a permanently empty index and had never produced
+// a verdict, so there is no baseline to move.
+func ownerScopeSeparator(ecosystem string) (byte, bool) {
+	switch strings.ToLower(ecosystem) {
+	case "github_actions":
+		return '/', true
+	case "swift":
+		return '.', true
+	default:
+		return 0, false
+	}
+}
+
+// sameOwnerSibling reports whether a candidate and the popular name it
+// matched are published under the SAME owner scope. Callers DEMOTE such a
+// hit to "low" — they do not silence it. See Check.
+//
+// WHY THIS IS NOT A HOLE. Typosquatting is impersonation of a publisher the
+// victim did not mean to install from. When the scope is byte-identical
+// there is no second publisher: `reviewdog/action-eclint` and
+// `reviewdog/action-eslint` are both reviewdog's, `grpc.grpc-swift-2` and
+// `grpc.grpc-swift` are both grpc's. An attacker who already controls the
+// scope does not need a lookalike name — they would ship the backdoor in the
+// real package. So the demotion cannot cost recall on any attack the
+// detector is for.
+//
+// It is byte equality on the RAW scope, deliberately, so a homoglyph in the
+// scope itself (`аpple.swift-nio` with a Cyrillic а) is NOT exempt — that is
+// a different account wearing the same face, which is the attack.
+//
+// Measured effect on the held-out corpora: this is every high-confidence
+// false positive both ecosystems produced (swift 2 of 2, github_actions
+// 1 of 1). See TestHeldOutFalsePositiveRateByEcosystem.
+func sameOwnerSibling(ecosystem, candidate, popular string) bool {
+	sep, ok := ownerScopeSeparator(ecosystem)
+	if !ok || candidate == "" || popular == "" {
+		return false
+	}
+	cs, cok := ownerScopeOf(candidate, sep)
+	ps, pok := ownerScopeOf(popular, sep)
+	return cok && pok && cs == ps
+}
+
+// ownerScopeOf extracts the lowercased scope prefix ahead of sep. A version
+// pin (`actions/checkout@v4`) is trimmed first so a workflow-shaped
+// reference resolves to the same scope as a bare one. Returns ok=false when
+// the name carries no scope at all, so an unscoped name never matches
+// another unscoped name on an empty string.
+func ownerScopeOf(name string, sep byte) (string, bool) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if at := strings.IndexByte(name, '@'); at > 0 {
+		name = name[:at]
+	}
+	i := strings.IndexByte(name, sep)
+	if i <= 0 {
+		return "", false
+	}
+	return name[:i], true
+}
+
+func (d *Detector) check(_ context.Context, ecosystem, packageName string) DetectionResult {
 	ecosystem = strings.ToLower(ecosystem)
 
 	d.mu.RLock()

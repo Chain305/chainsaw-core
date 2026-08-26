@@ -191,14 +191,22 @@ func (s *DefaultService) scanTransitiveDep(eco, name string, depth int) {
 // versions for. Mirrors the registrymetadata coverage list — packages
 // outside this set wouldn't pick up a useful Report from a Scan
 // anyway.
+// The set is declared once, in latest_resolution.go, because P8-45 gave
+// it a second consumer: the public intel path's `latest` dereference and
+// the one-shot cleanup of the rows that path already wrote. Two copies of
+// "which ecosystems can we resolve latest for" would drift, and the
+// cleanup's copy drifting is a DELETE against the wrong population.
+//
+// Maven / NuGet / Composer require version search APIs that don't have a
+// stable "latest" endpoint we can hit cheaply. Skip until we add
+// per-ecosystem version-resolver support.
 func canAutoResolve(eco string) bool {
-	switch strings.ToLower(eco) {
-	case "npm", "yarn", "bun", "pypi", "pip", "cargo", "rubygems":
-		return true
+	target := normalizeEcosystemKey(eco)
+	for _, e := range latestResolvableEcosystems {
+		if e == target {
+			return true
+		}
 	}
-	// Maven / NuGet / Composer require version search APIs that don't
-	// have a stable "latest" endpoint we can hit cheaply. Skip until
-	// we add per-ecosystem version-resolver support.
 	return false
 }
 
@@ -206,20 +214,13 @@ func canAutoResolve(eco string) bool {
 // latest published version of a package. Returns empty string when
 // the registry is unreachable, the package doesn't exist, or the
 // ecosystem is unsupported.
+//
+// Delegates to the exported ResolveLatestVersion (latest_resolution.go)
+// so the dependency enqueuer and the public intel path share ONE
+// implementation. They diverged before P8-45: this one worked and the
+// intel path had no resolver at all.
 func (s *DefaultService) resolveLatestVersion(ctx context.Context, eco, name string) string {
-	resolveCtx, cancel := context.WithTimeout(ctx, autoDepResolveTimeout)
-	defer cancel()
-	switch strings.ToLower(eco) {
-	case "npm", "yarn", "bun":
-		return resolveNpmLatest(resolveCtx, name)
-	case "pypi", "pip":
-		return resolvePyPILatest(resolveCtx, name)
-	case "cargo":
-		return resolveCargoLatest(resolveCtx, name)
-	case "rubygems":
-		return resolveRubyGemsLatest(resolveCtx, name)
-	}
-	return ""
+	return ResolveLatestVersion(ctx, eco, name)
 }
 
 // tryFetchArtifact pulls the upstream tarball into RAM so the child
@@ -289,8 +290,29 @@ func artifactURLFor(eco, name, version string) (string, string) {
 
 // -- per-ecosystem latest-version resolvers ---------------------------
 
+// latestRegistryBases holds the registry roots the four resolvers below
+// query. Declared as a package var, and NOT as consts inline, so a test
+// can point them at an httptest server: P8-45 makes these resolvers
+// load-bearing on the public intel path, and a fix that can only be
+// verified against the live internet is a fix nobody re-verifies.
+//
+// Production never writes to this. The only writer is
+// withStubLatestRegistries in latest_resolution_test.go, which restores
+// the defaults via t.Cleanup.
+var latestRegistryBases = struct {
+	npm      string
+	pypi     string
+	cargo    string
+	rubygems string
+}{
+	npm:      "https://registry.npmjs.org",
+	pypi:     "https://pypi.org",
+	cargo:    "https://crates.io",
+	rubygems: "https://rubygems.org",
+}
+
 func resolveNpmLatest(ctx context.Context, name string) string {
-	endpoint := "https://registry.npmjs.org/" + encodeNPMPackage(name)
+	endpoint := latestRegistryBases.npm + "/" + encodeNPMPackage(name)
 	var pack struct {
 		DistTags map[string]string `json:"dist-tags"`
 	}
@@ -301,7 +323,7 @@ func resolveNpmLatest(ctx context.Context, name string) string {
 }
 
 func resolvePyPILatest(ctx context.Context, name string) string {
-	endpoint := "https://pypi.org/pypi/" + url.PathEscape(name) + "/json"
+	endpoint := latestRegistryBases.pypi + "/pypi/" + url.PathEscape(name) + "/json"
 	var pack struct {
 		Info struct {
 			Version string `json:"version"`
@@ -314,7 +336,7 @@ func resolvePyPILatest(ctx context.Context, name string) string {
 }
 
 func resolveCargoLatest(ctx context.Context, name string) string {
-	endpoint := "https://crates.io/api/v1/crates/" + url.PathEscape(name)
+	endpoint := latestRegistryBases.cargo + "/api/v1/crates/" + url.PathEscape(name)
 	var pack struct {
 		Crate struct {
 			MaxStableVersion string `json:"max_stable_version"`
@@ -334,7 +356,7 @@ func resolveCargoLatest(ctx context.Context, name string) string {
 }
 
 func resolveRubyGemsLatest(ctx context.Context, name string) string {
-	endpoint := "https://rubygems.org/api/v1/gems/" + url.PathEscape(name) + ".json"
+	endpoint := latestRegistryBases.rubygems + "/api/v1/gems/" + url.PathEscape(name) + ".json"
 	var pack struct {
 		Version string `json:"version"`
 	}

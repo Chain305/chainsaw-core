@@ -75,6 +75,17 @@ type Config struct {
 	Repositories              []RepositoryConfig        `yaml:"repositories"`
 	Remotes                   map[string]RemoteDefaults `yaml:"remotes"`
 
+	// RetiredRepositoryGuides carries the client_configuration_guide prose
+	// for repositories that WERE seeded once and have since been removed
+	// from Repositories. Nothing seeds from this list and no repository row
+	// is ever created from it — it exists solely so the guide backfill
+	// (core/pgstore/migrate_repo_guides.go) can still repair the rows those
+	// repositories left behind in every org that was seeded while they were
+	// live. See P8-28: swift was dropped from Repositories at 5373b2ff and
+	// its ~25 per-org rows became permanently unrepairable, because the
+	// backfill can only rewrite a row it has replacement prose for.
+	RetiredRepositoryGuides []RetiredRepositoryGuide `yaml:"retired_repository_guides"`
+
 	// explicitKeys records which runtime-managed settings the YAML
 	// explicitly set, captured at parse time BEFORE applyDefaults fills the
 	// nil pointers. SaveToStore consults it so a boot-time YAML re-import
@@ -517,6 +528,24 @@ type DataSourceRuntimeConfig struct {
 	StartupSync            *bool `yaml:"startup_sync"`
 	TimeoutSeconds         int   `yaml:"timeout_seconds"`
 	JitterPercent          int   `yaml:"jitter_percent"`
+}
+
+// RetiredRepositoryGuide is one (repository name, guide prose) pair for a
+// repository that is no longer seeded.
+//
+// It is deliberately NOT a RepositoryConfig. A retired entry has no format,
+// no remote and no enabled flag, because nothing may ever create a
+// repository from it: re-adding swift to `repositories:` — even disabled —
+// would insert a dead row into every newly-seeded org and would need a
+// remote URL, which is the placeholder that 5373b2ff removed. Keeping the
+// prose here gives the backfill something to repair with and leaves the
+// seeded set untouched.
+//
+// Reason is documentation for whoever finds this list next; nothing reads it.
+type RetiredRepositoryGuide struct {
+	Name                     string `yaml:"name"`
+	Reason                   string `yaml:"reason"`
+	ClientConfigurationGuide string `yaml:"client_configuration_guide"`
 }
 
 // RepositoryConfig mirrors the Nexus Configuration entity at a high level.

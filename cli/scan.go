@@ -351,8 +351,12 @@ func init() {
 	// THE DEFAULT SHOULD FLIP ON THE NEXT MAJOR. When it does, this flag
 	// keeps its name and gains a --no-fail-on-unscanned counterpart rather
 	// than being removed, so a CI file written today still says what it means.
-	scanCmd.Flags().Bool("fail-on-unscanned", false,
-		"Exit 1 when any package could not be evaluated (default: warn only; will become the default in a future major release)")
+	//
+	// P8-27 — registered through the shared helper (scan_gate.go) rather than
+	// inline, so `scan` and `scan-repo` cannot drift into two different
+	// spellings of the same CI contract. Name, default and usage string are
+	// byte-identical to the inline form this replaced.
+	addScanGateFlags(scanCmd, scanGateFlags{FailOnUnscanned: true, FailOnUnscannedDefault: false})
 	// Y7: no backticks in this usage string. pflag's UnquoteUsage treats the
 	// first back-quoted span as the flag's value placeholder, so "the `-`
 	// arg" rendered a BOOL flag as `--stdin -`. Once the backticks are gone
@@ -382,11 +386,10 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// org turn the gate on fleet-wide without editing every workflow file.
 	// An EXPLICIT flag always wins over it in both directions, so
 	// `--fail-on-unscanned=false` can carve one job out of a fleet default
-	// — which is why this is Changed()-gated rather than a plain OR.
-	failOnUnscanned, _ := cmd.Flags().GetBool("fail-on-unscanned")
-	if !cmd.Flags().Changed("fail-on-unscanned") {
-		failOnUnscanned = envTruthy(os.Getenv("CHAINSAW_SCAN_FAIL_ON_UNSCANNED"))
-	}
+	// — which is why the resolver is Changed()-gated rather than a plain OR.
+	// P8-27 moved that precedence into resolveFailOnUnscanned (scan_gate.go)
+	// unchanged; `false` is this command's documented default.
+	failOnUnscanned := resolveFailOnUnscanned(cmd, false)
 
 	// P2.9 — stdin batch is STRICTLY opt-in. It engages only when the user
 	// passes --stdin or the conventional `-` arg; a bare `chainsaw scan` must

@@ -69,11 +69,7 @@ func (c *yumChecker) Check(ctx context.Context, packageName, version string) Res
 
 func (c *yumChecker) CheckWithSource(ctx context.Context, packageName, version, sourceURL string) Result {
 	if sourceURL == "" {
-		return Result{
-			Status:    StatusUnavailable,
-			Ecosystem: c.ecosystem,
-			Error:     "OS package provenance requires the source repository URL; call CheckWithSource",
-		}
+		return sourceURLRequired(c.ecosystem)
 	}
 	base := strings.TrimRight(sourceURL, "/")
 
@@ -83,12 +79,8 @@ func (c *yumChecker) CheckWithSource(ctx context.Context, packageName, version, 
 			c.logger.Warn("rpm provenance: keyring unavailable",
 				"package", packageName, "version", version, "error", err.Error())
 		}
-		return Result{
-			Status:          StatusUnavailable,
-			Ecosystem:       c.ecosystem,
-			AttestationType: "pgp-repo",
-			Error:           fmt.Sprintf("keyring unavailable: %v", err),
-		}
+		return keyringUnavailable(c.ecosystem, "CHAINSAW_RPM_KEYRING",
+			"/etc/pki/rpm-gpg/ (Fedora/RHEL/CentOS)", err)
 	}
 
 	// Step 1 — fetch repomd.xml and its detached signature.

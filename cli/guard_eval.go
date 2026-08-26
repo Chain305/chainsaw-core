@@ -369,6 +369,29 @@ type localGuard struct {
 	bundle    *intelligence.Bundle
 	fullFeed  bool
 	notices   []string
+
+	// Behavioral byte-scan accounting for THIS run, written by evaluate() as
+	// each spec reaches the acquisition step and read once by
+	// byteScanNotice() after evaluation.
+	//
+	// WHY THIS IS NOT AN ENV-VAR CHECK. The construction-time notice this
+	// replaced said "behavioral byte scan not run" whenever
+	// CHAINSAW_GUARD_ARTIFACT_DIR and CHAINSAW_GUARD_DEEP were both unset.
+	// Both are read ONCE per process, before a single package is examined —
+	// but guardArtifactBytes tries five sources, and three of them
+	// (npmCacheArtifactBytes, cargoCacheArtifactBytes, pipCacheArtifactBytes)
+	// are fully offline and need neither variable. On any developer machine
+	// with a warm ~/.npm/_cacache, $CARGO_HOME/registry/cache or pip cache the
+	// guard ran analyzeArtifact over real bytes and told the user, in the same
+	// breath, that it had not. The guard's own coverage claim was the one
+	// thing it was reliably wrong about.
+	//
+	// The truth is only knowable per-package, after acquisition. So it is
+	// counted here and reported afterwards. No extra work and no extra I/O:
+	// these are three integer updates on a path that already ran.
+	scanAttempted int           // specs that reached the acquisition step
+	scanAnalyzed  int           // specs whose bytes were actually analyzed
+	scanWorst     acquireResult // worst acquisition outcome across the misses
 }
 
 // newLocalGuard wires the offline engines and collects coverage/staleness
@@ -412,12 +435,68 @@ func newLocalGuard() *localGuard {
 		g.notices = append(g.notices,
 			"deep mode: fetching pinned package archives over the NETWORK for pre-install analysis (offline guarantee waived)")
 	}
-	if os.Getenv(guardArtifactDirEnv) == "" && !deepFetchEnabled() {
-		g.notices = append(g.notices,
-			"behavioral byte scan not run; using name/feed/typosquat checks only (set CHAINSAW_GUARD_DEEP=1 or stage artifacts for byte-level coverage)")
-	}
+	// NOTE: there is deliberately NO byte-scan coverage notice here. Whether
+	// the byte scan ran is not knowable at construction time — see the
+	// scanAttempted/scanAnalyzed fields above. byteScanNotice() reports it
+	// after evaluation, from what actually happened.
 
 	return g
+}
+
+// byteScanNotice reports what the behavioral byte scan ACTUALLY did on this
+// run: how many packages had their bytes read and analyzed, how many had no
+// bytes on this machine, and whether any acquisition failed to complete.
+//
+// Returns "" when no spec reached the acquisition step at all (every package
+// was decided by an earlier lane, or the coverage gate refused the whole run).
+// Saying anything about byte coverage there would be noise about work nobody
+// asked for.
+//
+// This is the honest replacement for the env-var-derived notice described on
+// localGuard.scanAttempted. It is a pure read of counters — no I/O, no network,
+// no second pass over the specs.
+func (g *localGuard) byteScanNotice() string {
+	if g.scanAttempted == 0 {
+		return ""
+	}
+
+	// How to get byte coverage for the packages that had none. Only worth
+	// saying when something was actually missed.
+	const how = "stage artifacts in " + guardArtifactDirEnv + " or set CHAINSAW_GUARD_DEEP=1 for byte-level coverage"
+
+	var msg string
+	switch {
+	case g.scanAnalyzed == 0:
+		msg = fmt.Sprintf("behavioral byte scan not run: no local bytes for any of %s; using name/feed/typosquat checks only (%s)",
+			guardPluralPackages(g.scanAttempted), how)
+	case g.scanAnalyzed == g.scanAttempted:
+		msg = fmt.Sprintf("behavioral byte scan read and analyzed the bytes of all %s (offline, local disk only)",
+			guardPluralPackages(g.scanAttempted))
+	default:
+		msg = fmt.Sprintf("behavioral byte scan analyzed %d of %d packages; the rest had no bytes on this machine (%s)",
+			g.scanAnalyzed, g.scanAttempted, how)
+	}
+
+	// A degraded acquisition is a materially different fact from a miss — it
+	// is the attacker-influenceable one (see acquireResult) — so it is never
+	// folded into "had no bytes". acquireDigestMismatch is reported per-package
+	// by printGuardVerdicts as well; this is the run-level aggregate.
+	switch g.scanWorst {
+	case acquireIncomplete:
+		msg += "; at least one package's bytes could not be fully acquired, so its scan is not a clean bill of health"
+	case acquireDigestMismatch:
+		msg += "; at least one package's bytes did not match the digest its lockfile pins"
+	}
+	return msg
+}
+
+// guardPluralPackages renders a package count with the right noun, so the
+// notice reads "1 package" rather than "1 packages".
+func guardPluralPackages(n int) string {
+	if n == 1 {
+		return "1 package"
+	}
+	return fmt.Sprintf("%d packages", n)
 }
 
 func guardUpdateNudge() string {
@@ -714,6 +793,15 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	// Do not "fix" this by hardcoding a block here — that reintroduces exactly
 	// the per-surface hardcoding the ruling exists to prevent.
 	data, acq := guardArtifactBytes(spec)
+	// Record what acquisition actually produced, so the run-level coverage
+	// notice is derived from outcomes rather than from env vars read before
+	// any package was looked at. See localGuard.scanAttempted.
+	g.scanAttempted++
+	if len(data) > 0 {
+		g.scanAnalyzed++
+	} else {
+		g.scanWorst = g.scanWorst.worse(acq)
+	}
 	var behavioral behavioralVerdict
 	switch {
 	case len(data) > 0:

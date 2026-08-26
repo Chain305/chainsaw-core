@@ -1,6 +1,9 @@
 package typosquat
 
-import "strings"
+import (
+	"log/slog"
+	"strings"
+)
 
 // GitHub Actions corpus and normalizer for typosquat detection.
 //
@@ -85,6 +88,26 @@ func NormalizeGitHubActions(name string) string {
 	// normalization see owner and name as siblings. See doc comment.
 	name = strings.ReplaceAll(name, "/", "-")
 	return name
+}
+
+// NewGitHubActionsDetector returns a Detector with the github_actions
+// corpus already loaded. It exists because the two-step form —
+//
+//	det := typosquat.NewDetector(nil)
+//	det.LoadEcosystem("github_actions", typosquat.PopularGitHubActions())
+//
+// is trivially easy to write as just the first line, and a Detector with no
+// loaded ecosystem is not an error: Check returns a zero DetectionResult and
+// the caller reads "clean". That is not hypothetical. Both production call
+// sites of githubactions.NewTyposquatAdapter constructed a bare
+// typosquat.NewDetector(nil) and shipped an Actions typosquat lookup that
+// could never return a hit. Prefer this constructor at every call site, and
+// see TestNoCallerBuildsAnEmptyGitHubActionsDetector, which scans the tree
+// for the bare form.
+func NewGitHubActionsDetector(logger *slog.Logger) *Detector {
+	d := NewDetector(logger)
+	d.LoadEcosystem("github_actions", PopularGitHubActions())
+	return d
 }
 
 // PopularGitHubActions returns the curated list of well-known GitHub

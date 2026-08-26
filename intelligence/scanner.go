@@ -640,6 +640,13 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 		report.Observation.Partial = true
 	}
 
+	// P8-05: stamp the no-advisory-source marker BEFORE the trust score is
+	// computed, because ComputeTrustScoreForOrg is what runs the
+	// projection and the evaluator. A stamp added after it would be
+	// persisted on the Report and invisible to the verdict — the inert
+	// half of the fix. See advisory_coverage.go for both traps.
+	markNoAdvisoryCoverage(report, s.now())
+
 	// Post-merge derived signals. Trust score is computed from the full
 	// merged Report, not a provider — that way it stays O(1) CPU work
 	// with no extra goroutines or cache pressure. We thread the request's

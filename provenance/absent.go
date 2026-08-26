@@ -43,6 +43,7 @@ func (c *absentChecker) Check(_ context.Context, _ string, _ string) Result {
 	return Result{
 		Status:    StatusUnavailable,
 		Ecosystem: c.ecosystem,
+		Reason:    ReasonEcosystemNoStandard,
 		Error:     c.reason,
 	}
 }

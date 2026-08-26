@@ -30,17 +30,24 @@ func init() {
 	})
 
 	register(Signal{
-		ID:          SignalSCShrinkwrapPresent,
-		Category:    CategorySupplyChain,
-		Severity:    SevLow,
-		Weight:      -10,
-		Title:       "Bundled npm-shrinkwrap.json",
-		Description: "Artifact ships an npm-shrinkwrap.json — hides transitive deps from consumer review.",
+		ID:       SignalSCShrinkwrapPresent,
+		Category: CategorySupplyChain,
+		Severity: SevLow,
+		Weight:   -10,
+		// COPY IS NOT npm-ONLY. The producing provider's coverage map,
+		// intelligence.ecosystemLockfiles, covers five ecosystems —
+		// npm-family, pypi/pip, composer, cargo and rubygems — so a
+		// title naming npm-shrinkwrap.json was factually wrong on four
+		// of them (a Rust crate shipping Cargo.lock rendered as
+		// "Bundled npm-shrinkwrap.json"). Keep this wording in step
+		// with that map, not with npm.
+		Title:       "Bundled dependency lockfile",
+		Description: "Artifact ships a pinned dependency lockfile (npm-shrinkwrap.json, package-lock.json, Pipfile.lock, poetry.lock, composer.lock, Cargo.lock or Gemfile.lock) — hides transitive deps from consumer review.",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if !in.ShrinkwrapPresent {
 				return false, "", nil
 			}
-			return true, "Tarball contains npm-shrinkwrap.json — review bundled transitive deps.", nil
+			return true, "Artifact bundles a dependency lockfile — review the pinned transitive deps.", nil
 		},
 	})
 

@@ -110,6 +110,11 @@ func TestVerifyHookCmd_JSONVerboseStillFailsCI(t *testing.T) {
 			verifyExitOverride = func(c int) { exitCode = c }
 			t.Cleanup(func() { verifyExitOverride = prev })
 
+			// Stub the driver so this never shells out to the developer's REAL `pip`.
+			// The assertions below are about output shape and exit code, not about
+			// pip itself; without the stub this test reached the network and let the
+			// machine's own chainsaw install-hook write to the real config home.
+			withStubVerifyDriver(t, "pip")
 			cmd := newDoctorVerifyHookCmd()
 			cmd.Flags().Bool("json", true, "")
 			args := []string{"pip", "--json", "--timeout", "1s"}
@@ -150,6 +155,11 @@ func TestVerifyHookCmd_JSONVerbosePayloadKeepsBothShapes(t *testing.T) {
 		verifyExitOverride = func(int) {}
 		t.Cleanup(func() { verifyExitOverride = prev })
 
+		// Stub the driver so this never shells out to the developer's REAL `pip`.
+		// The assertions below are about output shape and exit code, not about
+		// pip itself; without the stub this test reached the network and let the
+		// machine's own chainsaw install-hook write to the real config home.
+		withStubVerifyDriver(t, "pip")
 		cmd := newDoctorVerifyHookCmd()
 		cmd.Flags().Bool("json", true, "")
 		args := []string{"pip", "--json"}

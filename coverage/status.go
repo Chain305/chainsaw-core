@@ -55,6 +55,36 @@ var unavailableCodes = map[string]bool{
 	"timeline_fetch_failed":            true,
 	"repolink_probe_error":             true,
 	"transitive_dep_not_cached":        true,
+	// transitive_dep_superseded: the dependency IS cached, but the row was
+	// produced by a retired matcher generation, so the transitive walk
+	// skipped it exactly as it skips an absent one. Classified with its
+	// sibling, and it MUST be: an unregistered code falls through to
+	// StatusError, which never blocks, so splitting this out of
+	// transitive_dep_not_cached without registering it here would have
+	// silently converted a blocking condition into a non-blocking one for
+	// every org running core/coverage in mode: closed — and it would have
+	// done so precisely during an epoch bump, when this is the reason for
+	// nearly every skipped dep.
+	"transitive_dep_superseded": true,
+	// transitive_dep_lookup_error: the intelligence store returned a real
+	// error — not ErrNotFound — while resolving a dependency, so the walk
+	// could not read the row at all. Both paths that set it (Store.Get and
+	// Store.ListVersions) are genuine store failures; a constraint that
+	// will not parse takes a separate return and an empty version list is
+	// not an error, so nothing benign reaches this code.
+	//
+	// It sat in StatusError until 2026-08-25, i.e. it never blocked. That
+	// was incoherent in the direction that matters: the BENIGN sibling
+	// (transitive_dep_not_cached — the dependency simply has not been
+	// scanned yet) blocked, while the actual infrastructure failure did
+	// not. The more severe condition was the more permissive one.
+	//
+	// StatusError is scoped to "our bug, or a warn code we do not
+	// recognise", under the rule-bug-fails-open doctrine that stops a
+	// malformed rule from wedging production. A database read failure is
+	// neither of those, and the project posture for infra/DB/signal
+	// unavailability is fail-CLOSED.
+	"transitive_dep_lookup_error": true,
 }
 
 // okCodes are raw codes that represent a genuine answer from the source.
@@ -71,6 +101,19 @@ var okCodes = map[string]bool{
 	// over a typo'd version pin. The refusal that IS warranted comes
 	// from the unknown verdict, not from the coverage gate.
 	"version_not_found": true,
+	// package_not_found: BOTH the per-version endpoint and the package-level
+	// document 404'd, so the registry answered and the answer was "no such
+	// package". Classified here rather than in unavailableCodes, following
+	// the version_not_found precedent exactly, and for a stronger reason
+	// than its sibling has: a 404 for the whole package is the LEAST
+	// ambiguous answer a registry gives. Calling it unavailable would mean
+	// an org that opted into `core/coverage` with mode: closed starts
+	// refusing every typo'd or hallucinated package name at the gate rather
+	// than seeing it as the unknown verdict every surface already renders —
+	// two refusals for one fact, one of which only opted-in orgs would see.
+	// The refusal that IS warranted comes from the unknown verdict.
+	// See core/intelligence/report.go, WarnPackageNotFound.
+	"package_not_found": true,
 }
 
 // notApplicableCodes are raw codes meaning the source does not apply here.

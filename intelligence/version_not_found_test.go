@@ -223,10 +223,16 @@ func TestVersionNotFoundNotEmittedOnFetchFailure(t *testing.T) {
 	}
 }
 
-// TestVersionNotFoundNotEmittedOnPackage404 pins the package-level 404,
-// which the fetch layer already reports as not_found. Promoting it here
-// would claim a version does not exist on the strength of a response
-// that said nothing about versions at all.
+// TestVersionNotFoundNotEmittedOnPackage404 pins the package-level 404.
+// Promoting it to version_not_found would claim a VERSION does not exist
+// on the strength of a response that said nothing about versions at all.
+//
+// AMENDED, NOT REPLACED (P8-04). The assertion above is still exactly
+// right and is kept verbatim. What it never said is what happens INSTEAD —
+// and that silence was the defect: the coordinate kept the generic
+// not_found, which the projection does not consume, so a package name
+// that exists nowhere came back fully scored as a clean ALLOW. The
+// companion below states the positive.
 func TestVersionNotFoundNotEmittedOnPackage404(t *testing.T) {
 	// Nothing registered — every path 404s.
 	p, _ := newStubProvider(t, http.NewServeMux())
@@ -239,6 +245,24 @@ func TestVersionNotFoundNotEmittedOnPackage404(t *testing.T) {
 	}
 	if hasVersionNotFound(pr) {
 		t.Fatalf("a package-level 404 must never produce version_not_found: %+v", pr.Warnings)
+	}
+
+	// The companion. A package-level 404 must produce the PACKAGE-absent
+	// marker, and that marker must reach VerdictUnknown rather than a
+	// score.
+	if !hasWarningCode(pr, WarnPackageNotFound) {
+		t.Fatalf("a package-level 404 must produce %s, got %+v",
+			WarnPackageNotFound, pr.Warnings)
+	}
+	r := &Report{}
+	r.Identity.Ecosystem = "npm"
+	r.Identity.Package = "no-such-package"
+	r.Identity.Version = "9.9.9"
+	r.Observation.Warnings = pr.Warnings
+	ev := risk.EvaluatePackage(ProjectToRiskInput(r), risk.Options{})
+	if ev.Verdict != risk.VerdictUnknown {
+		t.Fatalf("verdict = %q (overall %d), want unknown — a package that "+
+			"does not exist was graded", ev.Verdict, ev.RolledUp.Overall)
 	}
 }
 

@@ -109,6 +109,11 @@ type v1CategoryScore struct {
 type v1Score struct {
 	Overall    int                        `json:"overall"`
 	Categories map[string]v1CategoryScore `json:"categories"`
+	// CeilingSignal mirrors risk.Score.CeilingSignal. Set only when a
+	// signal's MaxImpact ceiling PINNED Overall, in which case Overall is
+	// that ceiling and not the weighted rollup over Categories — which is
+	// why the breakdown printed below it will not add up to it. P8-12.
+	CeilingSignal string `json:"ceilingSignal,omitempty"`
 }
 
 type v1Resolution struct {
@@ -420,6 +425,18 @@ func renderEvaluation(w io.Writer, ev *v1Evaluation) {
 		fmt.Fprintf(w, "%s %3d %s   (%d finding%s)\n",
 			categoryLabel[cat], cs.Score, cs.Grade, len(cs.FiredSignals),
 			plural(len(cs.FiredSignals)))
+	}
+
+	// P8-12. When a signal's MaxImpact ceiling pinned the composite, the
+	// category scores above genuinely do not roll up to the Overall
+	// printed at the top — the clamp is applied after the rollup, by
+	// design. Saying which signal did it is the difference between a
+	// number the reader can act on and one they assume is a bug.
+	if ev.RolledUp.CeilingSignal != "" {
+		fmt.Fprintf(w,
+			"\nNote: overall is capped at %d by %s — a per-signal ceiling applied\n"+
+				"      after the category rollup, so the scores above do not sum to it.\n",
+			ev.RolledUp.Overall, ev.RolledUp.CeilingSignal)
 	}
 
 	// Resolution block — only emit when the verdict isn't a clean Allow.

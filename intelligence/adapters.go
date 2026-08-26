@@ -36,6 +36,28 @@ func (r *Report) ToLegacyPackageMetadata(repoName string) *metadata.PackageMetad
 	// policy.EvaluationContext.TrustScore, where nil matches neither
 	// trustScoreMin nor trustScoreMax. A genuine 0 (malware sentinel /
 	// checksum mismatch) comes from a real evaluation and stays known.
+	//
+	// P8-57 — THE RAIL, AND WHY IT JUST BECAME LOAD-BEARING. This guard
+	// used to be almost never exercised: VerdictUnknown was reachable only
+	// for an absent version. P8-04 and P8-05 make it reachable for a
+	// package that does not exist and for EVERY coordinate in the seven
+	// ecosystems with no advisory source — a large share of the corpus.
+	// core/intelligence/trustscore.go writes
+	// `report.SupplyChain.TrustScore = eval.RolledUp.Overall`
+	// UNCONDITIONALLY, including the Unknown 0, so the 0 is genuinely
+	// there and this is the only thing stopping it being presented as a
+	// measurement.
+	//
+	// The old expression was `r.Risk == nil || r.Risk.Verdict != Unknown`,
+	// which covered the Unknown half and left the FIRST disjunct wide
+	// open: a Report with NO evaluation at all and a zero TrustScore
+	// reported known=true, i.e. a hard 0, which matches every
+	// `trustScoreMax` rule ever written. `package_metadata.trust_score`
+	// has no non-test writer today so nothing observes it — but that makes
+	// this the moment to close it, not a reason to leave it: wiring a
+	// writer later would mass-block on a value nobody measured.
+	// trustScoreKnown below distinguishes "no evaluation and no score"
+	// from "no evaluation but a real legacy total".
 	meta := &metadata.PackageMetadata{
 		Repository:            repoName,
 		Package:               r.Identity.Package,
@@ -47,7 +69,7 @@ func (r *Report) ToLegacyPackageMetadata(repoName string) *metadata.PackageMetad
 		UpstreamURL:           r.Identity.RegistryBase,
 		ProvenanceStatus:      r.Provenance.Status,
 		TrustScore:            r.SupplyChain.TrustScore,
-		TrustScoreKnown:       r.Risk == nil || r.Risk.Verdict != risk.VerdictUnknown,
+		TrustScoreKnown:       trustScoreKnown(r),
 		TrustScoreBreakdown:   r.SupplyChain.TrustScoreBreakdown,
 		TyposquatStatus:       r.SupplyChain.TyposquatStatus,
 		TyposquatSimilarTo:    r.SupplyChain.TyposquatSimilarTo,
@@ -75,6 +97,30 @@ func (r *Report) ToLegacyPackageMetadata(repoName string) *metadata.PackageMetad
 	}
 
 	return meta
+}
+
+// trustScoreKnown reports whether SupplyChain.TrustScore is a MEASUREMENT
+// rather than a placeholder. See the P8-57 note in ToLegacyPackageMetadata
+// for why both branches matter.
+//
+// Two ways a 0 can mean "we never scored this":
+//
+//  1. an evaluation ran and could not evaluate — Verdict Unknown, Overall
+//     0 by construction (UnavailableEvaluation);
+//  2. no evaluation ran at all — Risk is nil and TrustScore is the zero
+//     value of an int nobody wrote.
+//
+// A non-zero score with a nil Risk is the legacy trustscore.Compute total
+// that ComputeTrustScoreForOrg's defensive fallback writes; that IS a
+// measurement and stays known.
+func trustScoreKnown(r *Report) bool {
+	if r == nil {
+		return false
+	}
+	if r.Risk != nil {
+		return r.Risk.Verdict != risk.VerdictUnknown
+	}
+	return r.SupplyChain.TrustScore != 0
 }
 
 // ToLegacyVulnerabilityMetadata projects Report.Vulnerabilities onto the

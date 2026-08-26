@@ -1,6 +1,28 @@
 package intelligence
 
-import "context"
+import (
+	"context"
+	"strings"
+)
+
+// normalizeEcosystemKey is the single spelling every provider's
+// `Supports` whitelist lookup must use.
+//
+// Key.Ecosystem is never normalised by the caller: it arrives verbatim
+// from a URL path segment (`/api/v1/intel/packages/PyPI/...`), a
+// lockfile parser, a policy row or a proxy repository config. Half the
+// providers lower-cased on the way in and half compared the raw string,
+// so a `PyPI`-cased coordinate kept its OSV and registry-metadata lanes
+// and silently lost its CVE, typosquat, malware and checksum lanes —
+// and the skip at scanner.go's `if !p.Supports(...) { continue }` emits
+// nothing, so the loss is invisible in the Report. P8-33.
+//
+// This is a lookup-key normaliser, NOT an alias resolver: `pypi`→`pip`
+// and friends stay the business of each provider's own whitelist (which
+// carries both spellings) and of malware.NormalizeEcosystem.
+func normalizeEcosystemKey(ecosystem string) string {
+	return strings.ToLower(strings.TrimSpace(ecosystem))
+}
 
 // Provider contributes a slice of the Report. Providers are pure relative
 // to the Request — they do not mutate each other; the Scan orchestrator is

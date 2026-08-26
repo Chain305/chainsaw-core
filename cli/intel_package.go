@@ -9,7 +9,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -66,6 +69,33 @@ func runIntelPackage(cmd *cobra.Command, args []string) error {
 		})
 	}
 
+	printLatestResolutionNotice(os.Stdout, key, data.Risk)
 	renderEvaluation(os.Stdout, data.Risk)
 	return nil
+}
+
+// printLatestResolutionNotice tells the user which concrete version the
+// verdict below actually describes, when the server dereferenced a
+// dist-tag on their behalf (P8-45).
+//
+// This is not cosmetic. `chainsaw intel package npm lodash latest` now
+// returns a scored verdict rather than NOT EVALUATED, and an ALLOW must
+// never be attributed to a coordinate the user did not ask about: the tag
+// moves, so the same command tomorrow describes different bytes. Printing
+// the substitution is what keeps the answer attributable — and it is the
+// only place the user's literal input still appears, because the stored
+// report is deliberately keyed on the resolved version.
+//
+// Silent whenever the server answered about the coordinate that was asked
+// for, which is every request that did not name a dist-tag.
+func printLatestResolutionNotice(w io.Writer, asked v1IntelKey, eval *v1Evaluation) {
+	if eval == nil {
+		return
+	}
+	got := strings.TrimSpace(eval.Key.Version)
+	if got == "" || got == strings.TrimSpace(asked.Version) {
+		return
+	}
+	fmt.Fprintf(w, "Resolved %s → %s (the registry's current %q tag)\n\n",
+		asked.Version, got, asked.Version)
 }

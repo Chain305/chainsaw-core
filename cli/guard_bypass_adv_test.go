@@ -510,6 +510,21 @@ func guardBypassFakePMDir(t *testing.T, names ...string) string {
 // passthrough can never touch the repo) with the fake-PM dir prepended to PATH
 // and the offline/telemetry-off/no-color env set. Returns exit code, stdout,
 // stderr.
+//
+// CHAINSAW_CONFIG_HOME IS NOT OPTIONAL. The env starts from os.Environ(), so a
+// subprocess inherits the developer's real $HOME and resolves configDir() to
+// their real ~/.chainsaw. Every guarded run here reaches processGuardOutcome,
+// which WRITES guard_state.json — this one helper accounted for 67 of the 68
+// writes a full `go test ./core/...` made into the author's real config home,
+// pushing installs_checked past 26,000. Same defect class as the
+// guard_policy_pin.json leak (revision 48) that guardPolicyTestEnv fixed, with
+// one extra twist: t.Setenv cannot help, because the writer is a child process
+// and only cmd.Env reaches it.
+//
+// It is also measurement contamination, not just untidiness. loadGuardState()
+// reads before it writes, so these tests were running against whatever counters,
+// consent decision, and 25-entry block ring the developer's own installs had
+// left behind.
 func guardBypassRun(t *testing.T, bin, fakeDir string, args ...string) (int, string, string) {
 	t.Helper()
 	cwd := t.TempDir()
@@ -517,6 +532,7 @@ func guardBypassRun(t *testing.T, bin, fakeDir string, args ...string) (int, str
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"CHAINSAW_CONFIG_HOME="+t.TempDir(),
 		"CHAINSAW_OFFLINE=1",
 		"CHAINSAW_TELEMETRY_DISABLED=1",
 		"CHAINSAW_NO_TELEMETRY=1",

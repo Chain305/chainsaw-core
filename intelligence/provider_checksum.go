@@ -83,8 +83,12 @@ var supportedChecksumEcosystems = map[string]struct{}{
 	"maven": {}, "gradle": {}, "nuget": {}, "cargo": {}, "swift": {},
 }
 
+// Lower-cased before the lookup (P8-33). Found by the same sweep that
+// produced the cve/typosquat/malware fixes and it is the identical
+// defect, so it is corrected here rather than left as the one remaining
+// case-sensitive whitelist for a future reader to trip over.
 func (p *checksumProvider) Supports(ecosystem string) bool {
-	_, ok := supportedChecksumEcosystems[ecosystem]
+	_, ok := supportedChecksumEcosystems[normalizeEcosystemKey(ecosystem)]
 	return ok
 }
 

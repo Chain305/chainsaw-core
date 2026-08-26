@@ -59,12 +59,19 @@ func init() {
 	// docs, and so fired records flow through the same UI pipeline.
 	// MaxImpact tier: MEDIUM-confidence harmful (50-60). Publishing
 	// anomalies are circumstantial — degrades but doesn't dominate.
+	//
+	// maxImpactWarnTop (59), not a literal 60. At 60 the ceiling landed
+	// exactly on thresholdWarn, `60 < 60` is false, band 2 was skipped and
+	// the package returned ALLOW with the composite pinned at 60 — the
+	// signature the vendor QA saw on requests 2.31.0 (ALLOW / Overall 60
+	// with no rationale lines, against five sub-scores all >= 85). See
+	// P8-02 in docs/plan_qa_phase8_remediation.md.
 	register(Signal{
 		ID:          SignalQualVersionAnomaly,
 		Category:    CategoryQuality,
 		Severity:    SevMedium,
 		Weight:      versionAnomalyWeightPerFlag, // documented; evaluator caps total
-		MaxImpact:   60,
+		MaxImpact:   maxImpactWarnTop,
 		Title:       "Version publishing anomaly",
 		Description: "Version number / timestamps / content diverge from the expected publishing pattern (e.g. timestamp regression, major-version skip).",
 		Fires: func(in Input) (bool, string, map[string]any) {

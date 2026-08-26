@@ -47,11 +47,15 @@ func buildTyposquatEcosystemSet() map[string]struct{} {
 
 // Supports returns true only for ecosystems in the detector's coverage
 // list. Nil detector → always false.
+//
+// Lower-cased before the lookup (P8-33): the set is built from
+// typosquat.EcosystemsWithTyposquatRisk(), whose members are all
+// lower-case, and Key.Ecosystem is never normalised by the caller.
 func (p *typosquatProvider) Supports(ecosystem string) bool {
 	if p.detector == nil {
 		return false
 	}
-	if _, ok := supportedTyposquatEcosystems[ecosystem]; !ok {
+	if _, ok := supportedTyposquatEcosystems[normalizeEcosystemKey(ecosystem)]; !ok {
 		return false
 	}
 	return true

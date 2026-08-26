@@ -159,6 +159,21 @@ var settingsBackedFields = map[string]string{
 // short and keep the reasons concrete: "we didn't get to it" is not a
 // reason, it is the bug.
 var ephemeralFields = map[string]string{
+	// P8-28. This list is read once at boot, by backfillRepositoryGuides,
+	// to hand the guide backfill replacement prose for repositories that
+	// are no longer seeded. It describes rows that already exist rather
+	// than creating any, so there is nothing to persist: round-tripping it
+	// through settings would mint a second copy that could disagree with
+	// configs/seed.yaml, which is the single source for guide prose.
+	"RetiredRepositoryGuides[].Name": "retired-guide list is a boot-time input to the " +
+		"guide backfill (core/pgstore/migrate_repo_guides.go), never a settings row; " +
+		"configs/seed.yaml is the single source and a persisted copy could drift from it.",
+	"RetiredRepositoryGuides[].Reason": "documentation for the next reader of " +
+		"configs/seed.yaml; nothing reads it at runtime.",
+	"RetiredRepositoryGuides[].ClientConfigurationGuide": "the replacement prose the " +
+		"backfill writes INTO repositories.client_configuration_guide_template; it is " +
+		"the source of that column, not a column itself.",
+
 	"Policies": "policy documents are stored in their own table by core/policy " +
 		"(NormalizePolicy + the policy store), not as settings kv rows. The YAML " +
 		"`policies:` block is a first-boot seed: cmd/chainsaw-proxy captures it " +

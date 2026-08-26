@@ -267,6 +267,11 @@ func TestVerifyHookCmd_FailReturnsExitCodeErrorWithoutOverride(t *testing.T) {
 	verifyExitOverride = nil
 	t.Cleanup(func() { verifyExitOverride = prev })
 
+	// Stub the driver so this never shells out to the developer's REAL `pip`.
+	// The assertions below are about output shape and exit code, not about
+	// pip itself; without the stub this test reached the network and let the
+	// machine's own chainsaw install-hook write to the real config home.
+	withStubVerifyDriver(t, "pip")
 	cmd := newDoctorVerifyHookCmd()
 	cmd.Flags().Bool("json", true, "")
 	cmd.SetArgs([]string{"pip", "--json", "--timeout", "1s"})

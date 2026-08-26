@@ -243,11 +243,44 @@ func outputSinkShadowingCommands(t *testing.T) []*cobra.Command {
 		found = append(found, c)
 	}
 	walk(rootCmd)
+
+	// P8-27 — the sweep is no longer "commands that SHADOW --format" but
+	// "commands with a non-global --format vocabulary", which is the property
+	// the sink contract actually depends on. scan-actions moved from the first
+	// category to the second when its local --format was deleted, and it would
+	// otherwise have dropped out of this test silently, taking the `--format
+	// text --output Y` case recorded in this file's header with it.
+	for path := range extraCommandFormats {
+		c, _, err := rootCmd.Find(strings.Fields(strings.TrimPrefix(path, "chainsaw ")))
+		if err != nil || c == nil || c.CommandPath() != path || c.RunE == nil {
+			continue // TestExtraCommandFormats_DeclaredOnRealNonShadowingCommands owns this
+		}
+		if _, exempt := outputSinkNoRecipeYet[path]; exempt {
+			continue
+		}
+		_ = c.InheritedFlags()
+		found = append(found, c)
+	}
+
 	sort.Slice(found, func(i, j int) bool { return found[i].CommandPath() < found[j].CommandPath() })
 	if len(found) == 0 {
 		t.Fatal("tree walk found no --format-shadowing commands; the walk is broken, not the tree")
 	}
 	return found
+}
+
+// outputSinkNoRecipeYet names extraCommandFormats commands this sweep does not
+// yet drive, with the reason. It is deliberately an EXPLICIT list rather than a
+// silent omission: a NEW extraCommandFormats entry still fails for want of a
+// recipe, which is the guard's whole point.
+//
+// Neither entry is a regression — both predate P8-27 and neither was ever in
+// this sweep. Their sarif emitters are covered directly: writeScanSARIF and
+// writePRScanSARIF in sarif_test.go, and pr-scan's --output-file sink in
+// TestRunPRScan_SARIFHonoursOutputFile.
+var outputSinkNoRecipeYet = map[string]string{
+	"chainsaw scan":    "needs a stubbed /api/scan responder; sarif emitter covered by sarif_test.go",
+	"chainsaw pr-scan": "needs a git fixture and writes sarif through its own --output-file; covered by TestRunPRScan_SARIFHonoursOutputFile",
 }
 
 // outputSinkStubServer answers the handful of read endpoints these commands

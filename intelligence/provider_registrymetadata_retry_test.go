@@ -117,8 +117,13 @@ func TestRegistryRetry_NoRetryOn404(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
 		t.Fatalf("404 path slept on backoff (%v) — should be immediate", elapsed)
 	}
-	if len(pr.Warnings) == 0 || pr.Warnings[0].Code != "not_found" {
-		t.Fatalf("expected not_found warning, got %+v", pr.Warnings)
+	// AMENDED for P8-04. The point of this test is the RETRY policy — one
+	// request, no backoff — not the warning vocabulary. A packument-level
+	// 404 now reports package_not_found (the packument IS the package
+	// object, so a 404 on it is definitionally "no such package"), which
+	// the projection routes to Unknown instead of grading it clean.
+	if len(pr.Warnings) == 0 || pr.Warnings[0].Code != WarnPackageNotFound {
+		t.Fatalf("expected %s warning, got %+v", WarnPackageNotFound, pr.Warnings)
 	}
 }
 

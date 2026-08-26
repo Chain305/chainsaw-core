@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
@@ -38,18 +39,27 @@ import (
 //  2. Value passed to newAPTCheckerWithKeyring at construction time.
 //  3. Embedded keys under internal/provenance/keys/apt/.
 //
+// InRelease lists one Packages file per (component, arch) — about forty
+// for a Debian suite — in several compressions. We build an ordered
+// candidate list (gz, bz2, plain; `main` first), fetch each in turn, and
+// stop at the first that hash-verifies AND contains the requested
+// coordinate, so callers need not pass component/arch. A fetch failure
+// moves to the next candidate; a hash mismatch or decompress failure does
+// not — that is evidence, and falling through would hand an attacker a
+// retry.
+//
 // Known limitations:
 //   - `by-hash` layouts (/by-hash/SHA256/<hex>) are NOT walked as a
 //     separate path; we fetch the canonical filename. Mirrors that only
 //     expose by-hash will miss and fall to StatusInconclusive.
+//   - `Packages.xz` is not read (no stdlib xz reader). Every mirror that
+//     publishes .xz also publishes .gz, so this costs nothing today.
+//   - At most maxPackagesCandidates indexes are read per check, so a
+//     coordinate in an unusual component/arch beyond that bound reports
+//     StatusMissing with the count in the message.
 //   - The Release file (unsigned) with detached Release.gpg is not
 //     supported — we require the clearsigned InRelease layout, which is
 //     what modern mirrors publish.
-//   - InRelease can list multiple Packages files per (component, arch);
-//     we scan the file list for any entry whose filename ends in
-//     /Packages, /Packages.gz, or /Packages.bz2 and stop at the first
-//     that verifies, so callers don't need to pass component/arch when
-//     the package name is unique in a small fixture.
 type aptChecker struct {
 	client      *http.Client
 	logger      *slog.Logger
@@ -92,11 +102,7 @@ func (c *aptChecker) Check(ctx context.Context, packageName, version string) Res
 // A missing trailing slash is tolerated.
 func (c *aptChecker) CheckWithSource(ctx context.Context, packageName, version, sourceURL string) Result {
 	if sourceURL == "" {
-		return Result{
-			Status:    StatusUnavailable,
-			Ecosystem: "apt",
-			Error:     "OS package provenance requires the source repository URL; call CheckWithSource",
-		}
+		return sourceURLRequired("apt")
 	}
 	base := strings.TrimRight(sourceURL, "/")
 
@@ -106,12 +112,8 @@ func (c *aptChecker) CheckWithSource(ctx context.Context, packageName, version, 
 			c.logger.Warn("apt provenance: keyring unavailable",
 				"package", packageName, "version", version, "error", err.Error())
 		}
-		return Result{
-			Status:          StatusUnavailable,
-			Ecosystem:       "apt",
-			AttestationType: "pgp-repo",
-			Error:           fmt.Sprintf("keyring unavailable: %v", err),
-		}
+		return keyringUnavailable("apt", "CHAINSAW_APT_KEYRING",
+			"/etc/apt/trusted.gpg.d/ (Debian/Ubuntu) or an exported archive keyring", err)
 	}
 
 	// Step 1 — fetch + verify InRelease.
@@ -140,8 +142,8 @@ func (c *aptChecker) CheckWithSource(ctx context.Context, packageName, version, 
 			Error:           fmt.Sprintf("parse InRelease: %v", err),
 		}
 	}
-	packagesEntry, ok := pickPackagesEntry(entries)
-	if !ok {
+	candidates := pickPackagesCandidates(entries)
+	if len(candidates) == 0 {
 		return Result{
 			Status:          StatusFailed,
 			Ecosystem:       "apt",
@@ -151,37 +153,74 @@ func (c *aptChecker) CheckWithSource(ctx context.Context, packageName, version, 
 	}
 
 	// Step 3 — fetch Packages and compare its SHA256.
-	packagesURL := base + "/" + strings.TrimLeft(packagesEntry.Path, "/")
-	packagesBytes, err := c.fetch(ctx, packagesURL, 256<<20) // 256 MiB cap
-	if err != nil {
-		return inconclusive("apt", fmt.Sprintf("fetch Packages: %v", err))
-	}
-	if got := sha256.Sum256(packagesBytes); !bytes.Equal(got[:], packagesEntry.SHA256) {
-		return Result{
-			Status:          StatusFailed,
-			Ecosystem:       "apt",
-			AttestationType: "pgp-repo",
-			Error:           fmt.Sprintf("Packages sha256 mismatch: got %x, want %x", got, packagesEntry.SHA256),
+	//
+	// Fall through to the next candidate ONLY on a fetch error. A hash
+	// mismatch or a decompress failure on bytes we did retrieve is
+	// evidence, not a transport problem: it terminates the walk as
+	// StatusFailed so an attacker cannot buy a retry by corrupting the
+	// first-choice file.
+	//
+	// Step 4 is folded into the same loop. An InRelease lists one
+	// Packages file per (component, arch), so "not in this index" is not
+	// an answer — it just means we read the wrong one. The original code
+	// read exactly ONE index and reported MISSING, which is how a package
+	// that is plainly in Debian main/binary-amd64 came back as "has no
+	// provenance". The file header has promised "stop at the first that
+	// verifies" since this checker was written; this is that promise.
+	var (
+		foundDeb   debEntry
+		found      bool
+		readAny    bool
+		fetchErrs  []string
+		tried      int
+		lastPkgErr string
+	)
+	for _, cand := range candidates {
+		if tried >= maxPackagesCandidates {
+			break
 		}
-	}
-	packagesPlain, err := maybeDecompress(packagesEntry.Path, packagesBytes)
-	if err != nil {
-		return Result{
-			Status:          StatusFailed,
-			Ecosystem:       "apt",
-			AttestationType: "pgp-repo",
-			Error:           fmt.Sprintf("decompress Packages: %v", err),
+		tried++
+		packagesURL := base + "/" + strings.TrimLeft(cand.Path, "/")
+		packagesBytes, ferr := c.fetch(ctx, packagesURL, 256<<20) // 256 MiB cap
+		if ferr != nil {
+			fetchErrs = append(fetchErrs, fmt.Sprintf("%s: %v", cand.Path, ferr))
+			continue
 		}
+		if got := sha256.Sum256(packagesBytes); !bytes.Equal(got[:], cand.SHA256) {
+			return Result{
+				Status:          StatusFailed,
+				Ecosystem:       "apt",
+				AttestationType: "pgp-repo",
+				Error:           fmt.Sprintf("Packages sha256 mismatch: got %x, want %x", got, cand.SHA256),
+			}
+		}
+		plain, derr := maybeDecompress(cand.Path, packagesBytes)
+		if derr != nil {
+			return Result{
+				Status:          StatusFailed,
+				Ecosystem:       "apt",
+				AttestationType: "pgp-repo",
+				Error:           fmt.Sprintf("decompress Packages: %v", derr),
+			}
+		}
+		readAny = true
+		if e, ok := findPackageEntry(plain, packageName, version); ok {
+			foundDeb, found = e, true
+			break
+		}
+		lastPkgErr = cand.Path
 	}
-
-	// Step 4 — find the requested package's .deb entry.
-	debEntry, ok := findPackageEntry(packagesPlain, packageName, version)
-	if !ok {
+	if !readAny {
+		return inconclusive("apt", fmt.Sprintf("fetch Packages: %s", strings.Join(fetchErrs, "; ")))
+	}
+	if !found {
 		return Result{
 			Status:          StatusMissing,
 			Ecosystem:       "apt",
 			AttestationType: "pgp-repo",
-			Error:           fmt.Sprintf("package %s=%s not found in Packages", packageName, version),
+			Reason:          ReasonNoAttestationFound,
+			Error: fmt.Sprintf("package %s=%s not found in any of the %d Packages indexes read (last: %s)",
+				packageName, version, tried, lastPkgErr),
 		}
 	}
 
@@ -191,17 +230,17 @@ func (c *aptChecker) CheckWithSource(ctx context.Context, packageName, version, 
 	// *above* dists/<suite>, so we need to strip the "dists/<suite>"
 	// suffix from base before joining.
 	distRoot := stripSuite(base)
-	debURL := distRoot + "/" + strings.TrimLeft(debEntry.Filename, "/")
+	debURL := distRoot + "/" + strings.TrimLeft(foundDeb.Filename, "/")
 	debHash, err := c.fetchSHA256(ctx, debURL)
 	if err != nil {
 		return inconclusive("apt", fmt.Sprintf("fetch .deb: %v", err))
 	}
-	if !bytes.Equal(debHash[:], debEntry.SHA256) {
+	if !bytes.Equal(debHash[:], foundDeb.SHA256) {
 		return Result{
 			Status:          StatusFailed,
 			Ecosystem:       "apt",
 			AttestationType: "pgp-repo",
-			Error:           fmt.Sprintf(".deb sha256 mismatch: got %x, want %x", debHash, debEntry.SHA256),
+			Error:           fmt.Sprintf(".deb sha256 mismatch: got %x, want %x", debHash, foundDeb.SHA256),
 		}
 	}
 
@@ -339,38 +378,68 @@ func parseReleaseFileHashes(body []byte) ([]releaseFileEntry, error) {
 	return entries, nil
 }
 
-// pickPackagesEntry returns the first Packages/Packages.gz/Packages.bz2
-// entry from the InRelease listing, preferring the plain file for simpler
-// fixture generation and falling back to gz/bz2.
-func pickPackagesEntry(entries []releaseFileEntry) (releaseFileEntry, bool) {
-	var plain, gz, bz2 *releaseFileEntry
+// pickPackagesCandidates returns every Packages/Packages.gz/Packages.bz2
+// entry the InRelease listing names, in fetch-preference order.
+//
+// Two things changed here, and they are separable.
+//
+// (1) Returning a LIST instead of one entry is the actual bug fix.
+// deb.debian.org's InRelease LISTS main/binary-amd64/Packages with a
+// hash, but the mirror only SERVES Packages.gz and Packages.xz — the
+// uncompressed path 404s. The old pickPackagesEntry returned exactly one
+// entry, preferring the uncompressed file "for simpler fixture
+// generation", so chainsaw fetched a 404 and returned INCONCLUSIVE
+// against the canonical Debian repository with a valid keyring and an
+// already-verified InRelease signature.
+//
+// (2) Ordering gz before plain saves a guaranteed-wasted round trip on
+// every Debian-shaped mirror. It is a cost choice, not a safety one.
+//
+// Falling through is scoped to FETCH failures. A hash mismatch or a
+// decompress error on bytes we did retrieve terminates the walk as
+// StatusFailed, so an attacker cannot buy a second attempt by corrupting
+// the first-choice file.
+//
+// .xz is deliberately not in the list — Go has no stdlib xz reader and
+// gz is universally published alongside it.
+func pickPackagesCandidates(entries []releaseFileEntry) []releaseFileEntry {
+	var plain, gz, bz2 []releaseFileEntry
 	for i := range entries {
-		e := &entries[i]
+		e := entries[i]
 		switch {
-		case strings.HasSuffix(e.Path, "/Packages") || e.Path == "Packages":
-			if plain == nil {
-				plain = e
-			}
 		case strings.HasSuffix(e.Path, "/Packages.gz") || e.Path == "Packages.gz":
-			if gz == nil {
-				gz = e
-			}
+			gz = append(gz, e)
 		case strings.HasSuffix(e.Path, "/Packages.bz2") || e.Path == "Packages.bz2":
-			if bz2 == nil {
-				bz2 = e
-			}
+			bz2 = append(bz2, e)
+		case strings.HasSuffix(e.Path, "/Packages") || e.Path == "Packages":
+			plain = append(plain, e)
 		}
 	}
-	switch {
-	case plain != nil:
-		return *plain, true
-	case gz != nil:
-		return *gz, true
-	case bz2 != nil:
-		return *bz2, true
-	}
-	return releaseFileEntry{}, false
+	out := make([]releaseFileEntry, 0, len(gz)+len(bz2)+len(plain))
+	out = append(out, gz...)
+	out = append(out, bz2...)
+	out = append(out, plain...)
+	// Within the compression preference, try the `main` component first.
+	// A real suite lists one Packages file per (component, arch) —
+	// bookworm has ~40 — and the overwhelming majority of coordinates
+	// live in main. Debian orders components alphabetically, so without
+	// this every lookup would walk all of contrib first. Stable sort so
+	// the compression preference and the InRelease order both survive.
+	sort.SliceStable(out, func(i, j int) bool {
+		return isMainComponent(out[i].Path) && !isMainComponent(out[j].Path)
+	})
+	return out
 }
+
+func isMainComponent(path string) bool {
+	return strings.HasPrefix(path, "main/") || strings.Contains(path, "/main/")
+}
+
+// maxPackagesCandidates bounds how many Packages files one check will
+// fetch before giving up. A suite lists one per (component, arch), so an
+// unbounded walk on a miss would pull every architecture's index. Twelve
+// covers main across the common arches with room to spare.
+const maxPackagesCandidates = 12
 
 func maybeDecompress(path string, data []byte) ([]byte, error) {
 	switch {
@@ -467,13 +536,79 @@ func stripSuite(base string) string {
 
 // inconclusive is a small helper to produce the "we could not evaluate"
 // variant — we reuse StatusUnavailable because that's what the existing
-// vocabulary supports; the Error string names the specific failure so
-// callers can distinguish it from other Unavailable causes.
+// vocabulary supports; Reason plus the Error string let callers
+// distinguish it from the other Unavailable causes without string
+// matching.
 func inconclusive(ecosystem, reason string) Result {
 	return Result{
 		Status:          StatusUnavailable,
 		Ecosystem:       ecosystem,
 		AttestationType: "pgp-repo",
+		Reason:          ReasonInconclusive,
 		Error:           "inconclusive: " + reason,
+	}
+}
+
+// osRepoExamples gives each OS-package ecosystem a copy-pasteable
+// --source-url so the error tells the operator what to type, not just
+// what is missing.
+var osRepoExamples = map[string]string{
+	"apt": "https://deb.debian.org/debian/dists/bookworm  (or https://archive.ubuntu.com/ubuntu/dists/jammy)",
+	"yum": "https://dl.fedoraproject.org/pub/fedora/linux/releases/40/Everything/x86_64/os",
+	"dnf": "https://dl.fedoraproject.org/pub/fedora/linux/releases/40/Everything/x86_64/os",
+}
+
+// sourceURLRequired is the P8-47 result: no source repository URL was
+// supplied, so nothing was attempted.
+//
+// This is a BAD INVOCATION, not a property of the ecosystem. APT, YUM and
+// DNF all publish signed repository metadata and this package walks the
+// whole InRelease → Packages → .deb sha256 chain — but (name, version)
+// alone does not name a trust domain, and guessing a default mirror is
+// strictly worse than saying so: if the guessed mirror happens to carry a
+// matching name+version, the chain walk SUCCEEDS and reports VERIFIED for
+// bytes the user never installed (openssl 3.0.2 exists in both jammy and
+// Debian), and in the common miss it reports StatusFailed — the status a
+// tampered package gets.
+//
+// The old message named CheckWithSource, an internal Go API, at an end
+// user. `chainsaw verify` now refuses the invocation with exit 4 before
+// reaching this point; this result covers the server-side path, where
+// provider_provenance.go calls CheckWithSource with whatever UpstreamURL
+// the scan carried.
+func sourceURLRequired(ecosystem string) Result {
+	msg := "no source repository URL supplied, so no verification was attempted. " +
+		ecosystem + " DOES publish signed repository metadata — chainsaw walks the full " +
+		"signed-metadata → package-digest chain — but (name, version) alone does not identify " +
+		"which repository signed it, and guessing a mirror could verify bytes you never installed. " +
+		"Pass --source-url <repo-url>"
+	if ex, ok := osRepoExamples[ecosystem]; ok {
+		msg += ", e.g. " + ex
+	}
+	return Result{
+		Status:    StatusUnavailable,
+		Ecosystem: ecosystem,
+		Reason:    ReasonSourceURLRequired,
+		Error:     msg,
+	}
+}
+
+// keyringUnavailable is the P8-47 half the plan under-called: fixing the
+// --source-url flag converts UNAVAILABLE into INCONCLUSIVE, not VERIFIED,
+// because core/provenance/keys/apt and keys/rpm ship with README.md and
+// nothing else. embeddedKeyrings therefore holds zero keys and
+// loadEmbeddedKeyring falls through to errKeyringEmpty on every default
+// build. That is documented intent (see the READMEs), but it means the
+// message must name the knob or the operator is stuck.
+func keyringUnavailable(ecosystem, envVar, exampleDir string, err error) Result {
+	return Result{
+		Status:          StatusUnavailable,
+		Ecosystem:       ecosystem,
+		AttestationType: "pgp-repo",
+		Reason:          ReasonKeyringUnavailable,
+		Error: fmt.Sprintf("no trusted keys available to evaluate this repository (%v). "+
+			"chainsaw ships no embedded %s keyring by default — point %s at a keyring "+
+			"file or directory, e.g. %s. Nothing was verified either way; this is not a "+
+			"signature failure", err, ecosystem, envVar, exampleDir),
 	}
 }

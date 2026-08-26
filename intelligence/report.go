@@ -10,6 +10,9 @@
 package intelligence
 
 import (
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/chain305/chainsaw-core/capability"
@@ -731,17 +734,305 @@ type ObservationSection struct {
 //	    and blockedCount therefore change for UNCHANGED coordinates,
 //	    which is exactly what this counter is for; every epoch-4 row with
 //	    resolvable dependencies must be recomputed.
-const CurrentMatcherEpoch = 5
+//	6 — the MaxImpact band-boundary collisions are corrected, re-arming five
+//	    signals that could not reach the verdict their ceiling claimed
+//	    (2026-08-25). applyMaxImpactCeiling pins overall to EXACTLY the
+//	    declared ceiling, and both of resolveVerdict's band tests are strict
+//	    `<`, so a ceiling equal to a threshold fell through into the weaker
+//	    band. sc.typosquat_high (ceiling 30) resolved to bare WARN — a
+//	    high-confidence typosquat could never block — and is now SevCritical
+//	    so it rides the band-2 critical escalation its two ceiling-30 peers
+//	    already used. The four SevMedium ceiling-60 signals
+//	    (qual.version_anomaly, sc.hidden_unicode, sc.repo_archived,
+//	    sc.repo_missing) had no escalation available at all: 60 skipped band
+//	    2 entirely and returned ALLOW, so hidden-Unicode/Trojan-Source could
+//	    not produce so much as a warning from the server while the offline
+//	    guard hard-blocked it. Their ceilings move to maxImpactWarnTop (59).
+//	    Neither the band tests nor the thresholds were touched. This changes
+//	    verdicts for UNCHANGED coordinates in the enforcement-STRENGTHENING
+//	    direction — warn → quarantine for a lone high-confidence typosquat,
+//	    allow → warn for a package whose tightest ceiling is one of the four
+//	    — so every epoch-5 row must be recomputed. The flip population is
+//	    exactly the rows where one of the five was the tightest fired
+//	    ceiling.
+//
+//	    The typosquat half of that population WAS measured, against a
+//	    read-only export of production `intelligence_reports` (7,099 rows):
+//	    12 rows move warn → quarantine. Half of them were false — `ms`
+//	    reported as a squat of `msw`, `is-typed-array` of `is-typedarray`,
+//	    `json5` of `json3`, `esutils` of `tsutils`, `lie` of `li` — because
+//	    the detector had no popularity-DIRECTION check and named whichever
+//	    of the pair was in the loaded corpus as the victim. Promoting the
+//	    signal without that check would have hard-blocked five of npm's
+//	    most-depended-on packages. It ships WITH the check
+//	    (core/typosquat/established.go): a hit is demoted to
+//	    sc.typosquat_low when the candidate is at least as established as
+//	    its claimed target on a reviewed download ranking. So the epoch-6
+//	    typosquat flip population is the SIX remaining rows — chalkk,
+//	    expres, lodashs, reqeusts (two versions) and colourama — every one
+//	    a genuine squat of a household name. The other four signals'
+//	    populations are not measurable from source and were not measured.
+//	7 — coverage honesty (2026-08-25). ONE bump for the whole wave, because
+//	    the five changes below all move the same rows and splitting them
+//	    would cost five recomputes of the same corpus for one measurement.
+//	    Every one of them changes a verdict for an UNCHANGED coordinate.
+//
+//	    (a) Ecosystem case is normalised in every provider's Supports()
+//	        whitelist (cve, typosquat, malware, checksum, registrymetadata).
+//	        A display-cased coordinate — `PyPI`, `NPM` — kept its OSV and
+//	        registry-metadata lanes and silently lost the rest, because
+//	        scanner.go skips an unsupported provider with a bare `continue`
+//	        that emits no warning and writes no timing entry. Those rows
+//	        were scored against a strictly smaller fact set than their
+//	        lower-cased twins. Direction is score-DOWN (lanes only ever add
+//	        deficits), i.e. enforcement-strengthening, and it re-arms the
+//	        malware lane that (c) below makes load-bearing.
+//	    (b) The literal dist-tag name `latest` is dereferenced to a concrete
+//	        version before Scan on the public intel path. Every packument
+//	        runner decides absence by asking whether the requested string is
+//	        a KEY of the registry's versions map, and `latest` is a tag name
+//	        and never a key, so the coordinate returned WarnVersionNotFound →
+//	        VerdictUnknown → NOT EVALUATED / 0 (F) for a package that is
+//	        fine. Rows already keyed on the literal string are NOT retired by
+//	        this bump — after the fix that coordinate is never requested on
+//	        that path again, so the epoch check is never reached for it — and
+//	        need the one-shot purge in
+//	        core/pgstore/migrate_latest_sentinel.go. docker (`latest` is a
+//	        real tag) and the Maven family (`LATEST` is a resolver directive)
+//	        are excluded from both halves.
+//	    (c) The known-malicious instant block is hoisted ABOVE
+//	        EvaluatePackage's SignalsUnavailable short-circuit, and the three
+//	        unavailability returns in risk_projection.go now carry the two
+//	        instant-block facts. The malware provider is Tier 1 and fans out
+//	        in parallel, so its verdict was computed and merged — and then
+//	        deleted by a projection that returned before reading it. An
+//	        unpublished or yanked MALICIOUS version returned NOT EVALUATED.
+//	        Direction is unknown → quarantine: enforcement-strengthening, and
+//	        the strongest single tightening in the wave.
+//	    (d) A package that does not exist upstream AT ALL is no longer graded
+//	        clean, IN THE ECOSYSTEMS WHERE THAT CAN BE KNOWN. The
+//	        package-level probe distinguishes a definite 404 from an outage
+//	        and mints WarnPackageNotFound, which the projection routes to
+//	        Unknown. Previously `rubygems colourama` scored ALLOW 96 (A),
+//	        `pypi requests-python` ALLOW 92 (A) — a textbook slopsquat graded
+//	        A. Direction is allow → unknown.
+//
+//	        The marker is restricted to ecosystems with ONE canonical
+//	        registry: npm/yarn/bun, pypi/pip, cargo, rubygems, nuget,
+//	        composer, cocoapods, pub. A 404 from the one registry this
+//	        provider asks is only evidence about the PACKAGE when that
+//	        registry owns the whole namespace. The Maven family and Go are
+//	        federated — a groupId lives in Central, maven.google.com, JitPack
+//	        or a corporate mirror, and a module path is the identity while
+//	        proxy.golang.org is a cache of public VCS — so they keep the
+//	        pre-existing `not_found`, which says the true thing: not found in
+//	        the registry we checked. Measured on the same 7,099-row export:
+//	        the unrestricted rule would have relabelled 1,547 registry-
+//	        COVERAGE gaps as absent packages, 1,405 of them real Android /
+//	        AndroidX coordinates published to maven.google.com, plus
+//	        unresolved-property coordinates like `${project.groupId}:txw2`.
+//	        Restricting it leaves 152 package_not_found rows, every one in a
+//	        single-canonical ecosystem.
+//	    (e) The seven ecosystems with no advisory source at all (huggingface,
+//	        swift, cocoapods, docker, apt, yum, dnf) stop flooring at ALLOW.
+//	        When no vulnerability lane covered the coordinate AND none
+//	        produced data, the scan now stamps WarnUnsupported and the
+//	        projection routes it to Unknown instead of letting every category
+//	        start at categoryBase = 100. Direction is allow → unknown, and it
+//	        is the largest population in the wave by row count.
+//
+//	        The stamp's WORDING now distinguishes two facts it used to
+//	        conflate. Its complement was taken over every string, so a
+//	        repository NAME that had leaked into the ecosystem column —
+//	        `maven-hosted`, `npmjs-hosted`, `rubygems-hosted`,
+//	        `crates-hosted`, 8 rows in the export — was reported as an
+//	        UNCOVERED ECOSYSTEM. That claim is false: they are ordinary
+//	        maven/npm/rubygems/cargo packages and every one of those
+//	        ecosystems has full advisory coverage. The verdict is unchanged
+//	        and deliberately so — every provider's Supports() rejects the
+//	        string, so nothing scanned those reports and Unknown is correct;
+//	        suppressing the marker would be a fail-open that the P8-34
+//	        refutation test forbids. What changes is that the reason names
+//	        the routing problem instead, which is the thing a reader can
+//	        act on.
+//
+//	        Per the Phase 7 Wave 6 ruling the real fix is upstream and NOT
+//	        in the canonicaliser: Refresher.refreshRow and its server wiring
+//	        no longer substitute a repository NAME for repo.Format when a
+//	        row cannot be resolved. That was the last live producer of these
+//	        rows; the upload and publish paths were moved to repo.Format in
+//	        Wave 6, so an org's hosted-registry uploads carry `maven` and
+//	        are scanned normally. The 8 in the export are historical.
+//
+//	    Flip population, by shape rather than by number — it is not
+//	    measurable from source and was NOT measured: (a) every row whose
+//	    stored ecosystem string is not already lower-case; (b) every row with
+//	    version = 'latest' outside docker and Maven; (c) rows carrying
+//	    MalwareStatus="malicious" together with an unavailability warning;
+//	    (d) rows for coordinates whose PACKAGE 404s upstream in a
+//	    single-canonical-registry ecosystem; (e) every row in the seven
+//	    uncovered ecosystems with no ScannedAt. (d) and (e) also move
+//	    `chainsaw intel scan` from exit 0/1 to exit 2 for any lockfile
+//	    containing one, via treeExitCode.
+//
+//	    That CI-exit delta HAS now been counted, on the 7,099-row read-only
+//	    production export, by TestPhase8UnevaluatedProbe: 1,983 coordinates
+//	    (27.93%) came back NOT EVALUATED under the uncorrected wave, and 457
+//	    (6.44%) come back under it as it now stands. The whole 1,526-row
+//	    difference is (d): registry-coverage gaps that the unrestricted rule
+//	    was relabelling as absent packages. (e)'s correction moves no row —
+//	    it changes what 8 of them SAY — which is why the two are counted
+//	    separately rather than netted. The remaining 457 are the genuinely
+//	    uncovered ecosystems and the genuinely absent packages, including
+//	    `npm leftpadd`, `pip colourama`, `pub htttp` and
+//	    `pub flutter_secure_strorage`.
+//	8 — licence correctness (2026-08-25). ONE bump for Wave D's licence
+//	    half, for the same reason epoch 7 was one bump: all four changes
+//	    move overlapping rows and splitting them would buy four recomputes
+//	    of one corpus for one measurement. Every one changes a verdict or a
+//	    score for an UNCHANGED coordinate.
+//
+//	    (a) Free-text licence NAMES are normalised to SPDX ids on READ, in
+//	        risk.Classify (core/risk/license_classifier.go). Registries
+//	        overwhelmingly carry the name, not the id — "The Apache Software
+//	        License, Version 2.0", "MIT License", "Apache 2.0" — and all of
+//	        them failed a strict SPDX parse and came back
+//	        license.unidentified at -15. Measured on the 400-package benign
+//	        corpus: 58 of 70 Maven artifacts (82.9%) and 28 of 100 PyPI
+//	        packages. Direction is score-UP (a -15 over-call is removed), so
+//	        this half is enforcement-LOOSENING and is the largest measured
+//	        false-positive source in the engine.
+//	    (b) The SAME normalisation closes a false NEGATIVE, and that half is
+//	        enforcement-strengthening. "Eclipse Public License v2.0", "MPL
+//	        2.0" and "GNU Lesser General Public License" are genuine
+//	        copyleft and were also reported merely "unidentified", so no
+//	        license.copyleft tag reached the policy engine and a copyleft
+//	        block rule could not fire on them. They now classify, and
+//	        versionless names keep the family ("LGPL") rather than a
+//	        fabricated version, because the strength band does not depend on
+//	        the version.
+//	    (c) Copyleft is no longer double-counted, and licence strength is
+//	        tiered (core/risk/registry_license.go). license.non_permissive
+//	        is by definition the superset of license.copyleft and both were
+//	        -20, so every copyleft package paid -40 — twice what BUSL-1.1
+//	        paid, and enough to beat a vuln.cvss_high in
+//	        UpgradePromotionEligible's dominance test, which suppressed the
+//	        upgrade recommendation for every copyleft package with a fixable
+//	        CVE. Now: weak copyleft -10, source-available -20, strong
+//	        copyleft -30. Direction is score-UP for weak copyleft and for
+//	        strong copyleft (-40 → -10 / -30) and unchanged for
+//	        source-available, and it turns WARN into UPGRADE_AVAILABLE for
+//	        the CVE-plus-copyleft population.
+//	    (d) The Composer reader implements Packagist's `composer/2.0`
+//	        minified metadata format (core/intelligence/
+//	        provider_registrymetadata.go). It did not, in two ways, and
+//	        between them they were the single largest FP cell in the corpus.
+//	        A removed field is encoded as the literal string "__unset" in a
+//	        position typed map[string]string, so one such field anywhere in
+//	        a package's version history aborted the decode of the WHOLE
+//	        document and the report came back with NO facts at all — which
+//	        the scorer reads as clean. 35 of the 60 most-installed Composer
+//	        packages (58.3%) carry one. Separately, entries after the first
+//	        are DELTAS, so 99.4% of version entries carry no licence key and
+//	        every non-latest coordinate silently lost its licence, its
+//	        maintainers, its dependencies and its source repo. Direction is
+//	        BOTH: score-UP for the 35 that were paying a phantom -30 licence
+//	        deficit, and allow → unknown for nonexistent Composer versions,
+//	        which could not reach the version-not-found promotion while the
+//	        decode was failing ahead of it (guzzlehttp/guzzle 99.99.99
+//	        graded ALLOW 96).
+//
+//	    Flip population, by shape rather than by number — it is not
+//	    measurable from source and was NOT measured, and the two directions
+//	    are deliberately NOT netted: (a) every row whose stored
+//	    Metadata.LicenseExpression is a licence name rather than an SPDX id,
+//	    which is most of Maven Central and a quarter of PyPI; (b) the subset
+//	    of those whose name denotes a copyleft licence — small in count,
+//	    and the only shape in this epoch where a policy that previously
+//	    could not fire begins to; (c) every row carrying license.copyleft,
+//	    and within it the rows that also carry a fixable vulnerability
+//	    signal, which are the ones whose VERDICT moves rather than just
+//	    their score; (d) every Composer row, in both directions — the 35
+//	    empty-report shapes gain facts, and any Composer row pinned to a
+//	    version the registry never published moves from allow to unknown.
+const CurrentMatcherEpoch = 8
+
+// MinServeableEpoch is the floor a cached row must meet to be SERVED. It
+// normally equals CurrentMatcherEpoch and MUST be returned to that value
+// once a staged backfill finishes; TestMinServeableEpochIsNotLeftLowered
+// fails while it is lowered without an explicit opt-in.
+//
+// # WHY IT IS SEPARATE FROM CurrentMatcherEpoch
+//
+// CurrentMatcherEpoch is two things at once: the generation a fresh Scan
+// STAMPS, and the floor reads REFUSE below. Those coincide in the steady
+// state, where a handful of rows are stale at any moment and every direct
+// read path treats a stale row as a cache miss and rescans on demand.
+//
+// They come apart on a deploy that raises the epoch by more than the
+// backlog can absorb. Raising it retires EVERY existing row at once, and
+// the transitive-risk provider is the one read path whose miss handler
+// cannot heal itself: lookupDepReport treats a superseded row like a miss
+// and provider_transitiverisk.go DROPS the dependency with a warning
+// rather than enqueuing a rescan. Measured on the 5 -> 8 bump against the
+// production export: dependency lookups served fall from 92,046 to
+// 11,744, so every rollup collapses to direct-only. The recompute sweep
+// drains 500 rows an hour (DefaultRecomputeMaxRows, one-hour tick), so
+// that is roughly a week of silently degraded transitive resolution.
+//
+// The backfill cannot run ahead of the deploy, because an epoch-8 row can
+// only be produced by epoch-8 code. And it cannot be shortcut by
+// re-scoring the stored report instead of rescanning: epoch 7(a) restored
+// provider lanes that display-cased coordinates never ran at all, 7(d)
+// added a network probe, and 8(d) fixed a decoder — those rows are
+// missing FACTS, not just mis-scored, so re-stamping them from stored
+// data would convert a visible "stale" state into an invisible "wrong"
+// one, which is the failure the epoch counter exists to prevent.
+//
+// So the sequence is: deploy with this floor held at the OLD epoch, let
+// the sweep drain the backlog to CurrentMatcherEpoch, then raise this to
+// match and redeploy. Holding the floor down during the drain is not a
+// regression — it serves exactly the verdicts production is already
+// serving today — whereas flipping cold makes transitive resolution
+// strictly worse than today until the sweep catches up.
+//
+// This is the SERVE gate only. The drain-side predicates (Store.Facets'
+// backlog count, IterateMatcherStale/CountMatcherStale, and the
+// "recompute pending" flag on Store.Search) deliberately stay on
+// CurrentMatcherEpoch: the sweep must still target every row below the
+// current generation, and the operator must still see the true backlog.
+// TestDrainPredicatesTrackCurrentEpochNotServeFloor pins that split.
+var MinServeableEpoch = envMinServeableEpoch()
+
+// envMinServeableEpoch reads CHAINSAW_INTELLIGENCE_MIN_SERVEABLE_EPOCH,
+// the staged-deploy override. Anything absent, unparseable, or outside
+// (0, CurrentMatcherEpoch] falls back to CurrentMatcherEpoch — a typo in
+// a deploy variable must not silently widen what the cache will serve.
+func envMinServeableEpoch() int {
+	raw := strings.TrimSpace(os.Getenv("CHAINSAW_INTELLIGENCE_MIN_SERVEABLE_EPOCH"))
+	if raw == "" {
+		return CurrentMatcherEpoch
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 || n > CurrentMatcherEpoch {
+		return CurrentMatcherEpoch
+	}
+	return n
+}
 
 // MatcherStale reports whether this Report was produced by a superseded
 // generation of the matcher or risk engine, and so must not be served from
 // cache. A nil Report is stale: callers treat "no report" and "unusable
 // report" the same way, which keeps the check safe at every call site.
+//
+// Compares against MinServeableEpoch, not CurrentMatcherEpoch — see that
+// variable for why the two exist. They are equal outside a staged
+// backfill.
 func (r *Report) MatcherStale() bool {
 	if r == nil {
 		return true
 	}
-	return r.Observation.MatcherEpoch < CurrentMatcherEpoch
+	return r.Observation.MatcherEpoch < MinServeableEpoch
 }
 
 // Warning is a provider-level non-fatal diagnostic.
@@ -797,6 +1088,39 @@ const (
 	// it must not trip the opt-in fail-closed coverage gate.
 	WarnVersionNotFound = "version_not_found"
 
+	// WarnPackageNotFound is emitted when BOTH the per-version endpoint
+	// and the package-level document 404 — positive evidence that the
+	// PACKAGE, not merely the version, does not exist upstream.
+	//
+	// It is the stronger sibling of WarnVersionNotFound and it exists
+	// because the two were collapsed. Every Group-A probe reduced its
+	// outcome to a bare bool, so a package-level 404 and a registry
+	// outage arrived at promoteVersionNotFound indistinguishable and
+	// both kept the generic `not_found` code — which the projection
+	// never consumes and core/coverage classifies as OK. The result,
+	// verified against live registries on 2026-08-25: `rubygems
+	// colourama` → ALLOW 96 (A), `nuget Newtonsoft.Json.net` → ALLOW 86
+	// (B), `pypi requests-python` → ALLOW 92 (A). `requests-python` is a
+	// textbook slopsquat of `requests`, graded A.
+	//
+	// SAME DISCIPLINE AS ITS SIBLING: only positive evidence. A 5xx, a
+	// timeout, a transport error or a decode failure on the package-level
+	// probe must never produce this code — isDefiniteAbsence is an
+	// allowlist of exactly {not_found, http_404} for that reason.
+	//
+	// Like WarnVersionNotFound it is NOT a risk signal: it means we
+	// evaluated nothing, not that we found something.
+	// risk_projection.go turns it into risk.Input.SignalsUnavailable →
+	// VerdictUnknown.
+	//
+	// Classified as an OK code in core/coverage/status.go, following the
+	// version_not_found precedent: the registry ANSWERED, and the answer
+	// was "no such package". That is not an outage, so it must not trip
+	// the opt-in fail-closed coverage gate — the refusal that is
+	// warranted comes from the unknown verdict, which every surface
+	// reads, not from a gate only opted-in orgs run.
+	WarnPackageNotFound = "package_not_found"
+
 	// WarnVersionNotEvaluable is stamped by the ingest gate in
 	// version_evaluable.go when the coordinate's VERSION component can
 	// never be ordered against an advisory range — an uninterpolated
@@ -826,6 +1150,18 @@ const (
 	WarnTransitiveDepNotCached             = "transitive_dep_not_cached"
 	WarnTransitiveDepConstraintUnparseable = "transitive_dep_constraint_unparseable"
 	WarnTransitiveDepLookupError           = "transitive_dep_lookup_error"
+	// WarnTransitiveDepSuperseded is the cached-but-retired case, split
+	// out from WarnTransitiveDepNotCached because the two call for
+	// opposite operator responses. "Not cached" means the dependency has
+	// never been scanned and someone should look at why. "Superseded"
+	// means it HAS been scanned and is waiting on the recompute sweep —
+	// nothing to chase, and it drains on its own.
+	//
+	// The distinction is load-bearing right after an epoch bump, when
+	// this is the reason for nearly every excluded dep. It used to
+	// report as "not in cache", which sent operators hunting for a scan
+	// that had already happened.
+	WarnTransitiveDepSuperseded = "transitive_dep_superseded"
 )
 
 // ProviderTiming captures per-provider runtime (for observability).

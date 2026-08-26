@@ -199,7 +199,7 @@ var supportedRegistryEcosystems = map[string]struct{}{
 }
 
 func (p *registryMetadataProvider) Supports(ecosystem string) bool {
-	_, ok := supportedRegistryEcosystems[strings.ToLower(ecosystem)]
+	_, ok := supportedRegistryEcosystems[normalizeEcosystemKey(ecosystem)]
 	return ok
 }
 
@@ -209,7 +209,12 @@ func (p *registryMetadataProvider) Run(ctx context.Context, req Request, _ *Repo
 	if pkg == "" || ver == "" {
 		return PartialReport{}, nil
 	}
-	eco := strings.ToLower(req.Key.Ecosystem)
+	// Same normaliser Supports() uses (P8-33). If these two ever
+	// disagree the provider claims coverage it then declines to
+	// deliver: Supports()=true writes a ProviderTimings entry, which
+	// core/intelligence/coverage.go reads as StatusOK, so the coverage
+	// gate would vouch for a lane that fell through this switch.
+	eco := normalizeEcosystemKey(req.Key.Ecosystem)
 	ctx = withEcosystem(ctx, eco)
 	switch eco {
 	case "npm", "yarn", "bun":
@@ -533,7 +538,7 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 	}
 	pr := PartialReport{}
 	if warn != nil {
-		pr.Warnings = append(pr.Warnings, *warn)
+		pr.Warnings = append(pr.Warnings, *promotePackagumentNotFound(p, "npm", warn, endpoint, pkg, ver))
 		return pr, nil
 	}
 
@@ -890,7 +895,7 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 		// /pypi/{pkg}/{ver}/json 404s identically for "no such project"
 		// and "no such release of this project". Ask the project-level
 		// document which one it was before the coordinate is scored.
-		warn = p.promoteVersionNotFound(ctx, warn, endpoint, pkg, ver, p.probePyPIPackage(pkg))
+		warn = p.promoteVersionNotFound(ctx, "pypi", warn, endpoint, pkg, ver, p.probePyPIPackage(pkg))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -1020,6 +1025,13 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 // latest version. Errors are returned as a Warning the caller can append
 // — the caller never aborts on this failure.
 func (p *registryMetadataProvider) fetchPyPITimeline(ctx context.Context, pkg string) ([]VersionRelease, string, *Warning) {
+	doc := p.fetchPyPITimelineDoc(ctx, pkg)
+	return doc.timeline, doc.latest, doc.wrapped(p)
+}
+
+// fetchPyPITimelineDoc is the fetch+parse half, returning the RAW fetch
+// warning. See timelineDoc for why the split exists.
+func (p *registryMetadataProvider) fetchPyPITimelineDoc(ctx context.Context, pkg string) timelineDoc {
 	endpoint := fmt.Sprintf("%s/pypi/%s/json", p.endpoints.pypi, url.PathEscape(pkg))
 	var pack struct {
 		Info struct {
@@ -1031,7 +1043,7 @@ func (p *registryMetadataProvider) fetchPyPITimeline(ctx context.Context, pkg st
 	}
 	warn, err := p.fetchJSON(ctx, endpoint, "application/json", &pack)
 	if err != nil || warn != nil {
-		return nil, "", timelineFetchFailedWarning(p, endpoint, err, warn)
+		return timelineDoc{endpoint: endpoint, warn: warn, err: err}
 	}
 	timeline := make([]VersionRelease, 0, len(pack.Releases))
 	for ver, uploads := range pack.Releases {
@@ -1052,7 +1064,7 @@ func (p *registryMetadataProvider) fetchPyPITimeline(ctx context.Context, pkg st
 		}
 		timeline = append(timeline, rel)
 	}
-	return timeline, strings.TrimSpace(pack.Info.Version), nil
+	return timelineDoc{timeline: timeline, latest: strings.TrimSpace(pack.Info.Version), endpoint: endpoint}
 }
 
 // parsePyPIRequiresDist turns a PEP 508 requirement list into a
@@ -1574,7 +1586,7 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 		// A missing .pom is a missing version directory; it says nothing
 		// about whether the groupId:artifactId exists. maven-metadata.xml
 		// one level up does.
-		warn = p.promoteVersionNotFound(ctx, warn, pomURL, pkg, ver, p.probeMavenPackage(groupPath, artifact))
+		warn = p.promoteVersionNotFound(ctx, "maven", warn, pomURL, pkg, ver, p.probeMavenPackage(groupPath, artifact))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -1859,11 +1871,18 @@ type mavenMetadataXML struct {
 // in a JSON-friendly form). The `latest` return value comes from
 // `<versioning><latest>` when set, falling back to `<release>`.
 func (p *registryMetadataProvider) fetchMavenTimeline(ctx context.Context, groupPath, artifact string) ([]VersionRelease, string, time.Time, *Warning) {
+	doc := p.fetchMavenTimelineDoc(ctx, groupPath, artifact)
+	return doc.timeline, doc.latest, doc.lastUpdated, doc.wrapped(p)
+}
+
+// fetchMavenTimelineDoc is the fetch+parse half, returning the RAW fetch
+// warning. See timelineDoc.
+func (p *registryMetadataProvider) fetchMavenTimelineDoc(ctx context.Context, groupPath, artifact string) timelineDoc {
 	endpoint := fmt.Sprintf("%s/%s/%s/maven-metadata.xml", p.endpoints.maven, groupPath, artifact)
 	var meta mavenMetadataXML
 	warn, err := p.fetchXML(ctx, endpoint, &meta)
 	if err != nil || warn != nil {
-		return nil, "", time.Time{}, timelineFetchFailedWarning(p, endpoint, err, warn)
+		return timelineDoc{endpoint: endpoint, warn: warn, err: err}
 	}
 	timeline := make([]VersionRelease, 0, len(meta.Versioning.Versions.Version))
 	for _, v := range meta.Versioning.Versions.Version {
@@ -1875,7 +1894,7 @@ func (p *registryMetadataProvider) fetchMavenTimeline(ctx context.Context, group
 	}
 	latest := firstNonEmpty(strings.TrimSpace(meta.Versioning.Latest), strings.TrimSpace(meta.Versioning.Release))
 	lastUpdated, _ := parseMavenLastUpdated(meta.Versioning.LastUpdated)
-	return timeline, latest, lastUpdated, nil
+	return timelineDoc{timeline: timeline, latest: latest, lastUpdated: lastUpdated, endpoint: endpoint}
 }
 
 // parseMavenLastUpdated parses the `lastUpdated` field from
@@ -1954,7 +1973,7 @@ func (p *registryMetadataProvider) runCargo(ctx context.Context, pkg, ver string
 		// crates.io returns the same 404 for an unknown crate and for an
 		// unknown version of a known crate; the crate summary separates
 		// them.
-		warn = p.promoteVersionNotFound(ctx, warn, endpoint, pkg, ver, p.probeCargoPackage(pkg))
+		warn = p.promoteVersionNotFound(ctx, "cargo", warn, endpoint, pkg, ver, p.probeCargoPackage(pkg))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -2067,6 +2086,13 @@ func (p *registryMetadataProvider) runCargo(ctx context.Context, pkg, ver string
 // crates.io's `/api/v1/crates/{crate}` summary endpoint plus the
 // declared `max_version` label.
 func (p *registryMetadataProvider) fetchCargoTimeline(ctx context.Context, pkg string) ([]VersionRelease, string, *Warning) {
+	doc := p.fetchCargoTimelineDoc(ctx, pkg)
+	return doc.timeline, doc.latest, doc.wrapped(p)
+}
+
+// fetchCargoTimelineDoc is the fetch+parse half, returning the RAW fetch
+// warning. See timelineDoc.
+func (p *registryMetadataProvider) fetchCargoTimelineDoc(ctx context.Context, pkg string) timelineDoc {
 	endpoint := fmt.Sprintf("%s/api/v1/crates/%s", p.endpoints.cargo, url.PathEscape(pkg))
 	var pack struct {
 		Crate struct {
@@ -2081,7 +2107,7 @@ func (p *registryMetadataProvider) fetchCargoTimeline(ctx context.Context, pkg s
 	}
 	warn, err := p.fetchJSON(ctx, endpoint, "application/json", &pack)
 	if err != nil || warn != nil {
-		return nil, "", timelineFetchFailedWarning(p, endpoint, err, warn)
+		return timelineDoc{endpoint: endpoint, warn: warn, err: err}
 	}
 	timeline := make([]VersionRelease, 0, len(pack.Versions))
 	for _, v := range pack.Versions {
@@ -2095,7 +2121,7 @@ func (p *registryMetadataProvider) fetchCargoTimeline(ctx context.Context, pkg s
 		timeline = append(timeline, rel)
 	}
 	latest := firstNonEmpty(pack.Crate.MaxStableVersion, pack.Crate.MaxVersion, pack.Crate.NewestVersion)
-	return timeline, latest, nil
+	return timelineDoc{timeline: timeline, latest: latest, endpoint: endpoint}
 }
 
 // cargoOwner is the subset of crates.io's owner record we surface.
@@ -2191,7 +2217,7 @@ func (p *registryMetadataProvider) runRubyGems(ctx context.Context, pkg, ver str
 		// /api/v2/rubygems/{gem}/versions/{ver}.json cannot distinguish a
 		// missing gem from a missing version; /api/v1/versions/{gem}.json
 		// can.
-		warn = p.promoteVersionNotFound(ctx, warn, endpoint, pkg, ver, p.probeRubyGemsPackage(pkg))
+		warn = p.promoteVersionNotFound(ctx, "rubygems", warn, endpoint, pkg, ver, p.probeRubyGemsPackage(pkg))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -2288,6 +2314,13 @@ func (p *registryMetadataProvider) runRubyGems(ctx context.Context, pkg, ver str
 // from /api/v1/versions/{gem}.json. The endpoint returns an unordered
 // array of `{number, created_at}` records.
 func (p *registryMetadataProvider) fetchRubyGemsTimeline(ctx context.Context, pkg string) ([]VersionRelease, string, *Warning) {
+	doc := p.fetchRubyGemsTimelineDoc(ctx, pkg)
+	return doc.timeline, doc.latest, doc.wrapped(p)
+}
+
+// fetchRubyGemsTimelineDoc is the fetch+parse half, returning the RAW
+// fetch warning. See timelineDoc.
+func (p *registryMetadataProvider) fetchRubyGemsTimelineDoc(ctx context.Context, pkg string) timelineDoc {
 	endpoint := fmt.Sprintf("%s/api/v1/versions/%s.json", p.endpoints.rubygems, url.PathEscape(pkg))
 	var versions []struct {
 		Number     string `json:"number"`
@@ -2296,7 +2329,7 @@ func (p *registryMetadataProvider) fetchRubyGemsTimeline(ctx context.Context, pk
 	}
 	warn, err := p.fetchJSON(ctx, endpoint, "application/json", &versions)
 	if err != nil || warn != nil {
-		return nil, "", timelineFetchFailedWarning(p, endpoint, err, warn)
+		return timelineDoc{endpoint: endpoint, warn: warn, err: err}
 	}
 	timeline := make([]VersionRelease, 0, len(versions))
 	var latest string
@@ -2316,7 +2349,7 @@ func (p *registryMetadataProvider) fetchRubyGemsTimeline(ctx context.Context, pk
 		}
 		timeline = append(timeline, rel)
 	}
-	return timeline, latest, nil
+	return timelineDoc{timeline: timeline, latest: latest, endpoint: endpoint}
 }
 
 // rubyGemsOwner is the subset of the RubyGems owners.json record we
@@ -2409,7 +2442,7 @@ func (p *registryMetadataProvider) runNuGet(ctx context.Context, pkg, ver string
 		// The flat container 404s a missing nuspec whether the package id
 		// is unknown or only the version is; its {id}/index.json says
 		// which.
-		warn = p.promoteVersionNotFound(ctx, warn, endpoint, pkg, ver, p.probeNuGetPackage(pkg))
+		warn = p.promoteVersionNotFound(ctx, "nuget", warn, endpoint, pkg, ver, p.probeNuGetPackage(pkg))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -2585,38 +2618,136 @@ func (p *registryMetadataProvider) fetchNuGetTimeline(ctx context.Context, pkg s
 
 // -- Composer / Packagist ---------------------------------------------
 
+// composerVersionEntry is one element of a Packagist p2 `packages[name]`
+// array. It was an anonymous struct written out twice; it is a named type
+// now because expandComposerMinified has to build these from raw JSON.
+type composerVersionEntry struct {
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Time        string   `json:"time"`
+	License     any      `json:"license"`
+	Description string   `json:"description"`
+	Homepage    string   `json:"homepage"`
+	Keywords    []string `json:"keywords"`
+	Source      struct {
+		URL  string `json:"url"`
+		Type string `json:"type"`
+	} `json:"source"`
+	Dist struct {
+		URL       string `json:"url"`
+		Type      string `json:"type"`
+		Shasum    string `json:"shasum"`
+		Reference string `json:"reference"`
+	} `json:"dist"`
+	Authors []struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	} `json:"authors"`
+	Support    map[string]string `json:"support"`
+	Require    map[string]string `json:"require"`
+	RequireDev map[string]string `json:"require-dev"`
+	Suggest    map[string]string `json:"suggest"`
+}
+
+// composerUnsetSentinel is how the `composer/2.0` minified metadata format
+// encodes "this field, which the previous entry had, is GONE in this one".
+// It is a bare JSON string in a position the schema types as an object or
+// an array.
+const composerUnsetSentinel = `"__unset"`
+
+// composerMinifiedFormat is the value of the document's `minified` key when
+// the entry array is a delta chain rather than a list of complete records.
+const composerMinifiedFormat = "composer/2.0"
+
+// expandComposerMinified implements the expand half of Packagist's
+// `composer/metadata-minifier`, and it is the fix for TWO defects that
+// between them accounted for the single largest false-positive cell in the
+// server-side risk corpus: 35 of the 60 most-installed Composer packages
+// (58.3%) firing BOTH lic.missing and license.unidentified.
+//
+// The format, which this reader did not implement:
+//
+//	entry[0]  complete record
+//	entry[i]  ONLY the fields that differ from entry[i-1]; a field that
+//	          was REMOVED is present with the literal value "__unset"
+//
+// Defect one — the decode. `require`, `require-dev`, `suggest` and
+// `support` are typed map[string]string, so a single `"suggest":"__unset"`
+// anywhere in a package's version history is a string where an object is
+// expected. encoding/json aborts the document, runComposer takes its
+// warning branch, and the ENTIRE report comes back empty: no licence, no
+// release date, no maintainers, no dependencies, no source repo. The
+// scorer then reads a fact-free report as a clean one. psr/log carries
+// `"require":"__unset"` on 1.0.0 and guzzlehttp/guzzle carries
+// `"suggest":"__unset"`; both graded allow with a licence FP attached.
+//
+// Defect two — the deltas. Even where nothing is unset and the decode
+// succeeds, 99.4% of version entries carry no `license` key at all,
+// because it is unchanged from the entry before. Any coordinate that is
+// not the newest release therefore lost its licence, its description, its
+// homepage, its authors and its keywords. That is why the corpus's
+// composer licences correlate exactly with "is this the latest version".
+//
+// Both are fixed by expanding before decoding: carry every field forward,
+// then delete the ones this entry explicitly unsets.
+//
+// The `__unset` strip runs unconditionally because it is a decode-killer
+// regardless of provenance. The carry-forward runs ONLY when the document
+// declares itself minified — on a hypothetical non-minified document an
+// absent field means absent, and inheriting one would invent a fact.
+func expandComposerMinified(raw []map[string]json.RawMessage, minified bool) []map[string]json.RawMessage {
+	out := make([]map[string]json.RawMessage, 0, len(raw))
+	var prev map[string]json.RawMessage
+	for _, entry := range raw {
+		expanded := make(map[string]json.RawMessage, len(entry)+len(prev))
+		if minified {
+			for k, v := range prev {
+				expanded[k] = v
+			}
+		}
+		for k, v := range entry {
+			if string(v) == composerUnsetSentinel {
+				delete(expanded, k)
+				continue
+			}
+			expanded[k] = v
+		}
+		out = append(out, expanded)
+		prev = expanded
+	}
+	return out
+}
+
+// decodeComposerEntries re-marshals each expanded entry into the typed
+// struct. An entry that still fails to decode is SKIPPED rather than
+// failing the whole document — the old all-or-nothing behaviour is exactly
+// what turned one malformed field into a fact-free report.
+func decodeComposerEntries(raw []map[string]json.RawMessage) []composerVersionEntry {
+	out := make([]composerVersionEntry, 0, len(raw))
+	for _, m := range raw {
+		b, err := json.Marshal(m)
+		if err != nil {
+			continue
+		}
+		var e composerVersionEntry
+		if err := json.Unmarshal(b, &e); err != nil {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 func (p *registryMetadataProvider) runComposer(ctx context.Context, pkg, ver string) (PartialReport, error) {
 	lower := strings.ToLower(pkg)
 	endpoint := fmt.Sprintf("%s/p2/%s.json", p.endpoints.composer, lower)
+	// Decoded as raw JSON per entry, not straight into the typed struct,
+	// because the document is a delta chain that has to be expanded first.
+	// See expandComposerMinified.
 	var pack struct {
-		Packages map[string][]struct {
-			Name        string   `json:"name"`
-			Version     string   `json:"version"`
-			Time        string   `json:"time"`
-			License     any      `json:"license"`
-			Description string   `json:"description"`
-			Homepage    string   `json:"homepage"`
-			Keywords    []string `json:"keywords"`
-			Source      struct {
-				URL  string `json:"url"`
-				Type string `json:"type"`
-			} `json:"source"`
-			Dist struct {
-				URL       string `json:"url"`
-				Type      string `json:"type"`
-				Shasum    string `json:"shasum"`
-				Reference string `json:"reference"`
-			} `json:"dist"`
-			Authors []struct {
-				Name  string `json:"name"`
-				Email string `json:"email"`
-				Role  string `json:"role"`
-			} `json:"authors"`
-			Support    map[string]string `json:"support"`
-			Require    map[string]string `json:"require"`
-			RequireDev map[string]string `json:"require-dev"`
-			Suggest    map[string]string `json:"suggest"`
-		} `json:"packages"`
+		Minified string                                  `json:"minified"`
+		Packages map[string][]map[string]json.RawMessage `json:"packages"`
 	}
 	warn, err := p.fetchJSON(ctx, endpoint, "application/json", &pack)
 	if err != nil {
@@ -2624,45 +2755,20 @@ func (p *registryMetadataProvider) runComposer(ctx context.Context, pkg, ver str
 	}
 	pr := PartialReport{}
 	if warn != nil {
-		pr.Warnings = append(pr.Warnings, *warn)
+		pr.Warnings = append(pr.Warnings, *promotePackagumentNotFound(p, "composer", warn, endpoint, pkg, ver))
 		return pr, nil
 	}
 
-	entries := pack.Packages[lower]
-	if entries == nil {
-		entries = pack.Packages[pkg]
+	rawEntries := pack.Packages[lower]
+	if rawEntries == nil {
+		rawEntries = pack.Packages[pkg]
 	}
+	entries := decodeComposerEntries(
+		expandComposerMinified(rawEntries, pack.Minified == composerMinifiedFormat))
 	if len(entries) == 0 {
 		return PartialReport{}, nil
 	}
-	var match *struct {
-		Name        string   `json:"name"`
-		Version     string   `json:"version"`
-		Time        string   `json:"time"`
-		License     any      `json:"license"`
-		Description string   `json:"description"`
-		Homepage    string   `json:"homepage"`
-		Keywords    []string `json:"keywords"`
-		Source      struct {
-			URL  string `json:"url"`
-			Type string `json:"type"`
-		} `json:"source"`
-		Dist struct {
-			URL       string `json:"url"`
-			Type      string `json:"type"`
-			Shasum    string `json:"shasum"`
-			Reference string `json:"reference"`
-		} `json:"dist"`
-		Authors []struct {
-			Name  string `json:"name"`
-			Email string `json:"email"`
-			Role  string `json:"role"`
-		} `json:"authors"`
-		Support    map[string]string `json:"support"`
-		Require    map[string]string `json:"require"`
-		RequireDev map[string]string `json:"require-dev"`
-		Suggest    map[string]string `json:"suggest"`
-	}
+	var match *composerVersionEntry
 	for i := range entries {
 		if versionMatches(entries[i].Version, ver) {
 			match = &entries[i]
@@ -2913,7 +3019,7 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	if warn != nil {
 		// @v/{ver}.info 404s for an unknown module and for an unknown
 		// version alike. @v/list answers 404 only for the former.
-		warn = p.promoteVersionNotFound(ctx, warn, infoURL, pkg, ver, p.probeGoModule(module))
+		warn = p.promoteVersionNotFound(ctx, "go", warn, infoURL, pkg, ver, p.probeGoModule(module))
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -3098,7 +3204,7 @@ func (p *registryMetadataProvider) runCocoapods(ctx context.Context, pkg, ver st
 	}
 	pr := PartialReport{}
 	if warn != nil {
-		pr.Warnings = append(pr.Warnings, *warn)
+		pr.Warnings = append(pr.Warnings, *promotePackagumentNotFound(p, "cocoapods", warn, endpoint, pkg, ver))
 		return pr, nil
 	}
 
@@ -3239,7 +3345,7 @@ func (p *registryMetadataProvider) runPub(ctx context.Context, pkg, ver string) 
 	}
 	pr := PartialReport{}
 	if warn != nil {
-		pr.Warnings = append(pr.Warnings, *warn)
+		pr.Warnings = append(pr.Warnings, *promotePackagumentNotFound(p, "pub", warn, endpoint, pkg, ver))
 		return pr, nil
 	}
 
@@ -4013,13 +4119,21 @@ func versionNotFoundWarning(p *registryMetadataProvider, endpoint, pkg, ver stri
 // after the per-version endpoint 404s:
 //
 //	package-level 200, version absent from its list -> version_not_found
-//	package-level 404                               -> keep not_found
+//	package-level 404, single-canonical registry    -> package_not_found
+//	package-level 404, federated ecosystem          -> keep not_found
 //	package-level 5xx / timeout / transport failure -> keep not_found
 //
-// The last line is the load-bearing one. Absence of evidence is not
-// evidence of absence: promoting an unanswered probe would convert every
-// registry hiccup, private mirror and replication lag into an `unknown`
-// verdict and a failed build.
+// Rows two and three are P8-04 and its correction, and the split between
+// them is the single-canonical-registry rule documented above
+// promoteVersionNotFound: only an ecosystem with ONE canonical registry
+// can have "this registry 404ed" mean "this package does not exist". Of
+// the ecosystems on this path that is pypi, cargo, rubygems and nuget;
+// maven/gradle and go are federated and keep the pre-P8-04 not_found.
+//
+// The last line is load-bearing for a different reason. Absence of
+// evidence is not evidence of absence: promoting an unanswered probe
+// would convert every registry hiccup, private mirror and replication lag
+// into an `unknown` verdict and a failed build.
 //
 // Cost: the probe sits behind the 404 branch, so a healthy scan issues
 // exactly the requests it issued before this existed — pinned by
@@ -4031,6 +4145,13 @@ func versionNotFoundWarning(p *registryMetadataProvider, endpoint, pkg, ver stri
 //
 //	pypi        WIRED   /pypi/{pkg}/json           (reuses fetchPyPITimeline)
 //	maven       WIRED   .../maven-metadata.xml     (reuses fetchMavenTimeline)
+//	                    FEDERATED: the probe still separates "this version
+//	                    is absent from a package repo1 does carry" from
+//	                    "repo1 carries nothing under this coordinate", but
+//	                    only the first is reportable. repo1 is one of
+//	                    several homes for a groupId — Central,
+//	                    maven.google.com, JitPack, corporate mirrors — so
+//	                    the second keeps not_found.
 //	cargo       WIRED   /api/v1/crates/{crate}     (reuses fetchCargoTimeline)
 //	rubygems    WIRED   /api/v1/versions/{gem}.json(reuses fetchRubyGemsTimeline)
 //	nuget       WIRED   flat-container {id}/index.json — deliberately NOT the
@@ -4040,6 +4161,11 @@ func versionNotFoundWarning(p *registryMetadataProvider, endpoint, pkg, ver stri
 //	                    for exactly the popular packages where a wrong
 //	                    promotion would hurt most.
 //	go          WIRED   /{module}/@v/list (text/plain)
+//	                    FEDERATED, same split as maven: the module path is
+//	                    the identity and proxy.golang.org is a cache of
+//	                    public VCS, so a private, vanity or GOPRIVATE
+//	                    module 404s there while existing. A total 404 keeps
+//	                    not_found.
 //	docker      WIRED   free — runDocker ALREADY fetches the repository
 //	                    object first and the per-tag object second, so both
 //	                    halves of the evidence are in hand with no extra
@@ -4059,11 +4185,24 @@ func versionNotFoundWarning(p *registryMetadataProvider, endpoint, pkg, ver stri
 
 // packageProbe issues exactly ONE package-level request and reports what
 // the registry said: the version list the document enumerated, the URL
-// asked (for the warning message), and whether the registry answered at
-// all. ok is false for every non-200 outcome — 404, 5xx, timeout,
-// transport error and decode failure alike — because none of them is
-// evidence about versions.
-type packageProbe func(ctx context.Context) (published []string, endpoint string, ok bool)
+// asked (for the warning message), and the RAW warning from the fetch —
+// nil when the registry answered 200.
+//
+// THE WARNING, NOT A BARE bool, IS THE WHOLE OF P8-04. Every probe used
+// to collapse its outcome to `ok bool`, so a package-level 404 ("this
+// package does not exist upstream") and a 5xx ("the registry told us
+// nothing") arrived at promoteVersionNotFound as the same value and both
+// kept the generic not_found code. core/coverage classifies not_found as
+// an OK code — a real answer, correctly — and risk_projection.go keys
+// only on version_not_found, so neither the projection nor the
+// fail-closed gate ever saw a difference. The result, verified against
+// live registries: `rubygems colourama` → ALLOW 96 (A), `pypi
+// requests-python` → ALLOW 92 (A). A textbook slopsquat graded A.
+//
+// Returning the warning keeps the two facts distinguishable without
+// inventing a second vocabulary: the codes are the ones the fetch
+// helpers already emit.
+type packageProbe func(ctx context.Context) (published []string, endpoint string, warn *Warning)
 
 // promoteVersionNotFound upgrades a per-version not_found into the
 // version_not_found marker when — and only when — the package-level
@@ -4073,17 +4212,48 @@ type packageProbe func(ctx context.Context) (published []string, endpoint string
 // That early return is the cost guarantee: on the success path (warn ==
 // nil) and on every non-404 failure the provider issues the same
 // requests it always did.
-func (p *registryMetadataProvider) promoteVersionNotFound(ctx context.Context, warn *Warning, versionEndpoint, pkg, ver string, probe packageProbe) *Warning {
+func (p *registryMetadataProvider) promoteVersionNotFound(ctx context.Context, ecosystem string, warn *Warning, versionEndpoint, pkg, ver string, probe packageProbe) *Warning {
 	if warn == nil || warn.Code != "not_found" {
 		return warn
 	}
-	published, probeEndpoint, ok := probe(ctx)
+	published, probeEndpoint, probeWarn := probe(ctx)
 	switch {
-	case !ok:
-		// Either the package really is absent (404) — in which case
-		// not_found is already the correct, narrower answer — or the
-		// registry told us nothing at all. Claiming a version does not
-		// exist on the back of a 5xx would be a fabrication.
+	case isDefiniteAbsence(probeWarn):
+		// The PACKAGE does not exist in the registry we asked — the
+		// per-version endpoint 404ed and so did the package-level
+		// document.
+		//
+		// Whether that is a statement about the PACKAGE or only about
+		// THIS REGISTRY depends on the ecosystem, and only the former
+		// may be reported as an absent package. See the
+		// single-canonical-registry rule above: for the Maven family and
+		// for Go a repo1 / proxy.golang.org 404 means "not in the
+		// registry we checked", which is the pre-P8-04 not_found, and
+		// saying anything stronger mislabels 1,405 production Android
+		// coordinates as names a model invented.
+		if !ecosystemHasSingleCanonicalRegistry(ecosystem) {
+			return warn
+		}
+		// Here the premise holds, and this is a different, stronger fact
+		// than "that version was never published". Until P8-04 it was
+		// reported as the generic not_found, which nothing downstream
+		// consumes: the coordinate came back fully scored, with every
+		// category at its 100 base, as a clean ALLOW. A hallucinated
+		// package name is precisely the surface this product exists to
+		// catch.
+		//
+		// It is a positive answer from the registry, not an outage, so
+		// it is classified in core/coverage's okCodes alongside
+		// not_found and version_not_found — the refusal that IS
+		// warranted comes from the unknown verdict, not from the
+		// coverage gate.
+		return packageNotFoundWarning(p, versionEndpoint, probeEndpoint, pkg, ver)
+	case probeWarn != nil:
+		// The registry told us nothing at all — 5xx, timeout, transport
+		// error, decode failure. Absence of evidence is not evidence of
+		// absence: promoting an unanswered probe would convert every
+		// registry hiccup, private mirror and replication lag into an
+		// `unknown` verdict and a failed build.
 		return warn
 	case len(published) == 0:
 		// A 200 that enumerated nothing is a partial document, not a
@@ -4098,6 +4268,169 @@ func (p *registryMetadataProvider) promoteVersionNotFound(ctx context.Context, w
 		return warn
 	}
 	return versionNotFoundByProbeWarning(p, versionEndpoint, probeEndpoint, pkg, ver, len(published))
+}
+
+// -- The single-canonical-registry rule (P8-04 correction) ------------
+//
+// A 404 from ONE registry only proves that a package does not exist when
+// the ecosystem HAS one canonical registry. That premise is true for npm,
+// PyPI, crates.io, RubyGems, NuGet, Packagist, pub.dev and the CocoaPods
+// trunk: the bare coordinate `left-pad` MEANS registry.npmjs.org's
+// `left-pad`, so if that registry says no such package, there is no such
+// package to speak of.
+//
+// It is FALSE for the Maven family and for Go, and shipping it as though
+// it were universal was a defect measured against production: 1,405 of the
+// 1,699 registrymetadata `not_found` rows in the 2026-08-25 export are
+// real Android/AndroidX coordinates — `androidx.*`, `com.android.tools.*`
+// — which are published to Google's Maven repository and are simply not
+// in repo1. Verified by hand:
+//
+//	repo1.maven.org   androidx/work/work-runtime/maven-metadata.xml -> 404
+//	maven.google.com  androidx/work/work-runtime/maven-metadata.xml -> 301
+//
+// Under the unrestricted rule `androidx.work:work-runtime@2.11.2` — a real,
+// ubiquitous dependency — was told its name may have been "invented by a
+// model rather than published". That is a REGISTRY-COVERAGE GAP wearing the
+// costume of a slopsquat finding, and an operator who sees it once stops
+// believing the marker at all.
+//
+// So the marker is restricted to the ecosystems whose premise holds. The
+// excluded ones keep the pre-P8-04 `not_found`, which is the honest code:
+// "not found in the registry we checked".
+//
+//	maven, gradle  a groupId is a NAMESPACE, not a registry pointer.
+//	               Coordinates legitimately live in Maven Central,
+//	               maven.google.com, JitPack and corporate Nexus /
+//	               Artifactory instances. repo1 is one of several homes,
+//	               so its 404 is a statement about repo1.
+//	go             the module PATH is the identity and proxy.golang.org is
+//	               a cache of public VCS, not a namespace owner. GOPRIVATE
+//	               and a direct GOPROXY are first-class in the toolchain,
+//	               so a private or vanity module 404s on the public proxy
+//	               while existing perfectly well. Production agrees: every
+//	               go `not_found` row in the export is an `example.com/...`
+//	               module path, i.e. exactly the shape that would be
+//	               mislabelled.
+//	docker         a coordinate names its own registry; Docker Hub is one
+//	               of many. Already outside this path — runDocker handles
+//	               its evidence pair inline and mints only
+//	               version_not_found.
+//	huggingface    already excluded upstream: a revision 404 cannot be told
+//	               apart from a commit SHA this replica has not fetched.
+//
+// This does NOT weaken the detection P8-04 exists for. The slopsquat
+// surface — `npm leftpadd`, `pypi colourama`, `pub htttp`,
+// `pub flutter_secure_strorage` — is entirely inside the included set, and
+// TestSlopsquatCoordinatesStillReachUnknown pins those four coordinates.
+//
+// SEPARATE QUESTION, deliberately NOT answered here: whether the provider
+// should also query maven.google.com for `androidx.*` / `com.android.*`.
+// That would be a real coverage gain, but it adds an outbound registry and
+// moves verdicts in the LOOSENING direction, so it needs its own decision
+// and its own measurement.
+var singleCanonicalRegistryEcosystems = map[string]struct{}{
+	"npm": {}, "yarn": {}, "bun": {},
+	"pypi": {}, "pip": {},
+	"cargo":     {},
+	"rubygems":  {},
+	"nuget":     {},
+	"composer":  {},
+	"cocoapods": {},
+	"pub":       {},
+}
+
+// ecosystemHasSingleCanonicalRegistry reports whether a 404 from the one
+// registry this provider asks is evidence that the PACKAGE does not exist,
+// as opposed to evidence that it is not in the registry we happened to ask.
+//
+// Unknown ecosystems answer false. The map is an ALLOWLIST for the same
+// reason isDefiniteAbsence is: the default for anything added later must be
+// the pre-P8-04 `not_found`, never a claim that a real package was invented
+// by a model.
+func ecosystemHasSingleCanonicalRegistry(ecosystem string) bool {
+	_, ok := singleCanonicalRegistryEcosystems[normalizeEcosystemKey(ecosystem)]
+	return ok
+}
+
+// isDefiniteAbsence reports whether a package-level probe warning is
+// POSITIVE evidence that the package does not exist upstream, as opposed
+// to evidence that we could not reach the registry.
+//
+// The allowlist is deliberately narrow and deliberately an ALLOWLIST. Only
+// a 404 is an answer. Every other failure the fetch helpers can produce —
+// http_5xx, http_403, transport, decode, context_cancelled,
+// registry_fetch_exhausted_retries — is silence, and silence must keep
+// today's behaviour. A denylist would mean any code added later defaults
+// to "the package does not exist", which is the direction that breaks
+// builds.
+//
+// nil means the registry answered 200 and is NOT absence; that case is
+// handled by the version-list arms of promoteVersionNotFound.
+func isDefiniteAbsence(w *Warning) bool {
+	if w == nil {
+		return false
+	}
+	switch w.Code {
+	case "not_found", "http_404":
+		return true
+	}
+	return false
+}
+
+// packageNotFoundWarning builds the WarnPackageNotFound marker: the
+// per-version endpoint 404ed AND the package-level document 404ed.
+//
+// The message names BOTH endpoints because the finding IS the pair — one
+// 404 alone is ambiguous, and an operator reading the report has to be
+// able to check the same two URLs we did. No version count: there is no
+// version list, and printing 0 would read as "enumerated an empty list",
+// the shape versionNotFoundWarning documents as a bug rather than a
+// finding.
+func packageNotFoundWarning(p *registryMetadataProvider, versionEndpoint, probeEndpoint, pkg, ver string) *Warning {
+	return &Warning{
+		Provider: "registrymetadata",
+		Code:     WarnPackageNotFound,
+		Message: fmt.Sprintf("endpoint=%s package=%s version=%s packageEndpoint=%s",
+			versionEndpoint, pkg, ver, probeEndpoint),
+		At: p.now(),
+	}
+}
+
+// promotePackagumentNotFound upgrades the generic `not_found` produced by
+// a PACKAGE-LEVEL document fetch into WarnPackageNotFound (P8-04).
+//
+// The packument ecosystems (npm, composer, cocoapods, pub) need no
+// second probe the way the per-version ecosystems do: the document they
+// fetch IS the package object, so a 404 on it is definitionally "no such
+// package" rather than "no such version". They were nonetheless left on
+// the generic not_found, which the projection never consumes and
+// core/coverage classifies as OK — so a package name that does not exist
+// anywhere came back fully scored with every category at its 100 base.
+//
+// SAME EVIDENCE STANDARD as the Group-A probe: only a 404. A 5xx, an auth
+// wall, a timeout or a decode failure keeps today's behaviour, because
+// those say nothing about whether the package exists. isDefiniteAbsence
+// is the single shared allowlist.
+//
+// Returns warn unchanged when it is not a definite absence, so the call
+// sites stay one line.
+func promotePackagumentNotFound(p *registryMetadataProvider, ecosystem string, warn *Warning, endpoint, pkg, ver string) *Warning {
+	if !isDefiniteAbsence(warn) {
+		return warn
+	}
+	// Same restriction the Group-A path applies, for the same reason: a
+	// 404 from one registry is only evidence about the PACKAGE when the
+	// ecosystem has one canonical registry. Every ecosystem on this path
+	// does today; the gate is here so that adding one which does not
+	// cannot silently inherit the stronger claim.
+	if !ecosystemHasSingleCanonicalRegistry(ecosystem) {
+		return warn
+	}
+	// One endpoint, named twice, because the message shape is shared with
+	// the Group-A marker and an operator re-running the check by hand
+	// should see exactly the URL we asked.
+	return packageNotFoundWarning(p, endpoint, endpoint, pkg, ver)
 }
 
 // versionNotFoundByProbeWarning builds the marker for the Group A
@@ -4199,13 +4532,9 @@ func canonicalVersionKey(ver string) string {
 // already fetches for the version timeline, so the probe adds no new URL
 // shape to maintain.
 func (p *registryMetadataProvider) probePyPIPackage(pkg string) packageProbe {
-	return func(ctx context.Context) ([]string, string, bool) {
-		endpoint := fmt.Sprintf("%s/pypi/%s/json", p.endpoints.pypi, url.PathEscape(pkg))
-		timeline, _, warn := p.fetchPyPITimeline(ctx, pkg)
-		if warn != nil {
-			return nil, endpoint, false
-		}
-		return timelineVersions(timeline), endpoint, true
+	return func(ctx context.Context) ([]string, string, *Warning) {
+		doc := p.fetchPyPITimelineDoc(ctx, pkg)
+		return timelineVersions(doc.timeline), doc.endpoint, doc.probeWarning()
 	}
 }
 
@@ -4214,35 +4543,23 @@ func (p *registryMetadataProvider) probePyPIPackage(pkg string) packageProbe {
 // which carries the canonical <versions> list. Maven has no package
 // object of any other kind.
 func (p *registryMetadataProvider) probeMavenPackage(groupPath, artifact string) packageProbe {
-	return func(ctx context.Context) ([]string, string, bool) {
-		endpoint := fmt.Sprintf("%s/%s/%s/maven-metadata.xml", p.endpoints.maven, groupPath, artifact)
-		timeline, _, _, warn := p.fetchMavenTimeline(ctx, groupPath, artifact)
-		if warn != nil {
-			return nil, endpoint, false
-		}
-		return timelineVersions(timeline), endpoint, true
+	return func(ctx context.Context) ([]string, string, *Warning) {
+		doc := p.fetchMavenTimelineDoc(ctx, groupPath, artifact)
+		return timelineVersions(doc.timeline), doc.endpoint, doc.probeWarning()
 	}
 }
 
 func (p *registryMetadataProvider) probeCargoPackage(pkg string) packageProbe {
-	return func(ctx context.Context) ([]string, string, bool) {
-		endpoint := fmt.Sprintf("%s/api/v1/crates/%s", p.endpoints.cargo, url.PathEscape(pkg))
-		timeline, _, warn := p.fetchCargoTimeline(ctx, pkg)
-		if warn != nil {
-			return nil, endpoint, false
-		}
-		return timelineVersions(timeline), endpoint, true
+	return func(ctx context.Context) ([]string, string, *Warning) {
+		doc := p.fetchCargoTimelineDoc(ctx, pkg)
+		return timelineVersions(doc.timeline), doc.endpoint, doc.probeWarning()
 	}
 }
 
 func (p *registryMetadataProvider) probeRubyGemsPackage(pkg string) packageProbe {
-	return func(ctx context.Context) ([]string, string, bool) {
-		endpoint := fmt.Sprintf("%s/api/v1/versions/%s.json", p.endpoints.rubygems, url.PathEscape(pkg))
-		timeline, _, warn := p.fetchRubyGemsTimeline(ctx, pkg)
-		if warn != nil {
-			return nil, endpoint, false
-		}
-		return timelineVersions(timeline), endpoint, true
+	return func(ctx context.Context) ([]string, string, *Warning) {
+		doc := p.fetchRubyGemsTimelineDoc(ctx, pkg)
+		return timelineVersions(doc.timeline), doc.endpoint, doc.probeWarning()
 	}
 }
 
@@ -4255,16 +4572,20 @@ func (p *registryMetadataProvider) probeRubyGemsPackage(pkg string) packageProbe
 // on, silently disabling the check exactly where it matters most.
 func (p *registryMetadataProvider) probeNuGetPackage(pkg string) packageProbe {
 	lower := strings.ToLower(pkg)
-	return func(ctx context.Context) ([]string, string, bool) {
+	return func(ctx context.Context) ([]string, string, *Warning) {
 		endpoint := fmt.Sprintf("%s/%s/index.json", p.endpoints.nuget, url.PathEscape(lower))
 		var idx struct {
 			Versions []string `json:"versions"`
 		}
 		warn, err := p.fetchJSON(ctx, endpoint, "application/json", &idx)
-		if err != nil || warn != nil {
-			return nil, endpoint, false
+		if err != nil && warn == nil {
+			warn = &Warning{Provider: "registrymetadata", Code: "transport",
+				Message: err.Error(), At: p.now()}
 		}
-		return idx.Versions, endpoint, true
+		if warn != nil {
+			return nil, endpoint, warn
+		}
+		return idx.Versions, endpoint, nil
 	}
 }
 
@@ -4278,14 +4599,76 @@ func (p *registryMetadataProvider) probeNuGetPackage(pkg string) packageProbe {
 // body, and promoteVersionNotFound's empty-list guard keeps that case on
 // the generic not_found.
 func (p *registryMetadataProvider) probeGoModule(module string) packageProbe {
-	return func(ctx context.Context) ([]string, string, bool) {
+	return func(ctx context.Context) ([]string, string, *Warning) {
 		endpoint := fmt.Sprintf("%s/%s/@v/list", p.endpoints.goproxy, module)
 		lines, warn, err := p.fetchLines(ctx, endpoint)
-		if err != nil || warn != nil {
-			return nil, endpoint, false
+		if err != nil && warn == nil {
+			warn = &Warning{Provider: "registrymetadata", Code: "transport",
+				Message: err.Error(), At: p.now()}
 		}
-		return lines, endpoint, true
+		if warn != nil {
+			return nil, endpoint, warn
+		}
+		return lines, endpoint, nil
 	}
+}
+
+// timelineDoc is what a package-level registry document yielded: the
+// version list, the registry's own "latest" label, the endpoint asked,
+// and the RAW fetch outcome.
+//
+// It exists because two callers need the SAME fetch-and-parse and
+// DIFFERENT failure reporting, and collapsing them is what produced
+// P8-04:
+//
+//   - the version-timeline path wraps every failure as
+//     timeline_fetch_failed. That is right there — the primary
+//     per-version fetch already succeeded, so a failed timeline is
+//     recoverable and the code says "we are missing version history",
+//     which core/coverage reads as an outage.
+//   - the package-level EXISTENCE probe must tell a definite 404 ("this
+//     package does not exist upstream") apart from a 5xx or a timeout
+//     ("the registry told us nothing"). Those are opposite facts and
+//     timeline_fetch_failed erases the difference.
+//
+// The raw warning is kept unwrapped here and wrapped by wrapped() at the
+// timeline call sites, so neither caller can silently inherit the other's
+// classification.
+type timelineDoc struct {
+	timeline    []VersionRelease
+	latest      string
+	lastUpdated time.Time
+	endpoint    string
+	// warn is the RAW warning from the fetch helpers — "not_found",
+	// "http_503", "transport", "decode", … — or nil on a 200.
+	warn *Warning
+	err  error
+}
+
+// ok reports whether the registry answered with a document we parsed.
+func (d timelineDoc) ok() bool { return d.warn == nil && d.err == nil }
+
+// wrapped renders the fetch outcome the way the TIMELINE path reports it.
+// Returns nil when the fetch succeeded.
+func (d timelineDoc) wrapped(p *registryMetadataProvider) *Warning {
+	if d.ok() {
+		return nil
+	}
+	return timelineFetchFailedWarning(p, d.endpoint, d.err, d.warn)
+}
+
+// probeWarning renders the fetch outcome the way the EXISTENCE-PROBE path
+// reports it: the raw warning, unwrapped, so isDefiniteAbsence can tell a
+// 404 from an outage. A transport error that produced no warning is given
+// one, because "no warning and no document" must not read as a 200.
+func (d timelineDoc) probeWarning() *Warning {
+	if d.warn != nil {
+		return d.warn
+	}
+	if d.err != nil {
+		return &Warning{Provider: "registrymetadata", Code: "transport", Message: d.err.Error()}
+	}
+	return nil
 }
 
 // timelineFetchFailedWarning builds a stable-code Warning for the

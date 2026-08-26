@@ -568,7 +568,8 @@ func GuardDigestMismatchCount() uint64 { return guardDigestMismatch.Load() }
 // CHAINSAW_GUARD_ARTIFACT_DIR. Looks for <eco>/<name>-<version>.* and, when the
 // spec is unpinned, <eco>/<name>.* as a fallback.
 //
-// Every no-bytes path here is acquireMiss, deliberately. The probe loop tries
+// Every LOOKUP path here is acquireMiss, deliberately (the anchor check at the
+// end is the one exception and reports for itself). The probe loop tries
 // many candidate paths and most are absent by design, so a failed ReadFile
 // cannot be told apart from a file that was never staged without an extra stat
 // per candidate. The staging directory is operator-controlled — an attacker who
@@ -607,8 +608,8 @@ func localArtifactBytes(spec packageSpec) ([]byte, acquireResult) {
 				if err != nil || len(data) == 0 {
 					continue
 				}
-				if checked, match := verifySRI(data, spec.Integrity); checked && !match {
-					return nil, acquireDigestMismatch
+				if res := anchorVerdict(data, spec.Integrity); res != acquireOK {
+					return nil, res
 				}
 				return data, acquireOK
 			}
@@ -934,8 +935,8 @@ func fetchArtifactBytes(spec packageSpec) ([]byte, acquireResult) {
 	if err != nil {
 		return nil, acquireIncomplete
 	}
-	if checked, match := verifySRI(data, spec.Integrity); checked && !match {
-		return nil, acquireDigestMismatch
+	if res := anchorVerdict(data, spec.Integrity); res != acquireOK {
+		return nil, res
 	}
 	return data, acquireOK
 }
@@ -1439,7 +1440,18 @@ func findNpmCacheIntegrity(indexDir, name, file string) (string, acquireResult) 
 // sriRank orders the SRI hash algorithms this build can recompute, strongest
 // last. An algorithm absent from this table cannot be verified at all — see
 // verifySRI's "checked" return.
-var sriRank = map[string]int{"sha1": 1, "sha256": 2, "sha512": 3}
+//
+// WHY sha384 IS HERE even though npm never emits it. An algorithm missing from
+// this table is INVISIBLE to verifySRI's pass 1, so it cannot raise `best` —
+// which means "sha384-<valid> sha1-<valid>" let the sha1 entry decide the
+// verdict, the exact downgrade the two-pass rewrite exists to prevent. SRI
+// names sha384 as a first-class algorithm (it is one of the three in the W3C
+// spec) and ssri implements it, so any producer other than npm proper — a
+// private mirror, an Artifactory proxy that re-hashes, a lockfile converted
+// from another tool — may legitimately put one in front of us. Two lines of
+// Go turn a silent downgrade AND (since anchorVerdict) a would-be false
+// "could not verify" into a real check. Leaving it out saves nothing.
+var sriRank = map[string]int{"sha1": 1, "sha256": 2, "sha384": 3, "sha512": 4}
 
 // sriDigest hashes data with one named SRI algorithm. ok=false for an algorithm
 // this build does not implement.
@@ -1447,6 +1459,9 @@ func sriDigest(algo string, data []byte) ([]byte, bool) {
 	switch strings.ToLower(algo) {
 	case "sha512":
 		s := sha512.Sum512(data)
+		return s[:], true
+	case "sha384":
+		s := sha512.Sum384(data)
 		return s[:], true
 	case "sha256":
 		s := sha256.Sum256(data)
@@ -1536,6 +1551,56 @@ func verifySRI(data []byte, sri string) (checked, ok bool) {
 	return checked, false
 }
 
+// anchorVerdict says what a lockfile anchor implies about bytes the guard is
+// about to analyze. It exists so the three byte sources that consult
+// packageSpec.Integrity (staged dir, npm cacache, deep fetch) cannot drift on
+// the answer, and so the answer has THREE outcomes rather than two.
+//
+// Every one of those call sites used to be written as
+//
+//	if checked, match := verifySRI(data, anchor); checked && !match { … }
+//
+// which collapses "no anchor was supplied" and "an anchor was supplied and I
+// could not check it" into the same silent acquireOK. The first is honest and
+// extremely common; the second is a report of verification on bytes nothing
+// verified.
+//
+//   - anchor EMPTY → acquireOK. This is the load-bearing case and it must
+//     stay non-degraded. packageSpec.Integrity is populated only on a
+//     LOCKFILE-DRIVEN install; a git dep, a `file:` dep, a bare
+//     `npm install newpkg`, and every pnpm/yarn path legitimately carry no
+//     anchor at all (see packageSpec.Integrity's coverage limit). Reporting
+//     those as degraded would fire input.signalsUnavailable on ordinary
+//     honest installs — which builtin.rego turns into a warn line today and
+//     which any operator running the fail-closed posture turns into a
+//     REFUSAL. That is the 2026-08-24 ruling's failure mode, not its intent:
+//     the lane must produce the fact honestly, and the honest fact about a
+//     package with no anchor is "there was nothing to check", not "the check
+//     failed".
+//   - anchor PRESENT and unverifiable (checked=false: it names only
+//     algorithms this build cannot recompute, or every entry at the strongest
+//     named rank is malformed) → acquireIncomplete. An anchor WAS supplied,
+//     so the guard was asked to bind these bytes to something outside the
+//     cache and did not manage it. That is the acquireIncomplete story
+//     verbatim: attempted, could not finish, cannot claim the bytes are the
+//     ones that will run. It is deliberately not acquireDigestMismatch —
+//     unverifiable is not disproven.
+//   - anchor PRESENT and disagrees → acquireDigestMismatch, unchanged.
+func anchorVerdict(data []byte, anchor string) acquireResult {
+	if strings.TrimSpace(anchor) == "" {
+		return acquireOK
+	}
+	checked, match := verifySRI(data, anchor)
+	switch {
+	case !checked:
+		return acquireIncomplete
+	case !match:
+		return acquireDigestMismatch
+	default:
+		return acquireOK
+	}
+}
+
 // splitSRIEntry splits one SRI entry into its lowercased algorithm and base64
 // digest, dropping the "?option" suffix SRI permits (cacache and npm both emit
 // "?size=…"). ok=false for anything that is not "<algo>-<digest>".
@@ -1591,9 +1656,11 @@ func subtleEqual(a, b []byte) bool { return subtle.ConstantTimeCompare(a, b) == 
 //     lockfile anchor was available (see packageSpec.Integrity's coverage
 //     limit) and this check is skipped rather than failed.
 //
-// A failure of either is acquireDigestMismatch, not acquireIncomplete: the
-// guard did get bytes, and they are demonstrably not the bytes that will be
-// installed. Every OTHER failure stays acquireIncomplete, and the caller only
+// A DISAGREEMENT in either is acquireDigestMismatch, not acquireIncomplete:
+// the guard did get bytes, and they are demonstrably not the bytes that will
+// be installed. An INABILITY to run either check is a third thing and reports
+// acquireIncomplete — "I could not verify" is neither "it matched" nor "it
+// did not". Every OTHER failure stays acquireIncomplete, and the caller only
 // reaches this function with an integrity string npm's own index produced. A
 // malformed integrity means a corrupt index; an unreadable file at a path that
 // computed cleanly means the artifact is present and unreadable. Neither is
@@ -1627,9 +1694,19 @@ func readCacacheContent(cacache, indexIntegrity, expected string) ([]byte, acqui
 	// under this function's own threat model — and it is about to become a
 	// filesystem path component. Allowlisting it to the algorithms cacache
 	// actually uses closes the traversal ("../../../../tmp-YWJjZA==" resolves
-	// to algo "../../../../tmp") and, just as importantly, guarantees the
-	// verifySRI call below is always CHECKED rather than silently skipped on
-	// an algorithm this build cannot recompute.
+	// to algo "../../../../tmp").
+	//
+	// WHAT IT DOES NOT GUARANTEE. This check used to also claim it made the
+	// verifySRI call below "always CHECKED rather than silently skipped". That
+	// stopped being true when verifySRI was rewritten to two passes: it now
+	// ranks across EVERY entry in the string, so a second entry naming a
+	// STRONGER algorithm with a malformed digest ("sha256-<valid, and it is
+	// the entry that addressed the content> sha512-@@@bad@@@") raises `best`
+	// to a rank at which nothing decodes, and verifySRI returns checked=false
+	// however well-formed first[0] was. The allowlist only ever constrained
+	// first[0]. The guarantee is now enforced below, where it belongs: an
+	// unCHECKED index verification is acquireIncomplete, not acquireOK on
+	// bytes nothing hashed.
 	if _, known := sriRank[algo]; !known {
 		return nil, acquireIncomplete
 	}
@@ -1643,11 +1720,24 @@ func readCacacheContent(cacache, indexIntegrity, expected string) ([]byte, acqui
 	if rerr != nil || len(data) == 0 {
 		return nil, acquireIncomplete
 	}
-	if checked, match := verifySRI(data, indexIntegrity); checked && !match {
+	// Check (1), the index integrity. UnCHECKED is acquireIncomplete here and
+	// NOT acquireOK, and the asymmetry with the anchor below is deliberate:
+	// indexIntegrity is never legitimately absent on this path — it is the
+	// string that just resolved the content address, it is non-empty, and its
+	// first entry's algorithm is in sriRank. So the only way to reach
+	// checked=false is a corrupt or tampered index entry, which is the same
+	// fact every other malformed-index branch above already reports.
+	checked, match := verifySRI(data, indexIntegrity)
+	if !checked {
+		return nil, acquireIncomplete
+	}
+	if !match {
 		return nil, acquireDigestMismatch
 	}
-	if checked, match := verifySRI(data, expected); checked && !match {
-		return nil, acquireDigestMismatch
+	// Check (2), the lockfile anchor. Absent is normal and stays acquireOK;
+	// present-and-unverifiable is acquireIncomplete. See anchorVerdict.
+	if res := anchorVerdict(data, expected); res != acquireOK {
+		return nil, res
 	}
 	return data, acquireOK
 }

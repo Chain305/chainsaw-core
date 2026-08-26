@@ -99,29 +99,94 @@ func (c *nugetChecker) Check(ctx context.Context, packageName, version string) R
 		return Result{
 			Status:    StatusUnavailable,
 			Ecosystem: "nuget",
+			Reason:    ReasonArtifactTooLarge,
 			Error:     fmt.Sprintf("artifact too large to verify (> %d bytes); range-GET path is a follow-up", nupkgSizeCap),
 		}
 	}
 	pkgBytes, status, err := fetchBytes(ctx, c.client, pkgURL, nupkgSizeCap)
 	if err != nil {
 		if isNotFound(status) {
-			return Result{Status: StatusMissing, Ecosystem: "nuget"}
+			return Result{
+				Status:    StatusMissing,
+				Ecosystem: "nuget",
+				Reason:    ReasonNoAttestationFound,
+				Error:     "nuget.org has no .nupkg at this coordinate (404)",
+			}
 		}
-		return Result{Status: StatusFailed, Ecosystem: "nuget", Error: err.Error()}
+		// Not reaching nuget.org is not a signature failure. StatusFailed
+		// is reserved for "we validated and it did not hold" — see the
+		// StatusFailed doc comment.
+		return Result{
+			Status:    StatusUnavailable,
+			Ecosystem: "nuget",
+			Reason:    ReasonUpstreamError,
+			Error:     fmt.Sprintf("fetch .nupkg: %v", err),
+		}
 	}
 
 	sig, err := extractNupkgSignature(pkgBytes)
 	if err != nil {
-		return Result{Status: StatusMissing, Ecosystem: "nuget"}
+		return Result{
+			Status:    StatusMissing,
+			Ecosystem: "nuget",
+			Reason:    ReasonNoAttestationFound,
+			Error:     "the .nupkg contains no .signature.p7s entry (package is unsigned)",
+		}
 	}
 
 	p7, err := pkcs7.Parse(sig)
 	if err != nil {
+		// A signature IS present — we simply cannot walk its wire format.
+		// That is a coverage gap in chainsaw, not evidence against the
+		// package, so it must never render as StatusFailed (the status a
+		// TAMPERED package gets). See P8-46.
 		return Result{
-			Status:          StatusFailed,
+			Status:          StatusUnverified,
 			Ecosystem:       "nuget",
 			AttestationType: "x509",
-			Error:           fmt.Sprintf("parse PKCS#7: %v", err),
+			Reason:          ReasonAttestationUnparseable,
+			Error: fmt.Sprintf("chainsaw could not parse the .signature.p7s CMS structure (%v); "+
+				"the package IS signed — this is a chainsaw coverage gap, not a signature failure", err),
+		}
+	}
+
+	// P8-46, the case that actually bites: pkcs7.Parse SUCCEEDS on a real
+	// nuget.org signature and returns ZERO signers.
+	//
+	// nuget.org emits CMS SignedData version 3 whose SignerInfo uses the
+	// CMS SignerIdentifier CHOICE `subjectKeyIdentifier [0] IMPLICIT OCTET
+	// STRING`. digitorus/pkcs7 models only the PKCS#7 `issuerAndSerialNumber
+	// SEQUENCE` form, so the SET OF SignerInfo fails to decode — and
+	// parseSignedData (verify.go:242) DISCARDS the asn1.Unmarshal error.
+	// Parse therefore returns a PKCS7 with 6 certificates and no signers,
+	// and VerifyWithChain reports "pkcs7: Message has no signers", which
+	// this checker used to surface as FAILED — the same verdict a tampered
+	// package gets, on a package that is correctly author- AND
+	// repository-signed.
+	//
+	// Distinguishing the gap from a real failure is exact, not heuristic:
+	// re-decode the SignedData with the SignerIdentifier left opaque. If
+	// SignerInfo entries are present in the DER but absent from p7.Signers,
+	// the library dropped them and nothing has been verified either way.
+	if len(p7.Signers) == 0 {
+		if n, derr := cmsSignerInfoCount(sig); derr == nil && n > 0 {
+			return Result{
+				Status:          StatusUnverified,
+				Ecosystem:       "nuget",
+				AttestationType: "x509",
+				Reason:          ReasonAttestationUnparseable,
+				Error: fmt.Sprintf("the .signature.p7s carries %d CMS SignerInfo entr(ies) that chainsaw's "+
+					"PKCS#7 parser cannot read (nuget.org uses the CMS subjectKeyIdentifier form of "+
+					"SignerIdentifier; digitorus/pkcs7 only models issuerAndSerialNumber). The package IS "+
+					"signed — this is a chainsaw coverage gap, not a signature failure", n),
+			}
+		}
+		return Result{
+			Status:          StatusUnverified,
+			Ecosystem:       "nuget",
+			AttestationType: "x509",
+			Reason:          ReasonAttestationUnparseable,
+			Error:           "the .signature.p7s parsed but declares no signers; nothing could be validated",
 		}
 	}
 
@@ -131,6 +196,7 @@ func (c *nugetChecker) Check(ctx context.Context, packageName, version string) R
 			Status:          StatusUnverified,
 			Ecosystem:       "nuget",
 			AttestationType: "x509",
+			Reason:          ReasonTrustRootsUnavailable,
 			Error:           fmt.Sprintf("load trust roots: %v", err),
 		}
 	}

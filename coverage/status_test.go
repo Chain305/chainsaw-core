@@ -22,6 +22,8 @@ func TestStatusForWarnCode(t *testing.T) {
 		{"timeline_fetch_failed", StatusUnavailable},
 		{"repolink_probe_error", StatusUnavailable},
 		{"transitive_dep_not_cached", StatusUnavailable},
+		{"transitive_dep_superseded", StatusUnavailable},
+		{"transitive_dep_lookup_error", StatusUnavailable},
 		{"http_500", StatusUnavailable},
 		{"http_503", StatusUnavailable},
 		{"http_401", StatusUnavailable},

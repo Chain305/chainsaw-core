@@ -274,6 +274,14 @@ func runChainsawExit(t *testing.T, bin string, extraEnv []string, args ...string
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = t.TempDir() // isolated cwd; no lockfiles, no repo files
 	cmd.Env = append(os.Environ(),
+		// Isolated config home for the same reason as guardBypassRun: the env
+		// starts from os.Environ() so the child would otherwise resolve
+		// configDir() to the developer's real ~/.chainsaw. No command driven
+		// through this helper currently reaches saveGuardState (they are
+		// scan/intel/admission paths, not guarded installs), so this is
+		// prophylactic rather than a fix — but it is one line, and the next
+		// exit-code case someone adds here may well be `npm install`.
+		"CHAINSAW_CONFIG_HOME="+t.TempDir(),
 		"CHAINSAW_OFFLINE=1",
 		"CHAINSAW_TELEMETRY_DISABLED=1",
 		"CHAINSAW_NO_TELEMETRY=1",

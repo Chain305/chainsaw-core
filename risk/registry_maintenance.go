@@ -95,6 +95,26 @@ func init() {
 			if time.Since(*in.PublishedAt) > VeryNewPackageThreshold {
 				return false, "", nil
 			}
+			// VersionDataAvailable IS the guard this signal was always
+			// missing. Input.VersionDataAvailable's own doc comment says it
+			// "Prevents the maint.very_new_package false-positive that fires
+			// when the sparse proxy-driven store returns 0 versions for a
+			// popular package" — and until now NOTHING in core/risk read the
+			// field. It was declared, projected, unit-tested for being set,
+			// and consulted by nobody, so the false positive it names was
+			// live: this signal's second clause treats "we have no version
+			// history" as "there is no version history", which is the one
+			// reading the flag exists to forbid.
+			//
+			// Dormant, not firing, is the right posture. A −10 maintenance
+			// signal asserted on absent facts is the shape of claim this
+			// engine must not make; the package is still scored by every
+			// other signal, and the sparse-store path
+			// (premium/provider_maintenance.go's GetPackageVersionHistory
+			// fallback) recovers the count as soon as history exists.
+			if !in.VersionDataAvailable {
+				return false, "", nil
+			}
 			if in.VersionCount > VeryNewPackageMaxVersions {
 				return false, "", nil
 			}

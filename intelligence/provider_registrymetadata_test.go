@@ -307,6 +307,11 @@ func TestRegistryMetadataProvider_MavenPOM(t *testing.T) {
 	}
 }
 
+// AMENDED for P8-04: a packument 404 is still fail-soft (no error), but it
+// now says WHICH absence it observed. The packument IS the package object,
+// so a 404 on it means the package does not exist — not merely that a
+// version was never published — and that distinction is what stops
+// `missing-pkg` being graded a clean ALLOW.
 func TestRegistryMetadataProvider_NotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/missing-pkg", func(w http.ResponseWriter, r *http.Request) {
@@ -317,8 +322,11 @@ func TestRegistryMetadataProvider_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run should not error on 404: %v", err)
 	}
-	if len(pr.Warnings) == 0 || pr.Warnings[0].Code != "not_found" {
-		t.Fatalf("expected not_found warning, got: %+v", pr.Warnings)
+	if len(pr.Warnings) == 0 || pr.Warnings[0].Code != WarnPackageNotFound {
+		t.Fatalf("expected %s warning, got: %+v", WarnPackageNotFound, pr.Warnings)
+	}
+	if !strings.Contains(pr.Warnings[0].Message, "package=missing-pkg") {
+		t.Errorf("marker must name the package it could not find, got %q", pr.Warnings[0].Message)
 	}
 }
 

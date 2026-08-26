@@ -72,8 +72,14 @@ func TestUncoveredEcosystemIsNotClaimedAsSupported(t *testing.T) {
 // apt-hosted, dnf-baseos, maven-central), while the ecosystem field must
 // carry the bare format.
 func TestRepositoryNamesAreNotEcosystems(t *testing.T) {
+	// The first four are the names that actually appear in the ecosystem
+	// column of the 2026-08-25 production export, which is how the leak was
+	// found. Note that the prefix is NOT the format for three of them
+	// (npmjs->npm, crates->cargo, rubygems->rubygems), so no string
+	// transform can recover the format: name to format is a database fact.
 	repoNames := []string{
-		"maven-hosted", "maven-central", "crates-hosted", "apt-hosted",
+		"maven-hosted", "npmjs-hosted", "rubygems-hosted", "crates-hosted",
+		"maven-central", "apt-hosted",
 		"dnf-hosted", "dnf-baseos", "yum-hosted", "docker-hub", "cocoapods-trunk",
 	}
 	for _, name := range repoNames {
@@ -86,6 +92,15 @@ func TestRepositoryNamesAreNotEcosystems(t *testing.T) {
 		if _, ok := supportedOSVEcosystems[name]; ok {
 			t.Errorf("supportedOSVEcosystems lists repository name %q", name)
 		}
+		// knownEcosystems is the domain markNoAdvisoryCoverage takes its
+		// complement over. A repository name inside it would make P8-05
+		// state "no advisory source covers ecosystem maven-hosted" about
+		// packages that are ordinary Maven packages with full coverage.
+		if isKnownEcosystem(name) {
+			t.Errorf("isKnownEcosystem(%q) = true — %q is a repository name. "+
+				"Admitting it lets the no-advisory-coverage stamp make a "+
+				"COVERAGE claim about a ROUTING bug.", name, name)
+		}
 	}
 	// And the formats those names carry MUST be recognised, so the fix
 	// (writing repo.Format instead of repo.Name) actually restores coverage.
@@ -94,5 +109,21 @@ func TestRepositoryNamesAreNotEcosystems(t *testing.T) {
 			t.Errorf("osv.CanonicalEcosystem(%q) = \"\" — this is a repository FORMAT "+
 				"and must canonicalise, or writing repo.Format gains nothing", format)
 		}
+	}
+	// Every bare FORMAT must also be inside the P8-05 domain, or the same
+	// fix (writing repo.Format) would trade one wrong stamp for another.
+	for _, format := range []string{
+		"maven", "gradle", "cargo", "npm", "pypi", "pip", "nuget", "go",
+		"rubygems", "composer", "cocoapods", "pub", "swift", "docker",
+		"huggingface", "apt", "yum", "dnf",
+	} {
+		if !isKnownEcosystem(format) {
+			t.Errorf("isKnownEcosystem(%q) = false — this is a repository "+
+				"FORMAT and must be in the domain", format)
+		}
+	}
+	if isKnownEcosystem("") {
+		t.Error("isKnownEcosystem(\"\") = true — an unresolved refresher row " +
+			"carries no ecosystem and nothing may be claimed about it")
 	}
 }

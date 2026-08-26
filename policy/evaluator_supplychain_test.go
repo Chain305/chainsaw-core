@@ -1067,11 +1067,19 @@ func TestEvaluatePublisherChangedNilConditionAnyValue(t *testing.T) {
 	}
 }
 
-// TestEvaluateSkipsUnsupportedCargoPublisherChanged asserts the matrix skip
-// path fires for cargo (❌ for PublisherChanged) — a policy referencing the
-// condition must not fire on cargo, and must emit one skip audit event.
-// Mirrors the HasProvenance skip test so the drift pattern is preserved.
-func TestEvaluateSkipsUnsupportedCargoPublisherChanged(t *testing.T) {
+// TestEvaluateEnforcesCargoPublisherChanged is the P8-59 regression.
+//
+// This test previously asserted the OPPOSITE — that a cargo publisherChanged
+// BLOCK rule must NOT block — because core/policy/proxy_matrix.go carried
+// `ConditionPublisherChanged: SupportNone, // not extracted in PR 2` for cargo.
+// That comment outlived its fix: supportedMetadiffEcosystems
+// (internal/intelligence/premium/provider_metadiff.go:83-91) covers cargo, and
+// cargo is in supportedRegistryEcosystems too, so both sides of the publisher
+// diff are hydrated. The stale cell made detectUnsupported fire and
+// evaluator.go:868-871 `continue` past the WHOLE policy — the operator's rule
+// silently stopped enforcing. The old assertion was pinning that fail-open in
+// place, which is why it survived so long.
+func TestEvaluateEnforcesCargoPublisherChanged(t *testing.T) {
 	store, _ := NewStore(nil)
 	auditor := &captureAuditor{}
 	eval := NewEvaluator(store).WithSkipAuditor(auditor)
@@ -1081,7 +1089,7 @@ func TestEvaluateSkipsUnsupportedCargoPublisherChanged(t *testing.T) {
 		RepositoryFormat: "cargo",
 		PackageName:      "cool-crate",
 		PackageVersion:   "1.2.3",
-		PublisherChanged: true, // would match without the matrix guard
+		PublisherChanged: true,
 		OrgID:            "org-1",
 	}
 
@@ -1097,8 +1105,51 @@ func TestEvaluateSkipsUnsupportedCargoPublisherChanged(t *testing.T) {
 	}
 
 	result := eval.EvaluateWithPolicies(ctx, []Policy{pol}, 0)
+	if result.Action != ModeBlock {
+		t.Fatalf("cargo+PublisherChanged rule must block — got %s (%s)",
+			result.Action, result.Reason)
+	}
+	if result.MatchedPolicy == nil || result.MatchedPolicy.ID != pol.ID {
+		t.Fatalf("expected the cargo rule to match, got %+v", result.MatchedPolicy)
+	}
+	if events := auditor.snapshot(); len(events) != 0 {
+		t.Fatalf("expected no skip events for a supported condition, got %d (%+v)", len(events), events)
+	}
+}
+
+// TestEvaluateSkipsUnsupportedGoPublisherChanged keeps the skip path itself
+// under test, using an ecosystem that genuinely has no producer: gomod is
+// absent from supportedMetadiffEcosystems, so PublisherChanged is SupportNone
+// for EcoGo and a rule referencing it must be skipped with one audit event
+// rather than silently never matching.
+func TestEvaluateSkipsUnsupportedGoPublisherChanged(t *testing.T) {
+	store, _ := NewStore(nil)
+	auditor := &captureAuditor{}
+	eval := NewEvaluator(store).WithSkipAuditor(auditor)
+
+	ctx := EvaluationContext{
+		Repository:       "my-go-proxy",
+		RepositoryFormat: "gomod",
+		PackageName:      "example.com/mod",
+		PackageVersion:   "v1.2.3",
+		PublisherChanged: true, // would match without the matrix guard
+		OrgID:            "org-1",
+	}
+
+	pol := Policy{
+		ID:         "pol-go-block-publisher-changed",
+		Precedence: 10,
+		Mode:       ModeBlock,
+		Status:     StatusEnabled,
+		CreatedAt:  time.Now(),
+		Conditions: Conditions{
+			PublisherChanged: boolPtr(true),
+		},
+	}
+
+	result := eval.EvaluateWithPolicies(ctx, []Policy{pol}, 0)
 	if result.Action != ModeAllow {
-		t.Fatalf("cargo+PublisherChanged rule must not block — got %s (%s)",
+		t.Fatalf("go+PublisherChanged rule must not block — got %s (%s)",
 			result.Action, result.Reason)
 	}
 	if result.MatchedPolicy != nil {

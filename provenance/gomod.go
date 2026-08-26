@@ -14,7 +14,7 @@ import (
 // sumdbVKey is the well-known verifier key for sum.golang.org. Public and
 // stable; baking it in lets us verify sumdb notes offline once fetched.
 // See https://go.dev/blog/module-mirror-launch.
-const sumdbVKey = "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ggk+ez7SUGOVmbro"
+const sumdbVKey = "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8"
 
 // gomodChecker verifies Go modules against the sum.golang.org transparency
 // log. This is a weaker provenance signal than Sigstore (it binds

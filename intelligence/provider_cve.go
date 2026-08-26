@@ -47,11 +47,19 @@ var supportedCVEEcosystems = map[string]struct{}{
 
 // Supports returns true for ecosystems the vulnerability scanners cover.
 // Nil store → always false (disabled).
+//
+// The ecosystem is lower-cased and trimmed before the lookup, matching
+// what osvProvider and registryMetadataProvider already do. Callers are
+// not normalised: `Key.Ecosystem` arrives verbatim from a URL path
+// segment, a lockfile parser or a policy row, so a `PyPI`-cased
+// coordinate reached Supports() with its display casing intact and lost
+// the ENTIRE provider lane — silently, because scanner.go's skip is a
+// bare `continue` with no warning. See P8-33.
 func (p *cveProvider) Supports(ecosystem string) bool {
 	if p.store == nil {
 		return false
 	}
-	_, ok := supportedCVEEcosystems[ecosystem]
+	_, ok := supportedCVEEcosystems[normalizeEcosystemKey(ecosystem)]
 	return ok
 }
 

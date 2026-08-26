@@ -57,6 +57,26 @@ var cargoTopSeed []byte
 //go:embed seeds/rubygems_top.txt
 var rubygemsTopSeed []byte
 
+// dockerTopSeed is the embedded popular-images list for Docker: the Docker
+// Official Images (`library/*`), which are the only Docker names typed bare
+// and the only ones with a single authoritative publisher. Docker Hub caps
+// anonymous pagination at 100 results, so there is no live endpoint that can
+// even enumerate the 144-image set, let alone rank a broader one. See
+// seeds/docker_top.txt for the sourcing rationale and the deliberate decision
+// to exclude org-scoped images from the corpus.
+//
+//go:embed seeds/docker_top.txt
+var dockerTopSeed []byte
+
+// swiftTopSeed is the embedded popular-packages list for Swift, in SE-0292
+// `scope.name` form. Neither the Swift Package Index nor a Swift Package
+// Registry publishes a download-ranked top-N — SPM resolves from git, so no
+// download counter exists — hence a curated seed rather than a live fetch.
+// See seeds/swift_top.txt.
+//
+//go:embed seeds/swift_top.txt
+var swiftTopSeed []byte
+
 // Fetcher retrieves popular packages from upstream registry APIs.
 type Fetcher struct {
 	client *http.Client
@@ -249,6 +269,31 @@ func (f *Fetcher) FetchPopularPackages(ctx context.Context, ecosystem string, li
 		// pub.dev has no documented top-N endpoint; rely on the embedded
 		// seed for now (same posture as Go/CocoaPods).
 		pkgs, err = f.fetchSeed(ctx, pubTopSeed, limit)
+	case "docker":
+		// Docker Hub's anonymous listing endpoint refuses to page past 100
+		// results ("pagination offset too large for anonymous requests"),
+		// so no live call can even enumerate the official-image set. The
+		// seed is generated from docker-library/official-images and ranked
+		// by pull_count out-of-band.
+		pkgs, err = f.fetchSeed(ctx, dockerTopSeed, limit)
+	case "swift":
+		// SPM resolves from git for most packages, so no registry publishes
+		// a download rank. Seed is the SwiftPackageIndex package list
+		// intersected with GitHub stars; see seeds/swift_top.txt.
+		pkgs, err = f.fetchSeed(ctx, swiftTopSeed, limit)
+	case "github_actions":
+		// The corpus is a Go literal rather than a seed file because it is
+		// also the derivation source for githubactions.DefaultKnownPublishers,
+		// which reads the owner prefixes. Marketplace publishes no top-N API.
+		//
+		// This branch is the ONLY thing that puts PopularGitHubActions() on
+		// the production bootstrap path. Before it existed the function had
+		// zero production callers — its own doc comment claimed it was loaded
+		// "typically at startup" and nothing loaded it, so every Action
+		// resolved "clean". Do not remove it without removing the ecosystem
+		// from EcosystemsWithTyposquatRisk() as well; the pairing is asserted
+		// by TestEveryEnrolledTyposquatEcosystemHasACorpus.
+		pkgs = truncatePopular(PopularGitHubActions(), limit)
 	default:
 		return nil, nil // no API available
 	}
@@ -263,6 +308,16 @@ func (f *Fetcher) FetchPopularPackages(ctx context.Context, ecosystem string, li
 		}
 	}
 	return pkgs, nil
+}
+
+// truncatePopular caps an in-memory curated corpus at limit, preserving the
+// caller's rank order. Rank comes from the source list, never from position
+// here, so a smaller limit narrows the corpus without renumbering it.
+func truncatePopular(pkgs []PopularPackage, limit int) []PopularPackage {
+	if limit <= 0 || limit >= len(pkgs) {
+		return pkgs
+	}
+	return pkgs[:limit]
 }
 
 // fetchSeed reads an embedded newline-delimited popular-package list. It

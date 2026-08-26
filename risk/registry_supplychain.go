@@ -80,10 +80,35 @@ func init() {
 
 	// MaxImpact tier: HIGH-confidence harmful (30-40). High-severity matched
 	// signal — strong evidence of attack pattern but not RCE-grade.
+	//
+	// SevCritical, not SevHigh — and the severity is load-bearing, not
+	// cosmetic. The ceiling of 30 pins overall to EXACTLY thresholdQuarantine
+	// when this fires alone, and resolveVerdict's band-1 test is strict
+	// (`overall < thresholdQuarantine`), so 30 falls through into band 2.
+	// Band 2 has one and only one way back out: the critical-signal
+	// escalation, driven by hasCriticalSignal. At SevHigh this signal took
+	// neither path and resolved to bare Warn — a high-confidence typosquat
+	// could never produce a blocking verdict, which is the whole point of
+	// detecting one. Its two ceiling-30 peers (vuln.cvss_critical,
+	// sc.transitive_critical_vuln) both already ride SevCritical for exactly
+	// this reason; this signal was the odd one out.
+	//
+	// The other two candidate fixes are wrong. Relaxing the band test to
+	// `<=` moves the boundary for every package whose organic rollup happens
+	// to land on the integer 30, with no signal-level attribution, and
+	// cascades into blockedNodes for transitive parents. Dropping the
+	// ceiling to 29 would trip UpgradePromotionEligible's bottom-band gate
+	// for the OTHER ceiling-30 signals and silently delete "upgrade to X"
+	// from a critical CVE that has a published fix.
+	//
+	// The severity change cannot interact with upgrade promotion: supply_chain
+	// is vetoed outright by upgradeVetoCategories, and UpgradePromotionEligible
+	// additionally requires a vulnerability-category deficit that a lone
+	// typosquat never produces. See TestTyposquatHighCannotPromoteToUpgradeAvailable.
 	register(Signal{
 		ID:        SignalSCTyposquatHigh,
 		Category:  CategorySupplyChain,
-		Severity:  SevHigh,
+		Severity:  SevCritical,
 		Weight:    -40,
 		MaxImpact: 30,
 		Title:     "Likely typosquat (high confidence)",
@@ -194,12 +219,18 @@ func init() {
 	// MaxImpact tier: MEDIUM-confidence harmful (50-60). Bidi/invisible
 	// Unicode is a known concealment vector but appears benignly (e.g.,
 	// internationalised tests) often enough to keep the ceiling soft.
+	//
+	// maxImpactWarnTop (59), not a literal 60. This is Trojan Source
+	// detection: the offline guard hard-blocks on it while the server, with
+	// the ceiling sitting exactly on thresholdWarn, could not produce so
+	// much as a warning — `60 < 60` is false, band 2 is skipped and the
+	// verdict is ALLOW. See P8-02.
 	register(Signal{
 		ID:          SignalSCHiddenUnicode,
 		Category:    CategorySupplyChain,
 		Severity:    SevMedium,
 		Weight:      -20,
-		MaxImpact:   60,
+		MaxImpact:   maxImpactWarnTop,
 		Title:       "Hidden Unicode in source",
 		Description: "Source files contain invisible or bidirectional Unicode that can hide malicious code from review.",
 		Fires: func(in Input) (bool, string, map[string]any) {
@@ -230,13 +261,15 @@ func init() {
 
 	// MaxImpact tier: MEDIUM-confidence harmful (50-60). Archived repos
 	// are not actively maintained but the package itself can still be
-	// fine — keep the ceiling soft.
+	// fine — keep the ceiling soft. maxImpactWarnTop (59) rather than a
+	// literal 60: a ceiling ON thresholdWarn resolves to ALLOW, which makes
+	// the ceiling decorative. See P8-02.
 	register(Signal{
 		ID:        SignalSCRepoArchived,
 		Category:  CategorySupplyChain,
 		Severity:  SevMedium,
 		Weight:    -12,
-		MaxImpact: 60,
+		MaxImpact: maxImpactWarnTop,
 		Title:     "Source repo archived",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if in.RepoLinkStatus != "archived" {
@@ -248,12 +281,14 @@ func init() {
 
 	// MaxImpact tier: MEDIUM-confidence harmful (50-60). Missing repo is
 	// a transparency degradation — medium severity matches the policy.
+	// maxImpactWarnTop (59) rather than a literal 60: a ceiling ON
+	// thresholdWarn resolves to ALLOW. See P8-02.
 	register(Signal{
 		ID:        SignalSCRepoMissing,
 		Category:  CategorySupplyChain,
 		Severity:  SevMedium,
 		Weight:    -12,
-		MaxImpact: 60,
+		MaxImpact: maxImpactWarnTop,
 		Title:     "Source repo missing",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if in.RepoLinkStatus != "missing" {

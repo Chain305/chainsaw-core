@@ -209,11 +209,48 @@ func AllConditions() []ConditionType {
 		ConditionNonExistentAuthor,
 		ConditionFirstTimeCollaborator,
 		ConditionSuspiciousRepoStars,
-		// NOTE: ConditionMaintainerAccountAge is intentionally NOT in
-		// AllConditions(). It is a numeric-threshold condition rather
-		// than a boolean signal column, so the per-ecosystem support
-		// matrix and POLICY_PROXY_MATRIX.md cells do not apply. The
-		// constant exists for ConditionsUsedBy() / DSL telemetry only.
+		// AI artifacts (Wave 6). P8-14: these six were declared as
+		// ConditionType constants, carried a cell in EVERY SupportMatrix
+		// row, and were emitted by ConditionsUsedBy — but were missing
+		// here. Everything that enumerates the matrix through
+		// AllConditions() was therefore blind to them: GET
+		// /api/policies/support-matrix omitted the columns, so the UI
+		// could not render its unsupported-condition warning, and
+		// `chainsaw policy preflight` exited 0 declaring "every
+		// condition supported" for a policy that used one.
+		ConditionDangerousPickle,
+		ConditionUnsafeSerializationFormat,
+		ConditionModelCardInjection,
+		ConditionAgentToolDangerousCapability,
+		ConditionMCPServerDeclared,
+		ConditionPromptTemplateInjection,
+		// NOTE: ConditionMaintainerAccountAge is the ONE ConditionType
+		// deliberately held out of AllConditions(). Read this before
+		// "fixing" it either way:
+		//
+		//   - The original rationale recorded here — that it is a
+		//     numeric-threshold condition, so "the per-ecosystem support
+		//     matrix and POLICY_PROXY_MATRIX.md cells do not apply" — is
+		//     FACTUALLY WRONG and has been since the constant landed.
+		//     Every SupportMatrix row carries a
+		//     ConditionMaintainerAccountAge cell, POLICY_PROXY_MATRIX.md
+		//     has a "maintainer account age" column, and
+		//     TestSupportMatrixMatchesMarkdown asserts the two agree.
+		//     ConditionCooldown and ConditionPackageAge are numeric-
+		//     threshold conditions too and both are listed above.
+		//
+		//   - So the exclusion is currently UNJUSTIFIED, not principled:
+		//     it makes the support-matrix API and preflight blind to
+		//     maintainerAccountAgeDaysMax in exactly the way P8-14
+		//     describes for the six AI conditions.
+		//
+		// It is held out here only because the Phase-8 remediation plan
+		// scoped this change to the six AI conditions. Adding it is
+		// verdict-neutral for the same reason they were (detectUnsupported
+		// reads ConditionsUsedBy, never AllConditions) and should be its
+		// own follow-up. TestEveryEmittedConditionIsInAllConditions
+		// carries it as the single documented exclusion, with this
+		// reason attached.
 	}
 }
 
@@ -367,8 +404,16 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
 		ConditionDeprecatedByMaintainer:     SupportFull, // yanked
-		ConditionShrinkwrapPresent:          SupportNone, // npm-only concept
-		ConditionManifestConfusion:          SupportNone, // npm-only
+		// P8-39 rail finding (same class as P8-58/P8-59, found by
+		// TestSupportMatrixMatchesProviderCoverage rather than by hand):
+		// shrinkwrapProvider is ecosystem-generic. ecosystemLockfiles
+		// (provider_shrinkwrap.go:53-63) maps pip/pypi → Pipfile.lock, poetry.lock and Run walks the
+		// shared artifact map for them exactly as it does for npm; only
+		// the bundledDependencies suppression is npm-family-specific.
+		// SupportNone made detectUnsupported skip the WHOLE policy: a
+		// live fail-open on a signal that is genuinely produced.
+		ConditionShrinkwrapPresent: SupportFull,
+		ConditionManifestConfusion: SupportNone, // npm-only
 		// Wave 2: depspec parser covers pyproject.toml (PEP 621 + Poetry)
 		// and requirements.txt. All four signals apply.
 		ConditionGitDependency:           SupportFull,
@@ -386,11 +431,23 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionURLStrings:          SupportFull,
 		ConditionMinifiedCode:        SupportFull,
 		// Wave 4: PyPI has a user page (HTML 404 probe) but no per-
-		// release uploader field — FirstTimeCollaborator is ❌.
-		ConditionTrivialPackage:        SupportFull,
-		ConditionTooManyFiles:          SupportFull,
-		ConditionNonExistentAuthor:     SupportPartial,
-		ConditionFirstTimeCollaborator: SupportNone,
+		// release uploader field.
+		ConditionTrivialPackage:    SupportFull,
+		ConditionTooManyFiles:      SupportFull,
+		ConditionNonExistentAuthor: SupportPartial,
+		// P8-58: was SupportNone on the "no per-release uploader field"
+		// rationale, which described the ORIGINAL network-fetching
+		// implementation. firstTimeCollaboratorProvider now reads the
+		// persisted publisher_set from the metadata store instead
+		// (provider_wave4_rtt.go:340-353 records the widening), and
+		// pip/pypi is in firstTimeCollabSupportedEcosystems. Leaving the
+		// cell at SupportNone made detectUnsupported fire and
+		// evaluator.go continue past the WHOLE policy — a rule an
+		// operator wrote, against a signal that is genuinely hydrated,
+		// silently stopped enforcing. Partial (not Full) because the
+		// signal is behind CHAINSAW_WAVE4_FIRST_TIME_COLLABORATOR, the
+		// same posture as npm/rubygems.
+		ConditionFirstTimeCollaborator: SupportPartial,
 		ConditionSuspiciousRepoStars:   SupportPartial,
 		ConditionMaintainerAccountAge:  SupportPartial,
 		// AI artifacts (Wave 6).
@@ -456,10 +513,15 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		// counts archive entries reliably. No user endpoint → NonE is
 		// ❌. No per-version uploader change → FirstTime ❌.
 		// RepoStars reads scm.url from the POM when present.
-		ConditionTrivialPackage:        SupportPartial,
-		ConditionTooManyFiles:          SupportFull,
-		ConditionNonExistentAuthor:     SupportNone,
-		ConditionFirstTimeCollaborator: SupportNone,
+		ConditionTrivialPackage:    SupportPartial,
+		ConditionTooManyFiles:      SupportFull,
+		ConditionNonExistentAuthor: SupportNone,
+		// P8-58: see the pip row. maven/gradle are in
+		// firstTimeCollabSupportedEcosystems — the provider reads the
+		// persisted publisher_set, not a per-version uploader field, so
+		// the "no per-version uploader change" rationale above no longer
+		// applies to this cell.
+		ConditionFirstTimeCollaborator: SupportPartial,
 		ConditionSuspiciousRepoStars:   SupportPartial,
 		ConditionMaintainerAccountAge:  SupportNone,
 		// AI artifacts (Wave 6).
@@ -567,7 +629,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
 		ConditionBuildRsExecutes:            SupportFull, // build.rs static scan ships for cargo crates
-		ConditionPublisherChanged:           SupportNone, // not extracted in PR 2
+		// P8-59: the "not extracted in PR 2" comment outlived its fix.
+		// supportedMetadiffEcosystems (provider_metadiff.go:88-91) covers
+		// cargo — crates.io exposes a stable per-crate owner set via
+		// api/v1/crates/{name}/owners — and cargo is also in
+		// supportedRegistryEcosystems, so both the incoming publisher IDs
+		// and the persisted baseline set are hydrated. SupportNone made
+		// detectUnsupported skip the WHOLE policy: a live fail-open.
+		ConditionPublisherChanged:           SupportFull,
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
 		ConditionPublishVelocityAnomaly:     SupportNone, // no per-version publisher metadata
@@ -577,8 +646,16 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
 		ConditionDeprecatedByMaintainer:     SupportFull, // crate version "yanked"
-		ConditionShrinkwrapPresent:          SupportNone,
-		ConditionManifestConfusion:          SupportNone,
+		// P8-39 rail finding (same class as P8-58/P8-59, found by
+		// TestSupportMatrixMatchesProviderCoverage rather than by hand):
+		// shrinkwrapProvider is ecosystem-generic. ecosystemLockfiles
+		// (provider_shrinkwrap.go:53-63) maps cargo → Cargo.lock and Run walks the
+		// shared artifact map for them exactly as it does for npm; only
+		// the bundledDependencies suppression is npm-family-specific.
+		// SupportNone made detectUnsupported skip the WHOLE policy: a
+		// live fail-open on a signal that is genuinely produced.
+		ConditionShrinkwrapPresent: SupportFull,
+		ConditionManifestConfusion: SupportNone,
 		// Wave 2: Cargo.toml supports { git = "..." } (✅) but not raw
 		// http tarballs (registry or git only).
 		ConditionGitDependency:           SupportFull,
@@ -639,8 +716,16 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
 		ConditionDeprecatedByMaintainer:     SupportNone,
-		ConditionShrinkwrapPresent:          SupportNone,
-		ConditionManifestConfusion:          SupportNone,
+		// P8-39 rail finding (same class as P8-58/P8-59, found by
+		// TestSupportMatrixMatchesProviderCoverage rather than by hand):
+		// shrinkwrapProvider is ecosystem-generic. ecosystemLockfiles
+		// (provider_shrinkwrap.go:53-63) maps composer → composer.lock and Run walks the
+		// shared artifact map for them exactly as it does for npm; only
+		// the bundledDependencies suppression is npm-family-specific.
+		// SupportNone made detectUnsupported skip the WHOLE policy: a
+		// live fail-open on a signal that is genuinely produced.
+		ConditionShrinkwrapPresent: SupportFull,
+		ConditionManifestConfusion: SupportNone,
 		// Wave 2: Composer specifier grammar has stability flags and
 		// dev-<branch> tags outside Masterminds/semver — range/semver
 		// cells start Partial until a dedicated composer grammar lands.
@@ -702,8 +787,16 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
 		ConditionDeprecatedByMaintainer:     SupportNone, // rubygems yanked not extracted
-		ConditionShrinkwrapPresent:          SupportNone,
-		ConditionManifestConfusion:          SupportNone,
+		// P8-39 rail finding (same class as P8-58/P8-59, found by
+		// TestSupportMatrixMatchesProviderCoverage rather than by hand):
+		// shrinkwrapProvider is ecosystem-generic. ecosystemLockfiles
+		// (provider_shrinkwrap.go:53-63) maps rubygems → Gemfile.lock and Run walks the
+		// shared artifact map for them exactly as it does for npm; only
+		// the bundledDependencies suppression is npm-family-specific.
+		// SupportNone made detectUnsupported skip the WHOLE policy: a
+		// live fail-open on a signal that is genuinely produced.
+		ConditionShrinkwrapPresent: SupportFull,
+		ConditionManifestConfusion: SupportNone,
 		// Wave 2: Gemfile supports :git and :github refs (✅); no raw
 		// http tarballs.
 		ConditionGitDependency:           SupportFull,
@@ -786,10 +879,12 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		// Wave 4: NuGet packages are .dll — TrivialPackage only
 		// fires on source-embedded .nupkg. No user-exists endpoint
 		// in scope. RepoStars reads the .nuspec repository field.
-		ConditionTrivialPackage:        SupportPartial,
-		ConditionTooManyFiles:          SupportFull,
-		ConditionNonExistentAuthor:     SupportNone,
-		ConditionFirstTimeCollaborator: SupportNone,
+		ConditionTrivialPackage:    SupportPartial,
+		ConditionTooManyFiles:      SupportFull,
+		ConditionNonExistentAuthor: SupportNone,
+		// P8-58: see the pip row. nuget is in
+		// firstTimeCollabSupportedEcosystems.
+		ConditionFirstTimeCollaborator: SupportPartial,
 		ConditionSuspiciousRepoStars:   SupportPartial,
 		ConditionMaintainerAccountAge:  SupportNone,
 		// AI artifacts (Wave 6).

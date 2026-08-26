@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -98,6 +99,16 @@ const (
 	lookupNotCached                                  // dep absent — cache cold
 	lookupConstraintUnparseable                      // constraint not semver, no probe matched
 	lookupStoreError                                 // store returned a non-not-found error
+	// lookupSuperseded: a row for this dep IS cached, but it was
+	// produced by a retired matcher generation, so it is skipped for the
+	// same reason a stale row is skipped everywhere else. Split out from
+	// lookupNotCached because the two need opposite responses from an
+	// operator — a cold miss means the dep has never been scanned, a
+	// superseded row means it has and is queued for recompute — and
+	// because after an epoch bump this is the overwhelmingly common
+	// case. Reporting it as "not in cache" sent operators looking for a
+	// scan that had already happened.
+	lookupSuperseded
 )
 
 // transitiveLookup is the read-only cache slice the helper needs.
@@ -206,6 +217,34 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 				if entry.emitWarn {
 					emitTransitiveWarning(report, WarnTransitiveDepNotCached,
 						fmt.Sprintf("direct dep %s/%s@%s not in cache", eco, ref.Name, displayConstraint(ref.Constraint)))
+				}
+				continue
+			case lookupSuperseded:
+				// Deliberately NOT enqueuing a rescan here. Two
+				// mechanisms already cover this row: the matcher-epoch
+				// recompute sweep targets every row below
+				// CurrentMatcherEpoch by construction, and
+				// enqueueDependencyScans — which the scanner runs a few
+				// statements after this walk (scanner.go) — lets a stale
+				// cache entry fall through to a real Scan. Adding a third
+				// enqueue inside the BFS would fan out one scan per node
+				// per level on a cold tree, from inside a scan that is
+				// already holding a deadline.
+				//
+				// The cost of that choice is honest and bounded: this
+				// walk sees the cache as it was BEFORE the enqueuer runs,
+				// so the rollup persisted by THIS scan is missing the
+				// dep, and it corrects on the next scan of this root. The
+				// warning below says so rather than leaving the tree
+				// silently short a node.
+				if entry.emitWarn {
+					msg := fmt.Sprintf("direct dep %s/%s@%s is cached but was produced by a retired matcher generation (serve floor %d); it is queued for recompute and is excluded from this tree until then",
+						eco, ref.Name, displayConstraint(ref.Constraint), MinServeableEpoch)
+					if e := supersededDepEpoch(ctx, store, orgID, eco, ref.Name, ref.Constraint); e > 0 {
+						msg = fmt.Sprintf("direct dep %s/%s@%s is cached at matcher epoch %d, below the serve floor %d; it is queued for recompute and is excluded from this tree until then",
+							eco, ref.Name, displayConstraint(ref.Constraint), e, MinServeableEpoch)
+					}
+					emitTransitiveWarning(report, WarnTransitiveDepSuperseded, msg)
 				}
 				continue
 			case lookupConstraintUnparseable:
@@ -370,17 +409,29 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 	// UI Dependency Alerts tab has data. Without this users see an
 	// empty tab even when their direct deps have known issues.
 	if len(report.Risk.Resolution.TransitiveBlame) == 0 {
+		// te.ByKey is a map, so collect first and sort before appending.
+		// This list is rendered in order in the Dependency Alerts tab;
+		// appending straight out of map iteration meant the same tree
+		// listed the same deps in a different order on every evaluation,
+		// which reads to a user as the data changing under them.
+		fallback := make([]depgraph.Key, 0, len(te.ByKey))
 		for k, ev := range te.ByKey {
 			if k == rootKey || ev == nil {
 				continue
 			}
 			if ev.Verdict != "" && ev.Verdict != risk.VerdictAllow {
-				report.Risk.Resolution.TransitiveBlame = append(report.Risk.Resolution.TransitiveBlame, risk.Key{
-					Ecosystem: k.Ecosystem,
-					Package:   k.Name,
-					Version:   k.Version,
-				})
+				fallback = append(fallback, k)
 			}
+		}
+		sort.Slice(fallback, func(i, j int) bool {
+			return depgraph.KeyLess(fallback[i], fallback[j])
+		})
+		for _, k := range fallback {
+			report.Risk.Resolution.TransitiveBlame = append(report.Risk.Resolution.TransitiveBlame, risk.Key{
+				Ecosystem: k.Ecosystem,
+				Package:   k.Name,
+				Version:   k.Version,
+			})
 		}
 	}
 
@@ -413,6 +464,16 @@ func visitedKey(eco, name, version string) string {
 // Masterminds/semver finds 1.5.3.
 func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, name, constraint string) (depgraph.Key, *Report, lookupOutcome, error) {
 	var firstStoreErr error
+	// Epoch of the first superseded row we saw, 0 if none. Recorded so
+	// the caller can say WHY the dep was skipped rather than reporting a
+	// cached-but-retired row as an absent one. Does not change which
+	// rows are usable — a retired verdict is still not served.
+	supersededEpoch := 0
+	noteSuperseded := func(r *Report) {
+		if r != nil && supersededEpoch == 0 {
+			supersededEpoch = r.Observation.MatcherEpoch
+		}
+	}
 	for _, candidate := range candidateVersions(constraint) {
 		k := Key{Ecosystem: eco, Package: name, Version: candidate}
 		r, err := store.Get(ctx, orgID, k)
@@ -421,6 +482,9 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 		// retracted verdict is worse than no alert.
 		if err == nil && !r.MatcherStale() {
 			return depgraph.Key{Ecosystem: eco, Name: name, Version: candidate}, r, lookupResolved, nil
+		}
+		if err == nil {
+			noteSuperseded(r)
 		}
 		if err != nil && !errors.Is(err, ErrNotFound) && firstStoreErr == nil {
 			firstStoreErr = err
@@ -436,6 +500,9 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 		if err == nil && !r.MatcherStale() {
 			return depgraph.Key{Ecosystem: eco, Name: name, Version: v}, r, lookupResolved, nil
 		}
+		if err == nil {
+			noteSuperseded(r)
+		}
 		if err != nil && !errors.Is(err, ErrNotFound) && firstStoreErr == nil {
 			firstStoreErr = err
 		}
@@ -448,7 +515,40 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 		// (e.g. "expected version number" vs "improper constraint").
 		return depgraph.Key{}, nil, lookupConstraintUnparseable, parseErr
 	}
+	// Ordered after the error cases on purpose: a store error or an
+	// unparseable constraint is a different problem and stays the
+	// headline. Supersession only explains an otherwise-clean miss.
+	if supersededEpoch > 0 {
+		return depgraph.Key{}, nil, lookupSuperseded, nil
+	}
 	return depgraph.Key{}, nil, lookupNotCached, nil
+}
+
+// supersededDepEpoch re-runs the cheap half of lookupDepReport to recover
+// the epoch of a superseded row for the warning text. Split out rather
+// than widened into lookupDepReport's return signature because every
+// other caller of that function wants the report, not the epoch, and
+// this path runs at most once per direct dep on a cold tree.
+func supersededDepEpoch(ctx context.Context, store transitiveLookup, orgID, eco, name, constraint string) int {
+	for _, candidate := range candidateVersions(constraint) {
+		// matcher-epoch-exempt: this read exists BECAUSE the row is
+		// superseded — lookupDepReport has already refused it, and the
+		// only thing taken from it is Observation.MatcherEpoch, an
+		// integer used in a diagnostic warning string. No verdict,
+		// score, or report field reaches a consumer, so checking
+		// MatcherStale() here would reject the exact rows this function
+		// is asked about and always return 0.
+		if r, err := store.Get(ctx, orgID, Key{Ecosystem: eco, Package: name, Version: candidate}); err == nil && r != nil {
+			return r.Observation.MatcherEpoch
+		}
+	}
+	if v := pickConstraintMatch(ctx, store, orgID, eco, name, constraint); v != "" {
+		// matcher-epoch-exempt: same as above — epoch only, no verdict.
+		if r, err := store.Get(ctx, orgID, Key{Ecosystem: eco, Package: name, Version: v}); err == nil && r != nil {
+			return r.Observation.MatcherEpoch
+		}
+	}
+	return 0
 }
 
 // pickConstraintMatch enumerates cached versions for (eco, name) and

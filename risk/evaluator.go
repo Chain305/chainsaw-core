@@ -116,30 +116,63 @@ const ThresholdWarn = thresholdWarn
 // The tree evaluator (future commit) produces distinct values by folding
 // in transitive descendants.
 func EvaluatePackage(in Input, opts Options) *Evaluation {
-	// "Could not evaluate" is answered before any signal runs. Scoring an
-	// Input whose facts were never fetched produces a 100/allow — the
-	// same output a genuinely clean package produces — so the caller's
-	// outage would be reported to the user as a clean bill of health.
+	// ORDERING INVARIANT (P8-44) — DO NOT MOVE THIS BELOW THE
+	// SignalsUnavailable BRANCH. Pinned by TestInstantBlockPrecedesUnavailable
+	// (behavioural) and by instant_block_order_guard_test.go (source-level),
+	// because an ordering invariant is exactly what a refactor reverts
+	// silently while every other test stays green.
+	//
+	// The two instant-block facts are answered BEFORE "could not evaluate".
+	// The malware provider is Tier 1, needs no artifact, and fans out in
+	// parallel with registry metadata, so its verdict is computed and merged
+	// even when the registry says the version was never published —
+	// core/intelligence/scanner.go's partialIsBlocking even short-circuits
+	// the whole fan-out on MalwareStatus == "malicious". Answering
+	// unavailability first DELETED that verdict: an unpublished or yanked
+	// MALICIOUS version, the case you most want flagged, returned NOT
+	// EVALUATED. (This is also the true explanation of the guard-vs-server
+	// divergence on `lodahs`: the local malware index handles intro-zero
+	// ranges, so the guard blocked what the server called unknown.)
+	//
+	// Safe precisely because instantBlock is a CLOSED short-circuit: it
+	// ignores every other fact, does no additive math, and returns a fixed
+	// zero-score quarantine. An empty fact set cannot corrupt it. That is
+	// what makes this a narrow, principled exception rather than a hole —
+	// see the matching note at core/intelligence/risk_projection.go, which
+	// carries these two facts (and ONLY these two) through the three
+	// unavailability returns.
+	//
+	// The alternative that was rejected: setting SignalsUnavailable=false and
+	// letting the full signal set run. With an empty Report, lic.missing and
+	// license.unidentified fire on nothing and reproduce the fake 86/92
+	// scores this wave exists to remove.
+	// "Could not evaluate" is answered before any of the ADDITIVE signals
+	// run. Scoring an Input whose facts were never fetched produces a
+	// 100/allow — the same output a genuinely clean package produces — so
+	// the caller's outage would be reported to the user as a clean bill of
+	// health.
 	if in.SignalsUnavailable {
+		if ev := instantBlockEvaluation(in, opts); ev != nil {
+			return ev
+		}
 		return UnavailableEvaluation(in, opts)
 	}
 
 	fired := runPrimitiveSignals(in, opts.SignalWeightOverrides)
 
-	// Short-circuit for instant-block signals. Checksum-mismatch gets the
-	// same treatment as known-malicious — we know the bytes are wrong.
-	if _, ok := fired[SignalSCKnownMalicious]; ok {
-		return instantBlock(in, opts, fired, "Known-malicious package — do not install.")
-	}
-	if _, ok := fired[SignalQualChecksumMismatch]; ok {
-		return instantBlock(in, opts, fired, "Artifact checksum mismatch — tampered or corrupted bytes.")
+	// The same two facts on the fully-evaluated path. Here the WHOLE fired
+	// set is handed to instantBlock so the category breakdown still carries
+	// the full evidence of why the package was blocked; on the unavailable
+	// path above there is no other evidence to carry, and deliberately so.
+	if ev := instantBlockFrom(in, opts, fired); ev != nil {
+		return ev
 	}
 
 	compoundFired := runCompoundRules(in, fired, opts.SignalWeightOverrides)
 
 	catScores := computeCategoryScores(fired, compoundFired, in)
 	overall := ComputeOverallWithWeights(catScores, opts.CategoryWeights)
-	overall = applyMaxImpactCeiling(overall, fired, compoundFired)
+	overall, ceilingSignal := applyMaxImpactCeiling(overall, fired, compoundFired)
 	minScore, worst := minCategoryScore(catScores)
 
 	direct := Score{
@@ -147,6 +180,7 @@ func EvaluatePackage(in Input, opts Options) *Evaluation {
 		Categories:       catScores,
 		MinCategoryScore: minScore,
 		WorstCategory:    worst,
+		CeilingSignal:    ceilingSignal,
 	}
 	verdict, resolution := resolveVerdict(overall, fired, compoundFired, opts)
 
@@ -163,6 +197,82 @@ func EvaluatePackage(in Input, opts Options) *Evaluation {
 		EvaluatedAt:   opts.now(),
 		EngineVersion: EngineVersion,
 	}
+}
+
+// instantBlockIDs are the signals whose presence ends the evaluation on
+// its own, in priority order. Both describe a fact about the BYTES —
+// "this package is known malware", "these bytes are not the bytes that
+// were published" — which is why neither needs, or can be improved by,
+// the rest of the fact set.
+//
+// The order matters only for which summary a package carrying both gets;
+// the verdict is identical.
+var instantBlockIDs = []string{SignalSCKnownMalicious, SignalQualChecksumMismatch}
+
+var instantBlockSummaries = map[string]string{
+	SignalSCKnownMalicious:     "Known-malicious package — do not install.",
+	SignalQualChecksumMismatch: "Artifact checksum mismatch — tampered or corrupted bytes.",
+}
+
+// instantBlockEvaluation runs ONLY the instant-block signals against the
+// Input and returns the quarantine evaluation when one fires, or nil.
+//
+// It runs the registered signals rather than re-testing Input.IsKnown
+// Malicious inline, so the predicate stays in one place and a change to
+// the registered signal reaches this path too. It runs ONLY those
+// signals, so it is safe on an Input whose other facts were never
+// fetched: nothing else can fire, so nothing else can be scored off an
+// empty Report. That is the whole reason this is a separate walk rather
+// than a reordering of the existing runPrimitiveSignals call.
+func instantBlockEvaluation(in Input, opts Options) *Evaluation {
+	return instantBlockFrom(in, opts,
+		runNamedPrimitiveSignals(in, opts.SignalWeightOverrides, instantBlockIDs...))
+}
+
+// instantBlockFrom is the shared decision over an already-computed fired
+// set, so the unavailable path and the fully-evaluated path cannot drift
+// on WHICH signals end an evaluation or on what they say.
+func instantBlockFrom(in Input, opts Options, fired map[string]FiredSignal) *Evaluation {
+	for _, id := range instantBlockIDs {
+		if _, ok := fired[id]; ok {
+			return instantBlock(in, opts, fired, instantBlockSummaries[id])
+		}
+	}
+	return nil
+}
+
+// runNamedPrimitiveSignals is runPrimitiveSignals restricted to an
+// explicit id list. Same evaluation, same override handling, same
+// FiredSignal shape — the only difference is which registry entries are
+// consulted.
+func runNamedPrimitiveSignals(in Input, overrides map[string]int, ids ...string) map[string]FiredSignal {
+	out := make(map[string]FiredSignal, len(ids))
+	for _, id := range ids {
+		sig, ok := Registry[id]
+		if !ok {
+			continue
+		}
+		fires, detail, evidence := sig.Fires(in)
+		if !fires {
+			continue
+		}
+		w := sig.Weight
+		if overrides != nil {
+			if ov, ok := overrides[id]; ok {
+				w = float64(ov)
+			}
+		}
+		out[id] = FiredSignal{
+			ID:       id,
+			Category: sig.Category,
+			Title:    sig.Title,
+			Severity: sig.Severity,
+			Weight:   w,
+			Detail:   detail,
+			Evidence: evidence,
+		}
+	}
+	return out
 }
 
 // runPrimitiveSignals walks Registry and returns the map of fired signals
@@ -366,24 +476,36 @@ func computeOverall(cats map[Category]CategoryScore) int {
 	// (100 - clean = 0) deficit and silently behave like a perfect 100,
 	// which collapses "we have no idea" into "all clear" — the regression
 	// this rollup correction removes.
+	//
+	// Both accumulations iterate AllCategories(), NOT `range
+	// CategoryWeights`. Go randomises map order, float addition is not
+	// associative, and the result is fed to a round-half-up — so map
+	// order alone could flip the rounded score by 1 between two
+	// evaluations of identical input. That is not cosmetic: the band
+	// tests below are strict integer comparisons, so a deficit landing
+	// on a band edge made the SAME package quarantine on one call and
+	// warn on the next. Measured before this fix: 96/4000 random
+	// fixtures returned >1 distinct overall, and 160/200000 straddled a
+	// verdict band. Keep the iteration stable.
+	// Guarded by TestAllCategoriesCoversCategoryWeights.
 	availableWeight := 0.0
-	for cat, weight := range CategoryWeights {
+	for _, cat := range AllCategories() {
 		cs, ok := cats[cat]
 		if !ok || !cs.DataAvailable {
 			continue
 		}
-		availableWeight += weight
+		availableWeight += CategoryWeights[cat]
 	}
 	if availableWeight == 0 {
 		return 0
 	}
 	deficit := 0.0
-	for cat, weight := range CategoryWeights {
+	for _, cat := range AllCategories() {
 		cs, ok := cats[cat]
 		if !ok || !cs.DataAvailable {
 			continue
 		}
-		deficit += float64(100-cs.Score) * (weight / availableWeight)
+		deficit += float64(100-cs.Score) * (CategoryWeights[cat] / availableWeight)
 	}
 	overall := 100 - int(deficit+0.5) // round-half-up
 	if overall < 0 {
@@ -760,31 +882,43 @@ func absF(f float64) float64 {
 //
 // Floor factor: we use the literal MaxImpact value rather than scaling
 // it because each signal's MaxImpact is a direct policy claim.
-func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSignal) int {
+// It returns the pinning signal's ID alongside the score whenever the
+// ceiling actually BOUND — i.e. whenever the number the caller is about to
+// show a user is the ceiling rather than the rollup. This is P8-12, and it
+// is an explainability fix, not an arithmetic one: the original filing
+// claimed a composite below the minimum of its sub-scores was impossible.
+// It is not. This function clamps `overall` AFTER computeCategoryScores has
+// already stored the un-ceilinged category scores, so "overall 30, every
+// category 60+" is the DESIGNED output. What was wrong is that the clamp
+// left no trace, so the breakdown a user reads does not add up to the
+// composite they are shown and there is nothing on the page that says why.
+// The empty string means the ceiling did not bind and nothing needs saying.
+func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSignal) (int, string) {
 	// Compound rules indicate genuine multi-signal elevation; they bypass
 	// the per-signal ceiling so the additive deficit from a compound stays
 	// authoritative. The ceiling is for the lone-signal case where the
 	// category-weighted-rollup undersells severity.
 	if len(compound) > 0 {
-		return overall
+		return overall, ""
 	}
 	cap := -1 // -1 = no cap
+	capID := ""
 	for id := range primitives {
 		sig, ok := Registry[id]
 		if !ok || sig.MaxImpact <= 0 {
 			continue
 		}
-		if cap == -1 || sig.MaxImpact < cap {
-			cap = sig.MaxImpact
+		// Ties resolve on the ID so the attribution is deterministic
+		// across map-iteration orders; a user comparing two runs of the
+		// same coordinate must not see the blame move.
+		if cap == -1 || sig.MaxImpact < cap || (sig.MaxImpact == cap && id < capID) {
+			cap, capID = sig.MaxImpact, id
 		}
 	}
-	if cap == -1 {
-		return overall
+	if cap == -1 || overall <= cap {
+		return overall, ""
 	}
-	if overall > cap {
-		return cap
-	}
-	return overall
+	return cap, capID
 }
 
 // minCategoryScore returns the worst (lowest) category subscore and the

@@ -536,6 +536,11 @@ func TestVerifyHookCmd_NoStatusLinesInJSONMode(t *testing.T) {
 	withIsolatedConfigHome(t)
 	withFileCredStore(t)
 
+	// Stub the driver so this never shells out to the developer's REAL `pip`.
+	// The assertions below are about output shape and exit code, not about
+	// pip itself; without the stub this test reached the network and let the
+	// machine's own chainsaw install-hook write to the real config home.
+	withStubVerifyDriver(t, "pip")
 	cmd := newDoctorVerifyHookCmd()
 	// --json is a persistent/global flag in this CLI; register it locally
 	// so the standalone command instance honours it the way the real

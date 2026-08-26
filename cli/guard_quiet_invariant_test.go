@@ -56,7 +56,14 @@ func TestQuiet_BlockedInstallStillEmitsVerdictAndExitsBlocked(t *testing.T) {
 	cmd := exec.Command(bin, "--quiet", "npm", "install", "lodahs")
 	// Force-disable color and pin a clean env so the assertion is on the text,
 	// not on ANSI. Keep PATH so exec.LookPath inside the guard still resolves.
+	//
+	// CHAINSAW_CONFIG_HOME is mandatory here for the same reason it is in
+	// guardBypassRun: os.Environ() carries the real $HOME into the child, this
+	// run blocks, and a block goes through processGuardOutcome -> saveGuardState.
+	// Unisolated, it appended a row to the developer's real guard_state.json ring
+	// on every run. t.Setenv would not help — the writer is the subprocess.
 	cmd.Env = append(os.Environ(),
+		"CHAINSAW_CONFIG_HOME="+t.TempDir(),
 		"NO_COLOR=1",
 		"CHAINSAW_NO_TELEMETRY=1",
 	)

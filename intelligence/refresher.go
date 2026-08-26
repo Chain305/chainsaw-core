@@ -71,6 +71,14 @@ type RefresherConfig struct {
 	// implementation without a real Postgres handle.
 	Metadata MetadataSource
 
+	// Recompute is the SECOND walk source: intelligence_reports rows whose
+	// persisted matcher epoch is behind CurrentMatcherEpoch. Nil falls back
+	// to Store, which satisfies the interface — so production needs no extra
+	// wiring and tests can inject an in-memory slice. See
+	// refresher_recompute.go for why package_metadata alone cannot drain the
+	// backlog.
+	Recompute RecomputeSource
+
 	// LatestProber, when non-nil, is called by the refresher to learn
 	// the current upstream "latest version" for a package. When nil, the
 	// refresher skips new-version discovery and only re-runs Scan for
@@ -80,10 +88,12 @@ type RefresherConfig struct {
 	// EcosystemResolver maps a chainsaw proxy repository name to the
 	// provider bucket Scan expects on Key.Ecosystem (npm / pip / maven /
 	// docker / ...). Required in production so per-repo format overrides
-	// (yarn→npm, gradle→maven) flow through correctly. When nil, the
-	// refresher falls back to using the repository name as the ecosystem
-	// — providers whose Supports() check rejects the value simply no-op,
-	// so a missing resolver degrades quietly.
+	// (yarn→npm, gradle→maven) flow through correctly.
+	//
+	// When nil — or when it cannot resolve a row — the ecosystem is left
+	// EMPTY. It is deliberately not filled in with the repository name: a
+	// repository name is not an ecosystem (Phase 7 Wave 6), and a
+	// fabricated bucket is read downstream as a fact about the package.
 	EcosystemResolver EcosystemResolver
 
 	// ArtifactFetcher, when non-nil AND ArtifactEnabled is true, is
@@ -98,6 +108,42 @@ type RefresherConfig struct {
 	Concurrency     int
 	PageSize        int
 	ArtifactEnabled bool
+
+	// RecomputeMaxRows caps how many matcher-stale coordinates one tick
+	// recomputes. Zero means DefaultRecomputeMaxRows.
+	RecomputeMaxRows int
+
+	// CoverageRecomputeMaxRows caps how many partial-closure rows one tick
+	// re-evaluates. Zero means DefaultCoverageRecomputeMaxRows.
+	CoverageRecomputeMaxRows int
+
+	// Coverage is an explicitly injected walk source for the coverage
+	// sweep. Nil means "use Store" — tests inject, production does not.
+	Coverage CoverageRecomputeSource
+
+	// CoverageStore is an explicitly injected read/write handle for the
+	// coverage sweep's per-row recompute. Nil means "use Store".
+	CoverageStore CoverageReportStore
+
+	// CoverageRecomputeDisabled turns the incomplete-coverage sweep off.
+	//
+	// Same inverted polarity as RecomputeDisabled and for the same reason:
+	// the sweep must be ON for the zero value of this struct, so a caller
+	// building a RefresherConfig by hand cannot ship a refresher that
+	// silently leaves partial rollups uncorrected. Production measurement
+	// before this sweep existed: 699 rows scored against a partial closure,
+	// 122 of them serving a verdict strictly better than the tree warranted.
+	CoverageRecomputeDisabled bool
+
+	// RecomputeDisabled turns the matcher-epoch sweep off.
+	//
+	// The polarity is inverted relative to ArtifactEnabled deliberately: the
+	// sweep must be ON for the zero value of this struct, so that a caller
+	// constructing a RefresherConfig without going through
+	// RefresherConfigFromEnv cannot silently ship a refresher that leaves the
+	// backlog undrained. That is the failure this whole file exists to
+	// prevent, and it should not be reachable by forgetting a field.
+	RecomputeDisabled bool
 
 	Logger *slog.Logger
 }
@@ -154,6 +200,9 @@ func NewRefresher(cfg RefresherConfig) *Refresher {
 	if cfg.PageSize <= 0 {
 		cfg.PageSize = 200
 	}
+	if cfg.RecomputeMaxRows <= 0 {
+		cfg.RecomputeMaxRows = DefaultRecomputeMaxRows
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -179,7 +228,9 @@ func (r *Refresher) Run(ctx context.Context) {
 		"max_staleness", r.cfg.MaxStaleness,
 		"concurrency", r.cfg.Concurrency,
 		"page_size", r.cfg.PageSize,
-		"artifact_enabled", r.cfg.ArtifactEnabled)
+		"artifact_enabled", r.cfg.ArtifactEnabled,
+		"recompute_enabled", !r.cfg.RecomputeDisabled,
+		"recompute_max_rows", r.cfg.RecomputeMaxRows)
 
 	// Prime the pump once so a fresh boot starts walking immediately
 	// rather than sitting idle for the first Interval. The walk honours
@@ -207,6 +258,16 @@ type TickSummary struct {
 	Skipped     int
 	NewVersions int
 	Duration    time.Duration
+
+	// Recompute reports the matcher-epoch sweep that runs as the second
+	// phase of every tick. Zero-valued when the sweep is disabled or has no
+	// walk source. See refresher_recompute.go.
+	Recompute RecomputeSummary
+
+	// Coverage reports the incomplete-transitive-coverage sweep that runs
+	// as the third phase of every tick. Zero-valued when the sweep is
+	// disabled or has no walk source. See refresher_coverage.go.
+	Coverage CoverageSummary
 }
 
 func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
@@ -264,11 +325,28 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 	}
 	wg.Wait()
 
+	// Phase two of the same tick: drain the matcher-epoch backlog. Runs
+	// AFTER the package_metadata walk so the walk's own Scans have already
+	// lifted whatever they cover out of the backlog, and the sweep spends
+	// its budget on the coordinates nothing else can reach. See
+	// refresher_recompute.go.
+	recompute := r.recomputeStaleOnce(ctx)
+
+	// Phase three: re-roll rows whose rollup was computed against a partial
+	// dependency closure. Runs LAST, after both the walk and the epoch
+	// sweep, because both of those warm dependency rows — a coverage
+	// recompute that ran first would re-evaluate against the cache as it
+	// was before this tick's own Scans landed, and would then find nothing
+	// new to say. See refresher_coverage.go.
+	coverage := r.recomputeCoverageOnce(ctx)
+
 	summary := TickSummary{
 		Scanned:     int(scanned.Load()),
 		Skipped:     int(skipped.Load()),
 		NewVersions: int(newVers.Load()),
 		Duration:    r.now().Sub(start),
+		Recompute:   recompute,
+		Coverage:    coverage,
 	}
 	r.lastScanned.Store(int64(summary.Scanned))
 	r.lastSkipped.Store(int64(summary.Skipped))
@@ -279,6 +357,11 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 		"rows_scanned", summary.Scanned,
 		"rows_skipped", summary.Skipped,
 		"new_versions", summary.NewVersions,
+		"recompute_backlog", summary.Recompute.Backlog,
+		"recomputed", summary.Recompute.Recomputed,
+		"coverage_backlog", summary.Coverage.Backlog,
+		"coverage_improved", summary.Coverage.Improved,
+		"coverage_verdict_changed", summary.Coverage.VerdictChanged,
 		"duration", summary.Duration)
 	return summary
 }
@@ -312,14 +395,24 @@ const (
 
 func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadataRow) refreshAction {
 	// Resolve the intelligence ecosystem bucket from the proxy repo name.
-	// Falls back to the repo name itself so providers Supports() checks
-	// simply no-op on an unresolved row (the dashboard renders "unknown"
-	// instead of blocking the walk).
-	ecosystem := row.Repository
+	//
+	// A REPOSITORY NAME IS NOT AN ECOSYSTEM, and this used to fall back to
+	// one. That is the leak Phase 7 Wave 6 adjudicated — the upload and
+	// publish paths were moved to `string(repo.Format)` there, and this
+	// path was missed. It looked harmless because every provider's
+	// Supports() rejected the name and the row simply no-opped; it stopped
+	// being harmless when P8-05 started reading the ecosystem string as a
+	// statement about advisory coverage, at which point an org's own
+	// `maven-hosted` uploads read as "no advisory source covers this
+	// ecosystem" — false, since they are ordinary Maven packages.
+	//
+	// The fallback is now the empty string: unresolved, and honestly so.
+	// Nothing downstream may invent a bucket for it (markNoAdvisoryCoverage
+	// declines to speak about a string that is not an ecosystem), and the
+	// row is still walked so the dashboard keeps rendering it.
+	ecosystem := ""
 	if r.cfg.EcosystemResolver != nil {
-		if resolved := strings.TrimSpace(r.cfg.EcosystemResolver(row.Repository)); resolved != "" {
-			ecosystem = resolved
-		}
+		ecosystem = strings.TrimSpace(r.cfg.EcosystemResolver(row.Repository))
 	}
 
 	latest := ""
@@ -494,6 +587,20 @@ func RefresherConfigFromEnv() RefresherConfig {
 		}
 	}
 	cfg.ArtifactEnabled = envBool("CHAINSAW_INTELLIGENCE_REFRESH_ARTIFACT", true)
+	if v := strings.TrimSpace(os.Getenv("CHAINSAW_INTELLIGENCE_RECOMPUTE_MAX_ROWS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.RecomputeMaxRows = n
+		}
+	}
+	// Default ON, matching the refresher itself: an operator who has not
+	// thought about matcher epochs should still get a draining backlog.
+	cfg.RecomputeDisabled = !envBool("CHAINSAW_INTELLIGENCE_RECOMPUTE_ENABLED", true)
+	if v := strings.TrimSpace(os.Getenv("CHAINSAW_INTELLIGENCE_COVERAGE_RECOMPUTE_MAX_ROWS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.CoverageRecomputeMaxRows = n
+		}
+	}
+	cfg.CoverageRecomputeDisabled = !envBool("CHAINSAW_INTELLIGENCE_COVERAGE_RECOMPUTE_ENABLED", true)
 	return cfg
 }
 

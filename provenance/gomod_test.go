@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"golang.org/x/mod/module"
+	"golang.org/x/mod/sumdb/note"
 )
 
 func TestEscapeModulePath(t *testing.T) {
@@ -69,5 +70,21 @@ func TestInferGoSourceRepo(t *testing.T) {
 		if got := inferGoSourceRepo(in); got != want {
 			t.Errorf("inferGoSourceRepo(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestSumdbVerifierKeyParses guards the baked-in sum.golang.org trust
+// anchor. A corrupt key makes note.NewVerifier fail, which makes every
+// single Go-module provenance check return StatusFailed with
+// "sumdb key: invalid verifier hash" — a silent, total outage of
+// `chainsaw verify go` that no network-touching test would catch either,
+// since the request never gets that far. No network, no fixtures.
+func TestSumdbVerifierKeyParses(t *testing.T) {
+	v, err := note.NewVerifier(sumdbVKey)
+	if err != nil {
+		t.Fatalf("note.NewVerifier(sumdbVKey) err = %v, want nil (the baked-in sum.golang.org key is corrupt)", err)
+	}
+	if got, want := v.Name(), "sum.golang.org"; got != want {
+		t.Errorf("verifier name = %q, want %q", got, want)
 	}
 }

@@ -128,7 +128,11 @@ Exit codes:
 	cmd.Flags().String("base", "", "Base git ref or SHA to diff from (required)")
 	cmd.Flags().String("head", "HEAD", "Head git ref or SHA to diff to (default: HEAD)")
 	cmd.Flags().String("repo-path", ".", "Path to the git repository")
-	cmd.Flags().Bool("json", false, "Emit JSON output")
+	// P8-27 — no local --json. The root persistent --json (root.go) is
+	// documented as sugar for --format=json and both useJSON and resolveFormat
+	// read it, so the shadow was redundant; it is also the mechanism behind
+	// scan-remote's S1 gate-disarm, so it does not get to survive here on the
+	// grounds that pr-scan's own gate happens to be format-independent.
 	cmd.Flags().String("output-file", "", "Write the report to this path (JSON by default; SARIF with --format=sarif)")
 	cmd.Flags().Bool("strict", false, "Escalate warnings to blocking (exit 20 instead of 10)")
 	_ = cmd.MarkFlagRequired("base")

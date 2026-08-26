@@ -67,11 +67,32 @@ func (c *swiftChecker) Check(ctx context.Context, packageName, version string) R
 		base = strings.TrimRight(c.registryURL(), "/")
 	}
 	if base == "" {
-		return Result{Status: StatusUnavailable, Ecosystem: "swift"}
+		// P8-48: this used to be a bare StatusUnavailable with an empty
+		// Error, which the CLI rendered as "ecosystem does not expose
+		// attestations". Swift Package Registries emphatically do — SE-0391
+		// CMS signatures — but SE-0292 registries are not centrally hosted,
+		// so there is no default URL to guess and the probe is inert until
+		// an operator names one. That is a CONFIGURATION gap, and the
+		// message has to say so or the operator has no move to make.
+		return Result{
+			Status:    StatusUnavailable,
+			Ecosystem: "swift",
+			Reason:    ReasonNotConfigured,
+			Error: "no Swift package registry configured: SE-0292 registries are not centrally hosted, " +
+				"so chainsaw cannot guess one. Set provenance.swift_registry_url (server) or pass " +
+				"--source-url <registry-base-url> (chainsaw verify). This is unset configuration, " +
+				"not an absence of Swift attestations.",
+		}
 	}
 	scope, name := splitSwiftPackageName(packageName)
 	if scope == "" || name == "" || version == "" {
-		return Result{Status: StatusMissing, Ecosystem: "swift"}
+		return Result{
+			Status:    StatusMissing,
+			Ecosystem: "swift",
+			Reason:    ReasonNoAttestationFound,
+			Error: "swift coordinates must be scope.name plus a version " +
+				"(e.g. apple.swift-argument-parser 1.3.0)",
+		}
 	}
 	reqURL := fmt.Sprintf("%s/%s/%s/%s",
 		base,
@@ -92,7 +113,12 @@ func (c *swiftChecker) Check(ctx context.Context, packageName, version string) R
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return Result{Status: StatusMissing, Ecosystem: "swift"}
+		return Result{
+			Status:    StatusMissing,
+			Ecosystem: "swift",
+			Reason:    ReasonNoAttestationFound,
+			Error:     "registry has no release metadata for this coordinate (404)",
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return Result{Status: StatusFailed, Ecosystem: "swift", Error: fmt.Sprintf("unexpected status %d", resp.StatusCode)}
@@ -135,12 +161,20 @@ func (c *swiftChecker) Check(ctx context.Context, packageName, version string) R
 		}
 	}
 	if !signed {
-		return Result{Status: StatusMissing, Ecosystem: "swift"}
+		return Result{
+			Status:    StatusMissing,
+			Ecosystem: "swift",
+			Reason:    ReasonNoAttestationFound,
+			Error:     "registry release metadata advertises no CMS signature for any resource",
+		}
 	}
 	result := Result{
 		Status:          StatusUnverified,
 		Ecosystem:       "swift",
 		AttestationType: "cms-se0391",
+		Reason:          ReasonPresenceOnly,
+		Error: "signature presence recorded only; full SE-0391 CMS validation is off " +
+			"(enable provenance.swift_full_verify to validate the chain and digest)",
 	}
 	if len(payload.Metadata.RepositoryURLs) > 0 {
 		result.SourceRepo = payload.Metadata.RepositoryURLs[0]
@@ -156,10 +190,13 @@ func (c *swiftChecker) Check(ctx context.Context, packageName, version string) R
 			c.logger.Debug("swift cms verification failed",
 				"package", scope+"."+name, "version", version, "error", verifyErr)
 			result.Status = StatusFailed
+			result.Reason = ""
 			result.Error = verifyErr.Error()
 			return result
 		}
 		result.Status = StatusVerified
+		result.Reason = ""
+		result.Error = ""
 		result.BuilderID = verifyResult.Signer
 		if verifyResult.SourceRepo != "" {
 			// Prefer the cert-bound repo URL over the metadata-declared one.

@@ -98,14 +98,21 @@ Examples:
 }
 
 func init() {
-	scanRemoteCmd.Flags().Bool("json", false, "Print the full report as JSON instead of a summary table")
+	// P8-27 — the local --json is GONE. S1 (below) recorded that this command
+	// "declares a LOCAL --json, so resolveFormat falls through to the
+	// persistent --format"; S1 fixed the consequence (the gate ordering) but
+	// left the mechanism in place. The root persistent --json is documented as
+	// sugar for --format=json and useJSON/resolveFormat read it, so removing
+	// the shadow changes no behaviour and removes the trap.
 	scanRemoteCmd.Flags().Duration("timeout", 5*time.Minute, "Maximum time to wait for the server to finish processing pending packages")
 	// S1 — an explicit opt-out for teams that deliberately collect reports
 	// without gating on them. Before this change --json was an ACCIDENTAL
 	// opt-out (the gate lived inside the text renderer), so a --json CI gate
 	// silently passed a critical lockfile. Making the escape hatch explicit
 	// keeps that workflow available while the default is fail-closed.
-	scanRemoteCmd.Flags().Bool("exit-zero", false, "Always exit 0, even when critical/high findings are reported (report-only mode)")
+	// Registered through the shared helper so the flag means the same thing
+	// here and on scan-repo.
+	addScanGateFlags(scanRemoteCmd, scanGateFlags{ExitZero: true})
 	rootCmd.AddCommand(scanRemoteCmd)
 }
 
@@ -191,9 +198,11 @@ func runScanRemote(cmd *cobra.Command, args []string) error {
 	// bottom of printRemoteSummary, so two paths skipped it entirely:
 	//
 	//   1. `--json` returned before the renderer ever ran. Worse than the
-	//      finding first suggested: scan-remote declares a LOCAL --json, so
-	//      resolveFormat falls through to the persistent --format and a
+	//      finding first suggested: scan-remote declared a LOCAL --json, so
+	//      resolveFormat fell through to the persistent --format and a
 	//      repo-wide `--format json` disarmed the gate on EVERY invocation.
+	//      (P8-27 has since deleted that local flag — see init() — so the
+	//      mechanism is gone as well as the consequence.)
 	//   2. In text mode, printRemoteSummary returned early when Findings was
 	//      empty — a summary can carry Critical/High counts with a truncated
 	//      or absent findings list, and that returned 0.
@@ -202,7 +211,7 @@ func runScanRemote(cmd *cobra.Command, args []string) error {
 	// is reached on every non-error path. It also returns ExitBlocked as a
 	// typed error instead of calling os.Exit, so Execute() still flushes
 	// telemetry and prints the update notice.
-	exitZero, _ := cmd.Flags().GetBool("exit-zero")
+	exitZero := scanExitZero(cmd)
 	return emitAndGate(cmd, resp,
 		func() error { return printRemoteSummary(&resp) },
 		func() error {

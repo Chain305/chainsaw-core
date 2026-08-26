@@ -251,15 +251,56 @@ func TestSeedNpmFamilyGuidesDocumentThePlaintextTokenFormat(t *testing.T) {
 // set PUB_HOSTED_URL at all from the instructions given, and `export` is not
 // a command on either Windows shell.
 //
-// The check is deliberately keyed on `export`, not on the mere presence of a
-// `bash` fence. A `bash` fence that only runs the tool itself (`dotnet
-// restore`, `composer install`, `cargo build`) is fine to leave as-is: those
-// commands are identical on PowerShell. It is specifically the shell-builtin
-// environment assignment that has no Windows equivalent.
+// The check is NOT keyed on the mere presence of a `bash` fence. A `bash`
+// fence that only runs the tool itself (`dotnet restore`, `composer install`,
+// `cargo build`) is fine to leave as-is: those commands are identical on
+// PowerShell. It is specifically the constructs that do not EXIST on Windows
+// that leave a reader stuck.
+//
+// P8-29 widened this. The guard used to key on `export` alone, and that is
+// exactly why it passed the pypi guide, which hands a Windows reader
+// `%USERPROFILE%\_netrc` on one line and `chmod 600 ~/.netrc` on the next.
+// `chmod` is no more a Windows command than `export` is. Phase 7 S-10's
+// "5 guides before, 0 after" was measured with the narrow rule and therefore
+// overstated the coverage it had achieved.
+//
+// Widening it flagged four more guides (pypi, rubygems, gomod, docker-hub)
+// plus the cocoapods exemption, which the narrow rule had never reached.
 // ---------------------------------------------------------------------------
 
-// posixExportLine matches a runnable POSIX environment assignment.
-var posixExportLine = regexp.MustCompile(`(?m)^\s*export\s+[A-Za-z_][A-Za-z0-9_]*=`)
+// posixOnlyConstructs are the runnable constructs that simply do not exist on
+// either Windows shell. Each entry carries the Windows answer, quoted back to
+// the author in the failure message so the fix is obvious.
+//
+// Keep this list to constructs with NO Windows equivalent. `rm -rf ~/…` is
+// here because both the `rm` command and the `~` expansion are POSIX-only;
+// `pip install` or `go build` are not, and must not be added.
+var posixOnlyConstructs = []struct {
+	name    string
+	windows string
+	re      *regexp.Regexp
+}{
+	{
+		name:    "export VAR=",
+		windows: "`$env:VAR = '…'` (persist with `setx` or `[Environment]::SetEnvironmentVariable`)",
+		re:      regexp.MustCompile(`(?m)^\s*export\s+[A-Za-z_][A-Za-z0-9_]*=`),
+	},
+	{
+		name:    "chmod",
+		windows: "`icacls <path> /inheritance:r /grant:r \"$($env:USERNAME):(R,W)\"`",
+		re:      regexp.MustCompile(`(?m)^\s*chmod\s`),
+	},
+	{
+		name:    "… | base64",
+		windows: "`[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))`",
+		re:      regexp.MustCompile(`\|\s*base64\b`),
+	},
+	{
+		name:    "rm -rf ~/…",
+		windows: "`Remove-Item -Recurse -Force \"$env:USERPROFILE\\…\"`",
+		re:      regexp.MustCompile(`(?m)^\s*rm\s+-rf?\s+~`),
+	},
+}
 
 // powerShellForm is what satisfies the guard. Any ONE of these is enough —
 // a guide may reasonably use a fenced ```powershell block, or an inline
@@ -277,13 +318,12 @@ var powerShellForm = regexp.MustCompile(
 // Windows — every other guide that hands out an `export` has a working
 // PowerShell equivalent and must carry it.
 //
-// The single entry below is currently UNEXERCISED: the cocoapods-trunk
-// guide has no `export` line today, so the guard never reaches the lookup
-// for it. It is recorded anyway because the standing decision is easy to
-// lose: CocoaPods drives Xcode and its own documented cache-clear step is
-// `rm -rf ~/Library/Caches/CocoaPods`. If someone later adds an `export`
-// to that guide, this pre-answers the failure instead of prompting a
-// transliterated PowerShell block for a toolchain that cannot run there.
+// The single entry below IS exercised as of P8-29: the widened construct
+// list reaches the cocoapods-trunk guide through its `export`, `chmod` and
+// `rm -rf ~/Library/Caches/CocoaPods` lines, all three of which are correct
+// for a toolchain that only runs where Xcode runs. (Under the old
+// `export`-only rule the lookup was never reached, so the exemption sat
+// unexercised — recorded then because the standing decision is easy to lose.)
 var windowsExemptGuides = map[string]string{
 	"cocoapods-trunk": "CocoaPods requires Xcode; macOS-only by construction",
 }
@@ -301,7 +341,15 @@ func TestSeedGuidesWithPosixExportAlsoCoverWindows(t *testing.T) {
 			if strings.TrimSpace(guide) == "" {
 				continue
 			}
-			if !posixExportLine.MatchString(guide) {
+			var found []string
+			var answers []string
+			for _, c := range posixOnlyConstructs {
+				if c.re.MatchString(guide) {
+					found = append(found, c.name)
+					answers = append(answers, c.name+" -> "+c.windows)
+				}
+			}
+			if len(found) == 0 {
 				continue
 			}
 			if _, exempt := windowsExemptGuides[strings.ToLower(repo.Name)]; exempt {
@@ -310,17 +358,79 @@ func TestSeedGuidesWithPosixExportAlsoCoverWindows(t *testing.T) {
 			if powerShellForm.MatchString(guide) {
 				continue
 			}
-			t.Errorf("%s: the %q client_configuration_guide hands the reader a "+
-				"runnable POSIX `export` but never a Windows equivalent.\n"+
-				"`export` is not a command in PowerShell or cmd.exe, so a "+
-				"Windows developer cannot follow this guide at all. Add a "+
-				"**Windows (PowerShell):** fence using `$env:VAR = ...` "+
-				"(persisting with `setx` or "+
-				"`[Environment]::SetEnvironmentVariable`), matching the "+
-				"structure the npmjs guide already uses. If the ecosystem "+
-				"genuinely does not run on Windows, add %q to "+
-				"windowsExemptGuides with the reason.",
-				path, repo.Name, repo.Name)
+			t.Errorf("%s: the %q client_configuration_guide hands the reader "+
+				"runnable POSIX-only construct(s) %v but never a Windows "+
+				"equivalent.\nNone of those exist in PowerShell or cmd.exe, so "+
+				"a Windows developer cannot follow this guide at all. Add a "+
+				"**Windows (PowerShell):** fence, matching the structure the "+
+				"npmjs guide already uses:\n  %s\nIf the ecosystem genuinely "+
+				"does not run on Windows, add %q to windowsExemptGuides with "+
+				"the reason.",
+				path, repo.Name, found, strings.Join(answers, "\n  "), repo.Name)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Guard (5): a guide that offers a labelled PowerShell variant must offer a
+// cmd.exe one too.
+//
+// This is about the wizard, not about prose. ui_new's splitGuideByOS
+// (components/dashboard/client-wizard/lib.ts, OS_MARKERS) turns the
+// `**macOS / Linux …:**` / `**Windows (PowerShell):**` / `**Windows
+// (cmd.exe):**` labels into a tab axis, and it folds the axis away entirely
+// when fewer than two variants are present. A guide with a PowerShell tab and
+// no cmd.exe tab therefore renders as a choice that silently excludes half of
+// Windows — the reader on cmd.exe is shown PowerShell syntax under a tab that
+// implies it is the Windows answer.
+//
+// The rule is deliberately one-directional. A cmd.exe variant without a
+// PowerShell one has never occurred and would be a stranger mistake; the
+// asymmetry that actually shipped (huggingface, found by P8-29) is
+// PowerShell-without-cmd.
+//
+// The labels are matched exactly as OS_MARKERS matches them, INCLUDING the
+// parentheses: `**Windows PowerShell:**` is not a marker the splitter
+// recognises. Three inline one-liners in the yarnpkg and bunjs guides use
+// that unparenthesised form; they are prose, not tab markers, and are left
+// alone here on purpose — converting them would give those guides a SECOND
+// marker group, and splitGuideByOS emits one variant per group, so the wizard
+// would render duplicate tabs.
+// ---------------------------------------------------------------------------
+
+var (
+	powerShellVariantLabel = regexp.MustCompile(`(?im)^\s*\*\*Windows\s*\(PowerShell\)[^*]*:?\*\*`)
+	cmdVariantLabel        = regexp.MustCompile(`(?im)^\s*\*\*Windows\s*\(cmd\.exe\)[^*]*:?\*\*`)
+)
+
+func TestSeedGuidesWithPowerShellVariantAlsoCoverCmd(t *testing.T) {
+	t.Parallel()
+	requireMonorepoTree(t, "configs")
+	for _, path := range seedConfigPaths {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", path, err)
+		}
+		for _, repo := range cfg.Repositories {
+			guide := repo.ClientConfigurationGuide
+			if strings.TrimSpace(guide) == "" {
+				continue
+			}
+			if !powerShellVariantLabel.MatchString(guide) {
+				continue
+			}
+			if cmdVariantLabel.MatchString(guide) {
+				continue
+			}
+			t.Errorf("%s: the %q client_configuration_guide carries a "+
+				"**Windows (PowerShell):** variant but no **Windows "+
+				"(cmd.exe):** one.\nThe client wizard turns those labels into "+
+				"tabs (ui_new splitGuideByOS / OS_MARKERS), so a cmd.exe "+
+				"reader is shown PowerShell syntax under the tab that claims "+
+				"to be the Windows answer. Add a **Windows (cmd.exe):** "+
+				"block using `set VAR=value` (persist with `setx`), matching "+
+				"the npmjs guide.",
+				path, repo.Name)
 		}
 	}
 }

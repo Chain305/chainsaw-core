@@ -2,9 +2,13 @@ package policy
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -388,4 +392,125 @@ func setNonZero(v reflect.Value) bool {
 	default:
 		return false
 	}
+}
+
+// TestEcosystemsDocMatchesSupportMatrix is the P8-62 rail.
+//
+// core/docs/ecosystems.md publishes a per-ecosystem Full/Partial/None table
+// and a list of every condition name. Every number in that table used to
+// disagree with a mechanical count of SupportMatrix (root cause: the doc was
+// written against 46 conditions while the matrix carried 53), and the doc
+// asserted in prose that "a drift test asserts it matches the published
+// matrix" — which was false. The only such test compared against
+// docs/POLICY_PROXY_MATRIX.md and nothing read this file at all. This is that
+// test.
+func TestEcosystemsDocMatchesSupportMatrix(t *testing.T) {
+	path := findEcosystemsDoc(t)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read ecosystems doc: %v", err)
+	}
+	text := string(raw)
+
+	// Doc label → matrix row key.
+	labelToEco := map[string]Ecosystem{
+		"npm": EcoNPM, "pypi": EcoPyPI, "maven": EcoMaven, "cargo": EcoCargo,
+		"composer": EcoComposer, "rubygems": EcoRubyGems, "nuget": EcoNuGet,
+		"go": EcoGo, "hugging face": EcoHuggingFace, "cocoapods": EcoCocoaPods,
+		"swift": EcoSwift, "pub (dart)": EcoPub, "docker / oci": EcoDocker,
+		"apt": EcoAPT, "yum": EcoYum, "dnf": EcoDNF,
+	}
+
+	seen := make(map[Ecosystem]struct{})
+	countRow := regexp.MustCompile(`(?m)^\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|$`)
+	for _, m := range countRow.FindAllStringSubmatch(text, -1) {
+		eco, ok := labelToEco[strings.ToLower(strings.TrimSpace(m[1]))]
+		if !ok {
+			continue
+		}
+		seen[eco] = struct{}{}
+		wantFull, wantPartial, wantNone := countSupportLevels(eco)
+		gotFull, _ := strconv.Atoi(m[2])
+		gotPartial, _ := strconv.Atoi(m[3])
+		gotNone, _ := strconv.Atoi(m[4])
+		if gotFull != wantFull || gotPartial != wantPartial || gotNone != wantNone {
+			t.Errorf("ecosystems.md drift for %s: doc says %d/%d/%d (full/partial/none), "+
+				"SupportMatrix counts %d/%d/%d",
+				eco, gotFull, gotPartial, gotNone, wantFull, wantPartial, wantNone)
+		}
+	}
+	for eco := range SupportMatrix {
+		if _, ok := seen[eco]; !ok {
+			t.Errorf("ecosystem %s is in SupportMatrix but has no row in %s", eco, path)
+		}
+	}
+
+	// The advertised condition count and the name list must both match the
+	// matrix's real column set — the 46-vs-53 gap is what desynced the table.
+	columns := matrixColumns()
+	if !strings.Contains(text, fmt.Sprintf("**%d policy conditions**", len(columns))) {
+		t.Errorf("%s does not advertise %d policy conditions; SupportMatrix has that many columns",
+			path, len(columns))
+	}
+	if !strings.Contains(text, fmt.Sprintf("## The %d policy conditions", len(columns))) {
+		t.Errorf("%s heading does not say %d policy conditions", path, len(columns))
+	}
+	for _, c := range columns {
+		if !regexp.MustCompile(`\b` + regexp.QuoteMeta(string(c)) + `\b`).MatchString(text) {
+			t.Errorf("%s does not list condition %s", path, c)
+		}
+	}
+}
+
+func countSupportLevels(eco Ecosystem) (full, partial, none int) {
+	for _, level := range SupportMatrix[eco] {
+		switch level {
+		case SupportFull:
+			full++
+		case SupportPartial:
+			partial++
+		case SupportNone:
+			none++
+		}
+	}
+	return full, partial, none
+}
+
+// matrixColumns returns every condition that has a cell in SupportMatrix,
+// sorted for stable output.
+func matrixColumns() []ConditionType {
+	seen := make(map[ConditionType]struct{})
+	for _, row := range SupportMatrix {
+		for c := range row {
+			seen[c] = struct{}{}
+		}
+	}
+	out := make([]ConditionType, 0, len(seen))
+	for c := range seen {
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return string(out[i]) < string(out[j]) })
+	return out
+}
+
+// findEcosystemsDoc walks up from the test's working directory to core/docs.
+func findEcosystemsDoc(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for i := 0; i < 6; i++ {
+		candidate := filepath.Join(dir, "docs", "ecosystems.md")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	t.Fatal("could not locate core/docs/ecosystems.md")
+	return ""
 }

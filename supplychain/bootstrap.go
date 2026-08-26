@@ -410,9 +410,30 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 					"ecosystem", ecosystem, "error", err)
 				continue
 			}
-			if len(pkgs) > 0 {
-				detector.LoadEcosystem(ecosystem, pkgs)
+			if len(pkgs) == 0 {
+				// SILENT-SKIP TRIPWIRE. An enrolled ecosystem with an
+				// empty corpus is not "degraded" — Detector.Check
+				// returns a zero result on an unloaded tree and
+				// provider_typosquat stamps TyposquatStatus="clean" on
+				// every package, forever, with no metric and (before
+				// this line) no log. docker, swift and github_actions
+				// shipped in exactly that state because this branch was
+				// a bare `if len(pkgs) > 0`. The fetch-error path above
+				// already logs; this is the case where the fetch
+				// SUCCEEDED and returned nothing, which is the one that
+				// hides.
+				//
+				// The condition is also asserted statically by
+				// TestEveryEnrolledTyposquatEcosystemHasACorpus, so
+				// reaching this line at runtime means the corpus went
+				// empty after the build, not that an ecosystem was
+				// enrolled without one.
+				logger.Warn("popular package fetch returned an empty corpus; "+
+					"typosquat detection for this ecosystem will report every package clean",
+					"ecosystem", ecosystem)
+				continue
 			}
+			detector.LoadEcosystem(ecosystem, pkgs)
 		}
 		logger.Info("popular package index bootstrap complete",
 			"warm_up_duration", time.Since(warmStart))

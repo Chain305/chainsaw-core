@@ -83,8 +83,8 @@ func TestBackfillStaleRepositoryGuidesNoStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nil store counts: unexpected error: %v", err)
 	}
-	if len(counts) != 0 {
-		t.Fatalf("nil store counts: expected empty map, got %v", counts)
+	if counts.Total() != 0 {
+		t.Fatalf("nil store counts: expected empty buckets, got %+v", counts)
 	}
 }
 
@@ -163,15 +163,24 @@ func TestBackfillStaleRepositoryGuides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stale counts: %v", err)
 	}
-	if counts[staleRepo] != 1 {
-		t.Errorf("stale counts[%s] = %d, want 1", staleRepo, counts[staleRepo])
+	if counts.Repairable[staleRepo] != 1 {
+		t.Errorf("stale counts.Repairable[%s] = %d, want 1", staleRepo, counts.Repairable[staleRepo])
 	}
-	if counts[customRepo] != 1 {
-		t.Errorf("stale counts[%s] = %d, want 1", customRepo, counts[customRepo])
+	if counts.Repairable[customRepo] != 1 {
+		t.Errorf("stale counts.Repairable[%s] = %d, want 1", customRepo, counts.Repairable[customRepo])
 	}
-	if n, ok := counts[freshRepo]; ok {
-		t.Errorf("stale counts[%s] = %d, want absent — the row already carries %q",
+	if n, ok := counts.Repairable[freshRepo]; ok {
+		t.Errorf("stale counts.Repairable[%s] = %d, want absent — the row already carries %q",
 			freshRepo, n, repositoryGuideFreshMarker)
+	}
+	// The fixtures are all seeded names, so nothing may land in the
+	// orphan bucket here — the orphan path has its own test.
+	if len(counts.Orphaned) != 0 {
+		for _, name := range []string{staleRepo, customRepo, freshRepo} {
+			if n, ok := counts.Orphaned[name]; ok {
+				t.Errorf("stale counts.Orphaned[%s] = %d, want absent — %s is in the supplied guide list", name, n, name)
+			}
+		}
 	}
 
 	updated, err := store.BackfillStaleRepositoryGuides(ctx, guides)
@@ -242,8 +251,11 @@ func TestBackfillStaleRepositoryGuides(t *testing.T) {
 		t.Fatalf("stale counts after backfill: %v", err)
 	}
 	for _, name := range []string{staleRepo, customRepo, freshRepo} {
-		if n, ok := counts[name]; ok {
-			t.Errorf("stale counts[%s] = %d after backfill, want absent", name, n)
+		if n, ok := counts.Repairable[name]; ok {
+			t.Errorf("stale counts.Repairable[%s] = %d after backfill, want absent", name, n)
+		}
+		if n, ok := counts.Orphaned[name]; ok {
+			t.Errorf("stale counts.Orphaned[%s] = %d after backfill, want absent", name, n)
 		}
 	}
 }

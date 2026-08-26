@@ -150,11 +150,23 @@ Once published, every tagged release of this module ships:
 
 Verification commands — run these before deploying a release.
 
+> **Pin the workflow, not just the repository.** This document previously
+> pinned `^https://github\.com/chain305/chainsaw-core/` — no workflow path,
+> so ANY workflow in this repository satisfied it. `chainsaw-core` is
+> public, so anyone can open a pull request; a workflow that runs on
+> `pull_request` with `id-token` permission would mint a certificate that
+> passes such a check. The org casing was wrong too (`chain305` vs
+> `Chain305`), and Fulcio SANs are matched exactly.
+>
+> The identity below is a pre-GA placeholder: release signing for this
+> repository is not provisioned yet, so the command fails closed rather
+> than accepting anything. Pinned by `TestSigningIdentityPinsAWorkflow`.
+
 ```sh
 # Verify the cosign signature
 cosign verify-blob \
   --bundle chainsaw_<version>_linux_amd64.sigstore \
-  --certificate-identity-regexp '^https://github\.com/chain305/chainsaw-core/' \
+  --certificate-identity-regexp '^https://github\.com/Chain305/chainsaw-core/\.github/workflows/release\.yml@refs/tags/v.+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   chainsaw_<version>_linux_amd64
 

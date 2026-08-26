@@ -47,11 +47,15 @@ with no feed downloaded yet:
 ```console
 $ npm install expresss
 chainsaw  offline known-malicious + typosquat active; run `chainsaw guard update` for the full OpenSSF malicious-package set
-chainsaw  behavioral byte scan not run; using name/feed/typosquat checks only (set CHAINSAW_GUARD_DEEP=1 or stage artifacts for byte-level coverage)
 chainsaw  ✗ blocked  npm:expresss — looks like a typosquat of "express" (distance 1, edit-distance, target rank #262)
 chainsaw  if you have verified this package is real: chainsaw guard allow npm:expresss
 chainsaw  ✗ refused at the install path — nothing was installed
 ```
+
+There is no byte-scan coverage line here, and its absence is meaningful: the name
+lane refused this install before acquisition was ever attempted, so the guard has
+nothing to report about bytes. See [Scope and limits](#scope-and-limits) for the
+runs where it does appear.
 
 An interactive terminal adds two more lines the first time around: a one-off
 telemetry notice ([Telemetry](#telemetry)) and, once you are past the first few
@@ -470,10 +474,16 @@ gets no byte scan even with deep mode on.
 **CVE lookup, registry metadata and provenance need the server.** Never
 available offline, in any mode.
 
-The binary tells you on every run which checks did **not** run:
+The binary tells you on every run what it actually did, derived from the bytes
+it was able to obtain rather than from configuration. Three of its five
+acquisition sources read the npm, cargo and pip caches and are fully offline, so
+on a machine that has already fetched a package the byte scan runs with no
+configuration at all:
 
 ```
-chainsaw  behavioral byte scan not run; using name/feed/typosquat checks only (set CHAINSAW_GUARD_DEEP=1 or stage artifacts for byte-level coverage)
+chainsaw  behavioral byte scan read and analyzed the bytes of all 12 packages (offline, local disk only)
+chainsaw  behavioral byte scan analyzed 5 of 12 packages; the rest had no bytes on this machine (stage artifacts in CHAINSAW_GUARD_ARTIFACT_DIR or set CHAINSAW_GUARD_DEEP=1 for byte-level coverage)
+chainsaw  behavioral byte scan not run: no local bytes for any of 12 packages; using name/feed/typosquat checks only (…)
 ```
 
 **The offline claim is testable, and we test it adversarially.** Run the guard
@@ -648,7 +658,7 @@ see and enforce across many machines.
 get a consent prompt, and **pressing Enter accepts it** — so read it.
 
 When enabled it sends anonymous usage plus **blocked package names** to
-`https://chain305.com/api/telemetry/ingest`. A blocked name could be an internal
+`https://chain305.com/chainproxy/api/telemetry/ingest`. A blocked name could be an internal
 package of yours; that is the honest reason to think about it before saying yes.
 Clean installs are never sent.
 

@@ -320,11 +320,67 @@ var acceptedBenignFalseBlocks = map[string]bool{
 
 // TestBlockCatchRate is the paired half of TestBenignFalseBlockRate: over a
 // combined corpus (benign + real malicious, e.g. the DataDog dataset) it reports
-// the guard's HARD-BLOCK catch-rate on malware alongside the false-block rate on
+// the guard's HARD-BLOCK catch on malware alongside the false-block rate on
 // benign — both via the same analyzeArtifact verdict, so the numbers are directly
 // comparable ("blocks X% of real malware at Y% false-block"). Offline behavioral
 // subset only; the name/feed floor (228k OpenSSF) and server-side
 // ioc/import-time providers catch more on top of this.
+//
+// Run (-count=1 is mandatory — the test cache will replay a stale arm):
+//
+//	CHAINSAW_DETECTION_EVAL_CORPUS=scripts/detection-eval/corpus-datadog/ddcorpus/corpus \
+//	  go test ./core/cli/ -run TestBlockCatchRate -v -count=1 -timeout 25m
+//
+// ─── WHAT DECIDES RED/GREEN ─────────────────────────────────────────────────
+//
+// Until 2026-08-25 this function was t.Logf all the way down: a t.Skip on a
+// missing env var, a t.Fatalf on failing to OPEN the manifest, and then nothing
+// but prose. It could not fail on a result. A change that dropped the catch to
+// ZERO produced a green build, while the number it printed — "104/238 = 43.7%"
+// — was quoted as verified fact in three commit messages and in
+// docs/launch/fp-rate-measurement-2026-08.md. Its sibling above was hardened to
+// an identity set on 2026-08-24 and this half was left open, which is the worse
+// half to leave open: a false-block regression annoys a developer, a catch
+// regression means malware installs.
+//
+// The assertions mirror the sibling's, in the same order and for the same
+// reasons, with one deliberate inversion.
+//
+//   - NOT A RATE. Same doctrine as the "THIS TEST NEVER FAILS ON A RATE" banner
+//     in guard_typosquat_fp_eval_test.go, and the same reasoning that replaced
+//     maxBenignFalseBlockPct above: a percentage floor here would be bumped the
+//     first time it went red and would tell us nothing. Worse, a floor is
+//     exactly as blind to a swap as the benign ceiling was — lose four samples,
+//     gain four, and 43.7% is still 43.7% while four pieces of real malware now
+//     install clean. The catch RATE is a published number, not a gate.
+//
+//   - THE INVERSION. The benign side fails on a name that is newly BLOCKED;
+//     this side fails on a name that is newly NOT blocked. Good news reports,
+//     bad news fails, on both sides.
+//
+//   - WHY A CAUGHT-SET IS A BETTER FIT HERE THAN AN ACCEPTED-SET IS THERE. The
+//     objection to pinning identity on the benign side was version churn: that
+//     corpus tracks "latest", so acceptedBenignFalseBlocks had to drop the
+//     version to survive a routine rebuild. This corpus has no such problem.
+//     Every sample is a specific published malicious release, frozen by
+//     coordinate — scripts/detection-eval/ingest-datadog.sh writes name AND
+//     version, and a malicious version is never re-cut. So the key here KEEPS
+//     the version, and must: 177 distinct names cover the 238 samples (28 names
+//     appear at two or more malicious versions — @art-ws/di, pypi:ultralytics,
+//     and 26 others), so a name-only key would silently collapse them and let a
+//     regression on one version hide behind a sibling that still blocks.
+//
+// ─── THIS IS NOT AN ALLOWLIST, AND NOT A DETECTION SOURCE ───────────────────
+//
+// mustStayCaught changes nothing about what the guard blocks. It is not
+// compiled into the binary, nothing consults it at install time, and a
+// coordinate's presence here is not evidence about that coordinate — it is a
+// record of what THIS detector caught on THIS corpus on a day we measured. The
+// 134 samples NOT on the list are not "safe"; they are malware the offline
+// behavioral subset does not catch by own bytes, which is the whole reason the
+// name/feed floor and the server-side providers exist. Deleting a name to make
+// a build green is the one edit this file cannot detect on its own, which is
+// what the size floor at the bottom is for.
 func TestBlockCatchRate(t *testing.T) {
 	dir := os.Getenv("CHAINSAW_DETECTION_EVAL_CORPUS")
 	if dir == "" {
@@ -336,7 +392,16 @@ func TestBlockCatchRate(t *testing.T) {
 	}
 	defer f.Close()
 
-	var malTotal, malBlocked, benTotal, benBlocked int
+	var (
+		malTotal, malBlocked, benTotal, benBlocked int
+		unreadable                                 int
+		// caught / seen are keyed "ecosystem:name@version" — see the WHY A
+		// CAUGHT-SET note above for why the version stays in the key. seen is
+		// carried so that a name on mustStayCaught which is not in the corpus
+		// AT ALL reports as a corpus fault rather than as a lost detection.
+		caught = map[string]bool{}
+		seen   = map[string]bool{}
+	)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
@@ -350,14 +415,18 @@ func TestBlockCatchRate(t *testing.T) {
 		}
 		tgz, err := os.ReadFile(s.File)
 		if err != nil || len(tgz) == 0 {
+			unreadable++
 			continue
 		}
 		blocked := analyzeArtifact(s.Ecosystem, tgz).Block
 		switch s.Label {
 		case "malicious":
 			malTotal++
+			key := s.Ecosystem + ":" + s.Name + "@" + s.Version
+			seen[key] = true
 			if blocked {
 				malBlocked++
+				caught[key] = true
 			}
 		case "benign":
 			benTotal++
@@ -376,4 +445,262 @@ func TestBlockCatchRate(t *testing.T) {
 	t.Logf("malware HARD-BLOCK catch: %d/%d = %.1f%%", malBlocked, malTotal, pct(malBlocked, malTotal))
 	t.Logf("benign  false-block:      %d/%d = %.2f%%", benBlocked, benTotal, pct(benBlocked, benTotal))
 	t.Logf("(offline subset — excludes name/feed floor + server-side ioc/import-time providers)")
+	// The benign half stays REPORT-ONLY here on purpose. It exists so the two
+	// numbers can be quoted from one run, but the corpus that gates it is the
+	// 860-package benign set and the gate that decides it is
+	// TestBenignFalseBlockRate above. Two tests asserting the same thing off
+	// different corpora is how a number ends up with two answers.
+
+	// ─── 1. CORPUS IDENTITY ─────────────────────────────────────────────────
+	//
+	// The corpus is the right corpus, or nothing below it means anything. Same
+	// rail as expectBenignCorpusSize, for the same reason: a short corpus must
+	// report as a CORPUS FAULT and must never be mistakable for a detector
+	// result. An exact count also makes the silent skips above visible —
+	// an unreadable or unparseable sample subtracts from malTotal, which a
+	// floor ("at least 200") would have absorbed.
+	if malTotal != expectMalwareCorpusSize {
+		t.Fatalf("CORPUS FAULT: scanned %d malicious samples, expected exactly %d "+
+			"(%d manifest entries had unreadable or empty bytes). No detector "+
+			"conclusion can be drawn from this run. If you pointed "+
+			"CHAINSAW_DETECTION_EVAL_CORPUS at the BENIGN corpus, point it at "+
+			"scripts/detection-eval/corpus-datadog/ddcorpus/corpus instead — "+
+			"TestBenignFalseBlockRate is the test that wants corpus-benign/pkgs. "+
+			"If the corpus was deliberately regrown, update expectMalwareCorpusSize "+
+			"and re-derive mustStayCaught in the same commit.",
+			malTotal, expectMalwareCorpusSize, unreadable)
+	}
+	// A coordinate on the list that this corpus does not contain is a corpus
+	// swap, not a lost detection, and must not be reported as one.
+	var absent []string
+	for key := range mustStayCaught {
+		if !seen[key] {
+			absent = append(absent, key)
+		}
+	}
+	sort.Strings(absent)
+	if len(absent) > 0 {
+		t.Fatalf("CORPUS FAULT: %d coordinate(s) on mustStayCaught are not in this "+
+			"corpus at all:\n  %s\nThe sample count still matches, so the corpus was "+
+			"SWAPPED rather than shortened. Re-derive mustStayCaught against the new "+
+			"corpus in the same commit that changes it — do not read this as a "+
+			"detection regression.", len(absent), strings.Join(absent, "\n  "))
+	}
+
+	// ─── 2. MUST-STAY-CAUGHT ────────────────────────────────────────────────
+	//
+	// Every coordinate the guard hard-blocked when this list was derived must
+	// still hard-block, BY NAME. Not how many, and not what fraction: this is
+	// the assertion a percentage floor cannot make, because a floor cannot see
+	// a swap.
+	var lost []string
+	for key := range mustStayCaught {
+		if !caught[key] {
+			lost = append(lost, key)
+		}
+	}
+	sort.Strings(lost)
+	if len(lost) > 0 {
+		t.Errorf("LOST detection — %d real malware sample(s) the guard used to "+
+			"hard-block and now lets through:\n  %s\n"+
+			"Each is a malicious package that would now install. Fix the detector. "+
+			"Removing the coordinate from mustStayCaught makes this message go away "+
+			"and the malware ship; do that only with the argument written down, the "+
+			"way the litellm@1.82.7 case is argued in "+
+			"docs/launch/fp-rate-measurement-2026-08.md.", len(lost), strings.Join(lost, "\n  "))
+	}
+
+	// The reverse direction is good news, so it reports rather than fails —
+	// same convention as the stale-entry NOTE on the benign side. The line is
+	// emitted paste-ready so extending the list is mechanical.
+	var gained []string
+	for key := range caught {
+		if !mustStayCaught[key] {
+			gained = append(gained, key)
+		}
+	}
+	sort.Strings(gained)
+	if len(gained) > 0 {
+		var b strings.Builder
+		for _, k := range gained {
+			b.WriteString("\n\t\"" + k + "\": true,")
+		}
+		t.Logf("NOTE: %d newly-caught sample(s) are not yet on mustStayCaught. "+
+			"Detection improved; pin it so it cannot silently regress:%s", len(gained), b.String())
+	}
+
+	// ─── 3. BACKSTOP on the SIZE OF THE LIST ────────────────────────────────
+	//
+	// Deliberately loose, and deliberately NOT a catch rate. The sibling keeps
+	// maxBenignFalseBlockPct for one job assertion 2 cannot do — catch growth of
+	// the hand-edited set itself. The mirror-image abuse here is DELETION: the
+	// failure mode of a by-name gate is someone under deadline deleting whichever
+	// coordinates went red instead of fixing the detector, and assertion 2 is
+	// blind to that by construction — it only ever looks at names still on the
+	// list.
+	//
+	// A catch-rate floor would also catch it, and is the wrong instrument twice
+	// over: it would need re-tuning every time detection improves, and it would
+	// be read as the published catch number by the next person to open the file.
+	// A floor on len(mustStayCaught) is a fixture-integrity check that can never
+	// be mistaken for a measurement, and never needs tuning downward.
+	if n := len(mustStayCaught); n < minMustStayCaughtSize {
+		t.Errorf("mustStayCaught has shrunk to %d entries, below the %d floor. "+
+			"Entries are removed only when a coordinate leaves the corpus (which "+
+			"assertion 1 reports separately) or when a lost detection is argued in "+
+			"writing. Bulk deletion to green a build is the thing this floor exists "+
+			"to stop.", n, minMustStayCaughtSize)
+	}
+}
+
+const (
+	// expectMalwareCorpusSize pins the IDENTITY of the malware corpus, exactly
+	// as expectBenignCorpusSize does for the benign one. 238 = the DataDog
+	// dataset as ingested by scripts/detection-eval/ingest-datadog.sh into
+	// scripts/detection-eval/corpus-datadog/ddcorpus/corpus (120 npm + 118
+	// pypi). Change this ONLY together with a re-derived mustStayCaught, in the
+	// same commit.
+	expectMalwareCorpusSize = 238
+
+	// minMustStayCaughtSize is the anti-deletion floor described in note 3. Set
+	// well below the measured list size so ordinary corpus maintenance can
+	// never trip it, and far above zero so a bulk delete cannot pass.
+	minMustStayCaughtSize = 90
+)
+
+// mustStayCaught is the exact set of malicious samples the offline behavioral
+// guard hard-blocks, keyed "ecosystem:name@version". Measured 104/238 on
+// 2026-08-25 against scripts/detection-eval/corpus-datadog/ddcorpus/corpus with
+// -count=1 (70 npm of 120, 34 pypi of 118) — the same 43.7% figure
+// docs/launch/fp-rate-measurement-2026-08.md publishes, now pinned by identity
+// instead of by prose.
+//
+// READ THIS BEFORE REMOVING A NAME. Every line is a piece of real, published
+// malware that analyzeArtifact refuses on its own bytes, with no feed and no
+// network. A line disappearing from the caught set means that sample now
+// installs clean.
+//
+// Removing a line is legitimate in exactly two cases, and both are arguments,
+// not edits:
+//
+//  1. The coordinate left the corpus. Assertion 1 reports that separately and
+//     fatals, so it can never be confused with case 2.
+//  2. The block was coincidental and the precision trade is worth it. There is
+//     one worked example of this: pypi:litellm@1.82.7 was hard-blocked only by
+//     a `nothooks.slack.com` docstring placeholder that also ships in clean
+//     litellm releases, so tightening exfilHostRE's host boundary dropped it —
+//     and dropped nothing real, because the own-bytes scanners had never
+//     actually detected what makes 1.82.7 malicious. That reasoning is written
+//     out in docs/launch/fp-rate-measurement-2026-08.md; anything removed here
+//     needs the same.
+//
+// It is NOT legitimate to delete a line because it went red.
+var mustStayCaught = map[string]bool{
+	// npm — 70 of the 120 npm samples.
+	"npm:@ahmedhfarag/ngx-perfect-scrollbar@20.0.20": true,
+	"npm:@ahmedhfarag/ngx-virtual-scroller@4.0.4":    true,
+	"npm:@antv/algorithm@0.3.26":                     true,
+	"npm:@antv/ava-react@3.5.2":                      true,
+	"npm:@antv/ava@3.6.1":                            true,
+	"npm:@antv/data-samples@1.2.1":                   true,
+	"npm:@antv/data-set@0.12.8":                      true,
+	"npm:@antv/dumi-theme-antv@0.10.4":               true,
+	"npm:@antv/f-engine@1.11.0":                      true,
+	"npm:@antv/f2-graphic@0.2.16":                    true,
+	"npm:@antv/f6-core@0.2.2":                        true,
+	"npm:@antv/f6@0.1.19":                            true,
+	"npm:@antv/g-device-api@1.7.13":                  true,
+	"npm:@antv/g-lite@2.8.0":                         true,
+	"npm:@antv/g-lite@2.9.0":                         true,
+	"npm:@antv/g2-extension-3d@0.3.0":                true,
+	"npm:@antv/g6-mobile@0.2.2":                      true,
+	"npm:@antv/g6-pc@0.10.25":                        true,
+	"npm:@antv/g6-pc@0.9.25":                         true,
+	"npm:@antv/g@6.4.1":                              true,
+	"npm:@antv/gi-assets-algorithm@2.4.19":           true,
+	"npm:@antv/gi-assets-scene@2.3.21":               true,
+	"npm:@antv/gi-assets-xlab@0.2.30":                true,
+	"npm:@antv/gi-assets-xlab@0.3.30":                true,
+	"npm:@antv/gpt-vis@1.1.0":                        true,
+	"npm:@antv/insight-component@1.1.0":              true,
+	"npm:@antv/l7-component@2.27.10":                 true,
+	"npm:@antv/l7-composite-layers@0.19.1":           true,
+	"npm:@antv/l7-core@2.27.10":                      true,
+	"npm:@antv/l7-draw@3.2.5":                        true,
+	"npm:@antv/l7-map@2.27.10":                       true,
+	"npm:@antv/l7-source@2.27.10":                    true,
+	"npm:@antv/li-aiearth-assets@0.5.7":              true,
+	"npm:@antv/li-aiearth-assets@0.6.7":              true,
+	"npm:@antv/lite-insight@2.2.1":                   true,
+	"npm:@antv/mcp-server-chart@0.10.10":             true,
+	"npm:@antv/narrative-text-editor@0.3.20":         true,
+	"npm:@antv/narrative-text-editor@0.4.20":         true,
+	"npm:@antv/narrative-text-vis@0.5.16":            true,
+	"npm:@antv/s2-react-components@2.3.2":            true,
+	"npm:@antv/s2-react@2.5.1":                       true,
+	"npm:@antv/scale@0.6.2":                          true,
+	"npm:@antv/t8@0.5.0":                             true,
+	"npm:@antv/x6-geometry@2.2.5":                    true,
+	"npm:@antv/x6-react-components@2.1.9":            true,
+	"npm:@antv/x6-react-components@2.2.9":            true,
+	"npm:@art-ws/common@2.0.28":                      true,
+	"npm:@art-ws/config-eslint@2.0.4":                true,
+	"npm:@art-ws/config-ts@2.0.7":                    true,
+	"npm:@art-ws/config-ts@2.0.8":                    true,
+	"npm:@art-ws/db-context@2.0.24":                  true,
+	"npm:@art-ws/di-node@2.0.13":                     true,
+	"npm:@art-ws/di@2.0.28":                          true,
+	"npm:@art-ws/di@2.0.32":                          true,
+	"npm:@art-ws/eslint@1.0.5":                       true,
+	"npm:@art-ws/eslint@1.0.6":                       true,
+	"npm:@art-ws/fastify-http-server@2.0.24":         true,
+	"npm:@art-ws/fastify-http-server@2.0.27":         true,
+	"npm:@art-ws/http-server@2.0.21":                 true,
+	"npm:@art-ws/http-server@2.0.25":                 true,
+	"npm:@art-ws/openapi@0.1.12":                     true,
+	"npm:@art-ws/openapi@0.1.9":                      true,
+	"npm:@art-ws/package-base@1.0.5":                 true,
+	"npm:@art-ws/prettier@1.0.5":                     true,
+	"npm:@art-ws/slf@2.0.15":                         true,
+	"npm:@art-ws/slf@2.0.22":                         true,
+	"npm:@art-ws/ssl-info@1.0.10":                    true,
+	"npm:@art-ws/ssl-info@1.0.9":                     true,
+	"npm:@art-ws/web-app@1.0.3":                      true,
+	"npm:@asyncapi/generator@2.8.6":                  true,
+
+	// pypi — 34 of the 118 pypi samples.
+	"pypi:1337test@1":                true,
+	"pypi:a-b27@1.0.0":               true,
+	"pypi:a1rn@0.1.4":                true,
+	"pypi:adanbu@92.6":               true,
+	"pypi:adandu@92.6":               true,
+	"pypi:adandv@912.6":              true,
+	"pypi:ailyboostbot@1.0":          true,
+	"pypi:ailynitro@1.0":             true,
+	"pypi:ailzyn1tr0@1.0":            true,
+	"pypi:aiogram-sever-patch@3.5.0": true,
+	"pypi:aiogram-sever-patch@3.6.0": true,
+	"pypi:aiogram-types-v3@3.0.1":    true,
+	"pypi:aiogram-types-v3@3.0.2":    true,
+	"pypi:aiogram-types-v3@3.0.5":    true,
+	"pypi:aiogram-types-v3@3.1.0":    true,
+	"pypi:aiogram-types-v3@3.1.5":    true,
+	"pypi:aiogram-types-v3@3.2.0":    true,
+	"pypi:aiogram-types-v3@3.3.1":    true,
+	"pypi:aiogram-types-v3@3.4.0":    true,
+	"pypi:aiogram-types-v3@3.9.7":    true,
+	"pypi:aiogram-types-v3@3.9.8":    true,
+	"pypi:aiogram-types-v3@4.2.0":    true,
+	"pypi:aiogram-types-v3@5.9.8":    true,
+	"pypi:aiohttp-libscss@0.25.0":    true,
+	"pypi:aiopbotocore@0.1.0":        true,
+	"pypi:aiopbotocore@0.3":          true,
+	"pypi:aiopbotocore@0.4.0":        true,
+	"pypi:aiopbotocore@0.9.0":        true,
+	"pypi:airduq@1.0":                true,
+	"pypi:airnitro@1.0":              true,
+	"pypi:algokit-arc@10.0.1":        true,
+	"pypi:alzynitro@1.0":             true,
+	"pypi:anaconda-anon-usage@0.4.9": true,
+	"pypi:ultralytics@8.3.45":        true,
 }

@@ -586,10 +586,24 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 	if merged.SupplyChain.RepoLastCommitAt == nil && prior.SupplyChain.RepoLastCommitAt != nil {
 		merged.SupplyChain.RepoLastCommitAt = prior.SupplyChain.RepoLastCommitAt
 	}
-	// PublisherChanged: *bool, sticky-true. Preserve when incoming is nil
-	// (no observation) OR when prior was *true and incoming is *false (an
-	// older "publisher changed" observation isn't withdrawn just because
-	// the next snapshot didn't repeat it).
+	// PublisherChanged: *bool, sticky-true ON SILENCE ONLY.
+	//
+	// Preserve when incoming is nil — a Tier-1-only refresh that never ran
+	// the metadiff provider has observed nothing, and silence is not a
+	// withdrawal. An explicit incoming *false IS an observation and DOES
+	// clear the flag: provider_metadiff.go computes
+	// `changed := len(added) > 0 || len(removed) > 0` and always assigns
+	// it, so a later scan that finds the publisher set unchanged returns
+	// the package to clean.
+	//
+	// This comment previously also claimed "OR when prior was *true and
+	// incoming is *false ... isn't withdrawn". That was never implemented,
+	// and implementing it would be a BUG, not a fix: a package would stay
+	// flagged forever after a single legitimate maintainer handover, with
+	// no path back. P8-35 was filed against exactly that behaviour on the
+	// strength of this sentence; the code was correct and the comment was
+	// not. TestPublisherChangedClearsOnExplicitFalse pins the real
+	// behaviour so the "fix" cannot be applied.
 	if merged.SupplyChain.PublisherChanged == nil && prior.SupplyChain.PublisherChanged != nil {
 		merged.SupplyChain.PublisherChanged = prior.SupplyChain.PublisherChanged
 	}

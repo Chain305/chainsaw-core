@@ -88,6 +88,15 @@ type Score struct {
 	Categories       map[Category]CategoryScore `json:"categories"`
 	MinCategoryScore int                        `json:"minCategoryScore"`
 	WorstCategory    Category                   `json:"worstCategory,omitempty"`
+
+	// CeilingSignal names the signal whose MaxImpact ceiling PINNED
+	// Overall — empty when the ceiling did not bind, which is the common
+	// case. When it is set, Overall is that signal's declared ceiling and
+	// NOT the weighted rollup over Categories, so a reader who tries to
+	// derive the composite from the category scores below will not get
+	// this number and is not doing anything wrong. Every renderer that
+	// shows Categories alongside Overall should say so; see P8-12.
+	CeilingSignal string `json:"ceilingSignal,omitempty"`
 }
 
 // Resolution is the structured "what to do" advice. Fields are populated

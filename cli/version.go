@@ -42,7 +42,21 @@ var (
 	// CORRECTIONS (were stale): this said "opt-out", which stopped being
 	// true when the consent gate landed; and it credited "DNT", which was
 	// never implemented — the honored variable is DO_NOT_TRACK.
-	DefaultTelemetryEndpoint = "https://chain305.com/api/telemetry/ingest"
+	//
+	// The /chainproxy prefix is NOT optional and is not cosmetic. The API is
+	// mounted behind it (Traefik strips it before forwarding to :8787); a bare
+	// /api/... on the apex host is served by the STATIC SITE's nginx, which
+	// 404s it. This constant shipped without the prefix, so every opt-in guard
+	// telemetry POST was silently absorbed by the landing page for the life of
+	// the constant — probed 2026-08-25: bare path 404, prefixed path 200. It is
+	// the same prefix-blind class as the SCIM base URL and the billing redirect
+	// (P8-18/P8-19), and it is guarded by scripts/check-doc-repo-urls.sh
+	// guard B, which now runs from the Makefile and the pre-commit hook.
+	//
+	// There is no build-time override anywhere in the tree — the -X hook below
+	// is available but unused by every build path — so the value here is the
+	// value that ships.
+	DefaultTelemetryEndpoint = "https://chain305.com/chainproxy/api/telemetry/ingest"
 )
 
 // resolvedVersion holds the post-resolution view of Version/Commit/BuildDate
