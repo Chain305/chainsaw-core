@@ -2295,6 +2295,39 @@ func (s *Store) migrateSchema() error {
 		// most — which means the index stays tiny no matter how large the
 		// cache grows, and non-KEV writes never touch it.
 		`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_kev ON intelligence_reports(package_name, version) WHERE (report -> 'vulnerabilities' ->> 'knownExploited') = 'true'`,
+
+		// Drop the trust-score columns on package_metadata. F-02, phase 2.
+		//
+		// They lost their writer when internal/supplychain/orchestrator.go was
+		// deleted in d625ef0e (2026-04-24) — silently: that commit's message
+		// claims its call sites "now go through intel.Scan", but intel.Scan
+		// persists to intelligence_reports, a different table, and never writes
+		// back here. The in-memory projection was ported; the persistence side
+		// effect was not.
+		//
+		// What survived was not inert. 160 of 2,417 production rows held two
+		// distinct values, 30 and 40 — the constants the retired legacy scorer
+		// emits when every input is empty. The evaluator is written so an
+		// unscored coordinate leaves ctx.TrustScore nil and matches NEITHER
+		// trustScoreMin nor trustScoreMax; a non-NULL fossil made it see a hard
+		// 30 instead, and policy PREVIEW read the fossils while live enforcement
+		// read the v2 score. Every fossil sat inside the band an operator would
+		// reach for.
+		//
+		// Phase 1 (d010013a) removed every reader and the dead write path, and
+		// is deployed. This must NOT ship before that is live everywhere: old
+		// pods name trust_score in GetPackageMetadata's SELECT, so dropping it
+		// while they serve turns every package-metadata read into SQLSTATE
+		// 42703 — taking out license, provenance, malware status and checksum
+		// enforcement on the download path.
+		//
+		// The live score is unaffected: trustScoreMin/trustScoreMax take the v2
+		// composite from the in-memory merge on the request path.
+		//
+		// NOT intelligence_reports.trust_score, which is a different column on a
+		// different table, is written on every scan, and is live.
+		`ALTER TABLE package_metadata DROP COLUMN IF EXISTS trust_score`,
+		`ALTER TABLE package_metadata DROP COLUMN IF EXISTS trust_score_breakdown`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

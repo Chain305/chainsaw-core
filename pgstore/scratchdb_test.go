@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -27,13 +28,32 @@ import (
 func provisionScratchDatabase(t *testing.T, baseDSN string) (string, func()) {
 	t.Helper()
 
+	// CHAINSAW_TEST_REQUIRE_DB turns "cannot reach Postgres" into a failure.
+	//
+	// Callers already fail when the DSN is EMPTY under that flag, but an
+	// unreachable server slipped through as a skip — and a skipped test still
+	// reports its package "ok". That happened for real on 2026-08-26: the
+	// Phase-2 DROP test reported ok while the container was simply not
+	// running, which is exactly the outcome the flag exists to prevent.
+	//
+	// A missing CREATEDB privilege still SKIPS below, deliberately: the point
+	// of this helper is to keep a destructive test off the shared database,
+	// and a test that cannot get a private one must not fall back to wiping it.
+	fatalIfRequired := func(format string, args ...any) {
+		t.Helper()
+		if os.Getenv("CHAINSAW_TEST_REQUIRE_DB") != "" {
+			t.Fatalf(format, args...)
+		}
+		t.Skipf(format, args...)
+	}
+
 	admin, err := sql.Open("pgx", baseDSN)
 	if err != nil {
-		t.Skipf("scratch db: open base DSN: %v", err)
+		fatalIfRequired("scratch db: open base DSN: %v", err)
 	}
 	defer admin.Close()
 	if err := admin.Ping(); err != nil {
-		t.Skipf("scratch db: Postgres unreachable: %v", err)
+		fatalIfRequired("scratch db: Postgres unreachable: %v", err)
 	}
 
 	// Unique per run. Postgres identifiers cap at 63 bytes and the name is

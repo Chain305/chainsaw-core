@@ -12,12 +12,18 @@ func (s *Store) ensurePackageRegistryColumns() error {
 	if err := s.addColumnIfMissing("package_metadata", "provenance_status", "TEXT"); err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing("package_metadata", "trust_score", "INTEGER"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfMissing("package_metadata", "trust_score_breakdown", "TEXT"); err != nil {
-		return err
-	}
+	// trust_score / trust_score_breakdown are NOT re-created here, and must
+	// not be added back.
+	//
+	// They are dropped in migrateSchema's stmts list. This function runs at
+	// migrate.go:2307, AFTER the stmts loop at :2299 — so re-adding either
+	// line here would drop the column and immediately re-create it as
+	// all-NULL on EVERY boot, forever. A fresh-DB test cannot see that;
+	// TestMigrateDropsLegacyTrustScoreColumns exists to, by creating the
+	// columns itself and migrating twice.
+	//
+	// Why they went: no writer since internal/supplychain/orchestrator.go
+	// was deleted in d625ef0e (2026-04-24). See the DROP for the rest.
 	if err := s.addColumnIfMissing("package_metadata", "typosquat_status", "TEXT"); err != nil {
 		return err
 	}
