@@ -93,7 +93,6 @@ type PackageEntry struct {
 	SHA256           string
 	LicenseSPDX      string
 	ProvenanceStatus string
-	TrustScore       int
 	IsVulnerable     bool
 	CVEs             []string
 
@@ -206,11 +205,6 @@ func GenerateWithGraph(entries []PackageEntry, serialNumber string, graph *depgr
 		if e.ProvenanceStatus != "" {
 			props = append(props, CycloneDXProperty{
 				Name: "chainsaw:provenance:status", Value: e.ProvenanceStatus,
-			})
-		}
-		if e.TrustScore > 0 {
-			props = append(props, CycloneDXProperty{
-				Name: "chainsaw:trust:score", Value: fmt.Sprintf("%d", e.TrustScore),
 			})
 		}
 		if e.IsVulnerable && len(e.CVEs) > 0 {

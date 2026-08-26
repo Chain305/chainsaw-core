@@ -107,7 +107,9 @@ func TestToLegacyPackageMetadata_CarriesFieldsOver(t *testing.T) {
 	if meta.TyposquatStatus != "suspected" || meta.TyposquatSimilarTo != "good" {
 		t.Fatalf("typosquat fields not carried: %+v", meta)
 	}
-	if meta.TrustScore != 42 || meta.TrustScoreBreakdown != `{"malwareCheck":-100}` {
+	// The breakdown is no longer carried: PackageMetadata dropped the field
+	// along with the column, which had no writer and no reader.
+	if meta.TrustScore != 42 {
 		t.Fatalf("trust score not carried: %+v", meta)
 	}
 	if !meta.ChecksumVerified || meta.ChecksumDeclared != "abc123" || meta.ChecksumActual != "abc123" {

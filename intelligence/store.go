@@ -777,7 +777,7 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, erro
 		conds = append(conds, "is_typosquat = TRUE")
 	}
 	if q.OnlyHasCVE {
-		conds = append(conds, "max_cvss IS NOT NULL AND max_cvss > 0")
+		conds = append(conds, hasCVEExpr)
 	}
 	if q.MinTrustScore != nil {
 		conds = append(conds, fmt.Sprintf("trust_score >= $%d", idx))
@@ -1020,6 +1020,66 @@ type LatestVersionProbe struct {
 // Matcher-stale rows are counted in every bucket exactly as they were, and
 // additionally counted once in StalePending. See FacetCounts.StalePending for
 // why disclosure beats subtraction here.
+// hasCVEExpr is the SQL predicate for "this row has a CVE".
+//
+// ONE constant because the facet COUNT and the OnlyHasCVE filter are the two
+// halves of one contract: the sidebar number and the list it filters must
+// mean the same thing. They were separate string literals, which is how a
+// number can stop matching the rows beside it without anything failing.
+// Same discipline, and the same reason, as coverageIncompleteExpr.
+//
+// Deliberately NOT used by sortToOrderBy's cvss_desc: that sorts on a numeric
+// severity, and a transitive-only row has no numeric severity to sort on.
+// Named here so it is not "fixed" by reflex later.
+const directCVEExpr = `max_cvss IS NOT NULL AND max_cvss > 0`
+
+// transitiveCVEExpr is "at least one CVE somewhere in this package's resolved
+// dependency closure".
+//
+// Reads risk_evaluation, the DEDICATED column, which Store.Get already treats
+// as authoritative over the copy embedded in report->'risk' (see the comment
+// at Get). computeTransitiveSeverity assigns these counts unconditionally on
+// every evaluation, so no new column, no migration and no backfill are needed
+// — the fact has been persisted all along; only the SQL that reads it was
+// missing.
+//
+// Sums the four CVSS tiers and deliberately EXCLUDES malwareCount and
+// blockedCount: those count descendants flagged malicious, and descendants
+// with no way out, neither of which is a CVE.
+//
+// The NULLIF/COALESCE wrapping is load-bearing twice over, not defensive
+// noise. Each inner count carries a working `omitempty`, so a zero is ABSENT
+// from the JSON rather than present as 0; and risk_evaluation is NULL
+// outright on rows that predate v2. Same shape as the matcherEpoch cell.
+//
+// Note what CANNOT be used: `? 'transitiveSeverity'` (key presence). The
+// containing field is a value struct tagged omitempty, and encoding/json
+// ignores omitempty for struct kinds — so the key is emitted as {} on every
+// evaluated row and presence is true for all of them. That is also the
+// independent reason a "transitive unknown" counter was dropped rather than
+// built: the persisted JSON cannot distinguish "the overlay did not run" from
+// "it ran and found nothing", so such a counter was never computable from
+// stored state.
+const transitiveCVEExpr = `(
+	  COALESCE(NULLIF(risk_evaluation->'resolution'->'transitiveSeverity'->>'criticalCount', ''), '0')::int
+	+ COALESCE(NULLIF(risk_evaluation->'resolution'->'transitiveSeverity'->>'highCount', ''), '0')::int
+	+ COALESCE(NULLIF(risk_evaluation->'resolution'->'transitiveSeverity'->>'mediumCount', ''), '0')::int
+	+ COALESCE(NULLIF(risk_evaluation->'resolution'->'transitiveSeverity'->>'lowCount', ''), '0')::int
+	) > 0`
+
+// hasCVEExpr is the union the facet and the filter both use.
+//
+// One asymmetry, documented rather than papered over: the direct half needs
+// max_cvss > 0, so a direct CVE carrying no CVSS score does not count as
+// direct — while all four transitive tiers count regardless.
+const hasCVEExpr = `((` + directCVEExpr + `) OR ` + transitiveCVEExpr + `)`
+
+// transitiveOnlyCVEExpr is the DISCLOSURE cell: rows the widened predicate
+// newly includes. Without it hasCve jumps by hundreds overnight with nothing
+// on the wire explaining why, and the new rows render an empty maxCvss in the
+// list. Same doctrine as StalePending — a companion, never a subtraction.
+const transitiveOnlyCVEExpr = `NOT (` + directCVEExpr + `) AND ` + transitiveCVEExpr
+
 func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) {
 	_ = orgID
 	if s == nil || s.sql == nil || s.sql.DB() == nil {
@@ -1039,7 +1099,8 @@ func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) 
 		  COUNT(*),
 		  COUNT(*) FILTER (WHERE is_malicious),
 		  COUNT(*) FILTER (WHERE is_typosquat),
-		  COUNT(*) FILTER (WHERE max_cvss IS NOT NULL AND max_cvss > 0),
+		  COUNT(*) FILTER (WHERE `+hasCVEExpr+`),
+		  COUNT(*) FILTER (WHERE `+transitiveOnlyCVEExpr+`),
 		  COUNT(*) FILTER (WHERE warning_count > 0),
 		  COUNT(*) FILTER (WHERE has_artifact_scan),
 		  COUNT(*) FILTER (WHERE collected_at > NOW() - INTERVAL '24 hours'),
@@ -1054,6 +1115,7 @@ func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) 
 	var lowTrust, medTrust, highTrust int
 	if err := row.Scan(
 		&out.Total, &out.Malicious, &out.Typosquat, &out.HasCVE,
+		&out.TransitiveOnlyCVE,
 		&out.HasWarnings, &out.ArtifactScan, &out.Last24h,
 		&lowTrust, &medTrust, &highTrust, &out.StalePending,
 	); err != nil {

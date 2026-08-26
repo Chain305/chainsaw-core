@@ -239,7 +239,6 @@ type scanResultItem struct {
 	// table when any value is non-default. Every field is `omitempty`
 	// so the JSON schema stays backward-compatible for consumers that
 	// pin on the legacy vulnerability-only shape.
-	TrustScore                *int     `json:"trust_score,omitempty"`
 	InstallScriptKind         string   `json:"install_script_kind,omitempty"`
 	PublisherChanged          *bool    `json:"publisher_changed,omitempty"`
 	PublisherSet              []string `json:"publisher_set,omitempty"`

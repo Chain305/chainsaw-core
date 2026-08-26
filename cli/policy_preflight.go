@@ -23,9 +23,12 @@ package cli
 //	1 — a condition one of your --policy rules USES is "none" on a
 //	    printed ecosystem (CI signal)
 //	2 — usage / network / other errors (cobra/RunE default)
-//	12 — the --policy tree could not be fully read, so the gate did not
-//	    cover the whole policy set (policyScanIncompleteExitCode, shared
-//	    with `policy lint`)
+//	12 — the gate did not cover the whole policy set, either because the
+//	    --policy tree could not be fully read OR because a condition your
+//	    rules use is absent from this proxy's support matrix (CLI newer
+//	    than proxy). policyScanIncompleteExitCode, shared with
+//	    `policy lint`. Distinct from 1 on purpose: a fleet mid-upgrade
+//	    must not fail the way a genuinely inert condition does.
 //
 // The "none" gate matters because the UI treats partial as supported (the
 // signal is wired, it just may be empty in practice) — preflight does the
@@ -210,6 +213,20 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 
 	g := glyphs()
 	inert := inertPolicyConditions(rows, usage)
+
+	// SURFACE version skew before the verdict, for the same reason the
+	// skipped paths above are surfaced: a gate that could not evaluate
+	// part of the policy set has to say so in the operator's output.
+	unknown := unknownPolicyConditions(rows, usage)
+	if len(unknown) > 0 {
+		fmt.Fprintf(out, "\n%s conditions your policies use that this proxy does not report on at all:\n", g.fail)
+		for _, u := range unknown {
+			fmt.Fprintf(out, "  - %s: condition %s is absent from the support matrix (%s:%d)\n",
+				u.Rule, u.Condition, u.File, u.Line)
+		}
+		fmt.Fprintf(out, "  %s this CLI is newer than the proxy it asked. Those rules cannot fire there.\n", g.dash)
+	}
+
 	if len(inert) == 0 {
 		if len(lost) > 0 {
 			// Never "✓ every condition is supported" over a policy set we
@@ -221,6 +238,19 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 				Code: policyScanIncompleteExitCode,
 				Err: fmt.Errorf("policy preflight: %d path(s) under %s could not be read; the gate did not cover the whole policy set",
 					len(lost), policyPath),
+			}
+		}
+		if len(unknown) > 0 {
+			// Never "\u2713 every condition is supported" over conditions the
+			// proxy never listed. Same doctrine as the unreadable-path
+			// branch above: the tick is the gate's ANSWER, and this gate
+			// has no answer for these.
+			fmt.Fprintf(out, "\n%s no unsupported condition found among the ones this proxy reports, but %d rule/condition pair(s) are absent from its matrix %s this gate is INCOMPLETE.\n",
+				g.fail, len(unknown), g.dash)
+			return &ExitCodeError{
+				Code: policyScanIncompleteExitCode,
+				Err: fmt.Errorf("policy preflight: %d rule/condition pair(s) are absent from the proxy's support matrix; the gate could not cover the whole policy set",
+					len(unknown)),
 			}
 		}
 		fmt.Fprintf(out, "\n%s every condition used by %s is supported on the printed ecosystem(s).\n", g.ok, policyPath)
@@ -312,10 +342,11 @@ func collectPreflightConditionUsage(path string) ([]preflightConditionUse, []pol
 // run scoped to --ecosystem npm must not fail because some other
 // ecosystem has a hole — same scoping rule the old anyUnsupported used.
 //
-// A condition the server does not list at all is NOT reported: absence
-// from the matrix means version skew between CLI and server, which is a
-// different problem from a known-inert cell and must not turn into a
-// fleet-wide CI failure.
+// A condition the server does not list at all is NOT reported HERE:
+// absence from the matrix means version skew between CLI and server,
+// which is a different problem from a known-inert cell and must not turn
+// into a fleet-wide CI failure (exit 1). It is not nothing either — see
+// unknownPolicyConditions, which routes it to the INCOMPLETE exit instead.
 func inertPolicyConditions(rows []supportMatrixRowDTO, usage []preflightConditionUse) []preflightInertCondition {
 	var out []preflightInertCondition
 	for _, row := range rows {
@@ -333,6 +364,58 @@ func inertPolicyConditions(rows []supportMatrixRowDTO, usage []preflightConditio
 		if out[i].Ecosystem != out[j].Ecosystem {
 			return out[i].Ecosystem < out[j].Ecosystem
 		}
+		if out[i].Rule != out[j].Rule {
+			return out[i].Rule < out[j].Rule
+		}
+		return out[i].Condition < out[j].Condition
+	})
+	return out
+}
+
+// unknownPolicyConditions returns the conditions a --policy rule uses that
+// NO printed matrix row mentions at all.
+//
+// This is the third outcome the gate was missing. inertPolicyConditions
+// answers "the server says this cell is none" (exit 1, a real finding).
+// The bare `✓ every condition is supported` answers "every cell said
+// partial or full". A condition the server never listed is NEITHER, and
+// it was falling into the second bucket — so a CLI newer than its proxy
+// printed a green tick over a rule the proxy has no code to evaluate.
+// Silence read as verification.
+//
+// It cannot be a typo in a policy file: ConditionsUsedBy
+// (core/policy/proxy_matrix.go:1456) derives conditions from typed struct
+// fields, so an unrecognised JSON key deserialises to nil and never gets
+// here. Absence therefore means exactly one thing — this CLI knows a
+// condition this server does not.
+//
+// Reported as INCOMPLETE (exit 12, shared with `policy lint` and with the
+// unreadable-path branch), never as unsupported (exit 1). That preserves
+// the original concern this comment block used to justify staying silent:
+// a fleet mid-upgrade must not fail the way a genuinely inert condition
+// does. It just no longer gets told everything is fine.
+func unknownPolicyConditions(rows []supportMatrixRowDTO, usage []preflightConditionUse) []preflightConditionUse {
+	// No rows means no matrix to judge against — every condition would
+	// look "unknown" and the report would be noise, not a finding.
+	if len(rows) == 0 {
+		return nil
+	}
+	known := make(map[string]bool)
+	for _, row := range rows {
+		for cond := range row.Conditions {
+			known[cond] = true
+		}
+	}
+	seen := make(map[preflightConditionUse]bool, len(usage))
+	var out []preflightConditionUse
+	for _, u := range usage {
+		if known[string(u.Condition)] || seen[u] {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool {
 		if out[i].Rule != out[j].Rule {
 			return out[i].Rule < out[j].Rule
 		}

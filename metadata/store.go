@@ -39,7 +39,12 @@ type PackageMetadata struct {
 
 	// Supply chain integrity fields.
 	//
-	// TrustScoreKnown reports whether trust_score was non-NULL on the row.
+	// TrustScoreKnown reports whether TrustScore holds a real measurement.
+	//
+	// It is NO LONGER hydrated from the database — package_metadata.trust_score
+	// is not read (see GetPackageMetadata). The only thing that sets this is
+	// the in-memory merge of the v2 evaluation on the request path, so a true
+	// here means "the risk engine scored this coordinate on THIS request".
 	// It is NOT redundant with `TrustScore != 0`: 0 is a legitimate score
 	// (malware sentinels and checksum mismatches roll up to 0 in
 	// core/risk). The proxy download path projects these onto
@@ -47,15 +52,14 @@ type PackageMetadata struct {
 	// "never scored" and "scored 0" stay distinguishable to
 	// trustScoreMin/trustScoreMax rules — a match condition that treats an
 	// absent score as 0 blocks packages on a signal that never ran.
-	ProvenanceStatus    string `json:"provenanceStatus,omitempty"`    // verified, unverified, unavailable, missing, failed
-	TrustScore          int    `json:"trustScore,omitempty"`          // composite 0-100
-	TrustScoreKnown     bool   `json:"trustScoreKnown,omitempty"`     // trust_score column was non-NULL
-	TrustScoreBreakdown string `json:"trustScoreBreakdown,omitempty"` // JSON breakdown
-	TyposquatStatus     string `json:"typosquatStatus,omitempty"`     // clean, suspected, confirmed_safe
-	TyposquatSimilarTo  string `json:"typosquatSimilarTo,omitempty"`  // popular package it resembles
-	MalwareStatus       string `json:"malwareStatus,omitempty"`       // clean, malicious, unknown
-	MalwareID           string `json:"malwareId,omitempty"`           // OSV ID if malicious
-	ChecksumVerified    bool   `json:"checksumVerified,omitempty"`
+	ProvenanceStatus   string `json:"provenanceStatus,omitempty"`   // verified, unverified, unavailable, missing, failed
+	TrustScore         int    `json:"trustScore,omitempty"`         // composite 0-100
+	TrustScoreKnown    bool   `json:"trustScoreKnown,omitempty"`    // set by the in-memory v2 merge, never from a column
+	TyposquatStatus    string `json:"typosquatStatus,omitempty"`    // clean, suspected, confirmed_safe
+	TyposquatSimilarTo string `json:"typosquatSimilarTo,omitempty"` // popular package it resembles
+	MalwareStatus      string `json:"malwareStatus,omitempty"`      // clean, malicious, unknown
+	MalwareID          string `json:"malwareId,omitempty"`          // OSV ID if malicious
+	ChecksumVerified   bool   `json:"checksumVerified,omitempty"`
 	// ChecksumDeclared records the hash chainsaw extracted from the
 	// upstream registry metadata (npm dist.integrity, pypi sha256, etc.).
 	// Paired with ChecksumActual so operators have a full audit trail
@@ -217,7 +221,6 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 		malwareID                  sql.NullString
 		typosquatStatus            sql.NullString
 		typosquatSimilarTo         sql.NullString
-		trustScore                 sql.NullInt64
 		attestationBuilderID       sql.NullString
 		attestationIssuer          sql.NullString
 		attestationSourceRepo      sql.NullString
@@ -259,7 +262,7 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 		checksum_declared, checksum_actual,
 		provenance_status, slsa_level, attestation_builder_id, attestation_issuer,
 		attestation_source_repo, attestation_transparency_log, attestation_cache_stale,
-		malware_status, malware_id, typosquat_status, typosquat_similar_to, trust_score,
+		malware_status, malware_id, typosquat_status, typosquat_similar_to,
 		yanked, created_at, updated_at
 		FROM package_metadata WHERE org_id=? AND repository=? AND package=? AND version=?`,
 		orgID, repository, packageName, version)
@@ -270,7 +273,7 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 		&checksumDeclared, &checksumActual,
 		&provenanceStatus, &slsaLevel, &attestationBuilderID, &attestationIssuer,
 		&attestationSourceRepo, &attestationTransparencyLog, &attestationCacheStale,
-		&malwareStatus, &malwareID, &typosquatStatus, &typosquatSimilarTo, &trustScore,
+		&malwareStatus, &malwareID, &typosquatStatus, &typosquatSimilarTo,
 		&yanked, &meta.CreatedAt, &meta.UpdatedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -293,8 +296,25 @@ func (s *Store) GetPackageMetadata(repository, packageName, version string) (Pac
 	meta.MalwareID = malwareID.String
 	meta.TyposquatStatus = typosquatStatus.String
 	meta.TyposquatSimilarTo = typosquatSimilarTo.String
-	meta.TrustScore = int(trustScore.Int64)
-	meta.TrustScoreKnown = trustScore.Valid
+	// TrustScore is NOT hydrated from the database, deliberately.
+	//
+	// package_metadata.trust_score has had no writer since
+	// internal/supplychain/orchestrator.go was deleted in d625ef0e
+	// (2026-04-24). What remains is a fossil layer: 160 of 2,417 rows in
+	// production, all created 2026-04-03..04-15, holding just two distinct
+	// values — 30 and 40. Thirty is the constant the legacy scorer emits
+	// when every input is empty (+20 not-vulnerable, +10 not-typosquat), so
+	// the values measure how much metadata existed at the instant a request
+	// touched the row, not the risk of the package.
+	//
+	// Hydrating them broke the invariant this struct documents above:
+	// TrustScoreKnown true made the evaluator treat a hard 30 as a
+	// measurement, for coordinates that were never scored. Every fossil sits
+	// inside the trustScoreMax band an operator would reach for.
+	//
+	// The live score reaches the evaluator in memory instead, merged from the
+	// v2 evaluation on the request path (server_repo_pipeline.go). The struct
+	// fields stay because that merge is what sets them.
 	if packageReleaseDate.Valid {
 		meta.PackageReleaseDate = &packageReleaseDate.Time
 	}
@@ -582,8 +602,7 @@ func (s *Store) UpdateSupplyChainMetadata(repository, packageName, version strin
 // updated_at would be set, in which case the caller should no-op.
 func buildSupplyChainUpdateSQL(now time.Time, update SupplyChainUpdate) (string, []any, bool) {
 	// Check if there's anything to update beyond updated_at.
-	if update.ProvenanceStatus == nil && update.TrustScore == nil &&
-		update.TrustScoreBreakdown == nil && update.TyposquatStatus == nil &&
+	if update.ProvenanceStatus == nil && update.TyposquatStatus == nil &&
 		update.TyposquatSimilarTo == nil && update.MalwareStatus == nil &&
 		update.MalwareID == nil && update.ChecksumVerified == nil &&
 		update.SourceRepo == nil && update.RepoLinkStatus == nil &&
@@ -603,14 +622,6 @@ func buildSupplyChainUpdateSQL(now time.Time, update SupplyChainUpdate) (string,
 	if update.ProvenanceStatus != nil {
 		setClauses = append(setClauses, "provenance_status=?")
 		args = append(args, *update.ProvenanceStatus)
-	}
-	if update.TrustScore != nil {
-		setClauses = append(setClauses, "trust_score=?")
-		args = append(args, *update.TrustScore)
-	}
-	if update.TrustScoreBreakdown != nil {
-		setClauses = append(setClauses, "trust_score_breakdown=?")
-		args = append(args, *update.TrustScoreBreakdown)
 	}
 	if update.TyposquatStatus != nil {
 		setClauses = append(setClauses, "typosquat_status=?")
@@ -903,8 +914,6 @@ func (s *Store) PublishCountByPublishers(ctx context.Context, publishers []strin
 // SupplyChainUpdate holds optional updates for supply chain fields.
 type SupplyChainUpdate struct {
 	ProvenanceStatus      *string
-	TrustScore            *int
-	TrustScoreBreakdown   *string
 	TyposquatStatus       *string
 	TyposquatSimilarTo    *string
 	MalwareStatus         *string

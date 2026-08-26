@@ -111,7 +111,6 @@ func TestSBOM_ComponentPropertiesPreserved(t *testing.T) {
 			Version:          "1.0.0",
 			LicenseSPDX:      "MIT",
 			ProvenanceStatus: "verified",
-			TrustScore:       42,
 			MalwareStatus:    "malicious",
 			ClientID:         "client-abc",
 		},

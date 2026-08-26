@@ -1020,6 +1020,31 @@ func envMinServeableEpoch() int {
 	return n
 }
 
+// MatcherSupersededForRecompute reports whether this Report was produced by
+// a generation below the CURRENT stamp epoch — the question "does this row
+// need recomputing", which is NOT the same question as "may I serve it".
+//
+// The two came apart when MinServeableEpoch was introduced, and conflating
+// them broke the very backfill the serve floor exists to stage. During the
+// v0.21.9 deploy the recompute sweep selected rows below CurrentMatcherEpoch
+// (correct), handed each to Scan, and Scan's cache short-circuit asked
+// MatcherStale() — which follows the SERVE floor. With the floor held at 5,
+// an epoch-5 row is not stale, so Scan returned the cached row untouched and
+// the sweep counted it as recomputed. Production logged
+// "recomputed=1500 failed=0" for three consecutive sweeps while the backlog
+// sat at exactly 3,453.
+//
+// So: read paths ask MatcherStale (serve floor, lowered during a staged
+// backfill). Recompute decisions ask this (stamp epoch, never lowered).
+// scanner.go's comment states the invariant this restores — a row from a
+// superseded matcher has "no escape hatch — not even AllowStale".
+func (r *Report) MatcherSupersededForRecompute() bool {
+	if r == nil {
+		return true
+	}
+	return r.Observation.MatcherEpoch < CurrentMatcherEpoch
+}
+
 // MatcherStale reports whether this Report was produced by a superseded
 // generation of the matcher or risk engine, and so must not be served from
 // cache. A nil Report is stale: callers treat "no report" and "unusable

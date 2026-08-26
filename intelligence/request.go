@@ -266,7 +266,11 @@ type SearchQuery struct {
 	Ecosystem     string // empty = any
 	OnlyMalicious bool
 	OnlyTyposquat bool
-	OnlyHasCVE    bool
+	// OnlyHasCVE narrows to rows with a CVE either on the package itself
+	// or anywhere in its resolved dependency closure. Direct-only until
+	// 2026-08-26; see hasCVEExpr in store.go for the predicate both this
+	// filter and the facet count share.
+	OnlyHasCVE bool
 	// OnlyHasWarnings narrows to reports whose providers logged at least
 	// one Warning. Useful when triaging scans that degraded (timeout,
 	// breaker_open, upstream_5xx) so an operator can see which packages
@@ -293,15 +297,28 @@ type SearchQuery struct {
 // sidebar in the admin UI. One request pulls every cell the filter bar
 // needs — ecosystem breakdown, signal toggle counts, risk tiers.
 type FacetCounts struct {
-	Total        int           `json:"total"`
-	Ecosystems   []FacetBucket `json:"ecosystems"`
-	Malicious    int           `json:"malicious"`
-	Typosquat    int           `json:"typosquat"`
-	HasCVE       int           `json:"hasCve"`
-	HasWarnings  int           `json:"hasWarnings"`
-	ArtifactScan int           `json:"artifactScan"`
-	TrustBuckets []FacetBucket `json:"trustBuckets"` // low (<40), medium (40-70), high (70-100)
-	Last24h      int           `json:"last24h"`
+	Total      int           `json:"total"`
+	Ecosystems []FacetBucket `json:"ecosystems"`
+	Malicious  int           `json:"malicious"`
+	Typosquat  int           `json:"typosquat"`
+	HasCVE     int           `json:"hasCve"`
+	// TransitiveOnlyCVE counts rows included in HasCVE ONLY because a CVE
+	// was found in their dependency closure — they carry no direct CVE of
+	// their own, so their list row renders an empty maxCvss.
+	//
+	// A COMPANION to HasCVE, never a subtraction, exactly like
+	// StalePending below. It exists so an operator can see why the number
+	// is what it is: the facet counted direct CVEs only until 2026-08-26,
+	// and on the production corpus the transitive population was LARGER
+	// than the direct one (423 vs 339), so the count moved a long way.
+	//
+	// No omitempty: zero is a real answer ("nothing is transitive-only")
+	// and must be distinguishable from an older server that omits it.
+	TransitiveOnlyCVE int           `json:"transitiveOnlyCve"`
+	HasWarnings       int           `json:"hasWarnings"`
+	ArtifactScan      int           `json:"artifactScan"`
+	TrustBuckets      []FacetBucket `json:"trustBuckets"` // low (<40), medium (40-70), high (70-100)
+	Last24h           int           `json:"last24h"`
 	// StalePending counts rows whose verdict and trust score came from a
 	// superseded matcher epoch — the aggregate companion to
 	// SearchRow.MatcherStale.

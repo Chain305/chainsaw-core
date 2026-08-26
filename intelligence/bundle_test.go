@@ -491,9 +491,14 @@ func TestIntelSignerIdentityRegexp_OverrideCompiles(t *testing.T) {
 	if !re.MatchString(selfIssued) {
 		t.Errorf("override regexp %q did not match self-issued identity %q", override, selfIssued)
 	}
-	// And the canonical bot URL must NOT match a tightened internal override.
-	if re.MatchString("https://github.com/chainsaw-releases/chainsaw/.github/workflows/release.yml@refs/tags/v1") {
-		t.Errorf("override regexp unexpectedly matched the canonical bot identity")
+	// And the CANONICAL Chainsaw identity must NOT match a tightened internal
+	// override. This asserted against `chainsaw-releases` — an org that never
+	// existed — so it was checking a string nobody uses, which is a weaker
+	// claim than its own comment made. The real canonical identity is the
+	// Chain305/chainsaw release.yml workflow ref (bundle.go,
+	// DefaultIntelSignerIdentityRegexp).
+	if re.MatchString("https://github.com/Chain305/chainsaw/.github/workflows/release.yml@refs/tags/v1") {
+		t.Errorf("override regexp unexpectedly matched the canonical Chainsaw identity")
 	}
 }
 

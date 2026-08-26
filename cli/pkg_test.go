@@ -12,7 +12,6 @@ func TestHasSupplyChainSection(t *testing.T) {
 	legacyOnly := bomEntry{
 		PackageName:      "foo",
 		PackageVersion:   "1.0.0",
-		TrustScore:       nil,
 		ProvenanceStatus: "verified",
 		MalwareStatus:    "clean",
 	}
@@ -33,7 +32,11 @@ func TestHasSupplyChainSection(t *testing.T) {
 		{"repo link timestamp", bomEntry{RepoLinkLastCheckedAt: "2026-04-17T00:00:00Z"}},
 		{"checksum declared", bomEntry{ChecksumDeclared: "sha256:abc"}},
 		{"checksum actual", bomEntry{ChecksumActual: "sha256:def"}},
-		{"trust breakdown", bomEntry{TrustScoreBreakdown: `{"score":50}`}},
+		// No trust-score case here any more. The BOM entry no longer
+		// carries one: package_metadata.trust_score lost its writer in
+		// d625ef0e (2026-04-24) and the fossil values it still held were
+		// 30/40 sentinels, so the field was removed from the wire rather
+		// than served as if it were a measurement.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,3 +59,6 @@ func TestTruncateHashPkg(t *testing.T) {
 		t.Fatalf("truncate long: got %q", got)
 	}
 }
+
+// ptrInt is a local helper for building *int fields in table tests.
+func ptrInt(v int) *int { return &v }

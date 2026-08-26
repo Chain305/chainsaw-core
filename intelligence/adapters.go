@@ -70,7 +70,6 @@ func (r *Report) ToLegacyPackageMetadata(repoName string) *metadata.PackageMetad
 		ProvenanceStatus:      r.Provenance.Status,
 		TrustScore:            r.SupplyChain.TrustScore,
 		TrustScoreKnown:       trustScoreKnown(r),
-		TrustScoreBreakdown:   r.SupplyChain.TrustScoreBreakdown,
 		TyposquatStatus:       r.SupplyChain.TyposquatStatus,
 		TyposquatSimilarTo:    r.SupplyChain.TyposquatSimilarTo,
 		MalwareStatus:         r.SupplyChain.MalwareStatus,

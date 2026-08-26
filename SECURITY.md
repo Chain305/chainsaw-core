@@ -132,7 +132,7 @@ users, and gives us a reasonable chance to remediate before disclosure.
 
 ## Verifying a release
 
-> **Pre-GA:** no public release has been cut yet and the `chainsaw-releases`
+> **Pre-GA:** no public release has been cut yet and the `Chain305`
 > Sigstore signer identity is not yet provisioned, so the signed-release
 > artefacts and the `cosign`/`slsa-verifier` commands below are not available
 > today. Until the first signed release ships, install via the hosted
@@ -166,7 +166,7 @@ Verification commands — run these before deploying a release.
 # Verify the cosign signature
 cosign verify-blob \
   --bundle chainsaw_<version>_linux_amd64.sigstore \
-  --certificate-identity-regexp '^https://github\.com/Chain305/chainsaw-core/\.github/workflows/release\.yml@refs/tags/v.+$' \
+  --certificate-identity-regexp '^https://github\.com/Chain305/chainsaw/\.github/workflows/release\.yml@refs/tags/v.+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   chainsaw_<version>_linux_amd64
 

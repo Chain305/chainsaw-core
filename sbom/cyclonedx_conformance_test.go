@@ -86,7 +86,6 @@ func conformanceFixture() ([]PackageEntry, *depgraph.Graph) {
 			SHA256:           "2222222222222222222222222222222222222222222222222222222222222222",
 			LicenseSPDX:      "Apache-2.0",
 			ProvenanceStatus: "verified",
-			TrustScore:       87,
 		},
 		{
 			Ecosystem:           "npm",
@@ -451,8 +450,14 @@ func TestCycloneDXConformance_SupplyChainPropertiesPreserved(t *testing.T) {
 	if !bytes.Contains(bytesOut, []byte("chainsaw:provenance:status")) {
 		t.Error("emitted bytes missing chainsaw:provenance:status property")
 	}
-	if !bytes.Contains(bytesOut, []byte("chainsaw:trust:score")) {
-		t.Error("emitted bytes missing chainsaw:trust:score property")
+	// chainsaw:trust:score is deliberately NOT emitted any more. It was fed
+	// from package_metadata.trust_score, a column with no writer since
+	// d625ef0e (2026-04-24) whose surviving values were 30/40 sentinels. An
+	// SBOM consumed downstream must not carry a number that looks like a
+	// risk measurement and is not one.
+	if bytes.Contains(bytesOut, []byte("chainsaw:trust:score")) {
+		t.Error("chainsaw:trust:score is back in the SBOM — it has no producer; " +
+			"if a real v2 score is being emitted, give it a distinct property name")
 	}
 	if !bytes.Contains(bytesOut, []byte("chainsaw:supplychain:installScriptKind")) {
 		t.Error("emitted bytes missing chainsaw:supplychain:installScriptKind property")

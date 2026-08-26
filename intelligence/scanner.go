@@ -167,7 +167,7 @@ func (s *DefaultService) Scan(ctx context.Context, req Request) (*Report, error)
 		// reached production and changed nothing anyone could observe.
 		// Skipping both paths recomputes synchronously; the singleflight
 		// and cross-replica leader machinery below collapse the herd.
-		if cached, err := s.store.Get(scanCtx, req.OrgID, req.Key); err == nil && cached != nil && !cached.MatcherStale() {
+		if cached, err := s.store.Get(scanCtx, req.OrgID, req.Key); err == nil && cached != nil && !cached.MatcherSupersededForRecompute() {
 			age := s.now().Sub(cached.Observation.CollectedAt)
 			if age < maxStale {
 				cached.Observation.Cached = true
@@ -239,7 +239,7 @@ func (s *DefaultService) Scan(ctx context.Context, req Request) (*Report, error)
 		// the "leader released lock without persisting" retry below,
 		// which is the correct outcome: retry, don't serve the row the
 		// leader was in the middle of replacing.
-		if err != nil || cached.MatcherStale() {
+		if err != nil || cached.MatcherSupersededForRecompute() {
 			return nil, nil
 		}
 		return cached, nil

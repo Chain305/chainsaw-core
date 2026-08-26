@@ -227,7 +227,7 @@ var exitCodeAllocations = []exitCodeAllocation{
 		Consts: []string{"policyScanIncompleteExitCode"},
 		Owner:  "policy lint`, `policy preflight",
 		Kind:   "command",
-		Desc:   "`policy lint` or `policy preflight` could not read part of the tree, so the result is not provably clean. Both walk the same tree with the same collector, so they share one number with one meaning. Outranks warnings-only — exit 1 reads as \"warnings, carry on\", which is the green light a half-read tree must not get. A genuine policy error still outranks it.",
+		Desc:   "`policy lint` or `policy preflight` could not cover the whole policy set, so the result is not provably clean. For `preflight` that also covers version skew: a condition your rules use that is absent from the proxy's support matrix means this CLI knows a condition that proxy does not, and those rules cannot fire there. Both walk the same tree with the same collector, so they share one number with one meaning. Outranks warnings-only — exit 1 reads as \"warnings, carry on\", which is the green light a half-read tree must not get. A genuine policy error still outranks it.",
 	},
 	{
 		Code:   prScanExitBlocking,

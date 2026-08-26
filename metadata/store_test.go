@@ -167,8 +167,6 @@ func TestSupplyChainUpdateNoDuplicateSetColumns(t *testing.T) {
 			name: "every optional field set",
 			update: SupplyChainUpdate{
 				ProvenanceStatus:           str("verified"),
-				TrustScore:                 intp(90),
-				TrustScoreBreakdown:        str("{}"),
 				TyposquatStatus:            str("clean"),
 				TyposquatSimilarTo:         str(""),
 				MalwareStatus:              str("clean"),

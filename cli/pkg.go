@@ -40,7 +40,6 @@ type bomEntry struct {
 	LastInstallAttempt string `json:"last_install_attempt"`
 	InstallCount       int    `json:"install_count"`
 	LastOutcome        string `json:"last_outcome"`
-	TrustScore         *int   `json:"trust_score,omitempty"`
 	ProvenanceStatus   string `json:"provenance_status,omitempty"`
 	MalwareStatus      string `json:"malware_status,omitempty"`
 	MalwareID          string `json:"malware_id,omitempty"`
@@ -62,7 +61,6 @@ type bomEntry struct {
 	RepoLinkLastCheckedAt string   `json:"repo_link_last_checked_at,omitempty"`
 	ChecksumDeclared      string   `json:"checksum_declared,omitempty"`
 	ChecksumActual        string   `json:"checksum_actual,omitempty"`
-	TrustScoreBreakdown   string   `json:"trust_score_breakdown,omitempty"`
 }
 
 // --- Commands ---
@@ -374,9 +372,6 @@ func runPkgInfo(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Last seen:   %s\n", e.LastInstallAttempt)
 	fmt.Printf("Installs:    %d\n", e.InstallCount)
 	fmt.Printf("Outcome:     %s\n", e.LastOutcome)
-	if e.TrustScore != nil {
-		fmt.Printf("Trust score: %d\n", *e.TrustScore)
-	}
 	if e.ProvenanceStatus != "" {
 		fmt.Printf("Provenance:  %s\n", e.ProvenanceStatus)
 	}
@@ -503,9 +498,10 @@ func hasSupplyChainSection(e bomEntry) bool {
 	if e.ChecksumDeclared != "" || e.ChecksumActual != "" {
 		return true
 	}
-	if e.TrustScoreBreakdown != "" {
-		return true
-	}
+	// Was: the legacy signal-blend blob on this row. That blob is never
+	// written (core/metadata/store.go's INSERT omits the column and the
+	// sole update path sets checksum fields only), so this clause could
+	// only ever open the section for a value nobody can produce — and it
 	return false
 }
 
@@ -551,9 +547,6 @@ func printSupplyChainSection(e bomEntry) {
 	if e.ChecksumDeclared != "" || e.ChecksumActual != "" {
 		fmt.Printf("  Checksum declared:    %s\n", truncateHashPkg(e.ChecksumDeclared))
 		fmt.Printf("  Checksum actual:      %s\n", truncateHashPkg(e.ChecksumActual))
-	}
-	if e.TrustScore != nil && e.TrustScoreBreakdown != "" {
-		fmt.Printf("  Trust score:          %d (breakdown: %s)\n", *e.TrustScore, e.TrustScoreBreakdown)
 	}
 }
 

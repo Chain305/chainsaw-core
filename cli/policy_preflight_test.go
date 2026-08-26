@@ -285,21 +285,34 @@ func newPreflightTestCmd(t *testing.T, buf *bytes.Buffer, resp supportMatrixResp
 // "hasInstallScript"), because the whole point of --policy is joining
 // policy.ConditionsUsedBy output against those keys. A fixture with
 // invented names would let a key-casing bug pass.
+// realConditionMatrix is a STUB, not the real matrix — two ecosystems and
+// the handful of conditions these tests exercise.
+//
+// ConditionCVSS must stay in it. policy.ConditionsUsedBy maps a single
+// `cvssMin` to BOTH ConditionCVE and ConditionCVSS, so a fixture carrying
+// only ConditionCVE makes every cvss-based test look like CLI/proxy
+// version skew to unknownPolicyConditions and trips the INCOMPLETE exit.
+// The real matrix has ConditionCVSS at SupportFull on all 16 ecosystems
+// (core/policy/proxy_matrix.go:175, :330 and siblings) — so including it
+// here makes the stub more faithful, not more permissive.
 func realConditionMatrix() supportMatrixResponseDTO {
 	return supportMatrixResponseDTO{
 		Ecosystems: []string{"npm", "maven"},
 		Conditions: []string{
 			string(policy.ConditionHasInstallScript),
 			string(policy.ConditionCVE),
+			string(policy.ConditionCVSS),
 		},
 		Matrix: []supportMatrixRowDTO{
 			{Ecosystem: "npm", Conditions: map[string]string{
 				string(policy.ConditionHasInstallScript): "full",
 				string(policy.ConditionCVE):              "full",
+				string(policy.ConditionCVSS):             "full",
 			}},
 			{Ecosystem: "maven", Conditions: map[string]string{
 				string(policy.ConditionHasInstallScript): "none",
 				string(policy.ConditionCVE):              "full",
+				string(policy.ConditionCVSS):             "full",
 			}},
 		},
 	}
@@ -569,5 +582,94 @@ func TestConditionCoverage_ComplementsUnsupportedList(t *testing.T) {
 		if supported+len(unsupported) != total {
 			t.Errorf("%s (unordered): supported=%d + unsupported=%d != total=%d", row.Ecosystem, supported, len(unsupported), total)
 		}
+	}
+}
+
+// TestRunPolicyPreflight_VersionSkewIsIncompleteNotClean pins the third
+// outcome. A CLI newer than its proxy uses a condition the proxy's matrix
+// never lists; the gate previously fell through to
+// "✓ every condition used by ... is supported" and exited 0, so a rule
+// that CANNOT fire on that proxy was reported as verified.
+//
+// It must exit 12 (INCOMPLETE), not 1 (unsupported) — a fleet mid-upgrade
+// must not fail the way a genuinely inert condition does.
+func TestRunPolicyPreflight_VersionSkewIsIncompleteNotClean(t *testing.T) {
+	dir := writePreflightPolicy(t, `{
+		"id":"p1","name":"block-hidden-unicode","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"hasHiddenUnicode":true}
+	}`)
+
+	matrix := realConditionMatrix()
+	// Guard the fixture: this test proves nothing if the condition under
+	// test is present in the matrix, because then there is no skew to
+	// detect. Deleting the policy's condition, or quietly adding it to
+	// the stub, must fail here rather than pass vacuously.
+	for _, row := range matrix.Matrix {
+		if _, ok := row.Conditions[string(policy.ConditionHasHiddenUnicode)]; ok {
+			t.Fatalf("fixture must NOT list %s — this test needs it absent to exercise skew",
+				policy.ConditionHasHiddenUnicode)
+		}
+	}
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, matrix)
+	_ = cmd.Flags().Set("policy", dir)
+
+	err := runPolicyPreflight(cmd, nil)
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) || coded.Code != policyScanIncompleteExitCode {
+		t.Fatalf("expected ExitCodeError{%d} for CLI/proxy skew, got %v\n%s",
+			policyScanIncompleteExitCode, err, buf.String())
+	}
+	out := buf.String()
+	if strings.Contains(out, "every condition used by") {
+		t.Errorf("must NOT print the all-clear over conditions the proxy never listed:\n%s", out)
+	}
+	for _, want := range []string{"block-hidden-unicode", string(policy.ConditionHasHiddenUnicode), "INCOMPLETE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report must name %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunPolicyPreflight_InertOutranksSkew: when a policy set has BOTH a
+// genuinely inert condition and a skewed one, the actionable failure wins
+// the exit code (1), but the skew is still printed — an operator must not
+// have to fix the inert cell before learning the gate was also partial.
+func TestRunPolicyPreflight_InertOutranksSkew(t *testing.T) {
+	dir := writePreflightPolicy(t, `{
+		"id":"p1","name":"mixed","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"hasInstallScript":true,"hasHiddenUnicode":true}
+	}`)
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, realConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "maven") // maven has hasInstallScript = none
+
+	err := runPolicyPreflight(cmd, nil)
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) || coded.Code != preflightUnsupportedExitCode {
+		t.Fatalf("expected the actionable exit %d to win, got %v\n%s",
+			preflightUnsupportedExitCode, err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, string(policy.ConditionHasHiddenUnicode)) {
+		t.Errorf("skew must still be reported even when an inert condition sets the exit code:\n%s", out)
+	}
+	if !strings.Contains(out, "HasInstallScript") {
+		t.Errorf("inert condition must still be reported:\n%s", out)
+	}
+}
+
+// TestUnknownPolicyConditions_EmptyMatrixReportsNothing: with no rows there
+// is no matrix to judge against, so every condition would look unknown.
+// That is noise, not a finding.
+func TestUnknownPolicyConditions_EmptyMatrixReportsNothing(t *testing.T) {
+	usage := []preflightConditionUse{
+		{File: "p.json", Line: 1, Rule: "r", Condition: policy.ConditionHasHiddenUnicode},
+	}
+	if got := unknownPolicyConditions(nil, usage); len(got) != 0 {
+		t.Fatalf("empty matrix must report nothing, got %v", got)
 	}
 }
