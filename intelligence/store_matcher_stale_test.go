@@ -145,7 +145,7 @@ func TestSearchAndFacetsDiscloseMatcherStaleRows(t *testing.T) {
 
 	// Facet counts span the whole table, so assert on the DELTA rather than
 	// on absolute numbers — a shared database legitimately holds other rows.
-	before, err := store.Facets(ctx, "org-test")
+	before, err := store.Facets(ctx, "org-test", "")
 	if err != nil {
 		t.Fatalf("facets before: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestSearchAndFacetsDiscloseMatcherStaleRows(t *testing.T) {
 		}
 	}
 
-	after, err := store.Facets(ctx, "org-test")
+	after, err := store.Facets(ctx, "org-test", "")
 	if err != nil {
 		t.Fatalf("facets after: %v", err)
 	}

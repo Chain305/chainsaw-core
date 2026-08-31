@@ -214,7 +214,7 @@ func TestCountMatcherStaleAgreesWithFacetsStalePending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count before: %v", err)
 	}
-	beforeFacets, err := store.Facets(ctx, "org-test")
+	beforeFacets, err := store.Facets(ctx, "org-test", "")
 	if err != nil {
 		t.Fatalf("facets before: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestCountMatcherStaleAgreesWithFacetsStalePending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count after: %v", err)
 	}
-	afterFacets, err := store.Facets(ctx, "org-test")
+	afterFacets, err := store.Facets(ctx, "org-test", "")
 	if err != nil {
 		t.Fatalf("facets after: %v", err)
 	}

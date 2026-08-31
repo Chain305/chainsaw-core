@@ -307,11 +307,11 @@ func (s *DefaultService) Search(ctx context.Context, q SearchQuery) (*SearchResu
 // The returned counts include matcher-stale rows in every bucket and report
 // how many of them there are in FacetCounts.StalePending, so the sidebar
 // reconciles with the list rather than quietly counting a smaller cache.
-func (s *DefaultService) Facets(ctx context.Context, orgID string) (*FacetCounts, error) {
+func (s *DefaultService) Facets(ctx context.Context, orgID, ecosystem string) (*FacetCounts, error) {
 	if s.store == nil {
 		return &FacetCounts{}, nil
 	}
-	return s.store.Facets(ctx, orgID)
+	return s.store.Facets(ctx, orgID, ecosystem)
 }
 
 // VerifyChecksum runs only the checksum provider if one is registered.

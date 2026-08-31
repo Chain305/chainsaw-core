@@ -197,7 +197,7 @@ func (s *alerterFakeService) Get(_ context.Context, _ string, _ Key) (*Report, e
 func (s *alerterFakeService) Search(_ context.Context, _ SearchQuery) (*SearchResults, error) {
 	return &SearchResults{}, nil
 }
-func (s *alerterFakeService) Facets(_ context.Context, _ string) (*FacetCounts, error) {
+func (s *alerterFakeService) Facets(_ context.Context, _, _ string) (*FacetCounts, error) {
 	return &FacetCounts{}, nil
 }
 func (s *alerterFakeService) VerifyChecksum(_ context.Context, _ ChecksumRequest) (ChecksumVerdict, error) {

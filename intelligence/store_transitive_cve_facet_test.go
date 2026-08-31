@@ -98,7 +98,7 @@ func TestFacetsCountTransitiveOnlyCVE(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	before, err := store.Facets(ctx, "org-test")
+	before, err := store.Facets(ctx, "org-test", "")
 	if err != nil {
 		t.Fatalf("facets before: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestFacetsCountTransitiveOnlyCVE(t *testing.T) {
 	})
 	assertFixtureCanDetectTheDefect(t, ctx, store, eco)
 
-	after, err := store.Facets(ctx, "org-test")
+	after, err := store.Facets(ctx, "org-test", "")
 	if err != nil {
 		t.Fatalf("facets after: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestFacetsTolerateNullRiskEvaluation(t *testing.T) {
 	})
 	collectedAt := time.Now().UTC().Truncate(time.Second)
 
-	before, err := store.Facets(ctx, "org-test")
+	before, err := store.Facets(ctx, "org-test", "")
 	if err != nil {
 		t.Fatalf("facets before: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestFacetsTolerateNullRiskEvaluation(t *testing.T) {
 		t.Fatalf("insert legacy row: %v", err)
 	}
 
-	after, err := store.Facets(ctx, "org-test")
+	after, err := store.Facets(ctx, "org-test", "")
 	if err != nil {
 		t.Fatalf("facets after a NULL risk_evaluation row: %v — the JSONB extract in "+
 			"transitiveCVEExpr must tolerate the column being NULL outright", err)
@@ -207,5 +207,58 @@ func TestFacetsTolerateNullRiskEvaluation(t *testing.T) {
 	}
 	if got := after.TransitiveOnlyCVE - before.TransitiveOnlyCVE; got != 0 {
 		t.Errorf("TransitiveOnlyCVE delta = %d, want 0", got)
+	}
+}
+
+// TestFacetsScopeToEcosystem — F-04. The per-ecosystem intelligence page has
+// always sent ?ecosystem=<eco>, the handler ignored it, and Store.Facets
+// applied no filter — so that page rendered whole-cache counts beneath a
+// header reading "Package intelligence scoped to the {label} ecosystem". An
+// npm page reported every indexed package as npm's.
+func TestFacetsScopeToEcosystem(t *testing.T) {
+	db := openStaleDisclosureDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	eco := mkTransitiveFixture(t, ctx, store) // 2 rows: pkg-direct, pkg-transitive
+	t.Cleanup(func() {
+		_, _ = db.DB().Exec(`DELETE FROM intelligence_reports WHERE ecosystem=$1`, eco)
+	})
+
+	scoped, err := store.Facets(ctx, "org-test", eco)
+	if err != nil {
+		t.Fatalf("scoped facets: %v", err)
+	}
+	global, err := store.Facets(ctx, "org-test", "")
+	if err != nil {
+		t.Fatalf("global facets: %v", err)
+	}
+
+	// Scoped Total is an ABSOLUTE assertion, which is only safe because the
+	// fixture owns a per-run ecosystem nothing else writes to. Everywhere
+	// else in this file uses deltas, because the table is universal.
+	if scoped.Total != 2 {
+		t.Errorf("scoped Total = %d, want exactly 2 — the filter is not applied", scoped.Total)
+	}
+	if scoped.HasCVE != 2 {
+		t.Errorf("scoped HasCVE = %d, want 2", scoped.HasCVE)
+	}
+
+	// The control that makes the assertions above mean something: the global
+	// count must be LARGER. If the shared database happened to hold only this
+	// test's rows, scoped == global and the test would pass without the
+	// filter existing. Fail loudly instead of passing vacuously.
+	if global.Total <= scoped.Total {
+		t.Fatalf("global Total (%d) is not greater than scoped (%d) — the database "+
+			"holds nothing outside this fixture, so this test cannot prove the "+
+			"ecosystem filter does anything. Seed another ecosystem first.",
+			global.Total, scoped.Total)
+	}
+
+	// The ecosystem BREAKDOWN must stay unscoped: it is the navigation
+	// control, and collapsing it to one row removes the only way off the page.
+	if len(scoped.Ecosystems) < 2 {
+		t.Errorf("scoped Ecosystems has %d entries — the breakdown must stay "+
+			"whole-cache so a reader can move between ecosystems", len(scoped.Ecosystems))
 	}
 }

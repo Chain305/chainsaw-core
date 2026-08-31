@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chain305/chainsaw-core/depgraph"
+	"github.com/github/go-spdx/v2/spdxexp"
 )
 
 // CycloneDXBOM represents a CycloneDX 1.6 BOM document.
@@ -74,8 +75,40 @@ type CycloneDXLicense struct {
 }
 
 // CycloneDXLicenseID holds a license identifier.
+//
+// Per the CycloneDX spec a license object carries EITHER `id` — which MUST be
+// a valid SPDX identifier — OR `name`, free text. Never both. Emitting a
+// non-SPDX string as `id` produces a BOM that fails schema validation
+// downstream, which is worse for the consumer than carrying no licence at all.
+//
+// This matters because the licence Chainsaw resolves is frequently NOT an SPDX
+// id: Metadata.LicenseExpression holds a licence NAME for most of Maven
+// Central and a quarter of PyPI, and production carries values like
+// "http://go.microsoft.com/fwlink/?LinkId=329770". See licenseEntry.
 type CycloneDXLicenseID struct {
-	ID string `json:"id,omitempty"`
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+// licenseEntry routes a licence string to the right CycloneDX field: `id`
+// when the SPDX parser accepts it, `name` otherwise. Returns false for an
+// empty value so callers can omit the licences array entirely.
+//
+// The caller is expected to have run the value through
+// risk.NormalizeLicenseExpression first, which maps recognised free-text
+// names ("The Apache Software License, Version 2.0") onto their SPDX ids and
+// leaves anything it cannot place untouched. What reaches `name` here is
+// therefore what nothing could resolve — a URL, a vendor string, a licence
+// body — and those are exactly the values that must not masquerade as SPDX.
+func licenseEntry(value string) (CycloneDXLicense, bool) {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return CycloneDXLicense{}, false
+	}
+	if ok, _ := spdxexp.ValidateLicenses([]string{v}); ok {
+		return CycloneDXLicense{License: CycloneDXLicenseID{ID: v}}, true
+	}
+	return CycloneDXLicense{License: CycloneDXLicenseID{Name: v}}, true
 }
 
 // CycloneDXProperty represents a custom property.
@@ -195,10 +228,8 @@ func GenerateWithGraph(entries []PackageEntry, serialNumber string, graph *depgr
 			}
 		}
 
-		if e.LicenseSPDX != "" {
-			comp.Licenses = []CycloneDXLicense{
-				{License: CycloneDXLicenseID{ID: e.LicenseSPDX}},
-			}
+		if lic, ok := licenseEntry(e.LicenseSPDX); ok {
+			comp.Licenses = []CycloneDXLicense{lic}
 		}
 
 		var props []CycloneDXProperty

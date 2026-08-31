@@ -1080,7 +1080,17 @@ const hasCVEExpr = `((` + directCVEExpr + `) OR ` + transitiveCVEExpr + `)`
 // list. Same doctrine as StalePending — a companion, never a subtraction.
 const transitiveOnlyCVEExpr = `NOT (` + directCVEExpr + `) AND ` + transitiveCVEExpr
 
-func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) {
+// ecosystem scopes every count to one ecosystem when non-empty. The MAIN
+// sidebar passes "" and keeps the whole-cache behaviour the doc above
+// describes — "what's available to filter on" is the right answer there.
+//
+// The PER-ECOSYSTEM page is a different question. It fetches
+// /intelligence/facets?ecosystem=<eco> and heads the numbers with "Package
+// intelligence scoped to the {label} ecosystem", but every param was ignored,
+// so the npm page reported the whole cache's indexed count as npm's. The
+// client was already asking the right question; the server was not answering
+// it.
+func (s *Store) Facets(ctx context.Context, orgID, ecosystem string) (*FacetCounts, error) {
 	_ = orgID
 	if s == nil || s.sql == nil || s.sql.DB() == nil {
 		return &FacetCounts{}, nil
@@ -1111,7 +1121,8 @@ func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) 
 		    WHERE COALESCE(NULLIF(report->'observation'->>'matcherEpoch', '')::int, 0) < $1
 		  )
 		FROM intelligence_reports
-	`, CurrentMatcherEpoch)
+		WHERE ($2 = '' OR ecosystem = $2)
+	`, CurrentMatcherEpoch, ecosystem)
 	var lowTrust, medTrust, highTrust int
 	if err := row.Scan(
 		&out.Total, &out.Malicious, &out.Typosquat, &out.HasCVE,
@@ -1129,6 +1140,11 @@ func (s *Store) Facets(ctx context.Context, orgID string) (*FacetCounts, error) 
 
 	// Ecosystem breakdown — separate query because GROUP BY
 	// doesn't compose cleanly with the aggregate row above.
+	//
+	// Deliberately NOT scoped by the ecosystem argument. This list is the
+	// navigation control: it answers "which ecosystems exist and how big are
+	// they", which is what lets a reader move between them. Scoping it would
+	// collapse it to a single row and remove the only way off the page.
 	rows, err := s.sql.DB().QueryContext(ctx, `
 		SELECT ecosystem, COUNT(*) AS c
 		FROM intelligence_reports

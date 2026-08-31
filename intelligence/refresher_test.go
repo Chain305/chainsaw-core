@@ -71,7 +71,7 @@ func (f *fakeService) Get(ctx context.Context, orgID string, key Key) (*Report, 
 func (f *fakeService) Search(ctx context.Context, q SearchQuery) (*SearchResults, error) {
 	return &SearchResults{}, nil
 }
-func (f *fakeService) Facets(ctx context.Context, orgID string) (*FacetCounts, error) {
+func (f *fakeService) Facets(ctx context.Context, orgID, ecosystem string) (*FacetCounts, error) {
 	return &FacetCounts{}, nil
 }
 func (f *fakeService) VerifyChecksum(ctx context.Context, req ChecksumRequest) (ChecksumVerdict, error) {

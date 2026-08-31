@@ -36,7 +36,7 @@ type Service interface {
 	// sidebar (ecosystem breakdown, signal toggle counts, risk tiers).
 	// Counts are over the full org — the UI's sidebar shows "what's
 	// available to filter on" rather than "what's left after my filter".
-	Facets(ctx context.Context, orgID string) (*FacetCounts, error)
+	Facets(ctx context.Context, orgID, ecosystem string) (*FacetCounts, error)
 
 	// VerifyChecksum is the fail-closed hot path used by the proxy's
 	// existing checksum enforcer. Runs only the checksum provider,
@@ -94,7 +94,7 @@ func (NoopService) Search(ctx context.Context, q SearchQuery) (*SearchResults, e
 }
 
 // Facets returns an empty facet block.
-func (NoopService) Facets(ctx context.Context, orgID string) (*FacetCounts, error) {
+func (NoopService) Facets(ctx context.Context, orgID, ecosystem string) (*FacetCounts, error) {
 	return &FacetCounts{}, nil
 }
 
