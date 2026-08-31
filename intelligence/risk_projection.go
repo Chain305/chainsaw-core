@@ -580,6 +580,11 @@ func anyCVEFixAvailable(details []CVEDetail) bool {
 //  4. Any unparseable operand, or a result that is not STRICTLY GREATER
 //     than the installed version, yields "". Both are the same rule —
 //     never advise an upgrade we cannot prove is one.
+//  5. If — and only if — Maintenance.VersionTimeline is populated, the
+//     answer must be a MEMBER of it. A registry that enumerated its
+//     published versions and did not list ours contradicts the advisory,
+//     and we side with the registry. An ABSENT timeline is not a
+//     contradiction and vetoes nothing; see the comment at the check.
 func MinimumSafeVersion(r *Report) string {
 	if r == nil || len(r.Vulnerabilities.CVEs) == 0 {
 		return ""
@@ -694,6 +699,48 @@ func MinimumSafeVersion(r *Report) string {
 	cmp, err := osv.CompareVersions(eco, bestCmp, installedCmp)
 	if err != nil || cmp <= 0 {
 		return ""
+	}
+
+	// FINAL CHECK — the candidate must not be CONTRADICTED by the
+	// registry's own published version list.
+	//
+	// Everything above this point reasons from advisory data alone.
+	// Advisory `fixed` endpoints are hand-entered upstream and are
+	// occasionally versions the registry never published — measured on a
+	// live production replay (439 CVE-bearing rows through HEAD): of the
+	// 359 rows that resolved a non-empty answer, 313 named a version the
+	// registry lists, 43 had no timeline to check against, and 3 named a
+	// version the registry's own enumerated list does NOT contain. Those
+	// 3 are the defect: ApplyKnownFix printed "upgrade and re-scan" for a
+	// version that 404s.
+	//
+	// THE RULE IS CONDITIONAL, DELIBERATELY. It fires only when a
+	// timeline EXISTS and the candidate is absent from it. An empty
+	// timeline is absence of evidence, and this file's sibling doctrine —
+	// WarnVersionNotFound in report.go, "positive evidence of absence,
+	// not absence of evidence" — forbids reading it as evidence of
+	// absence. An unconditional rule was measured at yield 3, cost 46: it
+	// would have deleted the guidance on all 43 timeline-less rows, lost
+	// 11 upgrade promotions, and flipped
+	// `go github.com/emicklei/go-restful@v2.15.0` warn → quarantine →
+	// Blocked via internal/decision. The conditional rule loses zero
+	// promotions.
+	//
+	// versionPublished (not versionListed) is the membership test on
+	// purpose: it is the trailing-zero-tolerant form, and it is used here
+	// ONLY TO SUPPRESS the veto, never to produce one, so widening it can
+	// cost a catch but can never manufacture a false blanking. It also
+	// normalises the `v` prefix through canonicalVersionKey, so a Go
+	// timeline entry `v0.39.0` matches an advisory's `0.39.0`.
+	//
+	// Note that the Go timeline is sourced from the module proxy's
+	// @v/list, which OMITS pseudo-versions. That is a second, independent
+	// reason the rule must stay conditional-and-tolerant rather than
+	// strict: a published list is not always a complete one.
+	if published := timelineVersions(r.Maintenance.VersionTimeline); len(published) > 0 {
+		if !versionPublished(published, best) {
+			return ""
+		}
 	}
 	return best
 }

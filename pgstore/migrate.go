@@ -903,6 +903,13 @@ func (s *Store) migrateSchema() error {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS persona TEXT`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS persona_inferred INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_skipped_at TIMESTAMPTZ`,
+		// Per-user session epoch for admin session revocation. Any token
+		// issued at or before this instant is refused. NULL means no
+		// revocation has happened. Read on the authCacheTTL-cached user
+		// path, so a revocation on one replica binds on all of them
+		// without a propagation channel — unlike the in-process
+		// revoked_tokens map, which is process-local by construction.
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS sessions_invalidated_at TIMESTAMPTZ`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS default_persona TEXT`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS allow_nonbusiness_invites INTEGER NOT NULL DEFAULT 0`,
 		// WS4 #4 — opt-in public "blocked N packages" badge. OFF by
@@ -2339,6 +2346,19 @@ func (s *Store) migrateSchema() error {
 	}
 	if err := s.ensureEnhancedColumns(); err != nil {
 		return err
+	}
+	// Billy's tenant boundary: column-level grants for the billy_ro role
+	// plus ENABLE/FORCE row-level security with an org-scoped policy on the
+	// four tables run_sql may read. See core/pgstore/rls.go for why this
+	// lives in the database rather than in the SQL guard's regex (P0-A/A1).
+	//
+	// Runs after ensureEnhancedColumns, not inside the stmts list above,
+	// so every column named in the GRANT exists by the time it is granted
+	// — a GRANT on a missing column is an error, not a no-op.
+	for _, stmt := range billyRLSStatements() {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("apply billy RLS migration %q: %w", stmt[:min(len(stmt), 60)], err)
+		}
 	}
 	// Record the schema revision after every table/column change
 	// above has been applied. ensureSchemaVersion runs last so the

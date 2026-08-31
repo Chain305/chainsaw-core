@@ -446,6 +446,14 @@ func TestRunGo(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"Version":"v1.2.4","Time":"2024-02-01T00:00:00Z"}`))
 	})
+	// @v/list is the Go version timeline. Before matcher epoch 9 runGo was
+	// the one major-ecosystem handler that never called applyTimeline, so
+	// every Go coordinate held an empty Maintenance.VersionTimeline — and
+	// the safe-version membership check had nothing to check against.
+	mux.HandleFunc("/github.com/foo/!bar/@v/list", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("v1.0.0\nv1.2.3\nv1.2.4\n"))
+	})
 	p, _ := newStubProvider(t, mux)
 	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "go", Package: "github.com/foo/Bar", Version: "v1.2.3"}}, nil)
 	if err != nil {
@@ -465,6 +473,22 @@ func TestRunGo(t *testing.T) {
 	}
 	if pr.Provenance == nil || pr.Provenance.SourceRepo == "" {
 		t.Fatalf("provenance: %+v", pr.Provenance)
+	}
+	if pr.Maintenance == nil || len(pr.Maintenance.VersionTimeline) != 3 {
+		t.Fatalf("go version timeline not populated from @v/list: %+v", pr.Maintenance)
+	}
+	if !versionPublished(timelineVersions(pr.Maintenance.VersionTimeline), "1.2.4") {
+		t.Fatalf("timeline must match a bare advisory version against a v-prefixed tag: %+v",
+			pr.Maintenance.VersionTimeline)
+	}
+	// @v/list carries no publish dates, so FirstPublishedAt legitimately
+	// stays nil — applyTimeline derives it only from non-zero times.
+	if pr.Maintenance.FirstPublishedAt != nil {
+		t.Fatalf("FirstPublishedAt invented from a dateless list: %v", pr.Maintenance.FirstPublishedAt)
+	}
+	// @latest already set it; applyTimeline must not overwrite.
+	if pr.Release.LatestVersion != "v1.2.4" {
+		t.Fatalf("applyTimeline clobbered LatestVersion: %q", pr.Release.LatestVersion)
 	}
 }
 
@@ -491,6 +515,12 @@ func registerGoBaseRoutes(mux *http.ServeMux, encodedModule string) {
 	mux.HandleFunc("/"+encodedModule+"/@latest", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"Version":"v1.2.4"}`))
+	})
+	// Epoch 9: runGo now also fetches the version timeline on the success
+	// path. Without this route the handler emits timeline_fetch_failed.
+	mux.HandleFunc("/"+encodedModule+"/@v/list", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("v1.0.0\nv1.2.3\nv1.2.4\n"))
 	})
 }
 

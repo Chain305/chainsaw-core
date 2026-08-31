@@ -83,6 +83,18 @@ type BootstrapConfig struct {
 	// SwiftRegistryURL configures the Swift provenance probe's target
 	// registry. Empty disables the Swift probe entirely.
 	SwiftRegistryURL string
+	// NPMRegistryURL is the npm registry this deployment actually
+	// resolves npm packages from — threaded from the proxy's configured
+	// npm upstream (see config.Config.NPMRegistryURL). It is NOT a new
+	// knob: the probe must interrogate the registry that served the
+	// tarball, and on a mirrored or air-gapped install that is not
+	// registry.npmjs.org.
+	//
+	// Empty means "not configured", and the npm probe then falls back to
+	// the public registry — an explicit, commented fallback, see
+	// defaultNPMRegistryURL in core/provenance/npm.go. Unlike
+	// SwiftRegistryURL, empty does NOT disable the probe.
+	NPMRegistryURL string
 	// SwiftTrustRoots is the CA pool used by the Swift CMS verifier
 	// when SwiftFullVerify is enabled. Nil means "use system trust
 	// pool".
@@ -293,6 +305,13 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 	provChecker := provenance.NewChecker(logger, provOpts...)
 	if cfg.SwiftRegistryURL != "" {
 		provChecker.WithSwiftRegistryURL(cfg.SwiftRegistryURL)
+	}
+	if cfg.NPMRegistryURL != "" {
+		// Empty is deliberately left alone rather than passed through:
+		// WithNPMRegistryURL("") is a no-op, and routing through it
+		// would blur "operator configured nothing" into "operator
+		// configured the empty string".
+		provChecker.WithNPMRegistryURL(cfg.NPMRegistryURL)
 	}
 	if cfg.SwiftFullVerify {
 		provChecker.WithSwiftFullVerify(cfg.SwiftTrustRoots)

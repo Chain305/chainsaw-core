@@ -120,6 +120,27 @@ type Resolution struct {
 	TransitiveBlame []Key    `json:"transitiveBlame,omitempty"`
 	Rationale       []string `json:"rationale,omitempty"`
 
+	// SafeVersionCorroborated says whether SafeVersion was confirmed to
+	// be INSTALLABLE, not merely NAMED by an advisory. False (the zero
+	// value, and therefore also every row written before matcher epoch
+	// 9) means "the advisory names this fix and we could not confirm the
+	// registry has published it".
+	//
+	// It exists because deleting an uncorroborated SafeVersion would
+	// destroy real information: coordinated disclosure routinely names a
+	// fix version days before the release lands, and "the fix is 4.19.2,
+	// not yet on the registry" is strictly more useful to a reader than
+	// silence. The defect this field addresses was the IMPERATIVE — a
+	// PatchAdvisory reading "upgrade and re-scan" for a version that may
+	// 404 — so the wording softens instead (see applyKnownFix).
+	//
+	// It is a DISPLAY bit. Nothing in the evaluator, internal/decision,
+	// internal/scan or the CLI exit-code path reads it; the enforcement
+	// consequence of corroboration lives in
+	// intelligence.promoteToUpgradeAvailable, which refuses to promote
+	// an uncorroborated candidate at all.
+	SafeVersionCorroborated bool `json:"safeVersionCorroborated,omitempty"`
+
 	// TransitiveSeverity is the severity-bucketed breakdown of issues found
 	// in the transitive closure. Populated by evaluateTransitiveRisk after
 	// the dep-tree walker resolves descendants. Zero values are valid: if
@@ -176,6 +197,21 @@ var noFixSummaries = map[string]string{
 	"Package is high-risk with no safe version. Consider an alternative.":                  "Package is high-risk. Patched in %s — upgrade and re-scan, or consider an alternative.",
 }
 
+// noFixSummariesUncorroborated is the same table for the case where the
+// fix version is NAMED by an advisory but was not confirmed installable.
+// Same keys, same posture words, one difference: it reports a fact
+// ("advisories name X") instead of issuing an instruction ("upgrade to
+// X"), because the instruction may send a reader to a 404.
+//
+// Kept as a parallel table rather than a runtime rewrite of the
+// corroborated strings so that resolution_display_test.go's drift check
+// covers both wordings from the same key set.
+var noFixSummariesUncorroborated = map[string]string{
+	"High-risk package with no known safe version or alternative. Manual review required.": "High-risk package. Advisories name %s as the fix; it is not confirmed published yet. Manual review required.",
+	"Critical signal present with no upgrade or alternative path. Manual review required.": "Critical signal present. Advisories name %s as the fix; it is not confirmed published yet. Manual review required.",
+	"Package is high-risk with no safe version. Consider an alternative.":                  "Package is high-risk. Advisories name %s as the fix; it is not confirmed published yet. Consider an alternative.",
+}
+
 // ApplyKnownFix records a patched version on a Resolution for DISPLAY,
 // and corrects a Summary that asserts no such version exists.
 //
@@ -192,6 +228,31 @@ var noFixSummaries = map[string]string{
 // clears every CVE" must render as today's output, not as a blank
 // advisory.
 func (r *Resolution) ApplyKnownFix(safeVersion string) {
+	r.ApplyKnownFixCorroborated(safeVersion, true)
+}
+
+// ApplyKnownFixCorroborated is ApplyKnownFix with the corroboration bit
+// made explicit. corroborated=false means the version is named by
+// advisory data but was NOT confirmed to be published upstream, and the
+// advisory sentence drops its imperative accordingly.
+//
+// AMENDS Phase 7 D-1/D-2 (docs/plan_qa_phase7_remediation.md). D-2 fixed
+// the SOURCE of the safe version (per-CVE FixedVersion, resolved to the
+// minimum clearing every CVE) and explicitly rejected
+// intelligence_latest_probes.latest_version as a source because "latest
+// upstream" is not "safe". That ruling stands and is not being revisited:
+// the probe is still never a source. What is added here is that the same
+// probe, plus the registry's published version timeline, is allowed to
+// act as a CORROBORATOR — a one-directional check on whether the version
+// D-2 chose can actually be installed. A founder decision is being
+// extended, not corrected.
+//
+// The extension exists because D-1/D-2 left one sentence unexamined: the
+// display path printed "Patched in X — upgrade and re-scan" for any X the
+// advisory named, which is an instruction to install something that may
+// not exist. Blanking X was considered and rejected (see
+// Resolution.SafeVersionCorroborated).
+func (r *Resolution) ApplyKnownFixCorroborated(safeVersion string, corroborated bool) {
 	if r == nil || safeVersion == "" {
 		return
 	}
@@ -204,8 +265,15 @@ func (r *Resolution) ApplyKnownFix(safeVersion string) {
 		return
 	}
 	r.SafeVersion = safeVersion
-	r.PatchAdvisory = "Patched in " + safeVersion + " — upgrade and re-scan."
-	if replacement, ok := noFixSummaries[r.Summary]; ok {
+	r.SafeVersionCorroborated = corroborated
+	table := noFixSummaries
+	if corroborated {
+		r.PatchAdvisory = "Patched in " + safeVersion + " — upgrade and re-scan."
+	} else {
+		r.PatchAdvisory = "Advisories name " + safeVersion + " as the fix; it is not confirmed published yet."
+		table = noFixSummariesUncorroborated
+	}
+	if replacement, ok := table[r.Summary]; ok {
 		r.Summary = fmt.Sprintf(replacement, safeVersion)
 	}
 }
@@ -214,10 +282,16 @@ func (r *Resolution) ApplyKnownFix(safeVersion string) {
 // display-only contract: Verdict, DirectScore, and RolledUp are never
 // read or written.
 func (e *Evaluation) ApplyKnownFix(safeVersion string) {
+	e.ApplyKnownFixCorroborated(safeVersion, true)
+}
+
+// ApplyKnownFixCorroborated is the Evaluation-level wrapper carrying the
+// corroboration bit. Same display-only contract.
+func (e *Evaluation) ApplyKnownFixCorroborated(safeVersion string, corroborated bool) {
 	if e == nil {
 		return
 	}
-	e.Resolution.ApplyKnownFix(safeVersion)
+	e.Resolution.ApplyKnownFixCorroborated(safeVersion, corroborated)
 }
 
 // gradeForScore maps a 0-100 score to a letter grade. Thresholds chosen

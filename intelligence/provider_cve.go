@@ -37,6 +37,21 @@ func (p *cveProvider) NeedsArtifact() bool { return false }
 
 // supportedCVEEcosystems mirrors malware's coverage list. Kept in-file
 // so the matrix can evolve independently of the malware provider.
+//
+// THIS IS A READER GATE, NOT A COVERAGE CLAIM. Membership means "if a
+// vulnerability_metadata row exists for this coordinate, surface it" —
+// nothing more. It says nothing about whether any advisory database has a
+// bucket for the ecosystem, and it must not be read that way: P9 P0-C is
+// the bill for exactly that misreading. `cocoapods` is in this list, the
+// proxy really does hand cocoapods pulls to the vendored scanner, the
+// scanner returned clean because nobody has verified a cocoapods bucket
+// exists, Run stamped ScannedAt off the resulting row, and 61 production
+// coordinates graded ALLOW 97-100 on an answer no lane was able to give.
+//
+// Do NOT narrow this map to fix a coverage gap. Narrowing it makes the
+// provider drop rows that DO carry findings, which turns a real CVE into
+// VerdictUnknown — a fail-open. The coverage question has its own table:
+// scannerAdvisedEcosystems in advisory_coverage.go. Edit that one.
 var supportedCVEEcosystems = map[string]struct{}{
 	"npm": {}, "pip": {}, "pypi": {}, "rubygems": {}, "cargo": {},
 	"composer": {}, "nuget": {}, "maven": {}, "gradle": {},

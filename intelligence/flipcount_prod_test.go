@@ -75,8 +75,9 @@ func TestProductionFlipCount(t *testing.T) {
 		}
 		// With the promotion gates applied.
 		safe := MinimumSafeVersion(&rep)
+		corroborated := safe != "" && upgradeCandidateCorroborated(&rep, safe)
 		after := before
-		if p := promoteToUpgradeAvailable(&rep, before, safe, nil, nil); p != nil {
+		if p := promoteToUpgradeAvailable(&rep, before, safe, corroborated, nil, nil); p != nil {
 			after = p
 		}
 

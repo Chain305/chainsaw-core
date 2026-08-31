@@ -3080,6 +3080,70 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	if urls.SourceRepoURL != "" {
 		pr.Provenance = &ProvenanceSection{SourceRepo: urls.SourceRepoURL}
 	}
+
+	// Version timeline, from the same @v/list endpoint probeGoModule
+	// already uses on the 404 branch — hoisted onto the SUCCESS path.
+	//
+	// WHY. applyTimeline is the single writer of
+	// Maintenance.VersionTimeline and is called from 8 of the 12
+	// ecosystem handlers; runGo was not one of them, so every Go
+	// coordinate held an empty timeline. Measured on a live production
+	// replay of 439 CVE-bearing rows: of the 43 rows whose safe-version
+	// candidate could not be checked against a published list, 39 were
+	// Go. This is the fact those rows were missing, and it must land in
+	// the SAME matcher epoch as the membership veto in
+	// MinimumSafeVersion — the epoch drain calls Scan with
+	// AllowStale:false, so a veto shipped one epoch ahead of this fetch
+	// would rescan every Go row while it still had no timeline and
+	// PERSIST the blanking.
+	//
+	// COST. One extra GET on a path that already makes four (info,
+	// @latest, deps.dev licence, go.mod).
+	//
+	// @v/list OMITS PSEUDO-VERSIONS. Two consequences, both deliberate:
+	// the membership veto that reads this list stays conditional and
+	// trailing-zero-tolerant (see MinimumSafeVersion step 5), and this
+	// call deliberately does NOT emit versionNotFoundWarning the way the
+	// single-canonical-registry handlers do. A pseudo-versioned module is
+	// legitimately absent from @v/list, and minting version_not_found for
+	// it would route the whole coordinate to VerdictUnknown.
+	//
+	// The list carries no publish dates, so every entry has a zero
+	// PublishedAt and FirstPublishedAt stays nil — applyTimeline already
+	// handles that (it derives FirstPublishedAt only from non-zero
+	// times). latest="" because release.LatestVersion is already set from
+	// @latest above and applyTimeline only fills it when empty.
+	//
+	// A failed fetch is reported as timeline_fetch_failed, the same
+	// recoverable code the other eight handlers use — the primary
+	// per-version fetch already succeeded, so this is missing version
+	// history, not a missing package. NOT swallowed the way the @latest
+	// fetch above is: an operator must be able to tell "Go has no
+	// timeline" from "we never asked", and core/coverage classifies the
+	// code as StatusUnavailable, which is the fail-closed posture this
+	// repo takes for every other ecosystem's timeline.
+	//
+	// SIZE THAT DECISION BEFORE THE EPOCH-9 DRAIN. Measured while
+	// building the 400-coordinate FP corpus twice in 15 minutes at
+	// parallelism 8: the first build got 69 of 70 Go timelines, the
+	// second only 60 — proxy.golang.org throttles, and every throttled
+	// coordinate now emits this code where it previously emitted nothing.
+	// Harmless to scoring (the membership veto is conditional, so a
+	// missing timeline vetoes nothing), but it is a new input to the
+	// OPT-IN core/coverage gate. Drain at a parallelism the proxy
+	// tolerates.
+	listVersions, listEndpoint, listWarn := p.probeGoModule(module)(ctx)
+	if listWarn != nil {
+		applyTimeline(&pr, nil, "", timelineFetchFailedWarning(p, listEndpoint, nil, listWarn))
+	} else if len(listVersions) > 0 {
+		timeline := make([]VersionRelease, 0, len(listVersions))
+		for _, v := range listVersions {
+			if s := strings.TrimSpace(v); s != "" {
+				timeline = append(timeline, VersionRelease{Version: s})
+			}
+		}
+		applyTimeline(&pr, timeline, "", nil)
+	}
 	return pr, nil
 }
 
@@ -4591,6 +4655,12 @@ func (p *registryMetadataProvider) probeNuGetPackage(pkg string) packageProbe {
 
 // probeGoModule asks the module proxy's `@v/list`, the only Group A
 // package-level endpoint that answers text/plain.
+//
+// TWO CALLERS. The existence probe below (the 404 branch of runGo), and
+// runGo's SUCCESS path, which routes the same list through applyTimeline
+// so Go stops being the one major ecosystem with no version timeline.
+// The paragraph below is about the FIRST caller; the second one carries
+// its own note on why pseudo-version omission matters there.
 //
 // @v/list omits pseudo-versions, which costs nothing here: a real
 // pseudo-version is served by @v/{ver}.info, so a coordinate that

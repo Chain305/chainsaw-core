@@ -1267,6 +1267,49 @@ func (c *Config) CoverageEnabled() bool {
 	return c.Coverage.IsEnabled()
 }
 
+// NPMRegistryURL resolves the npm registry this deployment actually
+// resolves npm packages from, for the provenance probe to query.
+//
+// This is deliberately NOT a new config key. An npm attestation lives on
+// the registry that served the tarball, so the only correct target is the
+// upstream this proxy already points at. Two existing places carry it, in
+// precedence order:
+//
+//  1. the remote URL of an enabled npm-format proxy repository — the most
+//     specific statement an operator can make, and the one an air-gapped
+//     or mirrored install typically sets;
+//  2. `remotes.npm.url`, the per-format default (applyDefaults seeds it
+//     from builtinRemoteDefaults, i.e. the public registry, when the
+//     operator sets neither).
+//
+// Repository first because RepositoryConfig.normalize only copies the
+// format default INTO an empty repo remote, never the reverse: an
+// operator who set `repositories[].remote.url` to their internal mirror
+// and left `remotes.npm` alone would otherwise have the probe interrogate
+// registry.npmjs.org about bytes that never came from there.
+//
+// Hosted repositories are skipped — they have no upstream to attest
+// against. An empty return means "nothing configured", and the npm probe
+// then applies its explicit public-registry fallback (see
+// defaultNPMRegistryURL in core/provenance/npm.go).
+func (c *Config) NPMRegistryURL() string {
+	if c == nil {
+		return ""
+	}
+	for _, repo := range c.Repositories {
+		if !strings.EqualFold(strings.TrimSpace(repo.Format), "npm") {
+			continue
+		}
+		if !repo.EnabledValue() || strings.EqualFold(repo.Type, "hosted") {
+			continue
+		}
+		if u := strings.TrimSpace(repo.Remote.URL); u != "" {
+			return u
+		}
+	}
+	return strings.TrimSpace(c.Remotes["npm"].URL)
+}
+
 // AnonymousRepositoryAccess reports whether repository routes allow unauthenticated access.
 func (c *Config) AnonymousRepositoryAccess() bool {
 	if c == nil || c.RepositoryAnonymousAccess == nil {

@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 )
 
 // pypiChecker queries the PyPI attestation API (PEP 740) for Sigstore
@@ -27,9 +26,12 @@ func (c *pypiChecker) Check(ctx context.Context, packageName, version string) Re
 	encodedVer := url.PathEscape(version)
 	reqURL := fmt.Sprintf("https://pypi.org/integrity/%s/%s/", encodedPkg, encodedVer)
 
-	_, err := fetchJSON(ctx, c.client, reqURL)
+	// Same rule as npm.go: the "no attestation" verdict is decided by the
+	// HTTP status code, not by whether the error string happens to contain
+	// "404". A package literally named `404` used to satisfy that sniff.
+	_, status, err := fetchJSONStatus(ctx, c.client, reqURL)
 	if err != nil {
-		if strings.Contains(err.Error(), "404") {
+		if isNotFound(status) {
 			return Result{Status: StatusMissing, Ecosystem: "pip"}
 		}
 		return Result{Status: StatusFailed, Ecosystem: "pip", Error: err.Error()}

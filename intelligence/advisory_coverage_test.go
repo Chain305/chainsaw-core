@@ -7,6 +7,7 @@ package intelligence
 // evaluation's Overall 0 must never be projected as a KNOWN trust score.
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -71,19 +72,197 @@ func TestCoveredEcosystemIsNotMarked(t *testing.T) {
 	}
 }
 
-// A coordinate a vulnerability lane REALLY scanned keeps its score, even
-// in an uncovered ecosystem. This is what stops the fix blinding the
-// Trivy-backed cveProvider on the proxy path, where docker images do get
-// scanned out of band.
-func TestScannedCoordinateInUncoveredEcosystemIsNotMarked(t *testing.T) {
+// A docker coordinate a vulnerability lane REALLY scanned keeps its
+// score. This is what stops the fix blinding the Trivy-backed cveProvider
+// on the proxy path, where images do get scanned out of band:
+// hooks.OCIInspector extracts the installed apk/dpkg/rpm packages out of
+// the layers and looks each one up against the OS buckets upstream
+// trivy-db genuinely ships, so a clean docker row is a real negative.
+func TestScannedDockerCoordinateIsNotMarked(t *testing.T) {
+	at := time.Unix(0, 0)
+	r := newUncoveredReport("docker", "nginx", "1.14.1")
+	scanned := at
+	r.Vulnerabilities.ScannedAt = &scanned
+	if markNoAdvisoryCoverage(r, at) {
+		t.Error("a scanned docker coordinate was marked uncovered — the " +
+			"Trivy image lane would be blinded")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P9 P0-C — the cocoapods regression, seeded from the LIVE SHAPE
+// ---------------------------------------------------------------------------
+
+// newLiveCocoapodsShape reproduces what production actually persisted: the
+// exact row class behind `cocoapods: 8 unknown, 61 allow 97-100` at
+// matcherEpoch 8, written 2026-08-31 05:45.
+//
+// Every field here is load-bearing and matches a fact in the chain:
+//
+//   - ecosystem cocoapods, which HAS a case in
+//     internal/hooks.selectTrivialTarget, so the proxy really did route
+//     the pull to the vendored Trivy scanner;
+//   - ScannedAt set, because internal/server.recordTrivialVulnerabilityMetadata
+//     wrote a vulnerability_metadata row for the result and
+//     provider_cve.go stamps ScannedAt off that row's existence;
+//   - zero CVEs and IsVulnerable false, because the scanner had no
+//     cocoapods bucket to answer from and so returned clean;
+//   - NO ecosystem_unsupported warning, which is what the production
+//     export showed and what proves the marker never fired.
+//
+// The package is the tester's published proof: swift Alamofire 5.8.0
+// against cocoapods Alamofire 5.8.0, same package, two ecosystems, two
+// verdicts. Only the accident that selectTrivialTarget has no `swift`
+// case made the swift half look correct.
+func newLiveCocoapodsShape(at time.Time) *Report {
+	r := newUncoveredReport("cocoapods", "Alamofire", "5.8.0")
+	scanned := at
+	r.Vulnerabilities.ScannedAt = &scanned
+	r.Vulnerabilities.IsVulnerable = false
+	r.Vulnerabilities.CVEs = nil
+	return r
+}
+
+// The regression itself. A clean scan from a lane with no advisory bucket
+// for the ecosystem is absence of evidence, not evidence of absence, and
+// must resolve to Unknown rather than to the ALLOW 97-100 production has
+// been serving.
+func TestCleanScanWithoutAStructuralAdvisorySourceIsUncovered(t *testing.T) {
+	at := time.Unix(0, 0)
+	r := newLiveCocoapodsShape(at)
+
+	// Precondition: this is the state that used to take the early return.
+	if r.Vulnerabilities.ScannedAt == nil {
+		t.Fatal("precondition: the live shape carries a completed scan")
+	}
+	for _, w := range r.Observation.Warnings {
+		if w.Code == WarnUnsupported {
+			t.Fatal("precondition: the live rows carry NO ecosystem_unsupported stamp")
+		}
+	}
+
+	if !markNoAdvisoryCoverage(r, at) {
+		t.Fatal("cocoapods + ScannedAt + zero CVEs was not marked — this is " +
+			"the live shape of the 61 production rows grading ALLOW 97-100 " +
+			"off a scanner with no cocoapods bucket (P9 P0-C)")
+	}
+
+	ev := risk.EvaluatePackage(ProjectToRiskInput(r), risk.Options{})
+	if ev.Verdict != risk.VerdictUnknown {
+		t.Fatalf("verdict = %q (overall %d), want unknown", ev.Verdict, ev.RolledUp.Overall)
+	}
+	if ev.RolledUp.Overall >= 95 {
+		t.Fatalf("overall = %d — an unlooked-at coordinate must not grade in "+
+			"the 95-100 band the defect produced", ev.RolledUp.Overall)
+	}
+
+	// Wording, on the Wave 6 precedent: the verdict is Unknown either way,
+	// but the sentence has to send the operator at the right thing. A scan
+	// DID run here, so the unrouted-ecosystem clause would be false and
+	// would point at the routing instead of at the advisory data.
+	reason, ok := noAdvisorySourceReason(r)
+	if !ok {
+		t.Fatal("no reason attached to the unavailable evaluation")
+	}
+	if strings.Contains(reason, "no vulnerability was looked for") {
+		t.Errorf("reason says nothing was looked for, but a scan completed "+
+			"for this coordinate — that sends the operator to the routing "+
+			"when the gap is the advisory database: %q", reason)
+	}
+	if !strings.Contains(reason, "advisory database") {
+		t.Errorf("reason does not name the advisory database as the gap: %q", reason)
+	}
+	if !strings.Contains(reason, "not a clean result") {
+		t.Errorf("reason drops the load-bearing 'not a clean result': %q", reason)
+	}
+}
+
+// The fail-open rail on the fix. Evidence of PRESENCE is dispositive
+// whatever the coverage table says: a lane that surfaced a CVE for this
+// coordinate demonstrably could look at it, so the marker must keep its
+// hands off and the finding must survive to the verdict. Without this
+// disjunct the fix would convert every real cocoapods/swift CVE into
+// VerdictUnknown and cost a block.
+func TestScanWithFindingsIsNeverMarkedUncovered(t *testing.T) {
 	at := time.Unix(0, 0)
 	for _, eco := range uncoveredEcosystems {
-		r := newUncoveredReport(eco, "nginx", "1.14.1")
+		t.Run(eco, func(t *testing.T) {
+			r := newUncoveredReport(eco, "Alamofire", "5.8.0")
+			scanned := at
+			r.Vulnerabilities.ScannedAt = &scanned
+			r.Vulnerabilities.IsVulnerable = true
+			r.Vulnerabilities.CVEs = []string{"CVE-2021-23337"}
+			r.Vulnerabilities.CVSSScore = 7.2
+
+			if markNoAdvisoryCoverage(r, at) {
+				t.Fatalf("%s coordinate with a real CVE was marked uncovered — "+
+					"that converts a finding into Unknown and loses the block", eco)
+			}
+			ev := risk.EvaluatePackage(ProjectToRiskInput(r), risk.Options{})
+			if ev.Verdict == risk.VerdictUnknown {
+				t.Fatalf("%s coordinate with a real CVE resolved to unknown", eco)
+			}
+		})
+	}
+}
+
+// The table is a claim about a third-party bundle's contents and about
+// what a DIFFERENT Go module routes, so nothing here can derive it and
+// nothing here can check it. What this test can do is stop it growing
+// quietly: every member must be an ecosystem that reached this file
+// because OSV does not cover it, and the three ecosystems the defect ran
+// through must stay out until somebody produces the evidence.
+func TestScannerAdvisedEcosystemsIsAJustifiedSubset(t *testing.T) {
+	for eco := range scannerAdvisedEcosystems {
+		if ecosystemHasAdvisorySource(eco) {
+			t.Errorf("%q has an OSV bucket, so it never reaches the "+
+				"scanner-advised test — remove the row", eco)
+		}
+		if !isKnownEcosystem(eco) {
+			t.Errorf("%q is not an ecosystem this build recognises", eco)
+		}
+	}
+
+	if !ecosystemHasScannerAdvisorySource("docker") {
+		t.Error("docker left scannerAdvisedEcosystems — hooks.OCIInspector " +
+			"extracts real apk/dpkg/rpm packages and looks them up against " +
+			"trivy-db's OS buckets, so clean docker rows are real negatives " +
+			"and dropping it re-blinds the image lane")
+	}
+
+	// Routed but unverified (cocoapods), and unrouted (swift,
+	// huggingface, apt, yum, dnf). None of them may be added without
+	// first establishing BOTH that the format is routed to a scanner and
+	// that the scanner's database has a bucket for it.
+	for _, eco := range []string{
+		"cocoapods", "swift", "huggingface", "apt", "yum", "dnf",
+	} {
+		if ecosystemHasScannerAdvisorySource(eco) {
+			t.Errorf("%q was added to scannerAdvisedEcosystems. A clean scan "+
+				"in that ecosystem now grades as a real negative again — "+
+				"which is the P9 P0-C defect. Add it only with evidence that "+
+				"the format is routed (internal/hooks.selectTrivialTarget) "+
+				"AND that the advisory bundle has a bucket for it", eco)
+		}
+	}
+}
+
+// Casing is not a bypass. Key.Ecosystem arrives verbatim from a URL path
+// segment, a lockfile parser or a policy row, and P8-33 was an entire
+// provider lane lost to a `PyPI`-cased coordinate.
+func TestScannerAdvisedEcosystemsIsCaseInsensitive(t *testing.T) {
+	for _, eco := range []string{"Docker", "DOCKER", " docker "} {
+		if !ecosystemHasScannerAdvisorySource(eco) {
+			t.Errorf("%q did not match the scanner-advised table", eco)
+		}
+	}
+	at := time.Unix(0, 0)
+	for _, eco := range []string{"CocoaPods", "COCOAPODS"} {
+		r := newUncoveredReport(eco, "Alamofire", "5.8.0")
 		scanned := at
 		r.Vulnerabilities.ScannedAt = &scanned
-		if markNoAdvisoryCoverage(r, at) {
-			t.Errorf("%s coordinate with a completed vulnerability scan was "+
-				"marked uncovered — the Trivy lane would be blinded", eco)
+		if !markNoAdvisoryCoverage(r, at) {
+			t.Errorf("%q escaped the marker on casing alone", eco)
 		}
 	}
 }

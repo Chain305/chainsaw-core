@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/chain305/chainsaw-core/csvsafe"
 )
 
 var auditExportCmd = &cobra.Command{
@@ -465,7 +467,11 @@ func writeAuditCSV(w io.Writer, events []auditEvent) error {
 			e.Severity,
 			meta,
 		}
-		if err := cw.Write(row); err != nil {
+		// Same guard as the server-side exporter (internal/server/dashboard.go):
+		// audit rows carry registry-supplied coordinates, and this file is what
+		// an operator opens in a spreadsheet. Escape at the CSV sink only — the
+		// JSON and NDJSON writers below emit the raw values.
+		if err := cw.Write(csvsafe.Row(row)); err != nil {
 			return err
 		}
 	}

@@ -268,3 +268,71 @@ func TestOpenExportSink_StdoutAndFile(t *testing.T) {
 		t.Errorf("temp file %s should be gone after commit", path+".tmp")
 	}
 }
+
+// TestWriteAuditCSV_NeutralisesFormulaInjection — `chainsaw audit export
+// --format csv` writes a file the operator opens in a spreadsheet, and the
+// rows carry values the CLI did not author: package coordinates from the
+// upstream registry reach `resource`, and the metadata blob is whatever the
+// emitting handler recorded. Excel evaluates a cell whose first character is
+// `= + - @` TAB or CR, so those must arrive behind the literal-text prefix.
+//
+// Mirrors the server-side exporter's guard (internal/server/dashboard.go),
+// which shares the same core/csvsafe rules — the two exports of one audit row
+// must agree byte for byte.
+func TestWriteAuditCSV_NeutralisesFormulaInjection(t *testing.T) {
+	const dde = `=cmd|'/c calc'!A1`
+	events := []auditEvent{{
+		ID: "ae-hostile", Action: "package.install", Actor: "-1+" + dde,
+		Resource: dde, Client: "@SUM(1+1)", Status: "success",
+		Severity: "info", Timestamp: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+	}}
+	var buf bytes.Buffer
+	if err := writeAuditCSV(&buf, events); err != nil {
+		t.Fatalf("writeAuditCSV: %v", err)
+	}
+	rows, err := csv.NewReader(&buf).ReadAll()
+	if err != nil {
+		t.Fatalf("csv.ReadAll: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want header + 1 row, got %d", len(rows))
+	}
+	for _, tc := range []struct {
+		col  int
+		name string
+		want string
+	}{
+		{2, "actor", "'-1+" + dde},
+		{4, "resource", "'" + dde},
+		{5, "client", "'@SUM(1+1)"},
+	} {
+		if rows[1][tc.col] != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, rows[1][tc.col], tc.want)
+		}
+	}
+}
+
+// TestWriteAuditCSV_LeavesOrdinaryRowsUntouched — the guard must be invisible
+// on real data. If this ever starts failing, the escape has widened past the
+// dangerous prefixes and every downstream CSV consumer is now reading mangled
+// values.
+func TestWriteAuditCSV_LeavesOrdinaryRowsUntouched(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeAuditCSV(&buf, sampleEvents()); err != nil {
+		t.Fatalf("writeAuditCSV: %v", err)
+	}
+	rows, err := csv.NewReader(&buf).ReadAll()
+	if err != nil {
+		t.Fatalf("csv.ReadAll: %v", err)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			if strings.HasPrefix(cell, "'") {
+				t.Errorf("ordinary cell %d = %q gained an escape prefix", i, cell)
+			}
+		}
+	}
+	if rows[1][2] != "alice@example.com" {
+		t.Errorf("actor = %q, want it untouched", rows[1][2])
+	}
+}

@@ -955,7 +955,67 @@ type ObservationSection struct {
 //	    their score; (d) every Composer row, in both directions — the 35
 //	    empty-report shapes gain facts, and any Composer row pinned to a
 //	    version the registry never published moves from allow to unknown.
-const CurrentMatcherEpoch = 8
+//	9 — safe-version corroboration (2026-08-31, QA Phase 9 P0-B). ONE bump
+//	    covering TWO changes that MUST NOT BE SPLIT, plus the cocoapods
+//	    advisory-coverage correction (P0-C) which rides this bump rather
+//	    than taking one of its own.
+//
+//	    (a) MinimumSafeVersion now refuses a candidate that the registry's
+//	        OWN enumerated version list contradicts. Advisory `fixed`
+//	        endpoints are hand-entered upstream and were taken verbatim, so
+//	        ApplyKnownFix printed "Patched in X — upgrade and re-scan" for
+//	        versions that 404. Measured on a live production replay of the
+//	        439 CVE-bearing rows: 359 resolved a non-empty answer, 3 of
+//	        them named a version the registry does not list. The rule is
+//	        CONDITIONAL — an absent timeline vetoes nothing, per the
+//	        WarnVersionNotFound doctrine above.
+//
+//	    (b) The Go handler now populates Maintenance.VersionTimeline from
+//	        the module proxy's @v/list. runGo was the one major-ecosystem
+//	        handler that never called applyTimeline, which is why 39 of the
+//	        43 timeline-less rows in that replay were Go.
+//
+//	    WHY (a) AND (b) ARE ONE EPOCH. The backfill drain calls Scan with
+//	    AllowStale:false — a full network rescan. Shipping (a) at this
+//	    epoch and (b) at the next would rescan every Go row while it still
+//	    had no timeline and PERSIST the blanking: 39 rows lose their
+//	    upgrade guidance, 10 lose their promotion, and
+//	    `go github.com/emicklei/go-restful@v2.15.0` goes warn →
+//	    quarantine → Blocked. Only a second bump plus a second full drain
+//	    would undo it. This is the inverse of the Phase 8 serve-floor
+//	    incident.
+//
+//	    (c) Corroboration moved ABOVE the display write and no longer
+//	        fails open when NOTHING is known. Previously an absent
+//	        "latest" returned corroborated=true; it now also requires a
+//	        populated timeline. Measured cost: 4 rows of 359 (1.1%).
+//	        An uncorroborated fix version is still RECORDED — only the
+//	        imperative wording is withdrawn, and the new
+//	        Resolution.SafeVersionCorroborated bit says which is which.
+//	        This AMENDS Phase 7 D-1/D-2: D-2's ruling that
+//	        intelligence_latest_probes.latest_version is not a safe-version
+//	        SOURCE is untouched; it is admitted only as a corroborator.
+//
+//	    Flip population, by shape: (a) the rows whose stored
+//	    Resolution.SafeVersion is absent from that coordinate's own
+//	    VersionTimeline — 3 in the replay, and the only ones losing the
+//	    value outright; (b) every Go row, which gains VersionCount and
+//	    VersionDataAvailable and therefore becomes eligible for
+//	    maint.very_new_package and maint.healthy_cadence for the first
+//	    time — direction is BOTH (a +10 cadence signal for established
+//	    modules, a -10 very-new signal for modules under 30 days old with
+//	    <=3 tags); (c) the 4 rows with neither a latest nor a timeline,
+//	    which lose an upgrade_available promotion and gain the softened
+//	    advisory wording; (d) every row with a non-empty SafeVersion,
+//	    whose PatchAdvisory sentence is rewritten when uncorroborated.
+//	    Fixing the computation fixes nothing for the 359 cached rows
+//	    without this bump: store.go serves the persisted risk_evaluation
+//	    verbatim and the refresher short-circuits on
+//	    `reportFresh && latest == row.Version`, which is exactly the
+//	    most-pulled coordinates. The staged drain in
+//	    docs/runbooks/matcher-epoch-backfill.md is REQUIRED and, at the
+//	    time of this commit, OUTSTANDING.
+const CurrentMatcherEpoch = 9
 
 // MinServeableEpoch is the floor a cached row must meet to be SERVED. It
 // normally equals CurrentMatcherEpoch and MUST be returned to that value

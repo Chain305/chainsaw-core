@@ -38,9 +38,13 @@ func (c *rubygemsChecker) Check(ctx context.Context, packageName, version string
 	encodedVer := url.PathEscape(version)
 	metaURL := fmt.Sprintf("https://rubygems.org/api/v2/gems/%s/versions/%s.json", encodedPkg, encodedVer)
 
-	body, err := fetchJSON(ctx, c.client, metaURL)
+	// Branch on the real HTTP status. This used to recover the code by
+	// re-parsing fetchJSON's error string, which silently degrades to
+	// "not a 404" the moment that message is reworded — and cannot tell a
+	// registry 404 from a transport error that merely reads like one.
+	body, status, err := fetchJSONStatus(ctx, c.client, metaURL)
 	if err != nil {
-		if status := statusFromErr(err); status == http.StatusNotFound {
+		if isNotFound(status) {
 			return Result{Status: StatusMissing, Ecosystem: "rubygems"}
 		}
 		return Result{Status: StatusFailed, Ecosystem: "rubygems", Error: err.Error()}
@@ -186,22 +190,4 @@ func extractRubyGemsAttestation(body map[string]any) (bundleURL string, bundleBy
 		}
 	}
 	return
-}
-
-// statusFromErr is a tiny helper that sniffs the stringified HTTP error
-// for a status code. fetchJSON currently returns only "404 not found" or
-// "HTTP <n>"; keep this tolerant.
-func statusFromErr(err error) int {
-	if err == nil {
-		return 0
-	}
-	var n int
-	s := err.Error()
-	if _, scanErr := fmt.Sscanf(s, "HTTP %d", &n); scanErr == nil {
-		return n
-	}
-	if s == "404 not found" || s == "404 Not Found" {
-		return http.StatusNotFound
-	}
-	return 0
 }

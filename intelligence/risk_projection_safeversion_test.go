@@ -239,9 +239,17 @@ func TestMinimumSafeVersion(t *testing.T) {
 // a high-CVSS, KEV-listed, actively-exploited package that DOES have a
 // patched release. Before this change the page rendered "Fix available"
 // and "no known safe version" side by side.
+//
+// It carries Release.LatestVersion deliberately: since matcher epoch 9
+// the display advisory softens its wording when NOTHING corroborates the
+// candidate, and this fixture is about the verdict staying put for a
+// package whose fix IS installable. The field feeds no risk signal —
+// ProjectToRiskInput never reads LatestVersion — so it cannot move the
+// score this test pins.
 func vulnerableReportWithFix() *Report {
 	return &Report{
 		Identity: IdentitySection{Ecosystem: "npm", Package: "express", Version: "4.17.1"},
+		Release:  ReleaseSection{LatestVersion: "4.19.2"},
 		Vulnerabilities: VulnSection{
 			IsVulnerable:   true,
 			CVSSScore:      9.8,
@@ -302,6 +310,10 @@ func TestComputeTrustScore_VerdictByteIdenticalWithKnownFix(t *testing.T) {
 		clone.Resolution.Summary = ""
 		clone.Resolution.SafeVersion = ""
 		clone.Resolution.PatchAdvisory = ""
+		// Epoch 9: a fourth display field. Same contract as the three
+		// above — it says whether the SafeVersion was confirmed
+		// installable and is read by no enforcement surface.
+		clone.Resolution.SafeVersionCorroborated = false
 		clone.EvaluatedAt = baseline.EvaluatedAt
 		b, err := json.Marshal(clone)
 		if err != nil {

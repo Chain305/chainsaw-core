@@ -14,6 +14,17 @@ import (
 	"github.com/chain305/chainsaw-core/provenance/sigstoreverify"
 )
 
+// defaultNPMRegistryURL is the public npm registry, used ONLY when the
+// deployment has not configured one (WithNPMRegistryURL / the proxy's
+// `remotes.npm.url`). The fallback is deliberate and explicit rather than
+// baked into the request URL: a mirrored or air-gapped deployment resolves
+// its packages somewhere else, and a probe that silently asks
+// registry.npmjs.org answers about a registry the artifact never came
+// from. Keeping the default in one named place makes "we asked the public
+// registry because nobody told us otherwise" a readable decision instead
+// of an invisible one.
+const defaultNPMRegistryURL = "https://registry.npmjs.org"
+
 // npmChecker queries the npm registry for Sigstore SLSA provenance
 // attestations and crypto-verifies the bundle against the live Sigstore
 // trust root, falling back to a last-known-good cache when Rekor/Fulcio
@@ -22,25 +33,46 @@ type npmChecker struct {
 	client   *http.Client
 	logger   *slog.Logger
 	cacheFor func() *sigstoreverify.BundleCache
+	// registryFor resolves the configured registry base URL lazily, so
+	// WithNPMRegistryURL applied after NewChecker still takes effect.
+	registryFor func() string
 }
 
-func newNPMChecker(client *http.Client, logger *slog.Logger, cacheFor func() *sigstoreverify.BundleCache) *npmChecker {
+func newNPMChecker(client *http.Client, logger *slog.Logger, cacheFor func() *sigstoreverify.BundleCache, registryFor func() string) *npmChecker {
 	if cacheFor == nil {
 		cacheFor = func() *sigstoreverify.BundleCache { return nil }
 	}
-	return &npmChecker{client: client, logger: logger, cacheFor: cacheFor}
+	if registryFor == nil {
+		registryFor = func() string { return "" }
+	}
+	return &npmChecker{client: client, logger: logger, cacheFor: cacheFor, registryFor: registryFor}
 }
 
 func (c *npmChecker) Ecosystem() string { return "npm" }
 
+// registryBase returns the configured registry base URL, or the public
+// registry when the deployment configured none. See defaultNPMRegistryURL.
+func (c *npmChecker) registryBase() string {
+	if c != nil && c.registryFor != nil {
+		if base := strings.TrimRight(strings.TrimSpace(c.registryFor()), "/"); base != "" {
+			return base
+		}
+	}
+	return defaultNPMRegistryURL
+}
+
 func (c *npmChecker) Check(ctx context.Context, packageName, version string) Result {
 	encodedPkg := url.PathEscape(packageName)
 	encodedVer := url.PathEscape(version)
-	reqURL := fmt.Sprintf("https://registry.npmjs.org/-/npm/v1/attestations/%s@%s", encodedPkg, encodedVer)
+	reqURL := fmt.Sprintf("%s/-/npm/v1/attestations/%s@%s", c.registryBase(), encodedPkg, encodedVer)
 
-	body, err := fetchJSON(ctx, c.client, reqURL)
+	// Branch on the real HTTP status, never on the text of the error: a
+	// package named `foo404`, a proxy error page, or a transport failure
+	// mentioning a port all contain "404" without the registry ever
+	// having said "no such thing".
+	body, status, err := fetchJSONStatus(ctx, c.client, reqURL)
 	if err != nil {
-		if strings.Contains(err.Error(), "404") {
+		if isNotFound(status) {
 			return Result{Status: StatusMissing, Ecosystem: "npm"}
 		}
 		return Result{Status: StatusFailed, Ecosystem: "npm", Error: err.Error()}
@@ -136,7 +168,7 @@ func pickSLSAAttestation(attestations []any) ([]byte, string, bool) {
 func (c *npmChecker) tarballSHA256(ctx context.Context, packageName, version string) ([]byte, error) {
 	encodedPkg := url.PathEscape(packageName)
 	encodedVer := url.PathEscape(version)
-	metaURL := fmt.Sprintf("https://registry.npmjs.org/%s/%s", encodedPkg, encodedVer)
+	metaURL := fmt.Sprintf("%s/%s/%s", c.registryBase(), encodedPkg, encodedVer)
 	meta, err := fetchJSON(ctx, c.client, metaURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch metadata: %w", err)

@@ -39,6 +39,12 @@ func TestRunGoRestoresVPrefixOnStrippedVersion(t *testing.T) {
 		case strings.HasSuffix(r.RequestURI, "/@latest"):
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"Version":"v1.2.4"}`))
+		case strings.HasSuffix(r.RequestURI, "/@v/list"):
+			// Epoch 9: the version timeline, fetched on the success path.
+			// Note the prefix invariant this test exists for applies here
+			// too — the module path must be the v-restored spelling.
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("v1.2.3\nv1.2.4\n"))
 		case strings.HasSuffix(r.RequestURI, "/@v/v1.2.3.mod"):
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = w.Write([]byte("module github.com/foo/bar\n\ngo 1.21\n\nrequire github.com/stretchr/testify v1.9.0\n"))

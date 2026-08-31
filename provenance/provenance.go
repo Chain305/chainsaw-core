@@ -201,6 +201,12 @@ type Checker struct {
 	// swiftVerifier is non-nil when full SE-0391 CMS verification is
 	// enabled. The Swift probe reads it lazily on each Check.
 	swiftVerifier *swiftformat.Verifier
+	// npmRegistryURL is the base URL of the npm registry this deployment
+	// actually resolves packages from. Empty means "not configured", and
+	// the npm probe then falls back to the public registry — see
+	// defaultNPMRegistryURL in npm.go for why that fallback is explicit.
+	// Mutated by WithNPMRegistryURL.
+	npmRegistryURL string
 	// sigstoreCache is the on-disk Sigstore-bundle verification cache,
 	// shared across per-ecosystem checkers that crypto-verify bundles
 	// (npm, PyPI, Maven). nil means "no caching" — every bundle is
@@ -299,7 +305,14 @@ func NewChecker(logger *slog.Logger, opts ...CheckerOption) *Checker {
 	for _, opt := range opts {
 		opt(c)
 	}
-	c.register(newNPMChecker(c.client, logger, func() *sigstoreverify.BundleCache { return c.sigstoreCache }), "npm")
+	// The npm checker reads the registry base URL through a closure for
+	// the same reason as Swift below: WithNPMRegistryURL is applied after
+	// construction, and a captured string would freeze the default.
+	c.register(newNPMChecker(
+		c.client, logger,
+		func() *sigstoreverify.BundleCache { return c.sigstoreCache },
+		func() string { return c.npmRegistryURL },
+	), "npm")
 	c.register(newPyPIChecker(c.client, logger), "pip", "pypi")
 	c.register(newMavenChecker(c.client, logger), "maven")
 	c.register(newGradleChecker(c.client, logger), "gradle")
@@ -340,6 +353,27 @@ func (c *Checker) register(eco EcosystemChecker, aliases ...string) {
 func (c *Checker) WithSwiftRegistryURL(url string) *Checker {
 	if c != nil {
 		c.swiftRegistryURL = strings.TrimRight(url, "/")
+	}
+	return c
+}
+
+// WithNPMRegistryURL points the npm provenance probe at the registry this
+// deployment actually resolves npm packages from. Returns the receiver for
+// chaining.
+//
+// The proxy threads `remotes.npm.url` in here (see
+// supplychain.BootstrapConfig.NPMRegistryURL). That matters because the
+// probe's answer is only about the registry it asked: on a mirrored,
+// self-hosted or air-gapped deployment, querying registry.npmjs.org
+// reports on a registry the artifact never came from — an attestation
+// present upstream but absent on the mirror (or vice versa) would be
+// reported as a property of the bytes in hand, which it is not.
+//
+// Empty is a no-op, leaving the explicit public-registry fallback in
+// npm.go in place.
+func (c *Checker) WithNPMRegistryURL(url string) *Checker {
+	if c != nil {
+		c.npmRegistryURL = strings.TrimRight(url, "/")
 	}
 	return c
 }
@@ -438,35 +472,51 @@ func SupportsProvenance(ecosystem string) bool {
 }
 
 // fetchJSON performs a GET and decodes the response as JSON. Shared across
-// ecosystem checkers.
+// ecosystem checkers that do not need to branch on the HTTP status code.
+//
+// Callers that need to distinguish "the registry answered 404" from any
+// other failure MUST use fetchJSONStatus and isNotFound. Sniffing the
+// returned error for "404" is a bug: a transport error, a proxy error
+// body, or a package name that merely contains those three digits
+// (`foo404`) all match, and the checker then reports "no attestation" for
+// a coordinate it never actually got an answer about.
 func fetchJSON(ctx context.Context, client *http.Client, url string) (map[string]any, error) {
+	body, _, err := fetchJSONStatus(ctx, client, url)
+	return body, err
+}
+
+// fetchJSONStatus is fetchJSON with the real HTTP status code plumbed back
+// to the caller. status is 0 when the request never produced a response
+// (request construction or transport error) — isNotFound(0) is false, so a
+// transport failure can never be mistaken for a 404.
+func fetchJSONStatus(ctx context.Context, client *http.Client, url string) (map[string]any, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("404 not found")
+		return nil, resp.StatusCode, fmt.Errorf("404 not found")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5 MiB limit
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, err
 	}
 
 	var result map[string]any
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
+		return nil, resp.StatusCode, err
 	}
-	return result, nil
+	return result, resp.StatusCode, nil
 }

@@ -77,6 +77,17 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	if isSwiftEcosystem(ecosystem) {
 		checker.WithSwiftRegistryURL(sourceURL)
 	}
+	// npm is the CLI's counterpart to the server reading its configured
+	// npm upstream: npmChecker is not a SourceAwareChecker either, so
+	// --source-url is the only way a user on a mirrored or air-gapped
+	// network can point `chainsaw verify npm ...` at the registry the
+	// tarball actually came from. Unlike swift, --source-url is optional
+	// here (it is an "upstream hint" per the flag help): omitting it
+	// leaves the explicit public-registry fallback in place rather than
+	// disabling the probe.
+	if isNPMEcosystem(ecosystem) {
+		checker.WithNPMRegistryURL(sourceURL)
+	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 	defer cancel()
@@ -143,6 +154,14 @@ var sourceURLRequiredEcosystems = map[string]string{
 
 func isSwiftEcosystem(ecosystem string) bool {
 	return strings.ToLower(strings.TrimSpace(ecosystem)) == "swift"
+}
+
+// isNPMEcosystem matches the ecosystem key the provenance dispatcher
+// registers the npm checker under. Only "npm" — yarn and bun proxy the
+// same packages but are not registered aliases of the npm checker, so
+// widening this would silently configure nothing.
+func isNPMEcosystem(ecosystem string) bool {
+	return strings.ToLower(strings.TrimSpace(ecosystem)) == "npm"
 }
 
 // requireSourceURL refuses the invocation with exit 4 (bad invocation)

@@ -213,7 +213,14 @@ func ComputeTrustScoreForOrg(report *Report, orgID string) {
 	// exactly as it is today) for every other package. See the function
 	// for the gates, and risk.UpgradePromotionEligible for two of them.
 	safeVersion := MinimumSafeVersion(report)
-	if promoted := promoteToUpgradeAvailable(report, eval, safeVersion, weights, signalOverrides); promoted != nil {
+	// Corroboration is resolved ONCE, ABOVE both consumers. It used to be
+	// consulted only inside promoteToUpgradeAvailable, so the verdict was
+	// gated on it while the sentence printed next to the verdict was not:
+	// an uncorroborated fix stayed un-promoted (correct) and still told
+	// the reader to "upgrade and re-scan" to a version that may 404
+	// (the defect). Same input, one answer, both consumers.
+	corroborated := safeVersion != "" && upgradeCandidateCorroborated(report, safeVersion)
+	if promoted := promoteToUpgradeAvailable(report, eval, safeVersion, corroborated, weights, signalOverrides); promoted != nil {
 		eval = promoted
 	}
 
@@ -223,7 +230,11 @@ func ComputeTrustScoreForOrg(report *Report, orgID string) {
 	// display-only behaviour — the page stops rendering "no known safe
 	// version" next to its own "Fix available" signal without the
 	// verdict moving.
-	eval.ApplyKnownFix(safeVersion)
+	//
+	// The value is recorded either way. An uncorroborated fix version is
+	// real information (coordinated disclosure names one routinely before
+	// the release lands); only the imperative is withdrawn.
+	eval.ApplyKnownFixCorroborated(safeVersion, corroborated)
 
 	report.Risk = eval
 	report.SupplyChain.TrustScore = eval.RolledUp.Overall
@@ -281,6 +292,7 @@ func promoteToUpgradeAvailable(
 	report *Report,
 	eval *risk.Evaluation,
 	safeVersion string,
+	corroborated bool,
 	weights map[risk.Category]float64,
 	signalOverrides map[string]int,
 ) *risk.Evaluation {
@@ -290,7 +302,11 @@ func promoteToUpgradeAvailable(
 	if !risk.UpgradePromotionEligible(eval) {
 		return nil
 	}
-	if !upgradeCandidateCorroborated(report, safeVersion) {
+	// Corroboration is now resolved by the CALLER, above ApplyKnownFix, so
+	// the verdict gate and the display sentence cannot disagree about
+	// whether the fix is installable. The gate itself is unchanged: an
+	// uncorroborated candidate never promotes.
+	if !corroborated {
 		return nil
 	}
 	promoted := risk.EvaluatePackage(ProjectToRiskInput(report), risk.Options{
@@ -325,12 +341,25 @@ func promoteToUpgradeAvailable(
 //
 // Sources, in order: the Report's own Release.LatestVersion (written by
 // the registry-metadata provider during this same scan) and then the
-// persisted daily probe via LatestVersionCorroborator. When neither is
-// available we PROCEED on the advisory data alone — that is the
-// documented fallback, and it is sound because the probe was never the
-// thing that made the claim true; MinimumSafeVersion is. An undecidable
-// comparison, by contrast, is a refusal: we cannot prove the candidate
-// is installable, so we do not promote.
+// persisted daily probe via LatestVersionCorroborator. An undecidable
+// comparison is a refusal: we cannot prove the candidate is installable,
+// so we do not promote.
+//
+// THE latest == "" FALLBACK IS NOW BOUNDED. It used to return true
+// unconditionally, which is a fail-OPEN: with no advertised latest and
+// no published version list, nothing at all had been heard from the
+// registry, and "we know nothing" was being scored as "we checked and it
+// was fine". It now returns true only when the registry told us
+// SOMETHING — a populated Maintenance.VersionTimeline is the second,
+// independent witness that this coordinate's registry answered at all.
+// The fallback still exists, and still rests on the sound half of the
+// original argument: the probe was never the thing that made the claim
+// true, MinimumSafeVersion is, and a timeline that lists the candidate
+// has already been checked by MinimumSafeVersion step 5.
+//
+// Measured cost of the narrowing on a live production replay: exactly 4
+// rows of 359 (1.1%) carry neither an advertised latest nor a timeline.
+// That is the honest "we know nothing" population.
 func upgradeCandidateCorroborated(report *Report, candidate string) bool {
 	latest := strings.TrimSpace(report.Release.LatestVersion)
 	if latest == "" && LatestVersionCorroborator != nil {
@@ -339,7 +368,11 @@ func upgradeCandidateCorroborated(report *Report, candidate string) bool {
 		}
 	}
 	if latest == "" {
-		return true
+		// No advertised latest. A published version list is the only
+		// remaining evidence that the registry was reachable and had
+		// something to say about this package; MinimumSafeVersion has
+		// already refused any candidate that list contradicts.
+		return len(timelineVersions(report.Maintenance.VersionTimeline)) > 0
 	}
 	cmp, err := osv.CompareVersions(report.Identity.Ecosystem, latest, candidate)
 	if err != nil {
@@ -415,7 +448,8 @@ func ReapplyKnownFixAfterTransitive(report *Report, orgID string) {
 	}
 
 	safeVersion := MinimumSafeVersion(report)
-	if promoted := promoteToUpgradeAvailable(report, report.Risk, safeVersion, weights, signalOverrides); promoted != nil {
+	corroborated := safeVersion != "" && upgradeCandidateCorroborated(report, safeVersion)
+	if promoted := promoteToUpgradeAvailable(report, report.Risk, safeVersion, corroborated, weights, signalOverrides); promoted != nil {
 		// The tree pass owns these three; a re-evaluation of the root
 		// input cannot reproduce them, so carry them across explicitly.
 		promoted.Resolution.TransitiveBlame = report.Risk.Resolution.TransitiveBlame
@@ -423,5 +457,5 @@ func ReapplyKnownFixAfterTransitive(report *Report, orgID string) {
 		promoted.RolledUp = report.Risk.RolledUp
 		report.Risk = promoted
 	}
-	report.Risk.ApplyKnownFix(safeVersion)
+	report.Risk.ApplyKnownFixCorroborated(safeVersion, corroborated)
 }

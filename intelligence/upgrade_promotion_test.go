@@ -203,15 +203,227 @@ func TestComputeTrustScore_KEVStaysQuarantined(t *testing.T) {
 func TestComputeTrustScore_UnpublishedFixIsNotCorroborated(t *testing.T) {
 	report := fixableReport()
 	report.Release.LatestVersion = "4.18.0" // below the 4.19.2 the advisory names
+	baseline := risk.EvaluatePackage(ProjectToRiskInput(report), risk.Options{})
 	ComputeTrustScore(report)
 
 	if report.Risk.Verdict == risk.VerdictUpgradeAvailable {
 		t.Fatalf("promoted to an upgrade the registry has not published")
 	}
-	// The display advisory still stands — MinimumSafeVersion is what
-	// makes the sentence true, and corroboration only gates the verdict.
+	// Epoch 9 tightened this case, and it deliberately did NOT tighten it
+	// by blanking the value. Coordinated disclosure routinely names a fix
+	// version before the release lands; "the fix is 4.19.2, not published
+	// yet" is strictly more useful than silence, and deleting it would
+	// destroy real information. What changes is the SENTENCE — see
+	// risk.Resolution.SafeVersionCorroborated and applyKnownFix.
 	if report.Risk.Resolution.SafeVersion != "4.19.2" {
 		t.Errorf("display SafeVersion = %q, want 4.19.2", report.Risk.Resolution.SafeVersion)
+	}
+	if report.Risk.Resolution.SafeVersionCorroborated {
+		t.Errorf("SafeVersionCorroborated = true for a fix the registry's own " +
+			"advertised latest sits below")
+	}
+	// The whole point of the display/verdict split: the enforcement
+	// answer must be byte-identical to the un-annotated evaluation.
+	if report.Risk.Verdict != baseline.Verdict {
+		t.Errorf("verdict moved: %q -> %q", baseline.Verdict, report.Risk.Verdict)
+	}
+	if report.Risk.RolledUp.Overall != baseline.RolledUp.Overall {
+		t.Errorf("score moved: %d -> %d", baseline.RolledUp.Overall, report.Risk.RolledUp.Overall)
+	}
+	// And the imperative is withdrawn: no "upgrade and re-scan" pointing
+	// at a version that may 404.
+	if strings.Contains(report.Risk.Resolution.PatchAdvisory, "upgrade and re-scan") {
+		t.Errorf("uncorroborated fix still issues an install instruction: %q",
+			report.Risk.Resolution.PatchAdvisory)
+	}
+	if !strings.Contains(report.Risk.Resolution.PatchAdvisory, "4.19.2") {
+		t.Errorf("uncorroborated advisory dropped the version entirely: %q",
+			report.Risk.Resolution.PatchAdvisory)
+	}
+}
+
+// The membership veto, in the shape that justifies it existing: the
+// registry enumerated its published versions, its advertised latest is
+// ABOVE the version the advisory names as the fix — so the corroboration
+// check passes — and yet that exact version is not in the list. Only a
+// membership test catches this, and nothing covered it before epoch 9.
+//
+// Modelled on the jetty shape: a long release history with many
+// point releases, an advisory naming a backport branch that this
+// registry never published.
+func TestMinimumSafeVersion_VetoedWhenAbsentFromPublishedTimeline(t *testing.T) {
+	withTimeline := func(versions ...string) []VersionRelease {
+		out := make([]VersionRelease, 0, len(versions))
+		for _, v := range versions {
+			out = append(out, VersionRelease{Version: v})
+		}
+		return out
+	}
+	published := withTimeline(
+		"9.4.44", "9.4.45", "9.4.46", "9.4.48", "9.4.51",
+		"10.0.11", "10.0.12", "10.0.15", "11.0.0", "11.0.2",
+	)
+
+	base := func() *Report {
+		return &Report{
+			Identity: IdentitySection{Ecosystem: "maven", Package: "org.eclipse.jetty:jetty-server", Version: "9.4.44"},
+			Release:  ReleaseSection{LatestVersion: "11.0.2"}, // ABOVE the candidate: corroboration cannot catch this
+			Maintenance: MaintenanceSection{
+				VersionTimeline: published,
+			},
+			Vulnerabilities: VulnSection{
+				IsVulnerable: true,
+				CVEs:         []string{"CVE-2024-7"},
+				CVEDetails: []CVEDetail{
+					{CVE: "CVE-2024-7", FixedVersion: "9.4.47", FixAvailable: true},
+				},
+			},
+		}
+	}
+
+	absent := base()
+	if got := MinimumSafeVersion(absent); got != "" {
+		t.Errorf("MinimumSafeVersion = %q, want \"\" — 9.4.47 is not in the "+
+			"registry's own published list, so advising it sends the user to a 404", got)
+	}
+	// Verdict must not move either way; this is a display-only refusal.
+	ComputeTrustScore(absent)
+	if absent.Risk.Resolution.SafeVersion != "" || absent.Risk.Resolution.PatchAdvisory != "" {
+		t.Errorf("vetoed candidate still rendered: %+v", absent.Risk.Resolution)
+	}
+
+	// Control 1: the SAME shape with a fix version the registry does list
+	// resolves normally. Without this the test would pass on any bug that
+	// blanks everything.
+	member := base()
+	member.Vulnerabilities.CVEDetails[0].FixedVersion = "9.4.48"
+	if got := MinimumSafeVersion(member); got != "9.4.48" {
+		t.Errorf("MinimumSafeVersion = %q, want 9.4.48 — a listed fix must survive", got)
+	}
+
+	// Control 2: THE RULE IS CONDITIONAL. Strip the timeline and the same
+	// unlisted candidate comes back, because an empty timeline is absence
+	// of evidence. An unconditional rule was measured at yield 3 / cost
+	// 46 against production and would flip a Go package to Blocked.
+	noTimeline := base()
+	noTimeline.Maintenance.VersionTimeline = nil
+	if got := MinimumSafeVersion(noTimeline); got != "9.4.47" {
+		t.Errorf("MinimumSafeVersion = %q, want 9.4.47 — an ABSENT version list "+
+			"is not evidence that a version does not exist", got)
+	}
+
+	// Control 3: the `v` prefix must not manufacture a veto. Go timelines
+	// come from @v/list and carry `v0.39.0` while advisories say `0.39.0`;
+	// canonicalVersionKey inside versionPublished collapses them.
+	goish := &Report{
+		Identity:    IdentitySection{Ecosystem: "go", Package: "github.com/example/mod", Version: "v0.38.0"},
+		Release:     ReleaseSection{LatestVersion: "v0.40.0"},
+		Maintenance: MaintenanceSection{VersionTimeline: withTimeline("v0.38.0", "v0.39.0", "v0.40.0")},
+		Vulnerabilities: VulnSection{
+			IsVulnerable: true,
+			CVEs:         []string{"CVE-2024-8"},
+			CVEDetails: []CVEDetail{
+				{CVE: "CVE-2024-8", FixedVersion: "0.39.0", FixAvailable: true},
+			},
+		},
+	}
+	if got := MinimumSafeVersion(goish); got != "0.39.0" {
+		t.Errorf("MinimumSafeVersion = %q, want 0.39.0 — a `v`-prefixed timeline "+
+			"entry must match a bare advisory version", got)
+	}
+}
+
+// Step 4's narrowing: with NO advertised latest and NO published version
+// list, nothing has been heard from the registry at all, and "we know
+// nothing" must not score as "we checked and it was fine". Measured cost
+// against production: 4 rows of 359 (1.1%).
+func TestComputeTrustScore_NothingKnownIsNotCorroboration(t *testing.T) {
+	prev := LatestVersionCorroborator
+	t.Cleanup(func() { LatestVersionCorroborator = prev })
+	LatestVersionCorroborator = nil
+
+	report := fixableReport()
+	report.Release.LatestVersion = ""
+	ComputeTrustScore(report)
+
+	if report.Risk.Verdict == risk.VerdictUpgradeAvailable {
+		t.Fatalf("promoted on no registry evidence whatsoever — this is the " +
+			"fail-open the epoch-9 change closes")
+	}
+	if report.Risk.Resolution.SafeVersionCorroborated {
+		t.Errorf("SafeVersionCorroborated = true with neither a latest nor a timeline")
+	}
+	// The advisory value itself survives; only the imperative is dropped.
+	if report.Risk.Resolution.SafeVersion != "4.19.2" {
+		t.Errorf("display SafeVersion = %q, want 4.19.2", report.Risk.Resolution.SafeVersion)
+	}
+}
+
+// The conditional invariant (P0-B step 6). For every fixture that
+// resolves a safe version AND carries a published version list, that
+// version must be a member of the list. It MUST stay conditional: a Go
+// fixture whose timeline the provider could not fetch has no list to be
+// a member of, and an unconditional form would fail on every one.
+func TestMinimumSafeVersion_MemberOfTimelineWhenTimelineKnown(t *testing.T) {
+	fixtures := map[string]*Report{
+		"npm, no timeline at all": fixableReport(),
+		"npm, listed fix": func() *Report {
+			r := fixableReport()
+			r.Maintenance.VersionTimeline = []VersionRelease{
+				{Version: "4.17.1"}, {Version: "4.18.1"}, {Version: "4.19.2"},
+			}
+			return r
+		}(),
+		"npm, unlisted fix": func() *Report {
+			r := fixableReport()
+			r.Maintenance.VersionTimeline = []VersionRelease{
+				{Version: "4.17.1"}, {Version: "4.18.1"},
+			}
+			return r
+		}(),
+		"go, @v/list-shaped timeline omitting the installed pseudo-version": {
+			Identity: IdentitySection{Ecosystem: "go", Package: "github.com/example/mod", Version: "v1.2.3"},
+			Release:  ReleaseSection{LatestVersion: "v1.4.0"},
+			Maintenance: MaintenanceSection{VersionTimeline: []VersionRelease{
+				{Version: "v1.2.3"}, {Version: "v1.3.0"}, {Version: "v1.4.0"},
+			}},
+			Vulnerabilities: VulnSection{
+				IsVulnerable: true,
+				CVEs:         []string{"CVE-2024-5"},
+				CVEDetails: []CVEDetail{
+					{CVE: "CVE-2024-5", FixedVersion: "v1.3.0", FixAvailable: true},
+				},
+			},
+		},
+		"go, timeline fetch failed — nothing to check against": {
+			Identity: IdentitySection{Ecosystem: "go", Package: "github.com/example/mod", Version: "v1.2.3"},
+			Vulnerabilities: VulnSection{
+				IsVulnerable: true,
+				CVEs:         []string{"CVE-2024-5"},
+				CVEDetails: []CVEDetail{
+					{CVE: "CVE-2024-5", FixedVersion: "v1.3.0", FixAvailable: true},
+				},
+			},
+		},
+	}
+
+	checkedAtLeastOne := false
+	for name, report := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			safe := MinimumSafeVersion(report)
+			published := timelineVersions(report.Maintenance.VersionTimeline)
+			if safe == "" || len(published) == 0 {
+				return // the invariant says nothing about these
+			}
+			checkedAtLeastOne = true
+			if !versionPublished(published, safe) {
+				t.Errorf("SafeVersion %q is not a member of the %d published versions %v",
+					safe, len(published), published)
+			}
+		})
+	}
+	if !checkedAtLeastOne {
+		t.Fatal("no fixture exercised the invariant — the conditional guard is vacuous")
 	}
 }
 
@@ -230,9 +442,16 @@ func TestComputeTrustScore_ProbeCorroboratorVetoes(t *testing.T) {
 	}
 
 	// An unavailable probe is not a veto — the advisory data alone is
-	// allowed to carry the claim.
+	// allowed to carry the claim, PROVIDED the registry was heard from at
+	// all. Since epoch 9 the published version list is that second
+	// witness: with neither a latest nor a timeline we know nothing, and
+	// TestComputeTrustScore_NothingKnownIsNotCorroboration pins that
+	// case. Here the timeline supplies the evidence the probe did not.
 	report = fixableReport()
 	report.Release.LatestVersion = ""
+	report.Maintenance.VersionTimeline = []VersionRelease{
+		{Version: "4.17.1"}, {Version: "4.18.1"}, {Version: "4.19.2"},
+	}
 	LatestVersionCorroborator = func(string, string) (string, bool) { return "", false }
 	ComputeTrustScore(report)
 	if report.Risk.Verdict != risk.VerdictUpgradeAvailable {

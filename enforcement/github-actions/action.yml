@@ -22,7 +22,16 @@
 #   was NOT inspected and `mode: block` fails the job rather than passing it.
 #
 name: "Chainsaw Guard"
-description: "Block vulnerable, typosquatted, malicious, or unlicensed packages in pull requests before they ever reach main."
+# Marketplace description. Keep this in step with the PR-comment footer
+# below: it is the most-read claim surface this action has. It used to
+# read "Block vulnerable, typosquatted, malicious, or unlicensed
+# packages" — three of those four were false. This action runs
+# `scan-repo` (proxy-bypass files), `doctor --strict` (config drift) and
+# `pr-scan`, whose entire offline signal set is sc.typosquat_low /
+# sc.short_name / sc.new_dep plus the policy lane. There is no
+# vulnerability lane, no malware lane and no licence lane on any of the
+# three. Do not restore a claim without shipping the lane behind it.
+description: "Catch typosquatted dependencies, proxy-bypass files, and config drift in pull requests before they reach main."
 author: "Chainsaw Security"
 
 branding:
@@ -494,10 +503,24 @@ runs:
           # the action — an advocacy loop, never forced. Kept to a single
           # subdued line with an install link so it reads as attribution, not
           # an ad.
+          #
+          # The line must describe what THIS action actually ran. It used to
+          # read "block malicious, typosquatted, and vulnerable packages in
+          # CI". Two thirds of that were false in every configuration: the
+          # action runs `scan-repo` (proxy-bypass files), `doctor --strict`
+          # (config drift) and `pr-scan`, and pr-scan's whole offline signal
+          # set is sc.typosquat_low / sc.short_name / sc.new_dep plus policy
+          # rules (core/cli/pr_scan.go, prOfflineSignals). There is no
+          # vulnerability lane, no advisory lookup and no malware lane on any
+          # of the three commands. A vuln lane was proposed and deliberately
+          # killed — see docs/plan_qa_phase9_remediation.md, DO NOT SHIP,
+          # P9-03. If one is ever built it belongs at the standing TODO in
+          # pr_scan.go, ecosystem-agnostic and behind an opt-in input; this
+          # footer stays behind it, not ahead of it.
           if [ "${ATTRIBUTION:-false}" = "true" ]; then
             echo
             echo "---"
-            echo "<sub>:shield: Protected by [Chainsaw](https://chain305.com) — block malicious, typosquatted, and vulnerable packages in CI. [Install the guard](https://chain305.com/install.sh).</sub>"
+            echo "<sub>:shield: Checked by [Chainsaw](https://chain305.com) — typosquat heuristics on changed dependencies, proxy-bypass files, and config drift. [Install the guard](https://chain305.com/install.sh).</sub>"
           fi
         } > "$body_file"
         gh pr comment "${{ github.event.pull_request.number }}" \

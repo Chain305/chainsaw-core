@@ -69,25 +69,3 @@ func TestExtractRubyGemsAttestation(t *testing.T) {
 		})
 	}
 }
-
-func TestStatusFromErr(t *testing.T) {
-	cases := []struct {
-		err  string
-		want int
-	}{
-		{"404 not found", 404},
-		{"HTTP 500", 500},
-		{"HTTP 200", 200},
-		{"other", 0},
-	}
-	for _, c := range cases {
-		got := statusFromErr(testErr(c.err))
-		if got != c.want {
-			t.Errorf("statusFromErr(%q) = %d, want %d", c.err, got, c.want)
-		}
-	}
-}
-
-type testErr string
-
-func (e testErr) Error() string { return string(e) }
