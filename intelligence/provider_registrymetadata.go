@@ -1227,6 +1227,12 @@ type mavenPOM struct {
 	} `xml:"issueManagement"`
 	Developers struct {
 		Developer []struct {
+			// ID is the POM `<developer><id>` element. It is the
+			// stable publisher key (see MavenDeveloperPublisherIDs)
+			// and was NOT parsed before P8-70 — which is why the
+			// incoming publisher set disagreed with the persisted
+			// baseline on every maven package.
+			ID    string `xml:"id"`
 			Name  string `xml:"name"`
 			Email string `xml:"email"`
 		} `xml:"developer"`
@@ -1603,19 +1609,26 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 	// Maven/Gradle POM `<developers>` is the canonical "people who
 	// publish + maintain this artifact" list — Maven Central does not
 	// distinguish authors from maintainers in metadata. Surface each
-	// entry on both axes so the UI's People panel renders, and use the
-	// email (or name when no email) as the publisher id since Sonatype
-	// keys publisher accounts on the developer email.
+	// entry on both axes so the UI's People panel renders.
+	//
+	// PublisherIDs is the MACHINE identity, not a display field: it is
+	// diffed against the persisted package_metadata.publisher_set column
+	// by the metadiff provider (sc.publisher_changed) and by the
+	// first-time-collaborator provider. It therefore has to use exactly
+	// the precedence the baseline extractor uses — `<id>`, then
+	// `<email>`, then `<name>` — via the single shared helper. Before
+	// P8-70 this branch preferred `<email>`/`<name>` while the baseline
+	// preferred `<id>`, so the two sets never intersected and the
+	// SevHigh publisher-changed signal fired on every maven package with
+	// any scan history. Authors/Maintainers keep the human-readable
+	// `Name <email>` render for the UI.
 	for _, d := range pom.Developers.Developer {
 		s := joinAuthor(d.Name, d.Email)
-		if s == "" {
-			continue
+		if s != "" {
+			people.Authors = append(people.Authors, s)
+			people.Maintainers = append(people.Maintainers, s)
 		}
-		people.Authors = append(people.Authors, s)
-		people.Maintainers = append(people.Maintainers, s)
-		if id := firstNonEmpty(strings.TrimSpace(d.Email), strings.TrimSpace(d.Name)); id != "" {
-			people.PublisherIDs = append(people.PublisherIDs, id)
-		}
+		people.PublisherIDs = append(people.PublisherIDs, MavenDeveloperPublisherIDs(d.ID, d.Email, d.Name)...)
 	}
 
 	jarBase := fmt.Sprintf("%s-%s", artifact, ver)

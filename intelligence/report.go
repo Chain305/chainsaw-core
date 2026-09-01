@@ -1041,7 +1041,69 @@ type ObservationSection struct {
 //	    population is Maven/Gradle coordinates with a single `<developers>`
 //	    entry sitting exactly on the 59/60 edge. Small, but it is the
 //	    direction that needs measuring, not the one that fails safe.
-const CurrentMatcherEpoch = 10
+//	epoch 11 (2026-09-02, P8-70): sc.publisher_changed stops firing on every
+//	    Maven/Gradle package that had ever been scanned before. This is the
+//	    SevHigh sibling of the epoch-10 finding — weight -25, MaxImpact 40,
+//	    and it feeds CompoundSCTakeoverSignature at -55 — but the defect
+//	    turned out NOT to be the one P8-70 was filed against.
+//
+//	    P8-70 alleged that the POM `<developers>` roster churns and so the
+//	    diff over it false-positives. The prod data says something worse:
+//	    the diff was never comparing rosters at all. The two sides of the
+//	    comparison were extracted by two different pieces of code that
+//	    disagreed on which POM element IS the publisher identity. The
+//	    persisted baseline (fetchMavenPublisherSet, package_metadata
+//	    .publisher_set) preferred `<developer><id>` — `ggregory`. The
+//	    incoming set (runMaven, Report.People.PublisherIDs) never parsed
+//	    `<id>` at all and used `<email>`, else `<name>` —
+//	    `ggregory@apache.org`. Those identifier spaces do not intersect, so
+//	    the diff saw a COMPLETE publisher replacement on every maven
+//	    coordinate with any scan history, forever.
+//
+//	    Measured on prod 2026-09-01, before the fix: 30 maven/gradle
+//	    coordinates carried publisherChanged=true, and ALL 30 had a
+//	    zero-size intersection between the two sides — i.e. 30/30 were
+//	    manufactured by the mismatch, not by a roster change. Nineteen of
+//	    them have byte-identical `<id>` sets across the two versions being
+//	    compared (all six org.apache.commons:commons-lang3 rows, all three
+//	    commons-text rows, five scala-library rows, ...). The only maven
+//	    rows that ever came back publisherChanged=false in the whole corpus
+//	    were org.apache.maven:maven-parent, forced false by the
+//	    canonicalParentPOMs allowlist — so the allowlist was not mitigating
+//	    an edge case, it was the only thing suppressing a signal that
+//	    otherwise fired on 100% of what it evaluated.
+//
+//	    The fix routes both sides through MavenDeveloperPublisherIDs
+//	    (`<id>` -> `<email>` -> `<name>`). The BASELINE extractor is
+//	    semantically unchanged, so no publisher_set backfill is needed and
+//	    no new false positives are introduced by re-persisting it; only the
+//	    incoming side moves.
+//
+//	    Flip population and direction, replayed through the real
+//	    EvaluatePackage over the 30 stored prod reports: 19 rows clear to
+//	    publisherChanged=false, and 6 of those 19 change VERDICT — every
+//	    one warn -> allow (commons-chain 1.2, commons-lang3 3.14.0,
+//	    commons-lang3 3.20.0, commons-text 1.15.0, maven-reporting-api 3.0,
+//	    slf4j-bom 2.1.0-alpha1). The other 13 gain score inside the same
+//	    band. Direction is UNIFORMLY UN-BLOCKING; nothing becomes more
+//	    restrictive. The ceiling, if every one of the 30 cleared, is 15
+//	    flips — that is the number to compare against if a later change
+//	    also addresses the residual.
+//
+//	    RESIDUAL, deliberately NOT fixed here. Eleven of the 30 still fire
+//	    after this bump because their `<id>` sets genuinely differ across
+//	    versions — a committer joining (commons-digester, commons-lang,
+//	    commons-logging), or an org rename (`lightbend` -> `akka` across
+//	    the scala-lang artifacts). None is an account takeover. That is
+//	    P8-70's original claim and it survives: a POM `<developers>` edit
+//	    is still not an access-control event. It stays open pending the
+//	    groupId-ownership design recorded in the P8-70 row.
+//
+//	    A bump is REQUIRED rather than optional: store.go serves the
+//	    persisted risk_evaluation verbatim, so the 19 cached rows keep
+//	    their manufactured SevHigh finding until the epoch invalidates
+//	    them.
+const CurrentMatcherEpoch = 11
 
 // MinServeableEpoch is the floor a cached row must meet to be SERVED. It
 // normally equals CurrentMatcherEpoch and MUST be returned to that value

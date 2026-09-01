@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -541,4 +542,250 @@ func TestQueryOrgScoped_RejectsEmptyOrg(t *testing.T) {
 	if _, err := QueryOrgScoped(context.Background(), probe, "  ", `SELECT 1`); err == nil {
 		t.Fatal("QueryOrgScoped accepted an empty org id")
 	}
+}
+
+// newInheritingProbeRole creates a second probe role that INHERITs, and
+// returns its DSN plus the writer's role name.
+//
+// newRLSTestEnv's own probe is NOINHERIT, which is the safer default but the
+// wrong fixture for the tests below: Postgres matches a policy's role list
+// with inherited privileges, so a NOINHERIT member of the writer would not
+// pick the writer's policy up without an explicit SET ROLE. Production's
+// billy_ro has rolinherit=t (verified 2026-09-01), so INHERIT is the shape
+// that has to be tested.
+func newInheritingProbeRole(t *testing.T, env *rlsTestEnv) (dsn, writerRole string) {
+	t.Helper()
+	ctx := context.Background()
+
+	writerRole, err := CurrentRole(ctx, env.store.DB())
+	if err != nil {
+		t.Fatalf("read writer role: %v", err)
+	}
+
+	role := fmt.Sprintf("chainsaw_rls_inherit_%d", time.Now().UnixNano())
+	const password = "probe-pw"
+	if _, err := env.store.DB().Exec(fmt.Sprintf(
+		`CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOBYPASSRLS INHERIT`, role, password)); err != nil {
+		t.Skipf("create inheriting probe role (does the test role have CREATEROLE?): %v", err)
+	}
+	t.Cleanup(func() {
+		for _, tbl := range billyReadableTables {
+			_, _ = env.store.DB().Exec(fmt.Sprintf(`REVOKE ALL ON TABLE public.%s FROM %s`, tbl, role))
+		}
+		_, _ = env.store.DB().Exec(fmt.Sprintf(`REVOKE %s FROM %s`, writerRole, role))
+		_, _ = env.store.DB().Exec(fmt.Sprintf(`DROP ROLE IF EXISTS %s`, role))
+	})
+	for _, tbl := range billyReadableTables {
+		if _, err := env.store.DB().Exec(fmt.Sprintf(`GRANT SELECT ON TABLE public.%s TO %s`, tbl, role)); err != nil {
+			t.Fatalf("grant SELECT on %s to inheriting probe: %v", tbl, err)
+		}
+	}
+
+	dsn, err = swapCredentials(env.adminDSN, role, password)
+	if err != nil {
+		t.Fatalf("rewrite DSN for inheriting probe: %v", err)
+	}
+	return dsn, writerRole
+}
+
+// countVisibleEvents runs the production read path and reports how many rows
+// came back in total and how many of them belong to a tenant other than orgID.
+func countVisibleEvents(ctx context.Context, t *testing.T, db *sql.DB, orgID string) (total, foreign int) {
+	t.Helper()
+	rows, err := QueryOrgScoped(ctx, db, orgID,
+		`SELECT org_id FROM events`)
+	if err != nil {
+		t.Fatalf("scoped read: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var got string
+		if err := rows.Scan(&got); err != nil {
+			t.Fatalf("scan org_id: %v", err)
+		}
+		total++
+		if got != orgID {
+			foreign++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("scoped read rows: %v", err)
+	}
+	return total, foreign
+}
+
+// TestVerifyBillyRole_RejectsInheritedWriterPolicy is the regression guard for
+// P9-22, and it is written as a MUTATION test on purpose.
+//
+// The structural version of this check — "the policies exist", "bypassrls is
+// off" — passes in both halves below, which is precisely why it is worthless:
+// production sat in a state where every structural assertion held and the
+// boundary enforced nothing. So this test first proves the boundary works,
+// then breaks it with a single GRANT that changes no role attribute, and
+// asserts BOTH that the data actually leaks and that VerifyBillyRole now
+// refuses the pool. If someone deletes the coverage check in rls.go, the
+// second half fails.
+//
+// The mutation is not hypothetical. `GRANT <writer> TO billy_ro` is the
+// obvious response to a "permission denied for table users" report from
+// Billy's other tools, and it silently removes the tenant boundary while
+// leaving rolsuper=f and rolbypassrls=f.
+func TestVerifyBillyRole_RejectsInheritedWriterPolicy(t *testing.T) {
+	env := newRLSTestEnv(t)
+	env.seedTwoTenants(t)
+	ctx := context.Background()
+
+	probeDSN, writerRole := newInheritingProbeRole(t, env)
+
+	// --- Half 1: the boundary binds. ---
+	clean, err := OpenBillyReadOnly(ctx, probeDSN, env.store.DB())
+	if err != nil {
+		t.Fatalf("OpenBillyReadOnly rejected a correctly separated inheriting role: %v", err)
+	}
+	total, foreign := countVisibleEvents(ctx, t, clean, rlsOrgA)
+	if total != 1 || foreign != 0 {
+		t.Fatalf("before the mutation: scoped read saw %d rows (%d foreign), want exactly tenant A's 1 row", total, foreign)
+	}
+	_ = clean.Close()
+
+	// --- The mutation: membership only. No attribute changes. ---
+	if _, err := env.store.DB().Exec(fmt.Sprintf(`GRANT %s TO %s`, writerRole, roleOf(t, probeDSN))); err != nil {
+		// Postgres 16+ requires ADMIN OPTION on a role to grant it, and a
+		// role does not hold ADMIN on itself. So this mutation cannot be
+		// staged when the test's own writer is a least-privilege
+		// CREATEROLE role rather than a superuser — which is exactly the
+		// configuration the P9-23 rehearsal runs under.
+		//
+		// Skipped, not failed, and loudly: the guard it exercises is still
+		// covered whenever the suite runs as a superuser (the default
+		// developer and production-shaped environment). If this skip ever
+		// appears in the normal run, the fixture is broken, not the DB.
+		t.Skipf("cannot stage the mutation: writer %q lacks ADMIN OPTION to grant itself (%v). "+
+			"Run this test with a superuser writer to exercise the coverage guard.", writerRole, err)
+	}
+
+	// The role still looks clean by attribute — this is the whole point.
+	attrDB, err := OpenReadOnly(probeDSN)
+	if err != nil {
+		t.Fatalf("reopen probe pool: %v", err)
+	}
+	defer attrDB.Close()
+	posture, err := DescribeRoleRLSPosture(ctx, attrDB)
+	if err != nil {
+		t.Fatalf("describe posture: %v", err)
+	}
+	if posture.BypassesRLS() {
+		t.Fatalf("fixture is wrong: the GRANT was supposed to change no attribute, but posture is %+v", posture)
+	}
+
+	// --- Half 2a: the data really does leak now. ---
+	total, foreign = countVisibleEvents(ctx, t, attrDB, rlsOrgA)
+	if foreign == 0 {
+		t.Fatalf("mutation did not actually break the boundary (saw %d rows, 0 foreign) — "+
+			"this test would pass for the wrong reason; check that %s is a PERMISSIVE policy naming %q",
+			total, rlsPolicyWriterAll, writerRole)
+	}
+
+	// --- Half 2b: and the guard refuses the pool. ---
+	if _, err := OpenBillyReadOnly(ctx, probeDSN, env.store.DB()); err == nil {
+		t.Fatal("OpenBillyReadOnly accepted a role that inherits the writer's unrestricted policy")
+	} else if !errors.Is(err, ErrBillyInheritsUnrestrictedPolicy) {
+		t.Fatalf("wrong rejection reason: %v", err)
+	}
+}
+
+// TestVerifyBillyRole_RejectsDisabledRowSecurity covers the third mechanism:
+// the documented incident rollback in docs/MIGRATIONS.md is
+// `ALTER TABLE … DISABLE ROW LEVEL SECURITY`, and nothing else in this file
+// would notice a deployment left in that state — the policies are all still
+// present and every role attribute is still correct.
+func TestVerifyBillyRole_RejectsDisabledRowSecurity(t *testing.T) {
+	env := newRLSTestEnv(t)
+	env.seedTwoTenants(t)
+	ctx := context.Background()
+
+	probe, err := OpenBillyReadOnly(ctx, env.roleDSN, env.store.DB())
+	if err != nil {
+		t.Fatalf("OpenBillyReadOnly rejected the probe role before the mutation: %v", err)
+	}
+	probe.Close()
+
+	if _, err := env.store.DB().Exec(`ALTER TABLE public.events DISABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatalf("disable RLS on events: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = env.store.DB().Exec(`ALTER TABLE public.events ENABLE ROW LEVEL SECURITY`)
+	})
+
+	// The leak is real: with RLS off, the policy is inert for everyone.
+	leaky, err := OpenReadOnly(env.roleDSN)
+	if err != nil {
+		t.Fatalf("open probe pool: %v", err)
+	}
+	defer leaky.Close()
+	total, foreign := countVisibleEvents(ctx, t, leaky, rlsOrgA)
+	if foreign == 0 {
+		t.Fatalf("disabling RLS did not expose foreign rows (%d total) — fixture is wrong", total)
+	}
+
+	if _, err := OpenBillyReadOnly(ctx, env.roleDSN, env.store.DB()); err == nil {
+		t.Fatal("OpenBillyReadOnly accepted a pool whose tables have row-level security disabled")
+	} else if !errors.Is(err, ErrBillyTablesUnprotected) {
+		t.Fatalf("wrong rejection reason: %v", err)
+	}
+}
+
+// TestWarnUnlessWriterIsLeastPrivilege is P9-23's guard. It is a warning and
+// not a rejection by design — see the function's doc comment — so what is
+// asserted here is that a bypassing writer is DETECTED and named, not that it
+// is refused.
+func TestWarnUnlessWriterIsLeastPrivilege(t *testing.T) {
+	env := newRLSTestEnv(t)
+	ctx := context.Background()
+
+	writerRole, err := CurrentRole(ctx, env.store.DB())
+	if err != nil {
+		t.Fatalf("read writer role: %v", err)
+	}
+	posture, err := DescribeRoleRLSPosture(ctx, env.store.DB())
+	if err != nil {
+		t.Fatalf("describe writer posture: %v", err)
+	}
+
+	ok, detail, err := WarnUnlessWriterIsLeastPrivilege(ctx, env.store.DB())
+	if err != nil {
+		t.Fatalf("WarnUnlessWriterIsLeastPrivilege: %v", err)
+	}
+	if posture.BypassesRLS() {
+		if ok {
+			t.Fatalf("writer %q has superuser=%t bypassrls=%t but the check reported it least-privilege",
+				writerRole, posture.Superuser, posture.BypassRLS)
+		}
+		if !strings.Contains(detail, writerRole) {
+			t.Fatalf("warning does not name the offending role %q: %s", writerRole, detail)
+		}
+	} else if !ok {
+		t.Fatalf("writer %q bypasses nothing but the check flagged it: %s", writerRole, detail)
+	}
+
+	// The probe role is the shape a demoted writer would have, and it must
+	// come back clean — otherwise the check would cry wolf after P9-23 lands.
+	probe := env.openProbePool(t)
+	ok, detail, err = WarnUnlessWriterIsLeastPrivilege(ctx, probe)
+	if err != nil {
+		t.Fatalf("WarnUnlessWriterIsLeastPrivilege(probe): %v", err)
+	}
+	if !ok {
+		t.Fatalf("least-privilege role was flagged as bypassing RLS: %s", detail)
+	}
+}
+
+// roleOf extracts the username from a URL-form DSN.
+func roleOf(t *testing.T, dsn string) string {
+	t.Helper()
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		t.Fatalf("parse role out of DSN: %v", err)
+	}
+	return u.User.Username()
 }

@@ -434,3 +434,110 @@ func TestSeedGuidesWithPowerShellVariantAlsoCoverCmd(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Guard (6): the seed guides teach the COMBINED credential vocabulary, and
+// only that one. P8-30.
+//
+// Four surfaces name this credential differently, and the differences are
+// real: `CHAINSAW_TOKEN` is one value, the plaintext `<client_id>:<client_secret>`
+// pair; `CHAINSAW_CLIENT_ID` + `CHAINSAW_CLIENT_SECRET` is two values a CI job
+// joins at the point of use. Neither renames into the other — a rename is a
+// value change, and every pipeline holding the old name in a secret store
+// breaks with a 401 that names nothing. So both vocabularies stay, and the
+// map is docs/CONFIG_REFERENCE.md section B30.
+//
+// The guides in configs/seed.yaml are the COMBINED surface. They are rendered
+// by the client wizard's "End users & AI agents" tab as copy-paste blocks for
+// a developer's own machine, where one exported variable is the whole story
+// and a split pair would need a join the reader has to write. Introducing the
+// split-pair names here would give the same tab two vocabularies with no
+// signal about which one the following fence expects.
+//
+// The rule is one-directional, matching guard (5)'s reasoning: the seed
+// guides must not gain the SPLIT names. Nothing stops a CI page from
+// mentioning the combined form, and tutorial 21's mapping table does exactly
+// that on purpose.
+//
+// Note the substring chosen. `CLIENT_ID:CLIENT_SECRET` — the literal every
+// guide already uses to spell the joined value — deliberately does NOT match:
+// the guard keys on the `CHAINSAW_`-prefixed names, which are the ones a
+// reader would export.
+// ---------------------------------------------------------------------------
+
+// splitPairVarNames are the CI-surface vocabulary. Their presence in a seed
+// guide is the regression.
+var splitPairVarNames = []string{"CHAINSAW_CLIENT_ID", "CHAINSAW_CLIENT_SECRET"}
+
+func TestSeedGuidesTeachOnlyTheCombinedTokenVocabulary(t *testing.T) {
+	t.Parallel()
+	requireMonorepoTree(t, "configs")
+	for _, path := range seedConfigPaths {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", path, err)
+		}
+		for _, repo := range cfg.Repositories {
+			guide := repo.ClientConfigurationGuide
+			if strings.TrimSpace(guide) == "" {
+				continue
+			}
+			for _, name := range splitPairVarNames {
+				if !strings.Contains(guide, name) {
+					continue
+				}
+				t.Errorf("%s: the %q client_configuration_guide introduces %s, the "+
+					"CI/CD split-pair vocabulary.\nThese guides teach the COMBINED "+
+					"form: one variable holding the plaintext `<client_id>:<client_secret>` "+
+					"pair, which is what the proxy splits on the first colon "+
+					"(splitTokenCredential in internal/server/server_clients.go). The "+
+					"split pair is two secret-store entries a CI job joins itself; "+
+					"mixing the two in one wizard tab leaves the reader unable to tell "+
+					"which shape the next fence expects. Keep the combined form here "+
+					"and see docs/CONFIG_REFERENCE.md section B30 for the map.",
+					path, repo.Name, name)
+			}
+		}
+	}
+}
+
+// TestSeedHuggingFaceGuideKeepsTheJoinedPairInHFToken pins the third surface.
+// HF_TOKEN is huggingface_hub's own variable, not ours; the guide borrows it
+// to carry OUR credential, and the value has to be the joined pair because
+// huggingface_hub sends it as `Authorization: Bearer $HF_TOKEN` and the proxy
+// splits that on the colon. A reader who assumes a real `hf_…` token, or who
+// base64-encodes, gets a 401 with no hint. Guard (2) already bans the base64
+// form; this pins the positive claim.
+func TestSeedHuggingFaceGuideKeepsTheJoinedPairInHFToken(t *testing.T) {
+	t.Parallel()
+	requireMonorepoTree(t, "configs")
+	for _, path := range seedConfigPaths {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", path, err)
+		}
+		checked := 0
+		for _, repo := range cfg.Repositories {
+			guide := repo.ClientConfigurationGuide
+			if !strings.Contains(guide, "HF_TOKEN") {
+				continue
+			}
+			checked++
+			if strings.Contains(guide, "HF_TOKEN") && strings.Contains(guide, "CLIENT_ID:CLIENT_SECRET") {
+				continue
+			}
+			t.Errorf("%s: the %q guide sets HF_TOKEN but never spells its value as the "+
+				"joined CLIENT_ID:CLIENT_SECRET pair. HF_TOKEN here carries a CHAINSAW "+
+				"client credential, not a huggingface.co `hf_…` token; "+
+				"huggingface_hub sends it as `Authorization: Bearer $HF_TOKEN` and the "+
+				"proxy splits on the colon. See docs/CONFIG_REFERENCE.md section B30.",
+				path, repo.Name)
+		}
+		if checked == 0 {
+			t.Errorf("%s: no client_configuration_guide mentions HF_TOKEN. The "+
+				"huggingface guide is the only surface that teaches it; if it was "+
+				"removed, drop this guard and the HF_TOKEN row in "+
+				"docs/CONFIG_REFERENCE.md section B30 in the same change.", path)
+		}
+	}
+}

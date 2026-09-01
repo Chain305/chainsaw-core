@@ -58,8 +58,14 @@ inputs:
     default: ""
   token:
     description: >
-      CHAINSAW_TOKEN — base64 of `client_id:client_secret` or a signed
-      short-lived token. Store as an Actions secret; never commit.
+      CHAINSAW_TOKEN — a Chainsaw management-API key (`c305_pa_…` /
+      `c305_ag_…`, minted at Access → API keys) or a session JWT. This
+      value is exported to `chainsaw doctor`, which sends it as
+      `Authorization: Bearer` to `/api/attestations`; that endpoint
+      accepts only an API key or a JWT. It is NOT the
+      `client_id:client_secret` package-registry credential, and it must
+      never be base64-encoded. See docs/CONFIG_REFERENCE.md section B30.
+      Store as an Actions secret; never commit.
       Only required when `server` is set.
     required: false
     default: ""

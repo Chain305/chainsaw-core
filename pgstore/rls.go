@@ -342,7 +342,62 @@ func VerifyBillyRole(ctx context.Context, billyDB, writerDB *sql.DB) error {
 	case super || bypass:
 		return fmt.Errorf("%w (role %q: superuser=%t bypassrls=%t)", ErrBillyRoleBypassesRLS, billyRole, super, bypass)
 	}
+
+	// Mechanism 3: the tables must actually have RLS switched on. Checked
+	// before the policy sweep because an unprotected table has no policies to
+	// find, so the sweep would come back clean and say nothing.
+	unprotected, err := UnprotectedBillyTables(ctx, billyDB)
+	if err != nil {
+		return fmt.Errorf("check row-level security for %q: %w", billyRole, err)
+	}
+	if len(unprotected) > 0 {
+		return fmt.Errorf("%w (role %q, tables: %s)", ErrBillyTablesUnprotected, billyRole, strings.Join(unprotected, ", "))
+	}
+
+	// Mechanism 2: no permissive policy other than the org-isolation one may
+	// apply to this role — including through role membership, which no
+	// attribute on the role reflects.
+	coverage, err := UnrestrictedPolicyCoverage(ctx, billyDB)
+	if err != nil {
+		return fmt.Errorf("check policy coverage for %q: %w", billyRole, err)
+	}
+	if len(coverage) > 0 {
+		names := make([]string, len(coverage))
+		for i, c := range coverage {
+			names[i] = c.String()
+		}
+		return fmt.Errorf("%w (role %q is covered by: %s)", ErrBillyInheritsUnrestrictedPolicy, billyRole, strings.Join(names, "; "))
+	}
 	return nil
+}
+
+// WarnUnlessWriterIsLeastPrivilege reports whether the application's OWN
+// database role bypasses row-level security, and returns a ready-to-log
+// explanation when it does.
+//
+// This is P9-23, and it is deliberately NOT fatal. The writer is supposed to
+// read across tenants — that is what the chainsaw_writer_all policy is for —
+// so a bypassing writer is a blast-radius problem, not a correctness one, and
+// making it fatal would refuse to boot every existing deployment. What it
+// must not be is silent: while the writer holds SUPERUSER or BYPASSRLS,
+// chainsaw_writer_all is never exercised, so the day the role is demoted is
+// the first day that policy runs in anger. See docs/plan_qa_phase9_remediation.md
+// P9-23 for the migration shape and why it needs its own wave.
+//
+// Returns ok=true when the writer is already least-privilege.
+func WarnUnlessWriterIsLeastPrivilege(ctx context.Context, writerDB *sql.DB) (ok bool, detail string, err error) {
+	p, err := DescribeRoleRLSPosture(ctx, writerDB)
+	if err != nil {
+		return false, "", err
+	}
+	if !p.BypassesRLS() {
+		return true, "", nil
+	}
+	return false, fmt.Sprintf(
+		"application database role %q bypasses row-level security (superuser=%t bypassrls=%t). "+
+			"An application compromise is an unrestricted database role, and the %s policy is moot until this is fixed. "+
+			"Remediation is P9-23: create a least-privilege owner role and repoint CHAINSAW_DATABASE_URL — do NOT demote this role in place if it is the cluster's only superuser.",
+		p.Role, p.Superuser, p.BypassRLS, rlsPolicyWriterAll), nil
 }
 
 // OpenBillyReadOnly opens the dedicated Billy read pool from billyDSN and
@@ -434,4 +489,196 @@ func QueryOrgScoped(ctx context.Context, db *sql.DB, orgID, query string, args .
 		return nil, err
 	}
 	return &ScopedRows{Rows: rows, tx: tx}, nil
+}
+
+// ---------------------------------------------------------------------------
+// P9-22 / P9-23 — the checks that make the boundary's absence loud.
+//
+// The two errors above (ErrBillySharesWriterRole, ErrBillyRoleBypassesRLS)
+// cover the two ways this design was expected to be undone: point Billy at
+// the writer's DSN, or give its role SUPERUSER/BYPASSRLS. Both are checks on
+// role ATTRIBUTES, and both were measured passing on a connection that was
+// nonetheless completely unscoped.
+//
+// They are not sufficient, because RLS binds a role through three
+// independent mechanisms and the attribute check only sees one of them:
+//
+//  1. the role's own SUPERUSER / BYPASSRLS attributes  — covered above;
+//  2. the POLICIES that name the role, including policies naming a role it
+//     is merely a MEMBER of. Postgres matches a policy's role list with
+//     pg_has_role(..., 'USAGE'), so `GRANT chainsaw TO billy_ro` silently
+//     hands billy_ro the chainsaw_writer_all policy, whose qual is `true`.
+//     Permissive policies OR together, so the effective predicate collapses
+//     to `true` and every tenant is visible — while rolsuper and
+//     rolbypassrls both still report false and the startup check passes.
+//     This is measured, not theorised: a two-tenant fixture that returns one
+//     row before the GRANT returns both rows after it, with no attribute
+//     change (TestVerifyBillyRole_RejectsInheritedWriterPolicy);
+//  3. whether ROW LEVEL SECURITY is enabled on the table at all. The
+//     documented incident rollback in docs/MIGRATIONS.md is
+//     `ALTER TABLE … DISABLE ROW LEVEL SECURITY`, which is exactly the state
+//     nothing else here would notice.
+//
+// So VerifyBillyRole now checks all three. Each is a query the Billy pool can
+// run as itself — pg_class and pg_policy are world-readable — which matters,
+// because the question "is THIS connection scoped" has to be answered on the
+// connection in question, not on the writer's.
+
+// ErrBillyInheritsUnrestrictedPolicy is mechanism 2 above: the Billy role is
+// covered by a permissive policy other than the org-isolation one, either by
+// being named in it directly or by holding membership in a role that is.
+var ErrBillyInheritsUnrestrictedPolicy = errors.New("billy read-only role is covered by an unrestricted row-level policy (directly or via role membership): row-level security would not scope its reads")
+
+// ErrBillyTablesUnprotected is mechanism 3: a Billy-readable table exists but
+// has row-level security switched off, so no policy on it applies to anyone.
+var ErrBillyTablesUnprotected = errors.New("row-level security is not enabled on every billy-readable table: reads on those tables are unscoped")
+
+// PolicyCoverage is one (table, policy, role) triple whose policy applies to
+// the connection it was read on. Role is "PUBLIC" for a policy that names no
+// role explicitly.
+type PolicyCoverage struct {
+	Table  string
+	Policy string
+	Role   string
+}
+
+func (c PolicyCoverage) String() string {
+	return fmt.Sprintf("%s.%s (via %s)", c.Table, c.Policy, c.Role)
+}
+
+// billyTableLiteralList renders billyReadableTables as a SQL list literal.
+// The values are a package constant, never operator or model input, so the
+// interpolation is not a parameter in disguise.
+func billyTableLiteralList() string {
+	quoted := make([]string, len(billyReadableTables))
+	for i, t := range billyReadableTables {
+		quoted[i] = "'" + t + "'"
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// UnrestrictedPolicyCoverage returns every PERMISSIVE policy on the
+// Billy-readable tables, other than the org-isolation policy itself, that
+// applies to db's current role.
+//
+// Only permissive policies are considered: Postgres OR-combines those, so any
+// one of them with a wide qual defeats the scope. Restrictive policies AND
+// together and can only ever narrow what is visible, so one appearing here
+// would be a false alarm.
+//
+// A policy's role list stores OID 0 for PUBLIC, which no pg_roles row
+// matches — so PUBLIC is tested explicitly rather than through the join, or a
+// second `TO PUBLIC USING (true)` policy would be invisible to this check.
+//
+// 'MEMBER', not 'USAGE'. Postgres matches a policy's role list with USAGE, so
+// USAGE is what reproduces its behaviour exactly — but a NOINHERIT member of
+// a policy's role has USAGE false and can still reach the policy by issuing
+// SET ROLE, which changes current_user to the covered role. MEMBER is true in
+// both cases. The check is therefore deliberately one notch stricter than
+// Postgres's own matching: the false positive it can raise is a role that
+// holds NOINHERIT membership in a writer role and never uses it, which is a
+// configuration worth failing on anyway.
+func UnrestrictedPolicyCoverage(ctx context.Context, db *sql.DB) ([]PolicyCoverage, error) {
+	if db == nil {
+		return nil, fmt.Errorf("nil database handle")
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT c.relname,
+		       p.polname,
+		       CASE WHEN pr.roleoid = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(pr.roleoid) END
+		  FROM pg_policy p
+		  JOIN pg_class c ON c.oid = p.polrelid
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		  CROSS JOIN LATERAL unnest(p.polroles) AS pr(roleoid)
+		 WHERE n.nspname = 'public'
+		   AND c.relname IN (`+billyTableLiteralList()+`)
+		   AND p.polpermissive
+		   AND p.polname <> $1
+		   AND (pr.roleoid = 0 OR pg_has_role(current_user, pr.roleoid, 'MEMBER'))
+		 ORDER BY 1, 2, 3`, rlsPolicyOrgIsolation)
+	if err != nil {
+		return nil, fmt.Errorf("read policy coverage: %w", err)
+	}
+	defer rows.Close()
+
+	var out []PolicyCoverage
+	for rows.Next() {
+		var c PolicyCoverage
+		if err := rows.Scan(&c.Table, &c.Policy, &c.Role); err != nil {
+			return nil, fmt.Errorf("scan policy coverage: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read policy coverage: %w", err)
+	}
+	return out, nil
+}
+
+// UnprotectedBillyTables returns the Billy-readable tables that exist in the
+// database but do not have row-level security enabled.
+//
+// A table that does not exist is not reported: billyRLSStatements skips
+// missing tables too, and a deployment mid-migration would otherwise fail a
+// check about a table nothing can read yet.
+func UnprotectedBillyTables(ctx context.Context, db *sql.DB) ([]string, error) {
+	if db == nil {
+		return nil, fmt.Errorf("nil database handle")
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT c.relname
+		  FROM pg_class c
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'public'
+		   AND c.relkind = 'r'
+		   AND c.relname IN (`+billyTableLiteralList()+`)
+		   AND NOT c.relrowsecurity
+		 ORDER BY 1`)
+	if err != nil {
+		return nil, fmt.Errorf("read row-security flags: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("scan row-security flags: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read row-security flags: %w", err)
+	}
+	return out, nil
+}
+
+// RoleRLSPosture records whether a role is exempt from row-level security by
+// attribute. Either attribute makes every policy on every table a no-op for
+// that role.
+type RoleRLSPosture struct {
+	Role      string
+	Superuser bool
+	BypassRLS bool
+}
+
+// BypassesRLS reports whether the role skips row-level security outright.
+func (p RoleRLSPosture) BypassesRLS() bool { return p.Superuser || p.BypassRLS }
+
+// DescribeRoleRLSPosture reads the RLS-relevant attributes of db's current
+// role. Unlike VerifyBillyRole it renders no judgement — the application's
+// own writer legitimately reads across tenants, so the caller decides whether
+// the answer is a problem. See WarnUnlessWriterIsLeastPrivilege.
+func DescribeRoleRLSPosture(ctx context.Context, db *sql.DB) (RoleRLSPosture, error) {
+	var p RoleRLSPosture
+	if db == nil {
+		return p, fmt.Errorf("nil database handle")
+	}
+	err := db.QueryRowContext(ctx,
+		`SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&p.Role, &p.Superuser, &p.BypassRLS)
+	if err != nil {
+		return p, fmt.Errorf("read role attributes: %w", err)
+	}
+	return p, nil
 }
