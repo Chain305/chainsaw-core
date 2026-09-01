@@ -297,7 +297,7 @@ func runPkgSearch(cmd *cobra.Command, args []string) error {
 
 var pkgInfoCmd = &cobra.Command{
 	Use:   "info <name@version>",
-	Short: "Show detailed info for a package: installs, vulnerabilities, trust score",
+	Short: "Show detailed info for a package: installs, vulnerabilities, licence",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runPkgInfo,
 }

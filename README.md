@@ -102,7 +102,8 @@ wherever its inputs exist.
 | Capability | Local CLI, no account | Server-backed |
 |---|:---:|:---:|
 | Typosquat detection (4 methods, embedded corpus) | ✅ | ✅ |
-| Known-malicious index (OpenSSF, ~231k entries) | ✅ | ✅ |
+| Known-malicious floor (11 curated incidents, embedded) | ✅ | ✅ |
+| Full OpenSSF malicious-package set (~231k entries) | after `guard update` | ✅ |
 | Byte-level behavioural scan (IOC + hidden-Unicode) | ✅ opt-in | ✅ |
 | Blocking installs of npm/pip/go/cargo/gem | ✅ | ✅ |
 | Lockfile and manifest diffing in CI (`pr-scan`) | ✅ | ✅ |
@@ -510,18 +511,22 @@ Quoting either number without the other misrepresents the trade.
 
 **Byte-level scanner — the opt-in deep mode, not the default path:**
 
-| | Real malware (597 samples) | Benign corpus (860 packages) |
+| | Real malware (238 samples) | Benign corpus (860 packages) |
 |---|---|---|
-| Hard-block | 46.2% | 0.81% false-block |
-| Any signal (surfaces, does not block) | 69% | 5% |
+| Hard-block | 43.7% (104/238) | 0.47% false-block (4/860) |
+| Any signal (surfaces, does not block) | 69% — dated, not re-measured | 5% — dated |
 
 **We do not claim zero false positives.** We published a 0.00% once, it did not
-reproduce on a wider corpus, and we retired it.
+reproduce on a wider corpus, and we retired it. The four packages still refused
+are named in the `acceptedBenignFalseBlocks` map in
+[`cli/benign_fp_eval_test.go`](cli/benign_fp_eval_test.go), which is the source
+of truth for both the rate and the names.
 
-Every caveat that belongs with these numbers — what the corpora are, why 0.81%
-is a floor rather than an estimate, the npm 0/600 vs PyPI 2.69% split, that
-detector changes were made against this corpus and then re-measured on it, and
-what is not yet independently reproducible — is in
+Every caveat that belongs with these numbers — what the corpora are, why 0.47%
+is a floor rather than an estimate, the npm 0/600 vs PyPI 1.54% split, that
+detector changes were made against this corpus and then re-measured on it, why
+the "any signal" row is dated, and what is not yet independently reproducible —
+is in
 **[docs/measurement.md](docs/measurement.md)**. Please read it before quoting
 any of the above.
 

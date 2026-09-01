@@ -1015,7 +1015,33 @@ type ObservationSection struct {
 //	    most-pulled coordinates. The staged drain in
 //	    docs/runbooks/matcher-epoch-backfill.md is REQUIRED and, at the
 //	    time of this commit, OUTSTANDING.
-const CurrentMatcherEpoch = 9
+//	epoch 10 (2026-09-01, P8-11): maint.single_maintainer no longer fires on
+//	    Maven/Gradle. The maintainer list for those ecosystems is built from
+//	    the POM `<developers>` block, which is hand-written prose; spring-core
+//	    lists exactly one developer, so the signal read "single maintainer,
+//	    bus-factor risk" off a documentation field. See
+//	    core/risk/registry_maintenance.go.
+//
+//	    THIS BUMP WAS ALMOST OMITTED, AND THE REASONING THAT NEARLY OMITTED
+//	    IT IS THE INTERESTING PART. The signal is SevLow, weight -5, and the
+//	    Phase 8 plan says outright that it "cannot move a verdict" — so the
+//	    first version of this change shipped without a bump on the theory
+//	    that it was score-affecting only. That is false. Bands are strict
+//	    integer comparisons on `overall` (`overall < thresholdWarn`), and
+//	    overall = 100 - int(deficit+0.5), so suppressing a -5 maintenance
+//	    signal removes 5 x 0.15 = 0.75 of deficit — enough to cross an
+//	    integer boundary. Brute-forcing the real EvaluatePackage over 1024
+//	    maintenance-heavy inputs found 9 verdict flips, every one
+//	    `overall=59 warn` -> `overall=60 allow`; the smallest is
+//	    {typosquat_medium, stale_repo_commit, manifest_confusion}. A weight
+//	    small enough to look cosmetic still moves a verdict when the band
+//	    test is a strict integer compare.
+//
+//	    Flip direction is UN-BLOCKING (warn -> allow), so the flip
+//	    population is Maven/Gradle coordinates with a single `<developers>`
+//	    entry sitting exactly on the 59/60 edge. Small, but it is the
+//	    direction that needs measuring, not the one that fails safe.
+const CurrentMatcherEpoch = 10
 
 // MinServeableEpoch is the floor a cached row must meet to be SERVED. It
 // normally equals CurrentMatcherEpoch and MUST be returned to that value

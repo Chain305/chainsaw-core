@@ -143,7 +143,7 @@ type serverRiskRow struct {
 //	one place tree-wide — internal/intelligence/premium/provider_maintenance.go
 //	— so in this build MaintainerCount and VersionCount are always 0.
 //	maint.single_maintainer requires MaintainerCount == 1
-//	(core/risk/registry_maintenance.go:114). Production links premium via
+//	(core/risk/registry_maintenance.go:153). Production links premium via
 //	the enterprise build tag (cmd/chainsaw-proxy/premium_enterprise.go), so
 //	the signal fires there and not here.
 //
@@ -155,7 +155,7 @@ type serverRiskRow struct {
 // rather than on signals. An absent field does not only silence signals — it
 // also disables SUPPRESSION GATES built on it, so a signal can fire MORE.
 // maint.very_new_package gates on `VersionCount > 3`
-// (registry_maintenance.go:98); with VersionCount pinned at 0 that gate is
+// (registry_maintenance.go:118); with VersionCount pinned at 0 that gate is
 // dead, and the harness's first run duly reported it firing on 41% of the top
 // PyPI downloads, boto3 included, which was then filed as a new engine defect.
 // It is this instrument's own false positive. On production boto3's
@@ -412,7 +412,7 @@ var maxFireRate = map[sigEco]fireCeiling{
 	// boto3 among them, and filed it as a new engine defect "not previously
 	// on any Phase 8 list". It was this instrument's own false positive.
 	//
-	// The signal gates on `VersionCount > 3` (registry_maintenance.go:98).
+	// The signal gates on `VersionCount > VeryNewPackageMaxVersions` (registry_maintenance.go:118).
 	// VersionCount is written only by the premium maintenance provider, which
 	// this build cannot link, so it is pinned at 0 and the guard never fires.
 	// Production, which links premium, sees boto3's VersionCount in the

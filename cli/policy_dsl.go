@@ -47,10 +47,14 @@ Exit codes:
 
 var policyGateCmd = &cobra.Command{
 	Use:   "gate <surface>",
-	Short: "Run a policy decision for one of the six enforcement surfaces",
+	Short: "Run a policy decision for one of the five enforcement surfaces",
 	Long: `Run the unified policy DSL decision for an enforcement surface.
 
-Surface must be one of: pr, proxy, publish, promote, deploy, runtime.
+Surface must be one of: pr, proxy, publish, deploy, runtime.
+
+("promote" is accepted for schema compatibility but is RESERVED — no
+production caller evaluates policy there, so it is not advertised as a
+live enforcement surface. See core/policy/input.go.)
 
 This is the entry point every chainsaw CI / git hook / k8s webhook /
 package-manager hook calls into. The same Rego rule in --bundle fires

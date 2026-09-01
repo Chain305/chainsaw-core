@@ -131,6 +131,25 @@ func init() {
 		Title:       "Single maintainer",
 		Description: "Only one maintainer — bus-factor and takeover-target risk.",
 		Fires: func(in Input) (bool, string, map[string]any) {
+			// P8-11: on Maven/Gradle the maintainer list is derived from the
+			// POM `<developers>` block, which an author fills in by hand.
+			// Whatever it is, it is not a headcount: plenty of large,
+			// well-staffed projects list exactly one developer, and
+			// spring-core-6.1.0.pom is one of them, which is why this fired
+			// on Spring Framework. A count of 1 there carries no bus-factor
+			// information, so the signal has nothing to measure.
+			//
+			// Note the open disagreement next door: `runMaven`
+			// (`provider_registrymetadata.go:1605-1607`) calls the same block
+			// a publisher identity, "since Sonatype keys publisher accounts
+			// on the developer email", and `sc.publisher_changed` for maven
+			// is built on that being true. This signal only needs the weaker
+			// claim — that the entry COUNT is meaningless — which holds
+			// either way. The stronger question is filed as P8-70; do not
+			// resolve it by copying either comment.
+			if isPOMMaintainerEco(in.Ecosystem) {
+				return false, "", nil
+			}
 			if in.MaintainerCount != 1 {
 				return false, "", nil
 			}
@@ -226,6 +245,39 @@ func isNPMEco(eco string) bool {
 func isPyPIEco(eco string) bool {
 	switch eco {
 	case "pip", "pypi":
+		return true
+	}
+	return false
+}
+
+// isPOMMaintainerEco reports whether this ecosystem's maintainer list comes
+// from a POM `<developers>` block. Those entries are self-declared prose
+// rather than an access-control list — `runMaven`'s `<developers>` loop
+// (`core/intelligence/provider_registrymetadata.go:1609`) maps them onto
+// PeopleSection.Maintainers deliberately, because the People panel has
+// nothing better to show, but a count taken off them does not mean what
+// MaintainerCount means everywhere else. See P8-11.
+//
+// LOWERCASE THE INPUT. `risk.Input.Ecosystem` is the RAW caller-supplied
+// string: `risk_projection.go:153` copies `r.Identity.Ecosystem` through
+// untouched and the HTTP handlers (`api_v1_intel.go`, `admin_intelligence.go`)
+// build the key without folding case. The provider side DOES normalise —
+// `provider_registrymetadata.go:217` runs `normalizeEcosystemKey` before
+// dispatching to `runMaven` — so a request for ecosystem "Maven" populates
+// Maintainers from the POM but would miss a case-sensitive guard here, and the
+// false positive would survive on exactly the `/api/v1/intel/packages/...`
+// surface it was reported from. That asymmetry is the residual of P8-33, which
+// normalised the `Supports()` lookup layer and left the stored value raw.
+func isPOMMaintainerEco(eco string) bool {
+	switch strings.ToLower(strings.TrimSpace(eco)) {
+	case "maven", "gradle":
+		return true
+	// "maven-central" is a chainsaw PROXY REPO NAME, not an ecosystem token
+	// (`internal/simulate/riskweights.go:274` draws that distinction
+	// explicitly), so nothing should route it here. Kept as a cheap guard
+	// against a repo-name leaking into the ecosystem field, not because it
+	// is a real coordinate shape.
+	case "maven-central":
 		return true
 	}
 	return false

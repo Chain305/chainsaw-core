@@ -10,7 +10,7 @@
 // applies the same rule, and this file is its CLI mirror — deliberately
 // down to the returned string, so `chainsaw install-hook <ecosystem>` and
 // the dashboard's "Save this secret now" snippet emit the same URL.
-// See docs/smoke-test-appsec-journey.md (BUG-A6, BUG-14) for the full
+// See docs/archive/2026/smoke-test-appsec-journey.md (BUG-A6, BUG-14) for the full
 // failure recipe and the rationale for the fail-closed placeholder.
 package hook
 

@@ -43,8 +43,10 @@ var latestKnownVersion = func() string { return "" }
 // version is known and every safety gate passes. Returns whether it printed,
 // for tests. Never returns an error and never panics — it is best-effort UX.
 func maybeNotifyUpdateAvailable() bool {
-	// Gate 1: offline opt-out. Any non-empty value counts as set.
-	if os.Getenv("CHAINSAW_OFFLINE") != "" {
+	// Gate 1: offline opt-out. Use the same truthiness rule as every other
+	// CHAINSAW_OFFLINE call site — a bare `!= ""` made CHAINSAW_OFFLINE=0
+	// suppress the notice here while enabling egress everywhere else.
+	if envTruthy(os.Getenv("CHAINSAW_OFFLINE")) {
 		return false
 	}
 	// Gate 2: quiet. --quiet IS a registered persistent flag now (root.go),
@@ -81,8 +83,13 @@ func maybeNotifyUpdateAvailable() bool {
 		return false
 	}
 
+	// `chainsaw guard update` fetches the OpenSSF malicious-package feed.
+	// It cannot upgrade this binary, and telling a user it can sends them
+	// in a circle. Point at the installer, which is what actually replaces
+	// the binary.
 	fmt.Fprintf(updateNoticeWriter(),
-		"chainsaw: a newer version (%s) is available; you're on %s. Run `chainsaw guard update` or reinstall.\n",
+		"chainsaw: a newer version (%s) is available; you're on %s.\n"+
+			"  Reinstall: curl -fsSL https://chain305.com/install.sh | sh\n",
 		latest, current)
 	return true
 }

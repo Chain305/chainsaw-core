@@ -917,7 +917,7 @@ func (s *Store) migrateSchema() error {
 		// 404s for any org that hasn't explicitly opted in, so a per-org
 		// block count is never leaked on the public surface without consent.
 		// An org admin flips it via PATCH /api/orgs/{id}/settings
-		// {"badge_blocked_public": true}. See docs/plan_10of10_surfaces.md.
+		// {"badge_blocked_public": true}. See docs/archive/2026/plan_10of10_surfaces.md.
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS badge_blocked_public INTEGER NOT NULL DEFAULT 0`,
 		// Org slugs are unique among LIVE orgs, not for all time.
 		//

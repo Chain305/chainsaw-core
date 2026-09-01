@@ -273,8 +273,15 @@ type scanAPIResponse struct {
 var scanCmd = &cobra.Command{
 	Use:     "scan [package@version | -]",
 	GroupID: GrpScan,
-	Short:   "Scan packages for vulnerabilities",
-	Long: `Scan one or more packages for known vulnerabilities using the Chainsaw server.
+	Short:   "Scan packages for vulnerabilities and supply-chain conditions",
+	Long: `Scan one or more packages using the Chainsaw server.
+
+The server merges vulnerability data (CVE / CVSS / EPSS) with the supply-chain
+signals it holds for each coordinate: malware and typosquat status, install-script
+kind, publisher set and publisher changes, version anomalies, hidden Unicode,
+publish velocity, repo-link status, checksum and provenance. Which of those are
+populated depends on the ecosystem and on what the server could reach — see
+Coverage below.
 
 Output formats (--format / --json / --output):
   table   human-readable table (default)

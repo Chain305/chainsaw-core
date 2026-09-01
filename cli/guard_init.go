@@ -37,7 +37,7 @@ const supportedShellsHint = "bash, zsh, sh, fish, powershell, pwsh, cmd"
 
 var guardInitCmd = &cobra.Command{
 	Use:   "init [bash|zsh|fish|powershell|pwsh|cmd]",
-	Short: "Print shell functions that route npm/pip/go through the guard",
+	Short: "Print shell functions that route npm, pip, go, cargo and gem through the guard",
 	Long: `Print shell functions that route your package managers through the Chainsaw
 install guard, so installs are checked automatically without typing "chainsaw"
 each time.
@@ -56,8 +56,13 @@ Add to your shell config and reload:
   # cmd.exe — current console session only, see below
   chainsaw guard init cmd
 
-The functions delegate to the real npm/pip/go after the check; the default path
-is offline and sends nothing off your machine.
+The functions delegate to the real npm, pip, pip3, go, cargo and gem after the
+check.
+
+The default path is offline. Two opt-in paths do reach the network, and
+neither runs unless you ask for it: "chainsaw guard update" downloads the
+OpenSSF malicious-package set, and CHAINSAW_GUARD_DEEP=1 fetches package
+bytes for artifact analysis.
 
 With --install, append the activation line to your shell rc file (idempotent)
 instead of printing the functions, so setup is a single command with no

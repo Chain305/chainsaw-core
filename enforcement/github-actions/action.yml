@@ -32,7 +32,7 @@ name: "Chainsaw Guard"
 # vulnerability lane, no malware lane and no licence lane on any of the
 # three. Do not restore a claim without shipping the lane behind it.
 description: "Catch typosquatted dependencies, proxy-bypass files, and config drift in pull requests before they reach main."
-author: "Chainsaw Security"
+author: "Chain305"
 
 branding:
   icon: "shield"

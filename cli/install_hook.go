@@ -35,7 +35,8 @@ func newInstallHookCmd() *cobra.Command {
 		GroupID: GrpGuard,
 		Short:   "Wire chainsaw into a package manager",
 		Long: `Insert the chainsaw-managed configuration block into a supported package
-manager's user config file (npm, pip, cargo, go, maven, …).
+manager's user config file. Supported clients: npm, yarn, bun, pip, cargo,
+maven, gradle, sbt, nuget, go, docker.
 
 The Chainsaw server URL baked into the block comes from the standard config
 chain: the root --server flag, the CHAINSAW_SERVER environment variable, or

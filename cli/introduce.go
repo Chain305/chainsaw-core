@@ -80,6 +80,7 @@ func init() {
 // those need the server).
 type introduceSections struct {
 	ProductName       string                      `json:"product_name"`
+	Vendor            string                      `json:"vendor"`
 	Summary           string                      `json:"summary"`
 	Modes             []agenticux.Mode            `json:"modes"`
 	MentalModels      []agenticux.MentalModel     `json:"mental_models"`
@@ -89,10 +90,12 @@ type introduceSections struct {
 
 func buildIntroduceSections() introduceSections {
 	return introduceSections{
-		ProductName: "Chain305",
-		Summary: "Chain305 is a software supply-chain firewall for npm, PyPI, " +
+		ProductName: "Chainsaw",
+		Vendor:      "Chain305",
+		Summary: "Chainsaw is an install-path firewall for npm, PyPI, " +
 			"Maven, Docker, and other registries. It proxies package installs, " +
-			"evaluates policy on every artifact, and exposes a management API.",
+			"evaluates policy on every artifact, and exposes a management API. " +
+			"Chain305 is the company that makes it.",
 		Modes:             agenticux.Modes(),
 		MentalModels:      agenticux.MentalModels(),
 		Vocabulary:        agenticux.Vocabulary(),
@@ -117,9 +120,9 @@ func runIntroduce(cmd *cobra.Command, _ []string) error {
 
 	w := cmd.OutOrStdout()
 	if showAll {
-		fmt.Fprintln(w, "Chain305 — how people use it")
+		fmt.Fprintln(w, "Chainsaw — how people use it")
 		fmt.Fprintln(w, strings.Repeat("=", 40))
-		fmt.Fprintln(w, "Chain305 is a software supply-chain firewall. This is a quick")
+		fmt.Fprintln(w, "Chainsaw is an install-path firewall. This is a quick")
 		fmt.Fprintln(w, "tour of the personas, workflows, glossary, and common examples —")
 		fmt.Fprintln(w, "same framing you'll see in the docs and on the web.")
 		fmt.Fprintln(w)

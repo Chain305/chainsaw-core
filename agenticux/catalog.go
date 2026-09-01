@@ -212,21 +212,29 @@ func MentalModels() []MentalModel {
 func Vocabulary() []VocabularyEntry {
 	return []VocabularyEntry{
 		{
-			Term:    "Chain305",
-			Meaning: "The product and the company. Use this name in user-facing replies.",
-			// "Use this name in your replies" is an instruction TO the
-			// agent. A person reading a glossary needs the definition,
-			// not the style rule.
-			CLIMeaning: "The product, and the company behind it. Chain305 is the whole thing; Chainsaw is the proxy inside it.",
+			// NAMING CANON — docs/POSITIONING.md §1. Chain305 is the
+			// COMPANY; Chainsaw is the PRODUCT. This is the standard
+			// product/company split (Stripe/Stripe Inc., GitHub/GitHub
+			// Inc.), and §13 formally REJECTED a proposal to merge or
+			// rebrand them. The previous wording here had it backwards
+			// ("Chain305: the product and the company" / "Chainsaw: the
+			// proxy component inside Chain305") — and because this file
+			// feeds chainsaw_introduce, /llms.txt, /for-agents and
+			// `chainsaw introduce`, that inversion shipped to four
+			// surfaces at once, in the public repo, with an AgentOnly
+			// heuristic instructing every agent to repeat it.
+			Term:       "Chain305",
+			Meaning:    "The company. Chainsaw is the product it makes.",
+			CLIMeaning: "The company behind Chainsaw.",
 			Synonyms:   []string{"chain305.com"},
 		},
 		{
 			Term:    "Chainsaw",
-			Meaning: "The proxy component inside Chain305 — the piece that intercepts package installs and enforces policy. Paths: /chainproxy/*, /chainproxy/mcp.",
+			Meaning: "The product — an install-path firewall. It runs as a local guard on a developer machine and as a registry proxy for an organisation, intercepting package installs and enforcing policy. Paths: /chainproxy/*, /chainproxy/mcp.",
 			// The path map is wire detail an agent needs to build
 			// request URLs. A person reading a glossary does not —
 			// their URLs come out of `chainsaw install-hook`.
-			CLIMeaning: "The proxy component inside Chain305 — the piece your package installs go through, and the piece that enforces policy. It is also the name of this CLI.",
+			CLIMeaning: "The product, and the name of this CLI. An install-path firewall: your package installs go through it and it enforces policy on them.",
 			Synonyms:   []string{"the proxy", "chain365 (common folder-name typo)"},
 		},
 		{
@@ -296,7 +304,7 @@ func RoutingHeuristics() []Heuristic {
 			// Instructions about how the agent should phrase its own
 			// replies. Nothing for a person to act on.
 			Match:     "user types 'chain305' / 'chainsaw' / 'chain365' (common folder-name typo)",
-			Do:        "Normalize: Chainsaw is the proxy component, Chain305 is the product. Don't correct the user; just use the canonical name in your own replies.",
+			Do:        "Normalize: Chainsaw is the product, Chain305 is the company. Don't correct the user; just use the canonical names in your own replies.",
 			AgentOnly: true,
 		},
 		{

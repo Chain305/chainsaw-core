@@ -47,22 +47,36 @@ Legitimate packages still refused include `npm:jsdoc` (against `jsdom`),
 This is **not** the default install path. It requires `CHAINSAW_GUARD_DEEP=1` or
 a staged artifact directory.
 
-| | Real malware (597 samples) | Benign corpus (860 packages) |
+| | Real malware (238 samples) | Benign corpus (860 packages) |
 |---|---|---|
-| **Hard-block** | 46.2% | 0.81% false-block |
-| **Any signal** (surfaces, does not block) | 69% | 5% |
+| **Hard-block** | 43.7% (104/238) | 0.47% false-block (4/860) |
+| **Any signal** (surfaces, does not block) | 69% — *dated, see below* | 5% — *dated* |
 
 **Caveats, before you quote these:**
 
-- The 0.81% benign corpus is drawn from the same popularity seeds the typosquat
+- The 0.47% benign corpus is drawn from the same popularity seeds the typosquat
   detector uses as its target index, so every name is an exact match and is
   cleared before any distance check runs — it *cannot* produce a typosquat false
   block. It is a floor, not an estimate of what you will experience. The
   typosquat class is measured separately, at 1.02%, above.
-- It is a composite: npm measured 0/600, PyPI 7/260 = 2.69%.
-- The 597 malware samples are a deterministic first-N slice of a public dataset,
-  not a random sample.
+- It is a composite: npm measured 0/600, PyPI 4/260 = 1.54%.
+- The four refused packages are named, with the reason each one is defensible
+  behaviour rather than a detector bug, in the `acceptedBenignFalseBlocks` map in
+  [`cli/benign_fp_eval_test.go`](../cli/benign_fp_eval_test.go). That map is the
+  source of truth for both the rate and the names: a fifth refusal fails the
+  build on its own identity rather than moving a percentage. The same file's
+  `mustStayCaught` map pins the 104 caught malware samples the same way.
+- The 238 malware samples are a deterministic slice of a public dataset (the
+  DataDog malicious-software-packages dataset, 120 npm + 118 PyPI), not a random
+  sample.
 - Detector changes were made against this corpus and then re-measured on it.
+- **The "any signal" row is older than the hard-block row and has not been
+  re-measured.** It comes from `intelligence/detection_lead_eval_test.go`
+  (`TestDetectionLeadEval`) on 2026-08-12, over a 597-sample slice that the
+  pinned 238-sample corpus has since replaced. That harness pins no corpus size
+  and no expected figures, so the pair cannot be tied to current code. Prefer the
+  hard-block row.
+- Hard-block figures measured 2026-08-24 (benign) and 2026-08-25 (malware).
 
 ## Reproducing
 
