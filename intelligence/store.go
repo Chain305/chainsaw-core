@@ -477,15 +477,14 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 // populated Tier-2/3 subtree, the new value wins — staleness is the failure
 // mode we are guarding against, not freshness.
 //
-// Sticky-true semantics. PublisherChanged, VersionAnomaly, SuspiciousRepoStars,
-// and NonExistentAuthor are *observed* events: once a Tier-3 enricher has
-// recorded them, a later Tier-1-only refresh whose section is empty must
-// not flip them off. They stay sticky-true until a future report
-// explicitly observes a different value — i.e. the incoming field is non-
-// zero (for *bool: the pointer is set; for bool: prior was true and incoming
-// is false stays prior). This is symmetric with the "no scan ran" guard we
-// already apply to Vulnerabilities: silence from one tier is not evidence
-// the prior observation has been withdrawn.
+// Sticky-on-silence semantics for the SupplyChain section live in
+// applyStickySupplyChain (sticky.go), which this function calls and which
+// runFanout ALSO calls against the risk input before EvaluatePackage runs.
+// One definition, two call sites: a sticky rule that existed only here was
+// applied after the evaluation had already happened, so the fact bound the
+// display and not the verdict (P8-71). VersionAnomalyFlags travels with the
+// VersionAnomaly bool there for the same reason — the bool is what the UI
+// renders, the flags are what the risk signal actually reads.
 func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 	if len(priorPayload) == 0 {
 		return json.Marshal(next)
@@ -567,49 +566,15 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 
 	// SupplyChain: per-field preservation. TrustScore + TrustScoreBreakdown
 	// are deliberately NOT preserved — they are recomputed by the risk
-	// engine on every scan and must reflect the latest evaluation. The
-	// Tier-3 enricher fields (repo-link probe, metadiff, RTT lookups)
-	// preserve the prior observation when the incoming field is empty.
-	// PublisherChanged / VersionAnomaly / SuspiciousRepoStars /
-	// NonExistentAuthor are sticky-true: once observed, a Tier-1-only
-	// refresher whose section is empty cannot flip them off (see the
-	// function comment for the rationale).
-	if merged.SupplyChain.MalwareStatus == "" && prior.SupplyChain.MalwareStatus != "" {
-		merged.SupplyChain.MalwareStatus = prior.SupplyChain.MalwareStatus
-	}
-	if merged.SupplyChain.TyposquatStatus == "" && prior.SupplyChain.TyposquatStatus != "" {
-		merged.SupplyChain.TyposquatStatus = prior.SupplyChain.TyposquatStatus
-	}
-	if merged.SupplyChain.RepoLinkStatus == "" && prior.SupplyChain.RepoLinkStatus != "" {
-		merged.SupplyChain.RepoLinkStatus = prior.SupplyChain.RepoLinkStatus
-	}
-	if merged.SupplyChain.RepoLastCommitAt == nil && prior.SupplyChain.RepoLastCommitAt != nil {
-		merged.SupplyChain.RepoLastCommitAt = prior.SupplyChain.RepoLastCommitAt
-	}
-	// PublisherChanged: *bool, sticky-true ON SILENCE ONLY.
+	// engine on every scan and must reflect the latest evaluation.
 	//
-	// Preserve when incoming is nil — a Tier-1-only refresh that never ran
-	// the metadiff provider has observed nothing, and silence is not a
-	// withdrawal. An explicit incoming *false IS an observation and DOES
-	// clear the flag: provider_metadiff.go computes
-	// `changed := len(added) > 0 || len(removed) > 0` and always assigns
-	// it, so a later scan that finds the publisher set unchanged returns
-	// the package to clean.
-	//
-	// This comment previously also claimed "OR when prior was *true and
-	// incoming is *false ... isn't withdrawn". That was never implemented,
-	// and implementing it would be a BUG, not a fix: a package would stay
-	// flagged forever after a single legitimate maintainer handover, with
-	// no path back. P8-35 was filed against exactly that behaviour on the
-	// strength of this sentence; the code was correct and the comment was
-	// not. TestPublisherChangedClearsOnExplicitFalse pins the real
-	// behaviour so the "fix" cannot be applied.
-	if merged.SupplyChain.PublisherChanged == nil && prior.SupplyChain.PublisherChanged != nil {
-		merged.SupplyChain.PublisherChanged = prior.SupplyChain.PublisherChanged
-	}
-	if merged.SupplyChain.VersionAnomaly == nil && prior.SupplyChain.VersionAnomaly != nil {
-		merged.SupplyChain.VersionAnomaly = prior.SupplyChain.VersionAnomaly
-	}
+	// The sticky-on-silence rules themselves live in applyStickySupplyChain
+	// (sticky.go) because runFanout must apply the SAME rules to the risk
+	// input BEFORE EvaluatePackage runs. Inlining them here again is what
+	// P8-71 recorded: a fact revived for display and discarded for
+	// enforcement. Add a new sticky field there, never here.
+	applyStickySupplyChain(&merged, &prior)
+
 	// Note: SuspiciousRepoStars, MaintainerAccountAgeDays,
 	// FirstTimeCollaborator, and NonExistentAuthor live on
 	// ArtifactScanSection (not SupplyChainSection — the audit groups them

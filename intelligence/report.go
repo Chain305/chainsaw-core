@@ -1136,7 +1136,71 @@ type ObservationSection struct {
 //	    a `quarantine` -> `allow` that discarded four transitive criticals.
 //	    A bare version is a soft requirement in Maven, a minimum under Go MVS,
 //	    and a lower bound in NuGet.
-const CurrentMatcherEpoch = 12
+//	epoch 13 (2026-09-02, P8-71): sticky supply-chain facts now bind the
+//	    VERDICT, not just the display.
+//
+//	    The stored `report` and the stored `risk_evaluation` were snapshots
+//	    of two different moments. risk.EvaluatePackage ran on the in-flight
+//	    report inside ComputeTrustScoreForOrg; only afterwards, inside
+//	    Store.Upsert, did mergeReportPayload revive the sticky-on-silence
+//	    supply-chain fields from the prior row. So a fact was preserved for
+//	    DISPLAY and discarded for ENFORCEMENT — the dashboard said
+//	    publisher-changed and the verdict, which is what actually gates,
+//	    did not.
+//
+//	    Measured on prod before the fix, at epoch 12, across all ecosystems:
+//	    28 rows with publisherChanged=true and no publisher signal in the
+//	    evaluation beside them, 180 with versionAnomaly=true and no
+//	    qual.version_anomaly, 83 across repoLinkStatus and 12 across
+//	    typosquatStatus — 298 distinct rows, and ZERO rows the other way
+//	    round in every one of those categories. The strict
+//	    one-directionality is what proves the mechanism rather than a
+//	    write-ordering artefact: a FIRED signal implies the incoming scan
+//	    genuinely observed the fact, so only the revival direction can drift.
+//
+//	    The fix applies the carry-forward to the RISK INPUT, in runFanout,
+//	    before the evaluation, instead of to the report afterwards.
+//	    Evaluation stays where it is; both columns derive from one set of
+//	    facts. The rules live in ONE function (applyStickySupplyChain) that
+//	    both runFanout and mergeReportPayload call, so a sticky field added
+//	    later cannot reintroduce the split — that generality is why this
+//	    was preferred over re-evaluating inside the store.
+//
+//	    VersionAnomalyFlags now travels with the VersionAnomaly bool as one
+//	    fact. qual.version_anomaly fires on the FLAGS and never on the bool,
+//	    so the bool-only carry-forward revived a fact whose evidence had
+//	    been dropped: 161 of the 180 drifted rows say versionAnomaly=true
+//	    with an empty flag list. A fact without its evidence cannot bind
+//	    anything.
+//
+//	    Flip population and direction, replayed through the real evaluator
+//	    over all 298 stored prod reports, before vs after, same engine:
+//	    189 rows change VERDICT and every single one is
+//	    ENFORCEMENT-STRENGTHENING — 181 allow -> warn, 7
+//	    upgrade_available -> warn, 1 upgrade_available -> quarantine
+//	    (org.apache.maven.shared:maven-shared-utils 3.1.0, whose CVSS-9.8
+//	    upgrade promotion no longer holds once a second non-CVE problem is
+//	    visible). Nothing becomes more permissive. As a model check, the
+//	    replayed BEFORE verdict reproduces the stored verdict for 288 of
+//	    the 298 rows; the 10 that differ are engine drift accumulated since
+//	    those rows were written, not this change.
+//
+//	    Of the 189, THIRTY-SIX flip from facts the corpus already holds.
+//	    The other 153 need a scan to observe version-anomaly flags, because
+//	    the flags those rows lost are not recoverable from the row that
+//	    overwrote them — the pair-carry stops the evidence being dropped
+//	    from here on, it does not resurrect what is already gone. Both
+//	    numbers are stated because quoting only 189 would overstate what
+//	    the drain itself does, and quoting only 36 would understate the
+//	    defect.
+//
+//	    A bump is REQUIRED, not optional: store.go serves the persisted
+//	    risk_evaluation verbatim, so every affected cached row keeps its
+//	    fact-free verdict until the epoch invalidates it. A staged drain is
+//	    needed on deploy — this is the strengthening direction, so the
+//	    backlog is rows that will start warning, and the drain should be
+//	    watched rather than assumed.
+const CurrentMatcherEpoch = 13
 
 // MinServeableEpoch is the floor a cached row must meet to be SERVED. It
 // normally equals CurrentMatcherEpoch and MUST be returned to that value

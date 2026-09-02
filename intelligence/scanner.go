@@ -274,6 +274,12 @@ func (s *DefaultService) Scan(ctx context.Context, req Request) (*Report, error)
 // query from under it.
 var xreplicaflightLeaderTimeout = 45 * time.Second
 
+// stickyPriorLookupTimeout bounds the prior-row read that runFanout does
+// before the risk evaluation (P8-71). It is a single primary-key lookup, so
+// the budget is small; the read is best-effort and a timeout simply leaves
+// the sticky facts unrevived for that scan.
+var stickyPriorLookupTimeout = 3 * time.Second
+
 // Get returns the cached Report or ErrNotFound.
 //
 // It deliberately returns whatever is persisted, including a row from a
@@ -638,6 +644,54 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	// (MaxTier=0 OR MaxTier>=tierTotal) leaves Partial=false.
 	if maxTier > 0 && tierTotal > 0 && maxTier < tierTotal {
 		report.Observation.Partial = true
+	}
+
+	// P8-71: revive the sticky-on-silence supply-chain facts from the
+	// prior row BEFORE the evaluation, not after it.
+	//
+	// Store.Upsert revives them on the way to the row (mergeReportPayload
+	// -> applyStickySupplyChain), which used to be the ONLY place it
+	// happened — after ComputeTrustScoreForOrg below had already run
+	// EvaluatePackage on the in-flight report. The stored `report` and the
+	// stored `risk_evaluation` were therefore snapshots of two different
+	// sets of facts, and the fact was preserved for display and discarded
+	// for enforcement. Applying the same rules here makes both columns
+	// derive from one set of facts. The rules live in exactly one function
+	// so a future sticky field cannot reintroduce the split.
+	//
+	// Skipped for Ephemeral (artifact-upload) requests: that path
+	// deliberately never touches the shared coordinate-keyed row, in
+	// either direction, and it never Upserts — so there is nothing to
+	// stay consistent with, and reading would reintroduce the
+	// cache-poisoning read the Ephemeral branch exists to avoid.
+	//
+	// The lookup runs on a context detached from the scan deadline, with
+	// its own short timeout: the Upsert that revives these facts uses the
+	// caller's outer context, not the fan-out's, so a fan-out that ran out
+	// of deadline would otherwise persist a fact its own verdict never
+	// saw — the exact split, in a narrower window. Failure is soft: no
+	// prior row, or an unreachable store, leaves the report exactly as the
+	// providers built it.
+	if s.store != nil && !req.Options.Ephemeral {
+		priorCtx, cancelPrior := context.WithTimeout(context.WithoutCancel(ctx), stickyPriorLookupTimeout)
+		// matcher-epoch-exempt: this read takes FACTS, never a verdict. Every
+		// field applyStickySupplyChain copies is an observation about the
+		// coordinate — an index verdict, a repo-link probe result, a metadiff
+		// outcome — and none of them is derived from the matcher, so a
+		// superseded epoch says nothing about whether they are still true. The
+		// row's own risk_evaluation is not read here and is not served; it is
+		// about to be REPLACED by the evaluation this scan is computing.
+		//
+		// Suppressing a matcher-stale row here would also be actively wrong:
+		// Store.Upsert's merge reads the same row with no epoch check at all
+		// (it cannot — it is the write path), so the fact would still land in
+		// the persisted report while the verdict beside it went without. That
+		// is P8-71 exactly, reintroduced through the fix for it.
+		prior, err := s.store.Get(priorCtx, req.OrgID, req.Key)
+		cancelPrior()
+		if err == nil && prior != nil {
+			applyStickySupplyChain(report, prior)
+		}
 	}
 
 	// P8-05: stamp the no-advisory-source marker BEFORE the trust score is
