@@ -208,7 +208,11 @@ func scanResultsToSARIF(results []scanResultItem) sarifLog {
 			if _, ok := condRule[id]; !ok {
 				condRule[id] = sarifConditionRule(id, cond)
 			}
-			condLevel := sarifLevelFor(supplyChainConditionSeverity[cond])
+			// Ecosystem-aware at RESULT level. The rule DEFINITION below
+			// (sarifConditionRule) stays on the base ladder because a SARIF
+			// rule is global and has no ecosystem — the per-result level is
+			// where the demotion belongs.
+			condLevel := sarifLevelFor(supplyChainConditionSeverityFor(cond, r.Ecosystem))
 			sarifResults = append(sarifResults, sarifResult{
 				RuleID:  id,
 				Level:   condLevel,

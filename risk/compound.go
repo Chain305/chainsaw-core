@@ -66,7 +66,7 @@ func init() {
 			// primitive or added the POM signal to the lookup, and the
 			// failure mode is a SevCritical block on a documentation edit.
 			// TestTakeoverCompound_DoesNotEscalateOnPOMEcosystems pins it.
-			if isPOMMaintainerEco(in.Ecosystem) {
+			if IsPOMMaintainerEco(in.Ecosystem) {
 				return false, "", nil
 			}
 			if !in.HasInstallScript && !in.InstallScriptFetchesRemote {

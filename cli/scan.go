@@ -16,6 +16,8 @@ import (
 	depanalyzer "github.com/chain305/chainsaw-core/depparser/analyzer"
 	ftypes "github.com/chain305/chainsaw-core/fanal"
 	"github.com/chain305/chainsaw-core/policy"
+
+	"github.com/chain305/chainsaw-core/risk"
 )
 
 // scanSchemaVersion identifies the JSON envelope shape `chainsaw scan` emits.
@@ -123,6 +125,50 @@ func rankSeverity(s string) (int, bool) {
 //
 // Any condition not listed here contributes "none" and is therefore
 // informational only.
+// supplyChainConditionSeverityFor is the ECOSYSTEM-AWARE lookup. Use it
+// wherever a real result is in hand; the bare map above is the base ladder and
+// should only be read directly where no ecosystem exists (SARIF *rule*
+// definitions, which are global by construction).
+//
+// The one demotion today: `publisherChanged` on Maven/Gradle. Its input is the
+// POM <developers> block, which is hand-written prose — of the 30 production
+// coordinates that ever fired it, ZERO were takeovers; they were committer
+// additions, removals, and the lightbend->akka rename. The server stopped
+// treating it as high in v0.21.16 (it now fires sc.pom_developer_list_changed,
+// SevLow), but this map is a SEPARATE surface and did not follow, so
+// `chainsaw scan --fail-on high` kept breaking Maven builds on a documentation
+// edit. That split is the whole bug: two surfaces answering one question
+// differently.
+//
+// This DOWNGRADES a gate the operator pinned, which is why the caller must say
+// so rather than silently passing — see demotedConditionNote.
+//
+// The ecosystem set is risk.IsPOMMaintainerEco, deliberately NOT a copy: a
+// second list here would drift, which is the defect P8-70 turned out to be.
+func supplyChainConditionSeverityFor(cond, ecosystem string) string {
+	sev, ok := supplyChainConditionSeverity[cond]
+	if !ok {
+		return ""
+	}
+	if cond == "publisherChanged" && risk.IsPOMMaintainerEco(ecosystem) {
+		return "low"
+	}
+	return sev
+}
+
+// demotedConditionNote returns a human-readable note when a condition's
+// severity was lowered for this ecosystem, so a CI operator who pinned
+// --fail-on high learns why the build did not break. Silence here would be the
+// worse failure: a gate that quietly stops gating.
+func demotedConditionNote(cond, ecosystem string) string {
+	if cond == "publisherChanged" && risk.IsPOMMaintainerEco(ecosystem) {
+		return "publisherChanged downgraded to low for " + ecosystem +
+			": it is derived from the POM <developers> block, which is hand-written" +
+			" and is not a publisher ACL (see sc.pom_developer_list_changed)"
+	}
+	return ""
+}
+
 var supplyChainConditionSeverity = map[string]string{
 	"publisherChanged":           "high",
 	"installScriptFetchesRemote": "high",
@@ -1002,8 +1048,11 @@ func resolveHighestSeverity(r scanResultItem) string {
 	// is returned verbatim rather than being invented away.
 	bestRank, _ := rankSeverity(best)
 	for _, cond := range r.TriggeredConditions {
-		sev, ok := supplyChainConditionSeverity[cond]
-		if !ok {
+		// ECOSYSTEM-AWARE: this is what --severity / --fail-on rank on, so it
+		// must agree with what the server decided. See
+		// supplyChainConditionSeverityFor.
+		sev := supplyChainConditionSeverityFor(cond, r.Ecosystem)
+		if sev == "" {
 			continue
 		}
 		if rank, _ := rankSeverity(sev); rank > bestRank {
@@ -1092,7 +1141,19 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 		}
 		signals := g.none
 		if len(r.TriggeredConditions) > 0 {
-			signals = strings.Join(r.TriggeredConditions, ", ")
+			// Mark any condition whose severity was lowered for this
+			// ecosystem. An operator who pinned --fail-on high and does not
+			// see their build break is owed the reason; a gate that silently
+			// stops gating is worse than one that never existed.
+			shown := make([]string, 0, len(r.TriggeredConditions))
+			for _, cond := range r.TriggeredConditions {
+				if demotedConditionNote(cond, r.Ecosystem) != "" {
+					shown = append(shown, cond+" (low for "+r.Ecosystem+")")
+					continue
+				}
+				shown = append(shown, cond)
+			}
+			signals = strings.Join(shown, ", ")
 			anySignals = true
 		}
 		// Qualify the package cell with its ecosystem so two same-named

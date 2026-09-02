@@ -147,7 +147,7 @@ func init() {
 			// claim — that the entry COUNT is meaningless — which holds
 			// either way. The stronger question is filed as P8-70; do not
 			// resolve it by copying either comment.
-			if isPOMMaintainerEco(in.Ecosystem) {
+			if IsPOMMaintainerEco(in.Ecosystem) {
 				return false, "", nil
 			}
 			if in.MaintainerCount != 1 {
@@ -250,7 +250,7 @@ func isPyPIEco(eco string) bool {
 	return false
 }
 
-// isPOMMaintainerEco reports whether this ecosystem's maintainer list comes
+// IsPOMMaintainerEco reports whether this ecosystem's maintainer list comes
 // from a POM `<developers>` block. Those entries are self-declared prose
 // rather than an access-control list — `runMaven`'s `<developers>` loop
 // (`core/intelligence/provider_registrymetadata.go:1609`) maps them onto
@@ -280,7 +280,11 @@ func isPyPIEco(eco string) bool {
 // false positive would survive on exactly the `/api/v1/intel/packages/...`
 // surface it was reported from. That asymmetry is the residual of P8-33, which
 // normalised the `Supports()` lookup layer and left the stored value raw.
-func isPOMMaintainerEco(eco string) bool {
+// EXPORTED because core/cli needs the same list for the `--fail-on` severity
+// map. Duplicating the ecosystem set there would recreate precisely the defect
+// P8-70 was: two sides of one question reading different definitions and
+// silently disagreeing. One list, four consumers.
+func IsPOMMaintainerEco(eco string) bool {
 	switch strings.ToLower(strings.TrimSpace(eco)) {
 	case "maven", "gradle":
 		return true

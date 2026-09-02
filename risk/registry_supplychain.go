@@ -199,7 +199,7 @@ func init() {
 			if !in.PublisherChanged {
 				return false, "", nil
 			}
-			if isPOMMaintainerEco(in.Ecosystem) {
+			if IsPOMMaintainerEco(in.Ecosystem) {
 				return false, "", nil
 			}
 			return true, "Publisher identity changed between versions.", nil
@@ -229,7 +229,7 @@ func init() {
 			if !in.PublisherChanged {
 				return false, "", nil
 			}
-			if !isPOMMaintainerEco(in.Ecosystem) {
+			if !IsPOMMaintainerEco(in.Ecosystem) {
 				return false, "", nil
 			}
 			return true, "Declared <developers> list differs from the previous version.", nil
@@ -518,7 +518,7 @@ func init() {
 			// nil and the guard above already returns. It exists so that
 			// turning CHAINSAW_WAVE4_FIRST_TIME_COLLABORATOR on cannot
 			// silently reintroduce the class.
-			if isPOMMaintainerEco(in.Ecosystem) {
+			if IsPOMMaintainerEco(in.Ecosystem) {
 				return false, "", nil
 			}
 			return true, "Publisher has not previously contributed to this package.", nil
