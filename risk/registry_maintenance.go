@@ -258,6 +258,18 @@ func isPyPIEco(eco string) bool {
 // nothing better to show, but a count taken off them does not mean what
 // MaintainerCount means everywhere else. See P8-11.
 //
+// P8-70 widened the scope of this predicate beyond the maintainer COUNT.
+// The same `<developers>` block is also the only source of maven/gradle
+// publisher identity (`intelligence.MavenDeveloperPublisherIDs`), so it
+// gates three signals now: maint.single_maintainer (P8-11),
+// sc.publisher_changed / sc.pom_developer_list_changed and
+// sc.first_time_collaborator (both P8-70), plus the
+// CompoundSCTakeoverSignature rule in compound.go. The name says
+// "Maintainer" for history; read it as "this ecosystem's People data is
+// POM prose". Every caller wants the same answer, so keep it one function
+// — a second, subtly different ecosystem list is how the two halves of
+// P8-70 drifted apart in the first place.
+//
 // LOWERCASE THE INPUT. `risk.Input.Ecosystem` is the RAW caller-supplied
 // string: `risk_projection.go:153` copies `r.Identity.Ecosystem` through
 // untouched and the HTTP handlers (`api_v1_intel.go`, `admin_intelligence.go`)

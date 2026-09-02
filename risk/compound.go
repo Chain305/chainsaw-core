@@ -52,6 +52,23 @@ func init() {
 			if !in.PublisherChanged {
 				return false, "", nil
 			}
+			// P8-70. The -55 here is the heaviest non-instant-block weight
+			// in the product, and every point of it rests on
+			// "a DIFFERENT PUBLISHER did this" being an access-control
+			// claim. On maven/gradle that claim is unsupported — both
+			// sides of the publisher diff are the POM <developers> block,
+			// self-declared prose (see registry_supplychain.go). Demoting
+			// the primitive to SignalSCPOMDeveloperListChanged already
+			// starves this rule, because the `fired[...]` lookup below
+			// cannot find sc.publisher_changed for those ecosystems. This
+			// guard is stated explicitly anyway: the implicit version
+			// would silently un-guard the moment anyone re-widened the
+			// primitive or added the POM signal to the lookup, and the
+			// failure mode is a SevCritical block on a documentation edit.
+			// TestTakeoverCompound_DoesNotEscalateOnPOMEcosystems pins it.
+			if isPOMMaintainerEco(in.Ecosystem) {
+				return false, "", nil
+			}
 			if !in.HasInstallScript && !in.InstallScriptFetchesRemote {
 				return false, "", nil
 			}

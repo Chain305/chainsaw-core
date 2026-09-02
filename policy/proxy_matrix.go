@@ -475,7 +475,28 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionImportTimeExecution:        SupportNone,
 		ConditionMaliciousIOC:               SupportFull,
 		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
-		ConditionPublisherChanged:           SupportFull, // developers[].id / email
+		// P8-70. Downgraded from ✅ to ⚠️ on 2026-09-02. The extractor
+		// works — `developers[].id` → `<email>` → `<name>` via
+		// `intelligence.MavenDeveloperPublisherIDs` — so the condition is
+		// populated and a policy rule referencing it does fire. What it
+		// is NOT is a publishing identity: the POM `<developers>` block
+		// is prose the project author edits, and Maven Central's real
+		// access control is Sonatype `groupId` namespace ownership,
+		// which is nowhere in the POM. Measured on prod: 30 maven/gradle
+		// coordinates fired this, 0 were takeovers. The risk signal was
+		// therefore demoted for maven/gradle to the SevLow
+		// `sc.pom_developer_list_changed`
+		// (core/risk/registry_supplychain.go); leaving this cell at
+		// SupportFull would have kept the UI telling policy authors the
+		// condition means here what it means on npm.
+		//
+		// Deliberately NOT SupportNone: the matrix is documentation +
+		// the `policy.rule.skipped` audit signal, and marking it ❌ would
+		// tell an operator their explicit rule is inert when it still
+		// evaluates. The honest level is "wired, but the underlying
+		// signal is weaker than the column implies", which is exactly
+		// what SupportPartial is defined as at the top of this file.
+		ConditionPublisherChanged:           SupportPartial, // developers[].id — self-declared POM prose, not an ownership record (P8-70)
 		ConditionVersionAnomaly:             SupportFull,
 		ConditionHasHiddenUnicode:           SupportFull,
 		ConditionPublishVelocityAnomaly:     SupportPartial, // developer IDs not always populated
@@ -521,6 +542,14 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		// persisted publisher_set, not a per-version uploader field, so
 		// the "no per-version uploader change" rationale above no longer
 		// applies to this cell.
+		//
+		// P8-70 (2026-09-02): stays ⚠️, and the reason narrowed. The
+		// publisher_set this reads on maven/gradle is the POM
+		// <developers> roster, so "first-time COLLABORATOR" is not what
+		// a new entry means. The risk signal is now suppressed for POM
+		// ecosystems (core/risk/registry_supplychain.go); the condition
+		// remains evaluable for a policy author who wants the raw fact,
+		// which is why this is ⚠️ and not ❌.
 		ConditionFirstTimeCollaborator: SupportPartial,
 		ConditionSuspiciousRepoStars:   SupportPartial,
 		ConditionMaintainerAccountAge:  SupportNone,

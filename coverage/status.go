@@ -114,6 +114,19 @@ var okCodes = map[string]bool{
 	// The refusal that IS warranted comes from the unknown verdict.
 	// See core/intelligence/report.go, WarnPackageNotFound.
 	"package_not_found": true,
+	// transitive_dep_constraint_conflict: the dependency resolved, the
+	// store answered, and the walk then EXCLUDED the node on purpose
+	// because its version violates a constraint the root package declares
+	// on that same name (J-1 / P8-08). Nothing about the source is
+	// degraded: this is the walk being correct, not the walk being blind,
+	// which is why it belongs here and not in unavailableCodes.
+	//
+	// Classifying it as unavailable would be actively wrong — an org
+	// running core/coverage in mode: closed would start refusing installs
+	// BECAUSE we successfully removed an anachronistic dependency, i.e.
+	// the fix for a false blame would become a false block. See
+	// core/intelligence/report.go, WarnTransitiveDepConstraintConflict.
+	"transitive_dep_constraint_conflict": true,
 }
 
 // notApplicableCodes are raw codes meaning the source does not apply here.

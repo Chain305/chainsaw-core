@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -51,27 +52,67 @@ func (s *Store) backfillDefaultPlanAssignment() error {
 	return err
 }
 
-// seedPricingPlans inserts the three advertised tiers (Free / Pro / Enterprise)
-// if they do not already exist. Idempotent — safe to run on every startup.
-// Byte limits use IEC units (1 GiB = 1024^3) to match the usage rollup math.
-// A limit of 0 means "unlimited" (see checkUsageQuota in usage_rollup.go).
-func (s *Store) seedPricingPlans() error {
-	type plan struct {
-		id                     string
-		name                   string
-		description            string
-		storageBytes           int64
-		bandwidthBytes         int64
-		maxMembers             int
-		basePriceCents         int64
-		priceStorageCentsPerGB int64
-		priceBwCentsPerGB      int64
-		isDefault              int
-		features               string
-		paddlePriceMonthly     string
-		paddlePriceAnnual      string
+// bundledFeatureDerivations maps a "parent" plan feature to the features that
+// are bundled with it and must be granted wherever the parent is granted.
+//
+// `sso` → `scim`: founder ruling — SSO and SCIM travel together, so any plan
+// that includes SSO also includes SCIM provisioning. SCIM is gated on its own
+// `scim` key (internal/server/authapi/scim.go) rather than borrowing `sso`, so
+// a denial names the feature the caller actually hit and the two can be
+// reasoned about separately. Deriving the grant here — rather than repeating
+// `"scim": true` in each plan literal — is what stops them drifting apart when
+// someone edits one plan and forgets the other.
+//
+// TestSeededPlansGrantSCIMWhereverSSO pins the invariant.
+var bundledFeatureDerivations = map[string][]string{
+	"sso": {"scim"},
+}
+
+// deriveBundledFeatures grants every bundled child feature whose parent the
+// plan already grants. It only ever adds grants: a plan without the parent is
+// left untouched, so Free stays Free.
+func deriveBundledFeatures(features map[string]bool) map[string]bool {
+	derived := make(map[string]bool, len(features)+len(bundledFeatureDerivations))
+	for k, v := range features {
+		derived[k] = v
 	}
-	plans := []plan{
+	for parent, children := range bundledFeatureDerivations {
+		if !derived[parent] {
+			continue
+		}
+		for _, child := range children {
+			derived[child] = true
+		}
+	}
+	return derived
+}
+
+type pricingPlanSeed struct {
+	id                     string
+	name                   string
+	description            string
+	storageBytes           int64
+	bandwidthBytes         int64
+	maxMembers             int
+	basePriceCents         int64
+	priceStorageCentsPerGB int64
+	priceBwCentsPerGB      int64
+	isDefault              int
+	features               map[string]bool
+	paddlePriceMonthly     string
+	paddlePriceAnnual      string
+}
+
+// pricingPlanSeeds is the code-owned definition of the three advertised tiers.
+// Split out of seedPricingPlans so tests can assert on the exact values that
+// ship without needing a live database — in particular the SSO/SCIM bundling
+// invariant (TestSeededPlansGrantSCIMWhereverSSO).
+//
+// Note these are the RAW grants: `scim` is absent here on purpose and is added
+// by deriveBundledFeatures at write time. Assert on the derived value, not on
+// these literals, when you care about what an org actually gets.
+func pricingPlanSeeds() []pricingPlanSeed {
+	return []pricingPlanSeed{
 		{
 			id:             "free",
 			name:           "Free",
@@ -81,7 +122,7 @@ func (s *Store) seedPricingPlans() error {
 			maxMembers:     3,
 			basePriceCents: 0,
 			isDefault:      1,
-			features:       `{}`,
+			features:       map[string]bool{},
 		},
 		{
 			id:                     "pro",
@@ -94,11 +135,12 @@ func (s *Store) seedPricingPlans() error {
 			priceStorageCentsPerGB: 150,
 			priceBwCentsPerGB:      150,
 			isDefault:              0,
-			// Billy (AI assistant), SSO (SAML/OIDC), and SCIM provisioning are
-			// available on Pro and Enterprise. The `sso` flag gates both SSO and
-			// SCIM (see billingapi/plan_features.go). SSO lives on the first paid
-			// tier deliberately — no SSO tax for a security product.
-			features:           `{"sso":true,"billy":true}`,
+			// Billy (AI assistant) and SSO (SAML/OIDC) are available on Pro and
+			// Enterprise. SSO lives on the first paid tier deliberately — no SSO
+			// tax for a security product. `scim` is NOT listed here: it is
+			// derived from `sso` by deriveBundledFeatures below, because SSO and
+			// SCIM travel together by founder ruling.
+			features:           map[string]bool{"sso": true, "billy": true},
 			paddlePriceMonthly: strings.TrimSpace(os.Getenv("PADDLE_PRICE_PRO_MONTHLY")),
 			paddlePriceAnnual:  strings.TrimSpace(os.Getenv("PADDLE_PRICE_PRO_ANNUAL")),
 		},
@@ -115,14 +157,22 @@ func (s *Store) seedPricingPlans() error {
 			basePriceCents: 119900,
 			isDefault:      0,
 			// Enterprise adds external integrations (SIEM, ticketing) and on-prem
-			// on top of everything in Pro. SSO/SCIM are no longer gated here —
-			// they moved to Pro (see the pro plan's `sso` flag above).
-			features:           `{"integrations_external":true,"onprem":true,"sso":true,"billy":true}`,
+			// on top of everything in Pro. SSO/SCIM are no longer exclusive here
+			// — they moved to Pro (see the pro plan's `sso` flag above). `scim`
+			// is derived from `sso`, not listed.
+			features:           map[string]bool{"integrations_external": true, "onprem": true, "sso": true, "billy": true},
 			paddlePriceMonthly: strings.TrimSpace(os.Getenv("PADDLE_PRICE_UNLIMITED_MONTHLY")),
 			paddlePriceAnnual:  strings.TrimSpace(os.Getenv("PADDLE_PRICE_UNLIMITED_ANNUAL")),
 		},
 	}
-	for _, p := range plans {
+}
+
+// seedPricingPlans inserts the three advertised tiers (Free / Pro / Enterprise)
+// if they do not already exist. Idempotent — safe to run on every startup.
+// Byte limits use IEC units (1 GiB = 1024^3) to match the usage rollup math.
+// A limit of 0 means "unlimited" (see checkUsageQuota in usage_rollup.go).
+func (s *Store) seedPricingPlans() error {
+	for _, p := range pricingPlanSeeds() {
 		// DO UPDATE keeps the plan definitions (prices, limits, feature
 		// flags) in sync with code on every startup. Plans are code-owned,
 		// not admin-editable, so refreshing is safe and prevents drift
@@ -134,7 +184,16 @@ func (s *Store) seedPricingPlans() error {
 		paddleMonthly := sql.NullString{String: p.paddlePriceMonthly, Valid: p.paddlePriceMonthly != ""}
 		paddleAnnual := sql.NullString{String: p.paddlePriceAnnual, Valid: p.paddlePriceAnnual != ""}
 
-		_, err := s.db.Exec(`
+		// Features are stored as a JSON object string. json.Marshal emits map
+		// keys in sorted order, so the serialised value is stable across runs
+		// and the ON CONFLICT DO UPDATE below is a genuine no-op when nothing
+		// changed.
+		featuresJSON, err := json.Marshal(deriveBundledFeatures(p.features))
+		if err != nil {
+			return fmt.Errorf("marshal features for plan %s: %w", p.id, err)
+		}
+
+		_, err = s.db.Exec(`
 			INSERT INTO pricing_plans (
 				id, name, description,
 				storage_bytes_limit, bandwidth_bytes_limit,
@@ -162,7 +221,7 @@ func (s *Store) seedPricingPlans() error {
 			p.storageBytes, p.bandwidthBytes,
 			p.priceStorageCentsPerGB, p.priceBwCentsPerGB,
 			p.basePriceCents, "monthly", p.isDefault,
-			p.maxMembers, p.features,
+			p.maxMembers, string(featuresJSON),
 			paddleMonthly, paddleAnnual)
 		if err != nil {
 			return fmt.Errorf("upsert plan %s: %w", p.id, err)

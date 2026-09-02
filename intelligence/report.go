@@ -1103,7 +1103,40 @@ type ObservationSection struct {
 //	    persisted risk_evaluation verbatim, so the 19 cached rows keep
 //	    their manufactured SevHigh finding until the epoch invalidates
 //	    them.
-const CurrentMatcherEpoch = 11
+//	epoch 12 (2026-09-02, P8-70 severity demotion + Wave J J-1): TWO changes,
+//	    ONE bump, deliberately — they landed together so the corpus is
+//	    invalidated once rather than twice.
+//
+//	    P8-70: `sc.publisher_changed` no longer fires on Maven/Gradle. Its
+//	    input is the POM `<developers>` block, and of the 30 coordinates that
+//	    ever fired it, ZERO were takeovers — they were committer additions,
+//	    removals, and the lightbend->akka rename. The fact is kept by a new
+//	    `sc.pom_developer_list_changed` (SevLow, -5, and deliberately NO
+//	    MaxImpact: a ceiling asserts the signal alone justifies holding a
+//	    package below a band, which a 0-of-30 true-positive rate refutes).
+//	    The SevCritical -55 takeover compound is blocked for these ecosystems
+//	    twice, implicitly and explicitly, because the implicit block
+//	    evaporates the moment anyone re-widens the primitive.
+//	    Flip population: 13 of the 16 affected prod rows, EVERY ONE
+//	    `warn` -> `allow`. Uniformly enforcement-weakening, which is the
+//	    direction that must be measured rather than assumed.
+//
+//	    Wave J J-1: a closure node whose version violates a constraint the
+//	    ROOT declares on that same name is refused before it enters the graph.
+//	    Measured flip count: ZERO tree verdicts across all 7,756 prod rows —
+//	    43 closures shrank and 4 blame lists changed, so it is report-
+//	    affecting but not verdict-affecting. It rides this bump rather than
+//	    needing its own.
+//
+//	    The J-1 scoping is the interesting part and must not be widened
+//	    casually: root-declared constraints only, single-version ecosystems
+//	    only, and OPERATOR-BEARING constraints only. That last limit came out
+//	    of measurement, not theory — an earlier cut that treated a bare
+//	    version as a pin flipped 11 verdicts, 10 of them go/maven, including
+//	    a `quarantine` -> `allow` that discarded four transitive criticals.
+//	    A bare version is a soft requirement in Maven, a minimum under Go MVS,
+//	    and a lower bound in NuGet.
+const CurrentMatcherEpoch = 12
 
 // MinServeableEpoch is the floor a cached row must meet to be SERVED. It
 // normally equals CurrentMatcherEpoch and MUST be returned to that value
@@ -1335,6 +1368,19 @@ const (
 	// report as "not in cache", which sent operators hunting for a scan
 	// that had already happened.
 	WarnTransitiveDepSuperseded = "transitive_dep_superseded"
+
+	// WarnTransitiveDepConstraintConflict is emitted when a closure node
+	// was REFUSED because its resolved version violates a constraint the
+	// ROOT package declares on that same dependency name. See
+	// violatesDeclaredRootConstraint in provider_transitiverisk.go for
+	// the rule and its deliberate limits.
+	//
+	// This is not a cache problem and not a parse problem: the dependency
+	// resolved fine, to a version this package provably cannot install.
+	// It is the only transitive warning that reports a node the walker
+	// found and then threw away, so it is emitted at every depth rather
+	// than only for the root's own direct edges.
+	WarnTransitiveDepConstraintConflict = "transitive_dep_constraint_conflict"
 )
 
 // ProviderTiming captures per-provider runtime (for observability).

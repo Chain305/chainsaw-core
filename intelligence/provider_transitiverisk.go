@@ -29,6 +29,63 @@ package intelligence
 // closure-size accounting uses the existing depgraph.Descendants()
 // BFS (already cycle-safe — see graph.go) rather than a parallel
 // traversal, so one cycle-correctness invariant covers both surfaces.
+//
+// ---------------------------------------------------------------------
+// WHAT THIS CLOSURE MEANS — J-2, ruled 2026-09-02. Read before changing
+// anything about resolution.
+// ---------------------------------------------------------------------
+//
+// The tree this builds is **what a fresh install would resolve to
+// TODAY**, not what the pinned release resolved to at the moment it was
+// published. Every open-ended edge is matched against THE CACHE AS IT
+// STANDS NOW (pickConstraintMatchDetailed takes the highest cached
+// version that satisfies the constraint); nothing here consults registry
+// publish dates, and nothing tries to reconstruct the dependency set that
+// existed on the parent's release day.
+//
+// THAT IS A DELIBERATE PRODUCT DECISION, NOT AN ACCIDENT. Publish-time
+// resolution would need per-version publish timestamps for every
+// dependency in every ecosystem plus a point-in-time resolver — a much
+// larger build — and the "install it today" reading is the one that
+// matches what the user's `bundle install` / `pip install` / `mvn` will
+// actually place on disk. An enforcement product is being asked about the
+// install that is about to happen.
+//
+// THE CONSEQUENCE, STATED PLAINLY: re-scanning an UNCHANGED coordinate
+// can produce a DIFFERENT closure over time, because the cache moved, not
+// because the package did. A closure is a statement about today's
+// registry, not a property of the pinned release. Do not read a closure
+// diff between two scans of the same version as package drift.
+//
+// It also has a bias, which is recorded and NOT fixed — see J-3 below.
+//
+// ---------------------------------------------------------------------
+// J-3: TRANSITIVE SEVERITY IS A FLOOR, NOT AN ESTIMATE. Recorded
+// 2026-09-02. Known limit, deliberately unfixed.
+// ---------------------------------------------------------------------
+//
+// Because every open-ended edge resolves to the MAXIMUM cached satisfying
+// version, and the newest version of a package is usually the LEAST
+// vulnerable one, this walk is systematically biased toward
+// under-reporting. The vulnerable older version can be sitting in the
+// same cache and be excluded purely by the take-the-max rule. Worked
+// example: cached rubygems/rack is 1.6.5, 3.2.6, 3.2.7 with max_cvss 10,
+// null, null — the CVSS-10 row IS cached and is excluded precisely
+// because `>= 1.3` takes the max.
+//
+// Measured 2026-09-02 on the full production export (7,756 rows), ordered
+// with the same per-ecosystem satisfiers this file uses rather than
+// lexically: 57 of 1,142 package names with more than one cached version
+// (5.0%) have a newest cached version that is safer than an older cached
+// version carrying CVSS >= 7. A further 52 groups could not be ordered
+// under their own ecosystem's grammar, so 57 is itself a floor.
+//
+// READ EVERY TransitiveSeverity COUNT AS A LOWER BOUND. The direction of
+// the error is under-statement, not over-blocking, so it is an internal
+// correctness limit rather than a truthfulness problem. Fixing it means
+// evaluating every cached satisfying version instead of the max, which
+// changes the cost model of the walk; that is not scheduled. Details in
+// docs/POLICY_PROXY_MATRIX.md, "Transitive closure semantics".
 
 import (
 	"context"
@@ -186,6 +243,16 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 	// haven't been scanned yet) and would flood Observation.Warnings
 	// without giving operators actionable signal.
 	maxDepth := transitiveDepthFromEnv()
+
+	// J-1 (P8-08). Every constraint the ROOT declares on a dependency
+	// name, indexed so the BFS can refuse a resolved node the root's own
+	// manifest forbids. Empty for every ecosystem outside
+	// singleVersionEcosystems, which makes the check free for npm roots.
+	// See the J-1 block above violatesDeclaredRootConstraint.
+	rootConstraints := buildRootConstraintIndex(deps, report.Identity.Ecosystem)
+	conflictsRefused := 0
+	conflictWarnings := 0
+
 	type frontierEntry struct {
 		parent      depgraph.Key
 		ref         DependencyRef
@@ -269,6 +336,32 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 			if depKey == (depgraph.Key{}) {
 				continue
 			}
+			// J-1 (P8-08). The dependency resolved, but to a version the
+			// ROOT's own manifest forbids — so it is not in this package's
+			// install and must not be scored, counted or blamed as if it
+			// were. Refusing here rather than after the BFS also prunes the
+			// subtree for free: `continue` skips the enqueue below, so the
+			// grandchildren read off the anachronism never enter the graph
+			// either. The check is a pure function of (eco, name, version)
+			// and the root's constraints, so it gives the same answer no
+			// matter which edge discovers the node — it cannot depend on
+			// walk order, and it is placed BEFORE the `visited` branch so
+			// that stays true.
+			if depKey != rootKey {
+				if badConstraint, conflict := violatesDeclaredRootConstraint(
+					rootConstraints, depKey.Ecosystem, depKey.Name, depKey.Version); conflict {
+					conflictsRefused++
+					if conflictWarnings < transitiveConflictWarnCap {
+						conflictWarnings++
+						emitTransitiveWarning(report, WarnTransitiveDepConstraintConflict,
+							fmt.Sprintf("closure dep %s/%s@%s resolved via %s/%s but violates this package's own declared constraint %q on %s; excluded from the dependency tree",
+								depKey.Ecosystem, depKey.Name, depKey.Version,
+								entry.parent.Name, entry.parent.Version,
+								badConstraint, depKey.Name))
+					}
+					continue
+				}
+			}
 			vk := visitedKey(depKey.Ecosystem, depKey.Name, depKey.Version)
 			if visited[vk] {
 				if entry.emitWarn {
@@ -319,6 +412,12 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 		if len(frontier) == 0 {
 			break
 		}
+	}
+
+	if conflictsRefused > conflictWarnings {
+		emitTransitiveWarning(report, WarnTransitiveDepConstraintConflict,
+			fmt.Sprintf("%d closure dependencies in total were excluded for violating this package's own declared constraints; %d are itemised above",
+				conflictsRefused, conflictWarnings))
 	}
 
 	// Always record coverage when at least one direct dep was declared,
@@ -440,6 +539,238 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 	// cutover (see ComputeTrustScore).
 	report.SupplyChain.TrustScore = rootEval.RolledUp.Overall
 }
+
+// ---------------------------------------------------------------------
+// J-1: constraint reconciliation (P8-08)
+// ---------------------------------------------------------------------
+//
+// THE DEFECT. Every edge in the BFS above is resolved INDEPENDENTLY, to
+// the maximum cached version that satisfies that one edge's constraint
+// (pickConstraintMatchDetailed). Nothing unifies the constraints that
+// several parents declare on the same package name, and visitedKey is
+// keyed on name+version, so two versions of one package are unrelated
+// nodes. A 2018 parent therefore walks forward into the 2026 tree:
+// rubygems/actionpack@5.2.0 declares `rack ~> 2.0`, that edge finds no
+// satisfier in cache, and rack@3.2.7 still enters the closure via
+// rack-test@2.2.0's `rack >= 1.3` — where it is then BLAMED on a package
+// whose own manifest, in the same report, forbids it.
+//
+// THE RULE. After a dependency resolves, test the resolved version
+// against every constraint the ROOT declares on that same package name.
+// A version that violates one is refused: it is not added to the graph,
+// no edge is drawn to it, and its own Direct list is never enqueued, so
+// the subtree that hangs off the anachronism goes with it.
+//
+// WHY REFUSE THE NODE RATHER THAN JUST SUPPRESS ITS BLAME LINE. Blame is
+// downstream of the score, not the other way round: a node kept in the
+// graph still contributes its deficit to RolledUp and still increments
+// the sc.transitive_* severity counts that can drive the root's verdict.
+// Suppressing only the blame line would leave the package's score
+// depressed by a dependency it cannot install AND remove the one field
+// that says which one — a wrong number with its explanation deleted,
+// which is strictly worse to operate than a wrong number you can see.
+// Refusing the node keeps score, counts and explanation consistent with
+// each other.
+//
+// THE TWO LIMITS, both deliberate, both chosen against over-reach.
+//
+//  1. ROOT-DECLARED CONSTRAINTS ONLY. The root's Direct list is
+//     first-party data about the coordinate under evaluation. A
+//     constraint declared by a NON-root parent is only as trustworthy as
+//     the max-satisfying chain that put that parent in the tree — it may
+//     itself be the anachronism. Refusing a node on that evidence would
+//     let one wrongly-resolved parent erase a legitimate subtree, which
+//     is exactly the failure this fix exists to prevent, pointed the
+//     other way. Deeper conflicts are therefore left alone.
+//
+//  2. SINGLE-VERSION ECOSYSTEMS ONLY. The rule is only sound where a
+//     violated constraint PROVES the version is absent. In npm, yarn,
+//     pnpm, bun and cargo it proves nothing: nested resolution installs
+//     several versions of one package at once, so a root pinned to
+//     `foo ^1` can legitimately have a vulnerable `foo@2` on disk
+//     underneath a transitive dep. Refusing it there would hide a real
+//     node. resolvesSingleVersion is an explicit ALLOWLIST for that
+//     reason: an unrecognised ecosystem keeps the historical behaviour.
+//
+// WHAT THIS IS NOT. It is not a resolver and it does not re-pick a
+// version. It only deletes closure members that the root's own manifest
+// contradicts. The residual bias — every open-ended edge still resolving
+// to the maximum cached version, and so to the LEAST vulnerable one — is
+// J-3 and is unfixed; see the doc block on evaluateTransitiveRisk.
+
+// transitiveConflictWarnCap bounds how many distinct constraint-conflict
+// warnings one report can carry. Unlike the cache-miss warnings, these
+// are emitted at EVERY depth (a refused node is a fact about this tree,
+// not about the corpus), so a pathological graph needs a ceiling. The
+// count of refusals is reported in full even when the per-node detail is
+// truncated.
+const transitiveConflictWarnCap = 10
+
+// singleVersionEcosystems lists the ecosystems whose installer resolves
+// exactly ONE version per package name per build, so that a constraint
+// violated anywhere in the manifest is proof the version is not present.
+//
+// ALLOWLIST, NOT DENYLIST, on purpose: an ecosystem nobody has reasoned
+// about must fall through to the historical behaviour rather than
+// inherit a rule that only holds for flat resolvers. npm/yarn/pnpm/bun
+// (nested node_modules) and cargo (one copy per semver-major) are the
+// known-unsound cases and are absent by design, as are the `*-hosted`
+// pseudo-ecosystems (their constraint grammar falls through to the
+// npm-flavoured default in parseEcosystemConstraint, so their
+// constraints are not reliably parsed under their real syntax) and the
+// OS/image ecosystems, which are not package-resolution problems at all.
+var singleVersionEcosystems = map[string]bool{
+	"rubygems":  true, // Gemfile.lock: one version per gem
+	"gem":       true,
+	"pypi":      true, // site-packages: one distribution per name
+	"pip":       true,
+	"maven":     true, // nearest-wins conflict resolution: one per groupId:artifactId
+	"gradle":    true,
+	"nuget":     true, // one package version per project
+	"composer":  true, // composer.lock: one version per package
+	"packagist": true,
+	"go":        true, // MVS: one version per module path (a new major is a new path)
+	"gomod":     true,
+	"golang":    true,
+	"pub":       true, // pubspec.lock: one version per package
+	"hex":       true,
+	"cocoapods": true,
+	"swift":     true,
+}
+
+// resolvesSingleVersion reports whether the ecosystem's installer picks
+// exactly one version per package name. Only these ecosystems are
+// eligible for constraint reconciliation — see limit (2) above.
+func resolvesSingleVersion(ecosystem string) bool {
+	return singleVersionEcosystems[strings.ToLower(strings.TrimSpace(ecosystem))]
+}
+
+// rootConstraintIndex maps a dependency coordinate to every constraint
+// the ROOT declares on it. Keyed with visitedKey's normalisation minus
+// the version, i.e. lowercased ecosystem and name, so a case-drifted
+// manifest entry still matches the resolved node.
+//
+// Entries whose constraint is empty are skipped: "no constraint" cannot
+// be violated. Entries in an ecosystem that is not single-version are
+// skipped too, so the map is empty for npm roots and the whole check
+// costs one map lookup that always misses.
+func buildRootConstraintIndex(deps []DependencyRef, fallbackEco string) map[string][]string {
+	idx := make(map[string][]string, len(deps))
+	for _, ref := range deps {
+		eco := strings.TrimSpace(ref.Ecosystem)
+		if eco == "" {
+			eco = fallbackEco
+		}
+		if !resolvesSingleVersion(eco) {
+			continue
+		}
+		c := strings.TrimSpace(ref.Constraint)
+		if c == "" || !constraintIsActionable(c) {
+			continue
+		}
+		name := strings.TrimSpace(ref.Name)
+		if name == "" {
+			continue
+		}
+		k := strings.ToLower(eco) + "|" + strings.ToLower(name)
+		idx[k] = append(idx[k], c)
+	}
+	return idx
+}
+
+// constraintIsActionable reports whether a declared constraint is
+// strong enough to DELETE a node on. It requires an explicit relational
+// operator, range or bracket — `~> 2.0`, `>= 1.0.2, ~> 1.0`, `= 5.2.0`,
+// `<4,>=2`, `[1.0,2.0)`. A BARE version string is refused.
+//
+// THIS IS THE LOAD-BEARING GUARD, and it was added after measurement,
+// not before. A bare version does not mean the same thing across
+// ecosystems, and in the three that dominate this corpus it does NOT
+// mean "pinned":
+//
+//   - Maven / Gradle: `<version>1.27</version>` is a SOFT requirement.
+//     Dependency mediation (nearest-wins, or Gradle's highest-wins) can
+//     and constantly does resolve a different version.
+//   - Go: `require gopkg.in/yaml.v3 v3.0.1` is a MINIMUM. MVS selects
+//     the highest version required anywhere in the build.
+//   - NuGet: a bare `Version="1.2.3"` is the lower bound of `[1.2.3, )`.
+//
+// translateBracketConstraint deliberately reads a bare Maven version as
+// `=1.0` because an exact read is the SAFER default for advisory
+// matching. It is the more DANGEROUS default here: this rule deletes
+// nodes, so reading a minimum as a pin would delete precisely the
+// higher, newer, and often more-vulnerable version the real resolver
+// selects. Measured on the 7,756-row prod corpus: without this guard the
+// change flipped 11 verdicts, and 10 of them — every go and maven row —
+// were driven by bare constraints read as pins, including a
+// `quarantine -> allow` on maven/org.apache.maven.shared:maven-filtering
+// that dropped 4 transitive criticals on that false premise. With the
+// guard, only the constraint classes that really are enforced by their
+// installer act.
+//
+// The cost is honest and stated: Maven, Gradle, NuGet and Go declare
+// their dependencies almost entirely as bare versions, so in practice
+// this rule reaches RubyGems, PyPI, Composer and the operator-bearing
+// tail. Reconciling a soft requirement needs a mediation algorithm, not
+// a satisfier, and that is not built.
+func constraintIsActionable(c string) bool {
+	c = strings.TrimSpace(c)
+	if c == "" {
+		return false
+	}
+	switch c[0] {
+	case '<', '>', '=', '~', '^', '!', '[', '(':
+		return true
+	}
+	return false
+}
+
+// violatesDeclaredRootConstraint reports whether `version` of (eco,
+// name) contradicts a constraint the root declares on that same name,
+// returning the offending constraint for the warning message.
+//
+// Every uncertain path answers "no". A constraint that will not parse, a
+// version that will not parse, the `latest` sentinel, and an ecosystem
+// outside the allowlist all fall through to false, because this function
+// DELETES a node and the cost of a wrong deletion is a hidden dependency.
+// The only true is a version that parsed, under a constraint that
+// parsed, and failed it.
+func violatesDeclaredRootConstraint(idx map[string][]string, eco, name, version string) (string, bool) {
+	if len(idx) == 0 || !resolvesSingleVersion(eco) {
+		return "", false
+	}
+	v := strings.TrimSpace(version)
+	if v == "" || v == transitiveLatestVersionSentinel {
+		return "", false
+	}
+	constraints := idx[strings.ToLower(strings.TrimSpace(eco))+"|"+strings.ToLower(strings.TrimSpace(name))]
+	for _, c := range constraints {
+		sat, err := parseEcosystemConstraint(eco, c)
+		if err != nil || sat == nil {
+			// Unparseable constraint: lookupDepReport already reports it
+			// as WarnTransitiveDepConstraintUnparseable. It is not
+			// evidence about this node.
+			continue
+		}
+		if !sat.Valid(v) {
+			// Not a version under this ecosystem's grammar (git ref,
+			// distro tag, Maven build property). Check would return false
+			// for it and that false would mean nothing.
+			continue
+		}
+		if !sat.Check(v) {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// transitiveLatestVersionSentinel is the literal version string
+// candidateVersions probes as a back-compat fallback. A row stored at
+// that coordinate has no orderable version, so it is exempt from the
+// conflict check rather than being deleted for failing to satisfy
+// anything.
+const transitiveLatestVersionSentinel = "latest"
 
 // visitedKey is the canonical dedupe key for the cycle / repeat guard.
 // Lowercased so case-drifted manifest entries (e.g. "LEFT-PAD" vs
@@ -611,9 +942,20 @@ func pickConstraintMatchDetailed(ctx context.Context, store transitiveLookup, or
 // ecosystem's ordering. Both inputs are raw strings — the satisfier
 // re-parses them internally so callers don't need to know which
 // library is in play.
+//
+// Valid reports whether a raw version string parses at all under this
+// ecosystem's grammar. It exists because Check collapses two very
+// different answers into one `false`: "this version is outside the
+// range" and "this string is not a version". The max-satisfying picker
+// is happy with that collapse — an unparseable cache entry simply
+// cannot be the best match. The constraint-conflict check is NOT: it
+// takes action on a false, so it must be able to tell an unparseable
+// coordinate (git ref, `latest` sentinel, distro tag) from a genuine
+// violation, and refuse to act on the former.
 type versionSatisfier interface {
 	Check(version string) bool
 	Greater(a, b string) bool
+	Valid(version string) bool
 }
 
 // parseEcosystemConstraint dispatches a constraint string to the
@@ -716,6 +1058,11 @@ func (s semverSatisfier) Check(version string) bool {
 	return s.c.Check(v)
 }
 
+func (s semverSatisfier) Valid(version string) bool {
+	_, err := semver.NewVersion(version)
+	return err == nil
+}
+
 func (s semverSatisfier) Greater(a, b string) bool {
 	va, err := semver.NewVersion(a)
 	if err != nil {
@@ -741,6 +1088,11 @@ func (p pep440Satisfier) Check(version string) bool {
 		return false
 	}
 	return p.spec.Check(v)
+}
+
+func (p pep440Satisfier) Valid(version string) bool {
+	_, err := pep440.Parse(version)
+	return err == nil
 }
 
 func (p pep440Satisfier) Greater(a, b string) bool {
@@ -785,6 +1137,11 @@ func (g gemSatisfier) Check(version string) bool {
 	return cs.Check(v)
 }
 
+func (g gemSatisfier) Valid(version string) bool {
+	_, err := gem.NewVersion(version)
+	return err == nil
+}
+
 func (g gemSatisfier) Greater(a, b string) bool {
 	va, err := gem.NewVersion(a)
 	if err != nil {
@@ -813,6 +1170,20 @@ func (m mvnSatisfier) Check(version string) bool {
 		return false
 	}
 	return m.cs.Check(v)
+}
+
+// Valid is deliberately stricter than mvn.NewVersion alone. The Maven
+// version grammar accepts almost any string — it treats an unknown token
+// as a qualifier and orders it — so "latest", "master" and "${project.version}"
+// all "parse". Requiring a leading digit keeps the conflict check from
+// acting on a coordinate that is not a version at all.
+func (m mvnSatisfier) Valid(version string) bool {
+	v := strings.TrimSpace(version)
+	if v == "" || v[0] < '0' || v[0] > '9' {
+		return false
+	}
+	_, err := mvn.NewVersion(v)
+	return err == nil
 }
 
 func (m mvnSatisfier) Greater(a, b string) bool {

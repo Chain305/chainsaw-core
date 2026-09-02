@@ -52,6 +52,10 @@ func TestCacheUnusableTransitiveCodesBlock(t *testing.T) {
 //     The walk could not obtain a usable row: absent, retired by an epoch
 //     bump, or unreadable because the store errored. In each case the source
 //     was effectively not reached.
+//   - transitive_dep_constraint_conflict → ok, deliberately. The dependency
+//     resolved and the row was read; the walk excluded the node because the
+//     root's own declared constraint forbids that version. The source was
+//     reached and answered — this is the walk being right, not blind.
 //   - transitive_dep_constraint_unparseable → NOT unavailable, deliberately.
 //     A non-semver constraint is a fact about the manifest, not an outage,
 //     and gating on it would refuse every package using a constraint syntax
@@ -67,6 +71,13 @@ func TestEveryTransitiveDepWarnCodeHasADisposition(t *testing.T) {
 		"transitive_dep_superseded":             StatusUnavailable,
 		"transitive_dep_constraint_unparseable": StatusError,
 		"transitive_dep_lookup_error":           StatusUnavailable,
+		// transitive_dep_constraint_conflict -> StatusOK, deliberately.
+		// The store answered and the row was read; the walk then dropped
+		// the node because the ROOT's own manifest forbids that version.
+		// That is a correct exclusion, not a coverage gap, and calling it
+		// unavailable would turn the fix for P8-08's false blame into a
+		// false block for any org in mode: closed.
+		"transitive_dep_constraint_conflict": StatusOK,
 	}
 	const reportGo = "../intelligence/report.go"
 	src, err := os.ReadFile(reportGo)

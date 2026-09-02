@@ -39,7 +39,7 @@ cannot produce a maintainer signal.
 |---|---:|---:|---:|
 | npm | 43 | 4 | 6 |
 | PyPI | 45 | 4 | 4 |
-| Maven | 21 | 14 | 18 |
+| Maven | 20 | 15 | 18 |
 | Cargo | 36 | 2 | 15 |
 | Composer | 33 | 4 | 16 |
 | RubyGems | 37 | 4 | 12 |

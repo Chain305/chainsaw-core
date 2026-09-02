@@ -6,22 +6,26 @@ import "fmt"
 // weight in CategoryWeights because these signals indicate active attack
 // patterns (malware, takeovers, typosquats) rather than latent flaws.
 const (
-	SignalSCKnownMalicious        = "sc.known_malicious"
-	SignalSCTyposquatHigh         = "sc.typosquat_high"
-	SignalSCTyposquatMedium       = "sc.typosquat_medium"
-	SignalSCTyposquatLow          = "sc.typosquat_low"
-	SignalSCPublisherChanged      = "sc.publisher_changed"
-	SignalSCInstallScriptNetwork  = "sc.install_script_fetches_remote"
-	SignalSCInstallScriptOnly     = "sc.install_script_only"
-	SignalSCHiddenUnicode         = "sc.hidden_unicode"
-	SignalSCRepoOwnershipMismatch = "sc.repo_ownership_mismatch"
-	SignalSCRepoArchived          = "sc.repo_archived"
-	SignalSCRepoMissing           = "sc.repo_missing"
-	SignalSCProvenanceVerified    = "sc.provenance_verified"
-	SignalSCReservedNamespace     = "sc.reserved_namespace_violation"
-	SignalSCPublishVelocity       = "sc.publish_velocity_anomaly"
-	SignalSCSLSALevelBonus        = "sc.slsa_level_bonus"
-	SignalSCSignatureVerified     = "sc.signature_verified"
+	SignalSCKnownMalicious   = "sc.known_malicious"
+	SignalSCTyposquatHigh    = "sc.typosquat_high"
+	SignalSCTyposquatMedium  = "sc.typosquat_medium"
+	SignalSCTyposquatLow     = "sc.typosquat_low"
+	SignalSCPublisherChanged = "sc.publisher_changed"
+	// SignalSCPOMDeveloperListChanged is the POM-ecosystem (maven/gradle)
+	// counterpart of sc.publisher_changed. Same underlying fact, different
+	// claim: see the registration below and P8-70.
+	SignalSCPOMDeveloperListChanged = "sc.pom_developer_list_changed"
+	SignalSCInstallScriptNetwork    = "sc.install_script_fetches_remote"
+	SignalSCInstallScriptOnly       = "sc.install_script_only"
+	SignalSCHiddenUnicode           = "sc.hidden_unicode"
+	SignalSCRepoOwnershipMismatch   = "sc.repo_ownership_mismatch"
+	SignalSCRepoArchived            = "sc.repo_archived"
+	SignalSCRepoMissing             = "sc.repo_missing"
+	SignalSCProvenanceVerified      = "sc.provenance_verified"
+	SignalSCReservedNamespace       = "sc.reserved_namespace_violation"
+	SignalSCPublishVelocity         = "sc.publish_velocity_anomaly"
+	SignalSCSLSALevelBonus          = "sc.slsa_level_bonus"
+	SignalSCSignatureVerified       = "sc.signature_verified"
 
 	// URL-dependency signals — fire when package.json deps resolve to
 	// git or raw HTTP(S) URLs, bypassing the registry hash chain.
@@ -164,6 +168,25 @@ func init() {
 	// MaxImpact tier: HIGH-confidence harmful (30-40). Account takeover is
 	// the dominant cause of publisher changes; only the compound rule
 	// (with install-script) escalates to instant-block grade.
+	//
+	// P8-70 (epoch 12): this claim — "signature of account takeover" — is an
+	// access-control claim, and it only holds where the publisher set is
+	// sourced from something the registry ENFORCES. On maven/gradle it is
+	// not: both sides of the diff are read out of the POM `<developers>`
+	// block, which is prose the author types into the artifact. Adding a
+	// committer, dropping one, or renaming the sponsoring company
+	// (`lightbend` -> `akka`) rewrites it without any account changing
+	// hands. Measured on prod, 2026-09-01/02: 30 maven/gradle coordinates
+	// carried publisherChanged=true; after the epoch-11 extractor fix 11
+	// still did, and the true-positive count across all 30 was ZERO.
+	// The blast radius was not hypothetical either — Wave S (2026-05-23)
+	// 403'd every `mvn` invocation in the smoke org off this signal.
+	//
+	// So for POM ecosystems the FACT is kept and the CLAIM is dropped: the
+	// firing moves to SignalSCPOMDeveloperListChanged below (SevLow, -5, no
+	// MaxImpact ceiling) which says only what the data supports. Do NOT
+	// "simplify" this by deleting the guard and re-widening the SevHigh
+	// signal; TestPublisherChangedDemotion_* pin both halves.
 	register(Signal{
 		ID:          SignalSCPublisherChanged,
 		Category:    CategorySupplyChain,
@@ -176,7 +199,40 @@ func init() {
 			if !in.PublisherChanged {
 				return false, "", nil
 			}
+			if isPOMMaintainerEco(in.Ecosystem) {
+				return false, "", nil
+			}
 			return true, "Publisher identity changed between versions.", nil
+		},
+	})
+
+	// The POM-ecosystem context signal. Deliberately NOT a takeover claim:
+	// the POM `<developers>` block is self-declared documentation, so all
+	// this reports is that the declared list moved between the two versions
+	// compared. SevLow / -5 matches the other "worth showing, never worth
+	// blocking on" entries in the registry (sc.install_script_only,
+	// maint.single_maintainer). It carries NO MaxImpact: a ceiling is a
+	// claim that this signal alone is enough to hold a package below a
+	// verdict band, which is exactly the claim P8-70 refuted.
+	//
+	// It also deliberately does NOT feed CompoundSCTakeoverSignature — see
+	// the guard and comment in compound.go. Routing it there would put the
+	// -55 takeover weight back on POM prose through the side door.
+	register(Signal{
+		ID:          SignalSCPOMDeveloperListChanged,
+		Category:    CategorySupplyChain,
+		Severity:    SevLow,
+		Weight:      -5,
+		Title:       "Declared developer list changed",
+		Description: "The POM <developers> block differs from the previous version. This block is self-declared documentation, not a registry-enforced publishing identity, so a change here is context — commonly a committer added or removed, or a sponsor rename — and not evidence of account takeover.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if !in.PublisherChanged {
+				return false, "", nil
+			}
+			if !isPOMMaintainerEco(in.Ecosystem) {
+				return false, "", nil
+			}
+			return true, "Declared <developers> list differs from the previous version.", nil
 		},
 	})
 
@@ -437,6 +493,32 @@ func init() {
 		Fires: func(in Input) (bool, string, map[string]any) {
 			// Three-state: only &true fires; nil and &false stay dormant.
 			if in.FirstTimeCollaborator == nil || !*in.FirstTimeCollaborator {
+				return false, "", nil
+			}
+			// P8-70, same root cause as sc.publisher_changed above and
+			// P8-11's maint.single_maintainer. This signal is computed by
+			// firstTimeCollaboratorProvider from exactly the same two
+			// fields — prior publisher_set vs Report.People.PublisherIDs —
+			// and on maven/gradle both are the POM `<developers>` roster.
+			// The sentence it renders ("publisher has never previously
+			// CONTRIBUTED to this package") is false by construction there:
+			// a name appearing in <developers> for the first time means the
+			// project edited a documentation block, not that a new account
+			// pushed the artifact. Whatever a new POM name is, it is not a
+			// first-time PUBLISHER, so the signal has nothing to measure.
+			//
+			// The fact that the declared list moved is still reported —
+			// SignalSCPOMDeveloperListChanged above carries it once. Firing
+			// both would double-count one POM edit.
+			//
+			// This is belt-and-braces today: maven/gradle sit in
+			// firstTimeCollabSupportedEcosystems
+			// (internal/intelligence/premium/provider_wave4_rtt.go) but the
+			// provider is env-gated off for them in prod, so the field is
+			// nil and the guard above already returns. It exists so that
+			// turning CHAINSAW_WAVE4_FIRST_TIME_COLLABORATOR on cannot
+			// silently reintroduce the class.
+			if isPOMMaintainerEco(in.Ecosystem) {
 				return false, "", nil
 			}
 			return true, "Publisher has not previously contributed to this package.", nil

@@ -3,7 +3,7 @@
 **Supply-chain enforcement for package installs — on the developer's machine, in
 CI, at the registry proxy, at publish time, and at Kubernetes admission.** It
 refuses known-malicious and typosquatted packages, known-vulnerable versions,
-bad licences, and anything else your policy declines: **76 risk signals, 16
+bad licences, and anything else your policy declines: **77 risk signals, 16
 package ecosystems**, one policy language, five enforcement surfaces.
 
 **The install-time guard runs entirely offline with no account, no server and no
@@ -154,12 +154,12 @@ binary ([`policy/proxy_matrix.go`](policy/proxy_matrix.go)), queryable at
 
 ## Risk signals
 
-**76 signals are registered** ([`risk/registry.go`](risk/registry.go)), each
+**77 signals are registered** ([`risk/registry.go`](risk/registry.go)), each
 scored with a severity and a weight rather than a bare boolean.
 
 | Category | Count | Examples |
 |---|---:|---|
-| Supply chain | 48 | known-malicious, typosquat (3 confidence tiers), install script fetches remote, manifest confusion, publisher changed, hidden Unicode, transitive malware, capability flags (network / shell / filesystem / eval), unsafe pickle opcodes, unpinned GitHub Action refs |
+| Supply chain | 49 | known-malicious, typosquat (3 confidence tiers), install script fetches remote, manifest confusion, publisher changed, hidden Unicode, transitive malware, capability flags (network / shell / filesystem / eval), unsafe pickle opcodes, unpinned GitHub Action refs |
 | Licence | 9 | copyleft, non-permissive, missing, unidentified, ambiguous classifier, changed from previous version |
 | Vulnerability | 7 | critical / high / medium / low CVSS, EPSS high exploit probability, KEV known-exploited, fix available |
 | Quality | 6 | checksum mismatch, minified code, version anomaly, declared MCP server / agent tool |
@@ -169,7 +169,7 @@ The full set is evaluated server-side. **The offline guard runs the subset
 needing no external data**: typosquat, known-malicious, and — opt-in — the
 byte-level checks.
 
-**All 76 with severities and weights: [docs/signals.md](docs/signals.md).**
+**All 77 with severities and weights: [docs/signals.md](docs/signals.md).**
 
 ---
 

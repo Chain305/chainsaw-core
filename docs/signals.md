@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **76 risk signals**. Each is scored, not merely
+Chainsaw registers **77 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,15 +23,15 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 48 |
+| Supply chain | 49 |
 | Vulnerability | 7 |
 | Licence | 9 |
 | Maintenance | 6 |
 | Quality | 6 |
-| **Total** | **76** |
+| **Total** | **77** |
 
 
-## Supply chain (48)
+## Supply chain (49)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -69,6 +69,7 @@ a configured server.
 | `sc.provenance_verified` | info | 15.00 | Verified build provenance |
 | `sc.publish_velocity_anomaly` | medium | -15.00 | Abnormal publish velocity |
 | `sc.publisher_changed` | high | -25.00 | Publisher changed from previous version |
+| `sc.pom_developer_list_changed` | low | -5.00 | Declared developer list changed |
 | `sc.repo_archived` | medium | -12.00 | Source repo archived |
 | `sc.repo_missing` | medium | -12.00 | Source repo missing |
 | `sc.repo_ownership_mismatch` | high | -20.00 | Source repo ownership mismatch |
