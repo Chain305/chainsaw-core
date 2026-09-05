@@ -155,6 +155,10 @@ func seedSystemPolicies(execer policyExecutor, orgID string, policies []Policy) 
 		if vErr := validatePolicy(pol); vErr != nil {
 			return created, refreshed, vErr
 		}
+		// A1 — direct INSERT path (not Store.Create); see seed.go.
+		if violations := policyRangeViolations(pol); len(violations) > 0 {
+			return created, refreshed, violations[0]
+		}
 		identifierJSON, mErr := json.Marshal(pol.Identifier)
 		if mErr != nil {
 			return created, refreshed, mErr

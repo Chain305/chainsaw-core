@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/chain305/chainsaw-core/intelligence"
 )
 
 var intelPackageCmd = &cobra.Command{
@@ -70,8 +72,27 @@ func runIntelPackage(cmd *cobra.Command, args []string) error {
 	}
 
 	printLatestResolutionNotice(os.Stdout, key, data.Risk)
-	renderEvaluation(os.Stdout, data.Risk)
+	renderEvaluation(os.Stdout, data.Risk, federatedAbsenceNote(data.Report))
 	return nil
+}
+
+// federatedAbsenceNote decodes just enough of the report to ask the one
+// question the A7 display override needs: did a federated registry come
+// back empty-handed for this coordinate? The predicate lives in
+// core/intelligence so the CLI and the server cannot drift on what counts.
+//
+// A report we cannot parse yields no note, and the normal grade line is
+// printed — a display nicety must never swallow the result.
+func federatedAbsenceNote(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var rep intelligence.Report
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		return ""
+	}
+	note, _ := intelligence.FederatedRegistryAbsence(&rep)
+	return note
 }
 
 // printLatestResolutionNotice tells the user which concrete version the

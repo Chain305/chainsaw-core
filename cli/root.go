@@ -53,8 +53,50 @@ vocabulary every Chainsaw surface (CLI, MCP, docs, landing page) shares.`,
 		if err := rejectPostSubcommandServerFlag(cmd, os.Args); err != nil {
 			return err
 		}
-		return validateOutputFlags(cmd)
+		if err := validateOutputFlags(cmd); err != nil {
+			return err
+		}
+		noteLocalOnlyOrgFlag(cmd)
+		return nil
 	},
+}
+
+// localOrgConsumers is the exact set of commands that READ the root --org
+// flag (viper `org_id`) for a local purpose: `status` displays it, `org
+// delete` uses it as the deletion target. Every other command ignores it —
+// no request the CLI makes carries an org header or parameter; the server
+// resolves the org from the token (see the --org usage text in init and the
+// A9 note above it). Pinned by TestOrgNote_LocalConsumersAreExactlyStatusAndOrgDelete.
+var localOrgConsumers = map[string]bool{
+	"chainsaw status":     true,
+	"chainsaw org delete": true,
+}
+
+func isLocalOrgConsumer(cmd *cobra.Command) bool {
+	return localOrgConsumers[cmd.CommandPath()]
+}
+
+// noteLocalOnlyOrgFlag (B6) prints one stderr line when the ROOT --org flag
+// was passed to a command that does nothing with it, so `chainsaw --org other
+// policy list` stops reading like a cross-org override that silently listed
+// the caller's own org.
+//
+// ownsGlobalFlag is load-bearing: install-hook, `auth sso` and `sbom vex
+// export` define shadowing LOCAL --org flags with their own meaning
+// (install_hook.go, auth_sso.go, sbom.go), and cobra merges root persistent
+// flags into every cmd.Flags(), so a bare Changed("org") would fire on them
+// too (doctor_orgslug.go documents the same trap). Chatter only: gated on
+// --quiet / CHAINSAW_QUIET, never changes an exit code.
+func noteLocalOnlyOrgFlag(cmd *cobra.Command) {
+	if !ownsGlobalFlag(cmd, "org") || !cmd.Flags().Changed("org") {
+		return
+	}
+	if quiet(cmd) || isLocalOrgConsumer(cmd) {
+		return
+	}
+	// os.Stderr, not cmd.ErrOrStderr(): tests re-point rootCmd's writer and
+	// the rest of this file's support chatter already writes here.
+	fmt.Fprintln(os.Stderr, "note: --org is local-only; the server resolves your org from your token")
 }
 
 // globalResultFormats is the vocabulary of the ROOT --format flag, exactly
@@ -484,6 +526,15 @@ func renderError(err error) {
 		if apiErr.Docs != "" {
 			fmt.Fprintf(os.Stderr, "  Docs:   %s\n", apiErr.Docs)
 		}
+		// The structured branch used to return here, which left a coded
+		// 401 with no next step: B1 dropped the client's own "run
+		// chainsaw auth login" suffix precisely because the classifier
+		// below was supposed to cover it, and then the CHW path never
+		// reached the classifier. Once respondUnauthorized moved to
+		// CHW-1001 that gap became the most common 401 in the product.
+		// The hint is the whole point of an error the user can act on,
+		// so the coded path gets it too.
+		emitRemediationHint(classifyCLIError(err))
 		return
 	}
 	fmt.Fprintln(os.Stderr, "Error:", err)
@@ -502,7 +553,15 @@ func renderError(err error) {
 	// next step is unambiguous. classifyCLIError is a pure function already
 	// run for telemetry in Execute; calling it again here keeps renderError
 	// self-contained (it consumes only err, per its godoc contract).
-	switch classifyCLIError(err) {
+	emitRemediationHint(classifyCLIError(err))
+}
+
+// emitRemediationHint prints the one-line next step for the two buckets
+// where a stock remediation is unambiguous. Shared by the structured
+// CHW-NNNN branch and the plain branch so a coded error is never LESS
+// actionable than an uncoded one.
+func emitRemediationHint(class string) {
+	switch class {
 	case "auth":
 		fmt.Fprintln(os.Stderr, "  Hint: run `chainsaw auth login` to re-authenticate.")
 	case "network":
@@ -766,7 +825,9 @@ func cfgOrgID() string     { return viper.GetString("org_id") }
 // keychain (step 4) silently override the explicit flag. See migrateTokenToKeychain
 // for the InConfig-gated guard that keeps the flag honored.
 func cfgToken() string {
-	if tok := viper.GetString("token"); tok != "" {
+	// TrimSpace so a whitespace-only `--token " "` / `CHAINSAW_TOKEN=" "` is
+	// treated as the empty override below (A2) rather than sent as a Bearer.
+	if tok := viper.GetString("token"); strings.TrimSpace(tok) != "" {
 		// Defensive support log: if the user explicitly passed --token (or
 		// CHAINSAW_TOKEN) while a keychain entry exists for the same server,
 		// note it so a support investigation can see the precedence at a glance.
@@ -786,6 +847,31 @@ func cfgToken() string {
 		}
 		return tok
 	}
+	// A2: a PRESENT-but-EMPTY override is a decision, not an omission.
+	// `--token ""` and `CHAINSAW_TOKEN=` both reach here as "" (viper folds
+	// an empty env value to unset, and an empty flag value is just ""), and
+	// this used to fall through to the keyring — so an operator who cleared
+	// the variable to run anonymously, or a CI job whose secret was never
+	// populated, was silently authenticated with the machine's stored
+	// credential. Present-but-empty now means "no credential": return the
+	// anonymous signal every caller already understands and do NOT consult
+	// the keyring. This deliberately returns "" rather than an error — the
+	// GitHub Action exports CHAINSAW_TOKEN unconditionally with default ""
+	// and ~25 anonymous-capable callers rely on "" (doctor, status, scan,
+	// intel, guard status…). The authenticated path names the empty override
+	// in its ExitConfigAuth message instead (notAuthenticatedError).
+	if tokenExplicitlyEmpty(nil) {
+		if verboseEnabled() {
+			if server := cfgServerURL(); server != "" {
+				if _, err := credStore().Get(credService, server); err == nil {
+					fmt.Fprintf(os.Stderr,
+						"chainsaw: --token / CHAINSAW_TOKEN set but empty; not falling back to the keychain credential for %s\n",
+						server)
+				}
+			}
+		}
+		return ""
+	}
 	server := cfgServerURL()
 	if server == "" {
 		return ""
@@ -795,6 +881,51 @@ func cfgToken() string {
 		return ""
 	}
 	return tok
+}
+
+// tokenExplicitlyEmpty reports whether the operator supplied a credential
+// override that is present but empty: the root `--token` flag was passed with
+// an empty value, or CHAINSAW_TOKEN is exported with an empty (after TrimSpace)
+// value. Either one means "no credential; do not fall back to the keyring".
+//
+// The flag half reads the ROOT persistent flag's Changed bit, not viper:
+// viper.IsSet fires on a YAML `token: ""` key, which is a stale-config
+// artefact and not an operator decision. cmd may be nil (the transport
+// preflight has no command); when it is non-nil and the command defines a
+// shadowing LOCAL --token (`setup`, `auth login`, `auth sso`), the root flag
+// cannot have been the one the operator typed after the subcommand, so the
+// flag half is skipped and only the env half applies. Those commands bypass
+// cfgToken anyway.
+func tokenExplicitlyEmpty(cmd *cobra.Command) bool {
+	if cmd == nil || ownsGlobalFlag(cmd, "token") {
+		if f := rootCmd.PersistentFlags().Lookup("token"); f != nil && f.Changed && strings.TrimSpace(f.Value.String()) == "" {
+			return true
+		}
+	}
+	if v, ok := os.LookupEnv("CHAINSAW_TOKEN"); ok && strings.TrimSpace(v) == "" {
+		return true
+	}
+	return false
+}
+
+// notAuthenticatedError is THE ExitConfigAuth error for a missing credential,
+// shared by requireAuth and the APIClient.do preflight so the two stay
+// indistinguishable to a caller (TestRequireAuth_MatchesTheTransportContract).
+// When the credential is missing because the operator passed an EMPTY
+// override (A2), the message names that instead of sending them to `auth
+// login` — the stored credential is fine, it is the empty override that is
+// hiding it.
+func notAuthenticatedError(cmd *cobra.Command) *ExitCodeError {
+	if tokenExplicitlyEmpty(cmd) {
+		return &ExitCodeError{
+			Code: ExitConfigAuth,
+			Err:  errors.New("--token / CHAINSAW_TOKEN is set but empty; refusing to fall back to the stored credential (unset it, or pass a value)"),
+		}
+	}
+	return &ExitCodeError{
+		Code: ExitConfigAuth,
+		Err:  errors.New("not authenticated — run 'chainsaw auth login' first"),
+	}
 }
 
 func newClient() *APIClient {
@@ -812,7 +943,8 @@ func newClient() *APIClient {
 // in practice, before it prints a confirmation prompt — when no credential is
 // resolvable.
 //
-// Why this exists: there is no PersistentPreRunE and no middleware, so the only
+// Why this exists: the root PersistentPreRunE only validates flags (it does
+// not authenticate) and there is no auth middleware, so the only
 // authentication check in the CLI lives inside the transport (APIClient.do,
 // client.go: requireToken && token == "" → ExitConfigAuth). A command therefore
 // inherits an auth check only if it happens to make a server call before it
@@ -825,16 +957,13 @@ func newClient() *APIClient {
 //
 // The code and message are deliberately IDENTICAL to the transport's preflight:
 // this moves the existing failure earlier, it does not add a new contract.
-// cmd is accepted for symmetry with errServerNotConfigured (and so a future
-// version can name the command path) but is not needed for the message today.
-func requireAuth(_ *cobra.Command) error {
+// cmd lets notAuthenticatedError tell a shadowing local --token from the root
+// one (A2); it is otherwise unused, and nil is accepted.
+func requireAuth(cmd *cobra.Command) error {
 	if strings.TrimSpace(cfgToken()) != "" {
 		return nil
 	}
-	return &ExitCodeError{
-		Code: ExitConfigAuth,
-		Err:  errors.New("not authenticated — run 'chainsaw auth login' first"),
-	}
+	return notAuthenticatedError(cmd)
 }
 
 // newClientWithTimeout is newClient with a caller-supplied overall HTTP

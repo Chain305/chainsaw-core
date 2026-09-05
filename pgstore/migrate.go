@@ -810,8 +810,111 @@ func (s *Store) migrateSchema() error {
 			FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_scim_tokens_org ON scim_tokens(org_id)`,
+		// LEGACY, FROZEN, NO LONGER READ. These two columns held the SCIM
+		// external id and provisioning source on the USER row, which is
+		// wrong once one human belongs to two orgs: each org's IdP issues
+		// its own external id, and org B provisioning a user org A already
+		// managed overwrote org A's identifier. Org A's deactivate then
+		// resolved `externalId eq "<its id>"` to zero results and the
+		// leaver kept a valid bearer token — a deprovisioning failure, not
+		// a cosmetic one.
+		//
+		// The live values now live on memberships (below). These columns
+		// are DELIBERATELY NOT DROPPED: dropping them would make a code
+		// rollback lose the data the old handlers read. Nothing in the
+		// application reads them any more; scimCreateUser still populates
+		// them on the INSERT of a brand-new user (exactly one org, so the
+		// value is unambiguous) purely so a rollback finds the common case
+		// intact. Drop them in a later release once rollback is off the
+		// table.
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS scim_external_id TEXT`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS provisioned_by TEXT DEFAULT 'manual'`,
+
+		// SCIM identity is PER-MEMBERSHIP. (org_id, user_id) is the
+		// memberships primary key, so these columns are keyed on the pair
+		// by construction and one user can carry a different external id
+		// in every org that provisions them.
+		//
+		// provisioned_by has NO default on purpose: a NULL means "this row
+		// predates the per-membership columns and has not been backfilled",
+		// which is what makes the backfill below effectively one-shot. A
+		// DEFAULT would stamp every legacy row and destroy that marker.
+		`ALTER TABLE memberships ADD COLUMN IF NOT EXISTS scim_external_id TEXT`,
+		`ALTER TABLE memberships ADD COLUMN IF NOT EXISTS provisioned_by TEXT`,
+		// Drives the only new lookup: `externalId eq "..."` scoped to the
+		// caller's org (scimListUsers). Partial — the overwhelming majority
+		// of memberships are manual and carry NULL here. The per-membership
+		// READ needs no index: it is a primary-key hit on (org_id, user_id).
+		`CREATE INDEX IF NOT EXISTS idx_memberships_org_scim_external_id
+		   ON memberships(org_id, scim_external_id) WHERE scim_external_id IS NOT NULL`,
+
+		// BACKFILL: move each legacy users.scim_external_id onto the ONE
+		// membership that actually owns it.
+		//
+		// Which membership? The data available is (a) users.provisioned_by,
+		// which says the identity came from SCIM but not from WHERE, and
+		// (b) which orgs run SCIM at all — scim_tokens.org_id. So the owner
+		// is resolved as: among the user's memberships, the orgs that hold
+		// a SCIM token; if exactly ONE such org, that is the owner. When
+		// the user has no membership in any SCIM-enabled org (the token was
+		// revoked, say) we fall back to "the user has exactly one
+		// membership" — also unambiguous.
+		//
+		// AMBIGUOUS USERS ARE LEFT NULL, deliberately. A user who is a
+		// member of two SCIM-enabled orgs is exactly the case whose
+		// identifier was already corrupted by the old overwrite: the stored
+		// value belongs to whichever IdP wrote last, and guessing would
+		// hand one org an identifier the other issued — the same
+		// cross-tenant confusion this change removes. They self-heal on the
+		// next full IdP sync, which PUTs externalId per org.
+		//
+		// One-shot by construction: the resolve requires that NO membership
+		// of the user has been stamped yet, and the statement immediately
+		// after stamps every remaining row 'manual'. After the first boot
+		// no user qualifies again, so a membership created later by a
+		// non-SCIM path can never be back-dated from the frozen users row.
+		`WITH candidates AS (
+			SELECT m.user_id, m.org_id
+			  FROM memberships m
+			  JOIN users u ON u.id = m.user_id
+			 WHERE u.scim_external_id IS NOT NULL
+			   AND u.scim_external_id <> ''
+			   AND NOT EXISTS (
+				   SELECT 1 FROM memberships m2
+				    WHERE m2.user_id = m.user_id
+				      AND m2.provisioned_by IS NOT NULL
+			   )
+		),
+		scim_owned AS (
+			SELECT c.user_id, MIN(c.org_id) AS org_id, COUNT(*) AS n
+			  FROM candidates c
+			 WHERE EXISTS (SELECT 1 FROM scim_tokens t WHERE t.org_id = c.org_id)
+			 GROUP BY c.user_id
+		),
+		sole_membership AS (
+			SELECT c.user_id, MIN(c.org_id) AS org_id, COUNT(*) AS n
+			  FROM candidates c
+			 WHERE c.user_id NOT IN (SELECT user_id FROM scim_owned)
+			 GROUP BY c.user_id
+		),
+		resolved AS (
+			SELECT user_id, org_id FROM scim_owned     WHERE n = 1
+			UNION ALL
+			SELECT user_id, org_id FROM sole_membership WHERE n = 1
+		)
+		UPDATE memberships m
+		   SET scim_external_id = u.scim_external_id,
+		       provisioned_by   = COALESCE(NULLIF(u.provisioned_by, ''), 'scim')
+		  FROM resolved r, users u
+		 WHERE r.user_id = m.user_id
+		   AND r.org_id  = m.org_id
+		   AND u.id      = m.user_id`,
+		// Seal the backfill. Every row still unstamped was either never
+		// SCIM-provisioned or was ambiguous; both are 'manual' from the
+		// per-membership point of view, and stamping them is what makes the
+		// UPDATE above one-shot. Also correct for rows created later by
+		// invite / admin paths, which never write these columns.
+		`UPDATE memberships SET provisioned_by='manual' WHERE provisioned_by IS NULL`,
 
 		// Usage-based pricing tables
 		`CREATE TABLE IF NOT EXISTS usage_rollups (
@@ -2335,6 +2438,51 @@ func (s *Store) migrateSchema() error {
 		// different table, is written on every scan, and is live.
 		`ALTER TABLE package_metadata DROP COLUMN IF EXISTS trust_score`,
 		`ALTER TABLE package_metadata DROP COLUMN IF EXISTS trust_score_breakdown`,
+
+		// Local-guard block ledger (P9F-UD-06 / P9F-252). The free guard has
+		// always emitted install.guard.block to /api/telemetry/ingest once the
+		// operator explicitly consented, but the server only forwarded it to
+		// PostHog — so `chainsaw guard status` could show 17 blocks while the
+		// dashboard showed 0, and there was no way to tell that 0 from a real
+		// one. These two tables are the read model behind that number. Nothing
+		// new leaves the machine; see core/pgstore/guardblocks.go for the
+		// identity and data-minimisation rules (server-resolved org only, no
+		// user_id, no IP).
+		`CREATE TABLE IF NOT EXISTS guard_block_events (
+			id BIGSERIAL PRIMARY KEY,
+			org_id TEXT NOT NULL,
+			install_id TEXT NOT NULL,
+			bin TEXT NOT NULL DEFAULT '',
+			ecosystem TEXT NOT NULL DEFAULT '',
+			package_name TEXT NOT NULL DEFAULT '',
+			package_version TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			severity TEXT NOT NULL DEFAULT '',
+			blocked_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// Drives the only read: "blocks for THIS org in the last N hours".
+		// org-leading so the tenant predicate is the first column, blocked_at
+		// DESC so the window is a range scan off the end.
+		`CREATE INDEX IF NOT EXISTS idx_guard_block_events_org_blocked_at ON guard_block_events(org_id, blocked_at DESC)`,
+		// blocked_at-leading companion for the retention DELETE, which the
+		// org-leading index above cannot drive. Same pairing as
+		// billy_call_logs. internal/datacleanup prunes this table on its
+		// own pass (guard_installs too, same window).
+		`CREATE INDEX IF NOT EXISTS idx_guard_block_events_blocked_at ON guard_block_events(blocked_at)`,
+
+		// One row per (org, install) that has sent ANY consented guard event.
+		// Its whole job is to let the dashboard tell "no blocks" apart from
+		// "no consented installs, so we cannot know" — a bare 0 that means the
+		// latter is the defect this closes, not a smaller version of it.
+		`CREATE TABLE IF NOT EXISTS guard_installs (
+			org_id TEXT NOT NULL,
+			install_id TEXT NOT NULL,
+			first_seen_at TIMESTAMPTZ NOT NULL,
+			last_seen_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (org_id, install_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_guard_installs_org_last_seen ON guard_installs(org_id, last_seen_at DESC)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

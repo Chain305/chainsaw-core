@@ -123,7 +123,7 @@ func TestSetup_NonTTY_NoToken_FailsFast(t *testing.T) {
 	defer srv.Close()
 	viper.Set("server_url", srv.URL)
 	// Ensure no ambient token leaks in.
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	cmd := newSetupCmd(t, srv.URL, []string{"--yes"})
 	err := cmd.Execute()
@@ -168,7 +168,7 @@ func TestSetup_TTY_NoToken_FallsIntoInteractive(t *testing.T) {
 	srv, _ := setupMockServer(t)
 	defer srv.Close()
 	viper.Set("server_url", srv.URL)
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	cmd := newSetupCmd(t, srv.URL, []string{"--yes"})
 	err := cmd.Execute()

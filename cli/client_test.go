@@ -224,3 +224,131 @@ func TestServerURLMisconfigError_HeuristicBoundaries(t *testing.T) {
 
 // Ensure httptest is referenced (Go compiler) — the helper lives in finding_test.go
 var _ = httptest.NewServer
+
+// ── B1: the flat {"error":<string>,"hint":…} shape and the doubled 401 hint ──
+//
+// respondUnauthorized (internal/server) writes {"error":"authentication
+// required","hint":"…"} — no code, no message. parseAPIError had no shape for
+// it, so the raw JSON became Message and the user read
+// `HTTP 401: {"error":"authentication required","hint":"…"} — run 'chainsaw
+// auth login' to authenticate` followed by renderError's own
+// `Hint: run \`chainsaw auth login\``: the JSON dumped verbatim and the same
+// remediation printed twice.
+
+func TestParseAPIError_FlatErrorStringShape(t *testing.T) {
+	body := `{"error":"authentication required","hint":"include a Bearer token from /api/auth/login","request_id":"r-1"}`
+	got := parseAPIError(401, []byte(body))
+	if got.Code != "HTTP 401" {
+		t.Errorf("Code = %q, want HTTP 401", got.Code)
+	}
+	if got.Message != "authentication required" {
+		t.Errorf("Message = %q, want the bare error string", got.Message)
+	}
+	if got.Reason != "include a Bearer token from /api/auth/login" {
+		t.Errorf("Reason = %q, want the hint", got.Reason)
+	}
+	if got.Status != 401 {
+		t.Errorf("Status = %d, want 401", got.Status)
+	}
+	if e := got.Error(); e != "HTTP 401: authentication required" {
+		t.Errorf("Error() = %q, want %q", e, "HTTP 401: authentication required")
+	}
+	if strings.Contains(got.Error(), "{") {
+		t.Errorf("Error() still carries raw JSON: %q", got.Error())
+	}
+}
+
+func TestParseAPIError_FlatErrorStringReasonFallback(t *testing.T) {
+	// respondEmailNotVerified uses `reason`, not `hint`.
+	got := parseAPIError(403, []byte(`{"error":"email not verified","reason":"verify your address first"}`))
+	if got.Message != "email not verified" || got.Reason != "verify your address first" {
+		t.Errorf("got Message=%q Reason=%q", got.Message, got.Reason)
+	}
+	// hint wins over reason when both are present.
+	got = parseAPIError(401, []byte(`{"error":"x","hint":"h","reason":"r"}`))
+	if got.Reason != "h" {
+		t.Errorf("Reason = %q, want hint to outrank reason", got.Reason)
+	}
+	// No hint at all (admin_intelligence.go, huggingface_handlers.go).
+	got = parseAPIError(400, []byte(`{"error":"bad request"}`))
+	if got.Message != "bad request" || got.Reason != "" || got.Code != "HTTP 400" {
+		t.Errorf("got Code=%q Message=%q Reason=%q", got.Code, got.Message, got.Reason)
+	}
+}
+
+func TestParseAPIError_NestedWithoutCodeStillSynthesizes(t *testing.T) {
+	// `error` is an object with neither code nor message: not the nested
+	// envelope, not the flat string. It must land in the synthesized shape
+	// exactly as before B1.
+	for _, body := range []string{
+		`{"error":{"reason":"x"}}`,
+		`{"error":""}`,
+		`{"error":"   "}`,
+		`{"error":42}`,
+		`{"error":null}`,
+	} {
+		got := parseAPIError(401, []byte(body))
+		if got.Code != "HTTP 401" {
+			t.Errorf("%s: Code = %q, want HTTP 401", body, got.Code)
+		}
+		if got.Message != strings.TrimSpace(body) {
+			t.Errorf("%s: Message = %q, want the raw body (synthesized shape)", body, got.Message)
+		}
+		if got.Reason != "" {
+			t.Errorf("%s: Reason = %q, want empty", body, got.Reason)
+		}
+	}
+}
+
+// TestAPIClient_do_401PrintsAuthLoginHintExactlyOnce is the end-to-end half:
+// a flat 401 from the server, through do() and renderError, must print the
+// `chainsaw auth login` remediation exactly once and never the raw JSON.
+func TestAPIClient_do_401PrintsAuthLoginHintExactlyOnce(t *testing.T) {
+	srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":"authentication required","hint":"include a Bearer token from /api/auth/login"}`)
+	})
+
+	err := clientAt(srv.URL).Get("/api/policies", nil)
+	if err == nil {
+		t.Fatal("expected a 401 error, got nil")
+	}
+	if err.Error() != "HTTP 401: authentication required" {
+		t.Errorf("Error() = %q, want %q (no 401 suffix, no JSON)", err.Error(), "HTTP 401: authentication required")
+	}
+	stderr := captureStderr(t, func() { renderError(err) })
+	if n := strings.Count(stderr, "chainsaw auth login"); n != 1 {
+		t.Errorf("`chainsaw auth login` printed %d times, want exactly 1; stderr:\n%s", n, stderr)
+	}
+	if strings.Contains(stderr, "{") {
+		t.Errorf("raw JSON reached the user; stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "Error: HTTP 401: authentication required") {
+		t.Errorf("stderr = %q, want the Error line", stderr)
+	}
+}
+
+// TestAPIClient_do_403And429SuffixesKept: only the 401 suffix was the
+// duplicate; the other two have no classifier hint and must survive.
+func TestAPIClient_do_403And429SuffixesKept(t *testing.T) {
+	srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/forbidden":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprint(w, `{"error":"forbidden"}`)
+		default:
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = fmt.Fprint(w, `{"error":"slow down"}`)
+		}
+	})
+	c := clientAt(srv.URL)
+	if err := c.Get("/forbidden", nil); err == nil || !strings.Contains(err.Error(), "does not have permission") {
+		t.Errorf("403 suffix lost: %v", err)
+	}
+	if err := c.Get("/limited", nil); err == nil || !strings.Contains(err.Error(), "retry after 7 seconds") {
+		t.Errorf("429 suffix lost: %v", err)
+	}
+}

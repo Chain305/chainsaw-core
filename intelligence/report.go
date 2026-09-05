@@ -397,6 +397,22 @@ type ArtifactScanSection struct {
 // SupplyChainSection carries the chainsaw-specific signals not in the
 // inventory-doc schema — these map 1:1 onto the policy Conditions fields
 // added over the last twelve LHF PRs.
+//
+// TrustScore is the risk-V2 composite (eval.RolledUp.Overall), written by
+// ComputeTrustScoreForOrg and read by the policy evaluator (trustScoreMin /
+// trustScoreMax) and the intel surfaces. It is live.
+//
+// Its former sibling `TrustScoreBreakdown` — a string holding JSON-encoded
+// JSON, carrying the LEGACY core/trustscore signal blend — was removed on
+// 2026-09-04 (P9F-307). It had one writer and zero readers: no column (F-02
+// dropped package_metadata.trust_score_breakdown, which had had no writer
+// since 2026-04), no OpenAPI entry, no CLI/MCP/export consumer, and a UI
+// component reachable only through an empty named import. It also
+// contradicted TrustScore in ordering, not merely magnitude. Do not
+// reintroduce it — see trustscore_breakdown_fossil_test.go, which fails on
+// any reintroduction. Reports persisted before the removal still carry the
+// key inside their stored JSONB; that is inert (unknown keys are ignored on
+// unmarshal) and no migration rewrote those rows.
 type SupplyChainSection struct {
 	MalwareStatus          string     `json:"malwareStatus,omitempty"` // clean|malicious|unknown
 	MalwareID              string     `json:"malwareId,omitempty"`
@@ -405,7 +421,6 @@ type SupplyChainSection struct {
 	TyposquatConfidence    string     `json:"typosquatConfidence,omitempty"`
 	TyposquatSimilarTo     string     `json:"typosquatSimilarTo,omitempty"`
 	TrustScore             int        `json:"trustScore,omitempty"`
-	TrustScoreBreakdown    string     `json:"trustScoreBreakdown,omitempty"`
 	PublisherChanged       *bool      `json:"publisherChanged,omitempty"`
 	PublisherAdded         []string   `json:"publisherAdded,omitempty"`
 	PublisherRemoved       []string   `json:"publisherRemoved,omitempty"`
@@ -1389,6 +1404,14 @@ const (
 	// the opt-in fail-closed coverage gate — the refusal that is
 	// warranted comes from the unknown verdict, which every surface
 	// reads, not from a gate only opted-in orgs run.
+	// WarnRegistryNotFound is the WEAK absence code: the registry we asked
+	// did not have the coordinate. For a single-canonical ecosystem it is
+	// promoted to WarnPackageNotFound / WarnVersionNotFound; for the Maven
+	// family and Go it survives, because those ecosystems have more than
+	// one home and a repo1 404 is a statement about repo1. Consumed by
+	// federatedRegistryAbsenceReason (Phase 9 A8).
+	WarnRegistryNotFound = "not_found"
+
 	WarnPackageNotFound = "package_not_found"
 
 	// WarnVersionNotEvaluable is stamped by the ingest gate in

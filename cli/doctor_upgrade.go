@@ -204,6 +204,15 @@ func upgradeSeverityMark(g glyphSet, s doctor.Severity) string {
 	}
 }
 
+// upgradeCheckScope is the one line that tells a CLI-only user to stop
+// reading. --upgrade-check diagnoses a chainsaw-proxy SERVER install, and on
+// a developer laptop with no server every finding it emits (no config YAML,
+// no data dir, no docker-compose) is noise that reads like breakage. Printed
+// in the text header only; --json stays a bare Report so it remains
+// machine-stable. The same sentence sits in the doctor Long text so --help
+// says it before the command is ever run.
+const upgradeCheckScope = "self-hosted chainsaw-proxy server preflight; not needed for CLI-only installs (see MIGRATIONS.md)"
+
 // printUpgradeReport renders the scorecard in a one-line-per-check
 // format with ok / warn / breaking markers (glyphSet, so a CP437 console
 // gets + / ! / X instead of three identical boxes) and a summary footer.
@@ -219,7 +228,8 @@ func printUpgradeReport(cmd *cobra.Command, r *doctor.Report) {
 	g := glyphs()
 	fmt.Fprintf(out, "chainsaw doctor --upgrade-check\n")
 	fmt.Fprintf(out, "  version : %s\n", r.Version)
-	fmt.Fprintf(out, "  platform: %s\n\n", r.Platform)
+	fmt.Fprintf(out, "  platform: %s\n", r.Platform)
+	fmt.Fprintf(out, "  scope   : %s\n\n", upgradeCheckScope)
 
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "STATUS\tCHECK\tMESSAGE")

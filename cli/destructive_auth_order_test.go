@@ -131,7 +131,7 @@ func TestDestructiveVerbs_AuthCheckedBeforeAnyPrompt(t *testing.T) {
 		t.Run(tc.path, func(t *testing.T) {
 			withIsolatedConfigHome(t) // viper.Reset(): no token anywhere
 			withFileCredStore(t)      // never touch the real OS keyring
-			t.Setenv("CHAINSAW_TOKEN", "")
+			unsetEnv(t, "CHAINSAW_TOKEN")
 			answerPromptYes(t)
 
 			var requests int
@@ -201,7 +201,7 @@ func TestDestructiveVerbs_AuthOrderCoversEveryGatedCommand(t *testing.T) {
 func TestRequireAuth_MatchesTheTransportContract(t *testing.T) {
 	withIsolatedConfigHome(t)
 	withFileCredStore(t)
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	err := requireAuth(&cobra.Command{Use: "x"})
 	if err == nil {

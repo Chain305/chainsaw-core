@@ -10,12 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/netip"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chain305/chainsaw-core/pgstore"
 	"github.com/chain305/chainsaw-core/tenancy"
@@ -637,6 +640,13 @@ func (s *Store) Create(policy Policy) (Policy, error) {
 	if err := validatePolicy(policy); err != nil {
 		return Policy{}, err
 	}
+	// A1 — numeric bounds and the name cap are checked here, not in
+	// validatePolicy, because Update must only reject violations an
+	// edit introduces (see policyRangeViolations). Create has no prior
+	// row to grandfather, so every violation is a rejection.
+	if violations := policyRangeViolations(policy); len(violations) > 0 {
+		return Policy{}, violations[0]
+	}
 	id, err := newID()
 	if err != nil {
 		return Policy{}, err
@@ -729,6 +739,29 @@ func (s *Store) Update(id string, policy Policy) (Policy, error) {
 	}
 	if err := validatePolicy(policy); err != nil {
 		return Policy{}, err
+	}
+	// A1 — introduced-violation-only semantics. Update runs on PATCH
+	// {"status":"disabled"}, promote-to-block, exception approve/deny and
+	// version rollback, every one of which round-trips the stored row.
+	// A plain rule here would lock admins out of every pre-existing
+	// out-of-range row, so violations are compared against what is
+	// already stored: only a NEW bad value is refused; a retained one is
+	// logged and accepted.
+	if violations := policyRangeViolations(policy); len(violations) > 0 {
+		orgID := tenancy.NormalizeOrgID(s.orgID)
+		prev, err := s.Get(id)
+		if err != nil {
+			if errors.Is(err, ErrPolicyNotFound) {
+				return Policy{}, err
+			}
+			// Cannot prove the violation predates this edit; be strict.
+			return Policy{}, violations[0]
+		}
+		if introduced := introducedRangeViolations(prev, policy); len(introduced) > 0 {
+			return Policy{}, introduced[0]
+		}
+		slog.Warn("policy update retains pre-existing out-of-range value",
+			"org_id", orgID, "policy_id", id, "violations", describeRangeViolations(violations))
 	}
 
 	now := time.Now().UTC()
@@ -1035,6 +1068,175 @@ func validatePolicy(policy Policy) error {
 		return fmt.Errorf("invalid decision %q: must be one of '', 'allow', 'deny', 'monitor'", policy.Decision)
 	}
 	return nil
+}
+
+// MaxPolicyNameRunes caps Policy.Name. 512, not 200: buildExceptionPolicy
+// (internal/server/exceptions_api.go) names rows "Exception: <pkg>@<version>"
+// and a scoped npm name alone reaches 214 characters. Counted in runes so a
+// non-ASCII name is not penalised for its byte length.
+const MaxPolicyNameRunes = 512
+
+// RangeError reports a numeric policy field outside its legal range.
+// Field is the dotted JSON path the caller sent ("conditions.cvssMin",
+// "name"). Min/Max are the legal bounds, with math.Inf(-1) / math.Inf(1)
+// standing in for "unbounded" — check HasMin/HasMax before serialising
+// them, encoding/json cannot represent an infinity. The message carries
+// the range itself because the CLI never decodes the envelope's fields.
+type RangeError struct {
+	Field string
+	Min   float64
+	Max   float64
+	Got   float64
+	// Unit is an optional noun appended after the bound in the message
+	// ("characters" for the name cap). Empty for bare numeric ranges.
+	Unit string
+}
+
+// HasMin reports whether the lower bound is finite.
+func (e RangeError) HasMin() bool { return !math.IsInf(e.Min, -1) }
+
+// HasMax reports whether the upper bound is finite.
+func (e RangeError) HasMax() bool { return !math.IsInf(e.Max, 1) }
+
+func (e RangeError) Error() string {
+	unit := ""
+	if e.Unit != "" {
+		unit = " " + e.Unit
+	}
+	switch {
+	case !e.HasMax():
+		return fmt.Sprintf("%s must be at least %s%s (got %s)", e.Field, formatBound(e.Min), unit, formatBound(e.Got))
+	case !e.HasMin():
+		return fmt.Sprintf("%s must be at most %s%s (got %s)", e.Field, formatBound(e.Max), unit, formatBound(e.Got))
+	default:
+		return fmt.Sprintf("%s must be between %s and %s%s (got %s)", e.Field, formatBound(e.Min), formatBound(e.Max), unit, formatBound(e.Got))
+	}
+}
+
+// formatBound renders 10 as "10" and 0.5 as "0.5" — the shortest exact
+// decimal, so the message reads like the value the operator typed.
+func formatBound(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// validateConditionBounds returns the first out-of-range numeric
+// condition as a RangeError, or nil. Bounds follow the evaluator's raw
+// compares (core/policy/evaluator.go): cvssMin/cvssMax ∈ [0,10],
+// epssMin/epssMax ∈ [0,1], trustScoreMin/trustScoreMax ∈ [0,100], each
+// pair min ≤ max, packageAge ≥ 0, cooldownDays ≥ 0, requireSlsaLevel ∈
+// [1,4]. trustScore is still populated by the repo pipeline, scan and
+// artifact-scan paths after F-02, so it stays bounded.
+func validateConditionBounds(c Conditions) error {
+	if violations := conditionRangeViolations(c); len(violations) > 0 {
+		return violations[0]
+	}
+	return nil
+}
+
+// conditionRangeViolations is validateConditionBounds without the
+// first-only cut, so Update can diff the full set against the stored row.
+func conditionRangeViolations(c Conditions) []RangeError {
+	var out []RangeError
+	checkFloat := func(field string, v *float64, lo, hi float64) bool {
+		if v == nil {
+			return true
+		}
+		if math.IsNaN(*v) || math.IsInf(*v, 0) || *v < lo || *v > hi {
+			out = append(out, RangeError{Field: field, Min: lo, Max: hi, Got: *v})
+			return false
+		}
+		return true
+	}
+	checkInt := func(field string, v *int, lo, hi float64) bool {
+		if v == nil {
+			return true
+		}
+		if float64(*v) < lo || float64(*v) > hi {
+			out = append(out, RangeError{Field: field, Min: lo, Max: hi, Got: float64(*v)})
+			return false
+		}
+		return true
+	}
+	// A pair is only compared when both halves are individually legal,
+	// so one bad value produces one finding rather than two.
+	if checkFloat("conditions.cvssMin", c.CVSSMin, 0, 10) && checkFloat("conditions.cvssMax", c.CVSSMax, 0, 10) &&
+		c.CVSSMin != nil && c.CVSSMax != nil && *c.CVSSMin > *c.CVSSMax {
+		out = append(out, RangeError{Field: "conditions.cvssMin", Min: 0, Max: *c.CVSSMax, Got: *c.CVSSMin})
+	}
+	if checkFloat("conditions.epssMin", c.EPSSMin, 0, 1) && checkFloat("conditions.epssMax", c.EPSSMax, 0, 1) &&
+		c.EPSSMin != nil && c.EPSSMax != nil && *c.EPSSMin > *c.EPSSMax {
+		out = append(out, RangeError{Field: "conditions.epssMin", Min: 0, Max: *c.EPSSMax, Got: *c.EPSSMin})
+	}
+	checkInt("conditions.packageAge", c.PackageAge, 0, math.Inf(1))
+	checkInt("conditions.cooldownDays", c.CooldownDays, 0, math.Inf(1))
+	checkInt("conditions.requireSlsaLevel", c.RequireSLSALevel, 1, 4)
+	if checkInt("conditions.trustScoreMin", c.TrustScoreMin, 0, 100) && checkInt("conditions.trustScoreMax", c.TrustScoreMax, 0, 100) &&
+		c.TrustScoreMin != nil && c.TrustScoreMax != nil && *c.TrustScoreMin > *c.TrustScoreMax {
+		out = append(out, RangeError{Field: "conditions.trustScoreMin", Min: 0, Max: float64(*c.TrustScoreMax), Got: float64(*c.TrustScoreMin)})
+	}
+	return out
+}
+
+// policyRangeViolations is every bound a write must satisfy: the name
+// cap plus conditionRangeViolations.
+func policyRangeViolations(policy Policy) []RangeError {
+	var out []RangeError
+	if n := utf8.RuneCountInString(policy.Name); n > MaxPolicyNameRunes {
+		out = append(out, RangeError{Field: "name", Min: math.Inf(-1), Max: MaxPolicyNameRunes, Got: float64(n), Unit: "characters"})
+	}
+	return append(out, conditionRangeViolations(policy.Conditions)...)
+}
+
+// introducedRangeViolations returns the violations in next that prev did
+// not already carry with the identical value. A retained bad value is a
+// pre-existing row being edited elsewhere (status flip, note, approval)
+// and is grandfathered; a changed or added bad value is refused.
+func introducedRangeViolations(prev, next Policy) []RangeError {
+	nextV := policyRangeViolations(next)
+	if len(nextV) == 0 {
+		return nil
+	}
+	prevV := policyRangeViolations(prev)
+	var out []RangeError
+	for _, nv := range nextV {
+		preexisting := false
+		if nv.Field == "name" {
+			// Two over-long names of equal length are different values;
+			// only the identical stored name is grandfathered.
+			preexisting = prev.Name == next.Name
+		} else {
+			for _, pv := range prevV {
+				if pv.Field == nv.Field && pv.Got == nv.Got && pv.Min == nv.Min && pv.Max == nv.Max {
+					preexisting = true
+					break
+				}
+			}
+		}
+		if !preexisting {
+			out = append(out, nv)
+		}
+	}
+	return out
+}
+
+func describeRangeViolations(vs []RangeError) []string {
+	out := make([]string, len(vs))
+	for i, v := range vs {
+		out[i] = v.Error()
+	}
+	return out
+}
+
+// TruncateName clips s to MaxPolicyNameRunes runes without splitting a
+// multi-byte character. Generated names (exception rows) go through it
+// so a pathological package/version pair cannot turn a valid request
+// into a name-cap rejection.
+func TruncateName(s string) string {
+	if utf8.RuneCountInString(s) <= MaxPolicyNameRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:MaxPolicyNameRunes])
 }
 
 func normalizePolicy(policy Policy) (Policy, error) {

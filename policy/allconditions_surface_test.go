@@ -19,16 +19,24 @@ import (
 // therefore blind to them, and preflight exited 0 declaring "every condition
 // supported" for a policy that used one.
 var excludedFromAllConditions = map[ConditionType]string{
-	ConditionMaintainerAccountAge: "" +
-		"Held out only because the Phase-8 remediation plan scoped the " +
-		"AllConditions() fix to the six AI-artifact conditions. The " +
-		"original in-code rationale (numeric-threshold condition, so the " +
-		"per-ecosystem cells 'do not apply') is factually wrong: every " +
-		"SupportMatrix row carries a ConditionMaintainerAccountAge cell, " +
-		"POLICY_PROXY_MATRIX.md has a 'maintainer account age' column, and " +
-		"TestSupportMatrixMatchesMarkdown asserts they agree. Adding it is " +
-		"verdict-neutral (detectUnsupported reads ConditionsUsedBy, never " +
-		"AllConditions) and should be its own follow-up.",
+	// DELIBERATELY EMPTY. AllConditions() now publishes every column
+	// SupportMatrix carries.
+	//
+	// The single entry that used to live here was
+	// ConditionMaintainerAccountAge, held out only because the Phase-8
+	// remediation plan scoped the AllConditions() fix to the six AI-artifact
+	// conditions. The exclusion was closed as the Phase-9-fresh §5 follow-up:
+	// the column has a cell in all 16 SupportMatrix rows, ConditionsUsedBy
+	// emits it, and withholding it made `chainsaw policy preflight` report a
+	// maintainerAccountAgeDaysMax rule as absent from the proxy's matrix and
+	// exit 12 ("this CLI is newer than the proxy"). See
+	// TestAllConditionsPublishesExactlyTheMatrixColumns in proxy_matrix_test.go
+	// for the full evidence.
+	//
+	// Adding an entry here is how a column stops being published. Do it only
+	// with a reason that survives that test's set-equality assertion being
+	// relaxed — an inert-in-production signal is NOT such a reason, because
+	// twenty already-published conditions are in that same state.
 }
 
 // TestEveryEmittedConditionIsInAllConditions is the P8-39 rail for P8-14.

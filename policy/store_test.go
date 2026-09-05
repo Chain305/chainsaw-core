@@ -845,3 +845,347 @@ func TestStandaloneContextOnlyAcceptsEveryRealConstraint(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A1 — policy threshold bounds (docs/plan_qa_phase9_fresh_remediation.md).
+//
+// Every policy write funnels through Store.Create / Store.Update, so a
+// bound there is total. Create rejects any out-of-range value; Update
+// rejects only violations the edit *introduces*, so a status flip,
+// exception approve/deny or version rollback on a pre-existing bad row
+// still succeeds (the lockout D8-4's grandfatheredUnsupportedRules exists
+// to prevent).
+// ---------------------------------------------------------------------------
+
+func TestValidateConditionBoundsRejectsOutOfRange(t *testing.T) {
+	cases := []struct {
+		name  string
+		c     Conditions
+		field string
+	}{
+		{"cvssMin -1", Conditions{CVSSMin: floatPtr(-1)}, "conditions.cvssMin"},
+		{"cvssMin 10.1", Conditions{CVSSMin: floatPtr(10.1)}, "conditions.cvssMin"},
+		{"cvssMin 999", Conditions{CVSSMin: floatPtr(999)}, "conditions.cvssMin"},
+		{"cvssMax 11", Conditions{CVSSMax: floatPtr(11)}, "conditions.cvssMax"},
+		{"cvssMax -0.5", Conditions{CVSSMax: floatPtr(-0.5)}, "conditions.cvssMax"},
+		{"cvss min>max", Conditions{CVSSMin: floatPtr(7), CVSSMax: floatPtr(2)}, "conditions.cvssMin"},
+		{"epssMin 2.0", Conditions{EPSSMin: floatPtr(2.0)}, "conditions.epssMin"},
+		{"epssMin -0.1", Conditions{EPSSMin: floatPtr(-0.1)}, "conditions.epssMin"},
+		{"epssMax 1.5", Conditions{EPSSMax: floatPtr(1.5)}, "conditions.epssMax"},
+		{"epss min>max", Conditions{EPSSMin: floatPtr(0.9), EPSSMax: floatPtr(0.1)}, "conditions.epssMin"},
+		{"packageAge -1", Conditions{PackageAge: intPtr(-1)}, "conditions.packageAge"},
+		{"cooldownDays -1", Conditions{CooldownDays: intPtr(-1)}, "conditions.cooldownDays"},
+		{"requireSlsaLevel 0", Conditions{RequireSLSALevel: intPtr(0)}, "conditions.requireSlsaLevel"},
+		{"requireSlsaLevel 99", Conditions{RequireSLSALevel: intPtr(99)}, "conditions.requireSlsaLevel"},
+		{"trustScoreMin -1", Conditions{TrustScoreMin: intPtr(-1)}, "conditions.trustScoreMin"},
+		{"trustScoreMax 101", Conditions{TrustScoreMax: intPtr(101)}, "conditions.trustScoreMax"},
+		{"trustScore min>max", Conditions{TrustScoreMin: intPtr(80), TrustScoreMax: intPtr(20)}, "conditions.trustScoreMin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateConditionBounds(tc.c)
+			var re RangeError
+			if !errors.As(err, &re) {
+				t.Fatalf("expected RangeError, got %v", err)
+			}
+			if re.Field != tc.field {
+				t.Errorf("field: got %q, want %q (err=%v)", re.Field, tc.field, err)
+			}
+		})
+	}
+}
+
+func TestValidateConditionBoundsAcceptsInRange(t *testing.T) {
+	cases := []struct {
+		name string
+		c    Conditions
+	}{
+		{"empty", Conditions{}},
+		{"cvssMin 0", Conditions{CVSSMin: floatPtr(0)}},
+		{"cvssMin 10", Conditions{CVSSMin: floatPtr(10)}},
+		{"cvssMax 10", Conditions{CVSSMax: floatPtr(10)}},
+		{"cvss min==max", Conditions{CVSSMin: floatPtr(7), CVSSMax: floatPtr(7)}},
+		{"epssMin 0.5", Conditions{EPSSMin: floatPtr(0.5)}},
+		{"epss 0..1", Conditions{EPSSMin: floatPtr(0), EPSSMax: floatPtr(1)}},
+		{"packageAge 0", Conditions{PackageAge: intPtr(0)}},
+		{"cooldownDays 0", Conditions{CooldownDays: intPtr(0)}},
+		{"requireSlsaLevel 1", Conditions{RequireSLSALevel: intPtr(1)}},
+		{"requireSlsaLevel 4", Conditions{RequireSLSALevel: intPtr(4)}},
+		{"trustScore 0..100", Conditions{TrustScoreMin: intPtr(0), TrustScoreMax: intPtr(100)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateConditionBounds(tc.c); err != nil {
+				t.Fatalf("expected accept, got %v", err)
+			}
+		})
+	}
+}
+
+// TestRangeErrorMessageCarriesRange pins the human-readable shape. The
+// CLI never decodes the envelope's `fields`, so the range has to live in
+// the message itself.
+func TestRangeErrorMessageCarriesRange(t *testing.T) {
+	cases := []struct {
+		name string
+		c    Conditions
+		want string
+	}{
+		{"cvss", Conditions{CVSSMin: floatPtr(999)}, "conditions.cvssMin must be between 0 and 10 (got 999)"},
+		{"epss", Conditions{EPSSMax: floatPtr(1.5)}, "conditions.epssMax must be between 0 and 1 (got 1.5)"},
+		{"packageAge", Conditions{PackageAge: intPtr(-1)}, "conditions.packageAge must be at least 0 (got -1)"},
+		{"slsa", Conditions{RequireSLSALevel: intPtr(0)}, "conditions.requireSlsaLevel must be between 1 and 4 (got 0)"},
+		{"min>max", Conditions{CVSSMin: floatPtr(7), CVSSMax: floatPtr(2)}, "conditions.cvssMin must be between 0 and 2 (got 7)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateConditionBounds(tc.c)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("message: got %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestPolicyNameCapIs512Runes(t *testing.T) {
+	ok := Policy{Name: strings.Repeat("é", 512), Mode: ModeBlock, Status: StatusEnabled, Conditions: Conditions{IsVulnerable: boolPtr(true)}}
+	if vs := policyRangeViolations(ok); len(vs) != 0 {
+		t.Fatalf("512-rune name must be accepted, got %v", vs)
+	}
+	long := ok
+	long.Name = strings.Repeat("é", 513)
+	vs := policyRangeViolations(long)
+	if len(vs) != 1 || vs[0].Field != "name" {
+		t.Fatalf("513-rune name must be rejected on field name, got %v", vs)
+	}
+	if got, want := vs[0].Error(), "name must be at most 512 characters (got 513)"; got != want {
+		t.Errorf("message: got %q, want %q", got, want)
+	}
+}
+
+// TestIntroducedRangeViolations pins the Update semantics without a
+// database: only violations the edit introduces count.
+func TestIntroducedRangeViolations(t *testing.T) {
+	base := Policy{Name: "pre-existing", Mode: ModeBlock, Status: StatusEnabled}
+	bad := base
+	bad.Conditions = Conditions{CVSSMin: floatPtr(999)}
+
+	t.Run("status flip keeps the same bad value", func(t *testing.T) {
+		next := bad
+		next.Status = StatusDisabled
+		if vs := introducedRangeViolations(bad, next); len(vs) != 0 {
+			t.Fatalf("expected no introduced violations, got %v", vs)
+		}
+	})
+	t.Run("new bad value on another field", func(t *testing.T) {
+		next := bad
+		next.Conditions.EPSSMin = floatPtr(5)
+		vs := introducedRangeViolations(bad, next)
+		if len(vs) != 1 || vs[0].Field != "conditions.epssMin" {
+			t.Fatalf("expected epssMin violation, got %v", vs)
+		}
+	})
+	t.Run("same field moved to a different bad value", func(t *testing.T) {
+		next := bad
+		next.Conditions.CVSSMin = floatPtr(500)
+		vs := introducedRangeViolations(bad, next)
+		if len(vs) != 1 || vs[0].Field != "conditions.cvssMin" {
+			t.Fatalf("expected cvssMin violation, got %v", vs)
+		}
+	})
+	t.Run("fixing the bad value", func(t *testing.T) {
+		next := bad
+		next.Conditions.CVSSMin = floatPtr(7)
+		if vs := introducedRangeViolations(bad, next); len(vs) != 0 {
+			t.Fatalf("expected none, got %v", vs)
+		}
+	})
+	t.Run("over-long name retained vs replaced", func(t *testing.T) {
+		prev := base
+		prev.Name = strings.Repeat("a", 600)
+		next := prev
+		next.Status = StatusDisabled
+		if vs := introducedRangeViolations(prev, next); len(vs) != 0 {
+			t.Fatalf("retained name must pass, got %v", vs)
+		}
+		next.Name = strings.Repeat("b", 600)
+		if vs := introducedRangeViolations(prev, next); len(vs) != 1 || vs[0].Field != "name" {
+			t.Fatalf("replacement over-long name must fail, got %v", vs)
+		}
+	})
+}
+
+func openBoundsTestStore(t *testing.T) (*pgstore.Store, *Store) {
+	t.Helper()
+	dsn := os.Getenv("CHAINSAW_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("CHAINSAW_DATABASE_URL not set; skipping database test")
+	}
+	db, err := pgstore.Open(dsn)
+	if err != nil {
+		t.Fatalf("open pgstore: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatalf("new policy store: %v", err)
+	}
+	orgID := "test-bounds-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+	t.Cleanup(func() {
+		_, _ = db.DB().Exec(`DELETE FROM policies WHERE org_id=?`, orgID)
+	})
+	return db, store.ForOrg(orgID)
+}
+
+func TestPolicyStoreCreateRejectsOutOfRangeConditions(t *testing.T) {
+	_, store := openBoundsTestStore(t)
+	cases := []struct {
+		name  string
+		c     Conditions
+		field string
+	}{
+		{"cvssMin 999", Conditions{CVSSMin: floatPtr(999)}, "conditions.cvssMin"},
+		{"cvssMin -1", Conditions{CVSSMin: floatPtr(-1)}, "conditions.cvssMin"},
+		{"cvssMin 10.1", Conditions{CVSSMin: floatPtr(10.1)}, "conditions.cvssMin"},
+		{"epssMin 2.0", Conditions{EPSSMin: floatPtr(2.0)}, "conditions.epssMin"},
+		{"cvss min>max", Conditions{CVSSMin: floatPtr(9), CVSSMax: floatPtr(1)}, "conditions.cvssMin"},
+		{"requireSlsaLevel 0", Conditions{RequireSLSALevel: intPtr(0)}, "conditions.requireSlsaLevel"},
+		{"requireSlsaLevel 99", Conditions{RequireSLSALevel: intPtr(99)}, "conditions.requireSlsaLevel"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := store.Create(Policy{
+				Name:       "bad " + tc.name,
+				Precedence: 100 + i,
+				Mode:       ModeBlock,
+				Status:     StatusEnabled,
+				Conditions: tc.c,
+			})
+			var re RangeError
+			if !errors.As(err, &re) {
+				t.Fatalf("expected RangeError, got %v", err)
+			}
+			if re.Field != tc.field {
+				t.Errorf("field: got %q, want %q", re.Field, tc.field)
+			}
+		})
+	}
+	rows, err := store.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("no out-of-range policy may be persisted, found %d", len(rows))
+	}
+}
+
+func TestPolicyStoreCreateAcceptsBoundaryValues(t *testing.T) {
+	_, store := openBoundsTestStore(t)
+	cases := []struct {
+		name string
+		c    Conditions
+	}{
+		{"cvssMin 0", Conditions{CVSSMin: floatPtr(0)}},
+		{"cvssMax 10", Conditions{CVSSMax: floatPtr(10)}},
+		{"epssMin 0.5", Conditions{EPSSMin: floatPtr(0.5)}},
+		{"requireSlsaLevel 4", Conditions{RequireSLSALevel: intPtr(4)}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.Create(Policy{
+				Name:       "ok " + tc.name,
+				Precedence: 200 + i,
+				Mode:       ModeBlock,
+				Status:     StatusEnabled,
+				Conditions: tc.c,
+			}); err != nil {
+				t.Fatalf("expected accept, got %v", err)
+			}
+		})
+	}
+}
+
+// TestPolicyStoreUpdateGrandfathersPreexistingViolation seeds a row that
+// predates the bound (written straight to SQL, as every pre-A1 row was)
+// and proves that a status-only edit still saves while an edit that adds
+// a NEW out-of-range value is refused.
+func TestPolicyStoreUpdateGrandfathersPreexistingViolation(t *testing.T) {
+	db, store := openBoundsTestStore(t)
+	created, err := store.Create(Policy{
+		Name:       "legacy row",
+		Precedence: 300,
+		Mode:       ModeBlock,
+		Status:     StatusEnabled,
+		Conditions: Conditions{CVSSMin: floatPtr(7)},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := db.DB().Exec(`UPDATE policies SET conditions=? WHERE id=?`, `{"cvssMin":999}`, created.ID); err != nil {
+		t.Fatalf("seed legacy out-of-range row: %v", err)
+	}
+	legacy, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if legacy.Conditions.CVSSMin == nil || *legacy.Conditions.CVSSMin != 999 {
+		t.Fatalf("seed did not land: %+v", legacy.Conditions)
+	}
+
+	flipped := legacy
+	flipped.Status = StatusDisabled
+	if _, err := store.Update(created.ID, flipped); err != nil {
+		t.Fatalf("status-only update of a pre-existing out-of-range row must succeed, got %v", err)
+	}
+	if err := store.SetStatus(created.ID, StatusEnabled); err != nil {
+		t.Fatalf("SetStatus must not trip the bound: %v", err)
+	}
+
+	worse := legacy
+	worse.Conditions.EPSSMin = floatPtr(5)
+	_, err = store.Update(created.ID, worse)
+	var re RangeError
+	if !errors.As(err, &re) {
+		t.Fatalf("update introducing a new out-of-range value must fail with RangeError, got %v", err)
+	}
+	if re.Field != "conditions.epssMin" {
+		t.Errorf("field: got %q, want conditions.epssMin", re.Field)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Conditions.EPSSMin != nil {
+		t.Fatalf("rejected update must not persist: %+v", got.Conditions)
+	}
+}
+
+// TestPolicyStoreAcceptsLongScopedExceptionName: buildExceptionPolicy
+// names rows "Exception: <pkg>@<version>" and scoped npm names reach 214
+// characters, so the cap is 512 runes, not 200.
+func TestPolicyStoreAcceptsLongScopedExceptionName(t *testing.T) {
+	_, store := openBoundsTestStore(t)
+	scoped := "@" + strings.Repeat("s", 100) + "/" + strings.Repeat("p", 113) // 215 chars, over the npm 214 limit
+	name := "Exception: " + scoped + "@1.0.0"
+	if _, err := store.Create(Policy{
+		Name:       name,
+		Precedence: 400,
+		Mode:       ModeAllow,
+		Status:     StatusEnabled,
+		Kind:       KindException,
+		Identifier: Identifier{TargetPackageName: scoped, TargetPackageRepo: "npmjs", TargetPackageVersion: "1.0.0"},
+	}); err != nil {
+		t.Fatalf("scoped exception name (%d chars) must be accepted: %v", len(name), err)
+	}
+	_, err := store.Create(Policy{
+		Name:       strings.Repeat("n", 513),
+		Precedence: 401,
+		Mode:       ModeBlock,
+		Status:     StatusEnabled,
+		Conditions: Conditions{IsVulnerable: boolPtr(true)},
+	})
+	var re RangeError
+	if !errors.As(err, &re) || re.Field != "name" {
+		t.Fatalf("513-rune name must be rejected with RangeError on name, got %v", err)
+	}
+}

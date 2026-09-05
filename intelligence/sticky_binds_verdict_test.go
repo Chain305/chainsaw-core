@@ -73,6 +73,15 @@ func npmReport(v string) *Report {
 func TestStickyPublisherChangedBindsTheVerdict(t *testing.T) {
 	prior := npmReport("1")
 	prior.SupplyChain.PublisherChanged = boolp(true)
+	// The evidence travels with the bool. provider_metadiff derives
+	// `changed` FROM these lists, so a true without them is a shape the
+	// provider cannot emit; a prior carrying one is a fact whose evidence
+	// was dropped in transit, and applyStickySupplyChain now declines to
+	// revive it (TestPublisherChangedRequiresEvidence covers that half).
+	// Without them this fixture would assert the row may claim a publisher
+	// change its own verdict cannot see, which is the inverse of the
+	// invariant this test exists to hold.
+	prior.SupplyChain.PublisherAdded = []string{"new-maintainer"}
 
 	// The defect, reproduced: evaluate the in-flight report as it arrives
 	// from a Tier-1-only refresh, with the revival happening afterwards.

@@ -145,6 +145,13 @@ var notApplicableCodes = map[string]bool{
 	// comes from the marked, unevaluated report, not from the coverage
 	// gate. See core/intelligence/version_evaluable.go.
 	"version_not_evaluable": true,
+	// coordinate_malformed: the name-side twin. The package string is one
+	// no registry in that ecosystem can serve (`<script>alert(1)</script>`
+	// on npm, `:x` on Maven, an uppercase Go host). Same reasoning: a fact
+	// about the coordinate, not the source, so not_applicable; the refusal
+	// that IS warranted comes from the unknown verdict, not from this gate.
+	// See MalformedCoordinateReason in core/intelligence/version_evaluable.go.
+	"coordinate_malformed": true,
 }
 
 // StatusForWarnCode normalizes a raw provider warn code into a Status.

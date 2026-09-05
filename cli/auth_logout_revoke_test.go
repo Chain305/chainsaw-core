@@ -107,7 +107,7 @@ func runLogoutWithStoredToken(t *testing.T, server, token string, asJSON bool) (
 // TestAuthLogout_RevokesTheServerSideKey is the headline: the key the CLI was
 // authenticating with must not survive the logout.
 func TestAuthLogout_RevokesTheServerSideKey(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 	url, deleted := logoutKeyServer(t, []tokenItem{
 		{ID: "ak-someoneelse", Name: "other", Prefix: "otherpfx", Active: true},
 		{ID: testAPIKeyID, Name: "cli:laptop@2026-08-22", Prefix: testAPIKeyPrefix, Active: true},
@@ -136,7 +136,7 @@ func TestAuthLogout_RevokesTheServerSideKey(t *testing.T) {
 // contract. A logout that can fail is a logout you cannot rely on, so an
 // unreachable server costs a warning and nothing else.
 func TestAuthLogout_UnreachableServerStillLogsOutLocally(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 	// A port nothing is listening on: connection refused, immediately.
 	const dead = "http://127.0.0.1:1"
 
@@ -170,7 +170,7 @@ func TestAuthLogout_UnreachableServerStillLogsOutLocally(t *testing.T) {
 // out after revoking from the dashboard, must be quiet — not a second DELETE
 // and not a warning about a key that is already dead.
 func TestAuthLogout_AlreadyRevokedKeyIsNotAnError(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 	revokedAt := time.Now().Add(-time.Hour)
 	url, deleted := logoutKeyServer(t, []tokenItem{
 		{ID: testAPIKeyID, Name: "cli:laptop@2026-08-22", Prefix: testAPIKeyPrefix, RevokedAt: &revokedAt},
@@ -192,7 +192,7 @@ func TestAuthLogout_AlreadyRevokedKeyIsNotAnError(t *testing.T) {
 // there is nothing to revoke and nothing to warn about. This also keeps the
 // common case free of a network round trip.
 func TestAuthLogout_SessionJWTMakesNoServerCall(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
@@ -239,7 +239,7 @@ func TestAuthLogout_DoesNotRevokeATokenItNeverStored(t *testing.T) {
 // TestAuthLogout_JSONReportsServerKeyState: the machine-readable half. A CI
 // runner tearing itself down needs to know whether it left a key behind.
 func TestAuthLogout_JSONReportsServerKeyState(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	t.Run("revoked", func(t *testing.T) {
 		url, _ := logoutKeyServer(t, []tokenItem{

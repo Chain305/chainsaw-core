@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -36,6 +37,14 @@ const (
 	lintExitClean   = 0
 	lintExitWarning = 1
 	lintExitError   = 2
+
+	// lintTypeMatchAllThreshold / lintTypeNeverFiresThreshold are the two
+	// finding types the range classifier produces, one per
+	// policy.RangeEffect. match-all-threshold is the name lint has
+	// published since A1 and is unchanged; never-fires-threshold is new,
+	// because until this change lint had no way to say it.
+	lintTypeMatchAllThreshold   = "match-all-threshold"
+	lintTypeNeverFiresThreshold = "never-fires-threshold"
 )
 
 // policyScanIncompleteExitCode — the policy tree could not be fully inspected:
@@ -115,7 +124,7 @@ var policyLintCmd = &cobra.Command{
 	Long: `Scan policy JSON/YAML files for rules that depend on semantics that have
 recently shifted under them.
 
-Two checks run today:
+Three checks run today:
 
   1. Standalone codesmell (ERROR): a rule that gates ONLY on one of the
      five demoted Wave-3 codesmell signals (UsesEval, NetworkAccess,
@@ -129,6 +138,16 @@ Two checks run today:
      or false" as the old two-state shape allowed. Operators may have
      intended either reading; lint flags the call site so they can
      verify intent.
+
+  3. Degenerate numeric thresholds (ERROR or WARNING): a bounded
+     condition (cvssMin/Max, epssMin/Max, trustScoreMin/Max,
+     requireSlsaLevel, packageAge, cooldownDays, or a min above its
+     paired max) whose value the evaluator can never satisfy, or always
+     satisfies. ERROR when the value is outside the range the API
+     enforces on save (cvssMin: 999); WARNING when it is legal but
+     degenerate (cvssMin: 0 matches every package, including ones with
+     no CVE). This is the same classifier "chainsaw policy audit" runs
+     over live rows, so a file and the row it becomes cannot disagree.
 
 Pointing --input at a DIRECTORY is a sweep: the walker skips .git,
 node_modules, vendor, .gradle, target, build, dist and .venv/venv, and any
@@ -643,7 +662,103 @@ func lintPolicy(file string, e rawPolicyEntry) []lintFinding {
 		out = append(out, *f)
 	}
 	out = append(out, checkThreeStateNilAsFalse(file, e)...)
+	out = append(out, checkMatchAllThreshold(file, e)...)
 	return out
+}
+
+// checkMatchAllThreshold reports every numeric condition the evaluator can
+// never satisfy, or always satisfies.
+//
+// It delegates the whole decision to policy.AuditPolicyRanges — the same
+// function `chainsaw policy audit` and Store.AuditRanges call — for the same
+// reason checkStandaloneCodesmell delegates to
+// policy.StandaloneContextOnlyViolation: a policy FILE and the live ROW it
+// becomes must not classify the same threshold differently. Only the
+// rendering into lint's finding shape is local.
+//
+// The look-alike this replaced was a hand-rolled two-field check: it flagged
+// `cvssMin: 0` and `epssMin: 0` and nothing else, so seven of the classifier's
+// nine bounded fields were invisible on the file path, and the whole
+// never-fires half of the classification (`cvssMin: 999` — a value
+// Store.Create refuses outright) linted clean. It also could not tell a
+// match-all that decides the policy's whole behaviour from one sitting beside
+// a real narrowing condition, because AND-ed conditions were not in its model.
+//
+// No value is reported twice. The classifier reports a min>max pair on the MIN
+// field alone (never once per half), and it compares a pair only when both
+// halves are individually legal — which is disjoint from the per-field check,
+// since that one fires only on a value at or outside its signal's domain. Lint
+// adds no range check of its own on top, so one bad threshold stays one
+// finding; TestPolicyLint_RangeAuditAgreesWithClassifier pins it.
+func checkMatchAllThreshold(file string, e rawPolicyEntry) []lintFinding {
+	audit := policy.AuditPolicyRanges("", []policy.Policy{e.policy})
+	out := make([]lintFinding, 0, len(audit))
+	for _, a := range audit {
+		out = append(out, lintFinding{
+			File:       file,
+			Line:       e.line,
+			Rule:       e.name,
+			Severity:   lintSeverityForRangeAudit(a.Severity),
+			Type:       lintTypeForRangeEffect(a.Effect),
+			Message:    rangeAuditMessage(a),
+			Suggestion: a.Suggestion,
+		})
+	}
+	return out
+}
+
+// lintSeverityForRangeAudit maps the classifier's severity onto lint's.
+//
+// The two vocabularies coincide today — both are exactly {error, warning},
+// and they mean the same thing: error is a value Store.Create would refuse,
+// warning is a legal value that is nevertheless degenerate. The mapping is
+// still written out rather than passed through, so a severity added to the
+// classifier later cannot arrive as a string lint's exit ladder does not
+// count: runPolicyLint's tally switch matches only the two constants, and an
+// unrecognised third value would print in the findings list while leaving the
+// exit code at 0. Anything unrecognised therefore lands on WARNING — reported
+// and non-zero, never silently clean, and never escalated to a CI-breaking
+// error on lint's guess.
+func lintSeverityForRangeAudit(severity string) string {
+	if severity == policy.RangeAuditSeverityError {
+		return lintFindingError
+	}
+	return lintFindingWarning
+}
+
+// lintTypeForRangeEffect names the finding after what the value DOES, which
+// is the distinction an operator acts on: a never-fires rule is dead and a
+// match-all rule is over-broad, and the two need opposite edits.
+func lintTypeForRangeEffect(effect string) string {
+	if effect == policy.RangeEffectNeverFires {
+		return lintTypeNeverFiresThreshold
+	}
+	return lintTypeMatchAllThreshold
+}
+
+// rangeAuditMessage renders one classifier finding as a lint message.
+//
+// The consequence is the classifier's own sentence, verbatim: it is derived
+// from the evaluator's compare and from this policy's kind, mode and status,
+// so quoting it is what keeps lint and audit saying the same thing about the
+// same policy. Only the "rule sets <field>: <value>" lead-in is lint's, and
+// it uses the classifier's dotted field name so a finding can be grepped
+// across both surfaces.
+func rangeAuditMessage(a policy.RangeAuditFinding) string {
+	lead := fmt.Sprintf("rule sets %s: %s", a.Field, formatRangeValue(a.Value))
+	if a.Consequence == "" {
+		// Defensive: the classifier returns an empty consequence only for an
+		// effect it has no sentence for. Say what is known rather than
+		// emitting a finding with no reason attached.
+		return fmt.Sprintf("%s, which is outside the valid range (%s)", lead, a.ValidRange)
+	}
+	return lead + " — " + a.Consequence
+}
+
+// formatRangeValue renders a threshold the way it was authored: 0, 7, 0.1,
+// 999 — no trailing zeros, no exponent for the magnitudes these fields take.
+func formatRangeValue(v float64) string {
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // checkStandaloneCodesmell reports the same finding the save-time validator

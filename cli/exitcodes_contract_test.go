@@ -30,6 +30,7 @@ package cli
 // (so its membership tracks the constants too).
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -298,5 +299,36 @@ func TestDoctorUpgradeCheckExitCodesMatchPublishedCaveat(t *testing.T) {
 		if got := r.ExitCode(); got != tc.want {
 			t.Errorf("doctor --upgrade-check %s exits %d; the published ExitBlocked/ExitOpError caveats say %d", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestDoctorStrictLongPublishesExitLadder pins the `--strict` exit ladder that
+// `doctor --help` publishes to the constants in doctor_strict.go. Each check
+// pairs the number with the words that follow it, so the test cannot pass on
+// a stray "1" or "10" elsewhere in the help text — a bare Contains("1") is
+// vacuous. If a constant moves, the sentence in doctor.go Long must move
+// with it, or CI readers are told the wrong number.
+func TestDoctorStrictLongPublishesExitLadder(t *testing.T) {
+	// Long is a wrapped raw string; collapse the wrapping so a phrase that
+	// straddles a line break still matches.
+	long := strings.Join(strings.Fields(newDoctorCmd().Long), " ")
+	for _, want := range []string{
+		fmt.Sprintf("%d compliant", doctorExitOK),
+		fmt.Sprintf("%d egress probe inconclusive", doctorExitEgressUnknown),
+		fmt.Sprintf("%d drift", doctorExitDrift),
+		fmt.Sprintf("%d direct egress", doctorExitDirectReachable),
+		fmt.Sprintf("%d installed package manager", doctorExitUnsupported),
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("doctor Long does not publish %q; the --strict exit ladder in doctor.go has drifted from doctor_strict.go", want)
+		}
+	}
+	// The ladder must sit in the --strict paragraph, and must tell the reader
+	// that --upgrade-check's 0/1/2 ladder is a different contract.
+	if !strings.Contains(long, "--no-egress-probe reports \"skipped\"") {
+		t.Errorf("doctor Long must say the deliberate --no-egress-probe skip never trips exit %d", doctorExitEgressUnknown)
+	}
+	if !strings.Contains(long, "The --upgrade-check ladder below is different") {
+		t.Errorf("doctor Long must warn that the --upgrade-check 0/1/2 ladder is a separate contract from --strict")
 	}
 }

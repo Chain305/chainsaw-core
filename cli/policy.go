@@ -3,9 +3,11 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1013,11 +1015,18 @@ func runPolicyExport(cmd *cobra.Command, _ []string) error {
 	case "json":
 		data, err = json.MarshalIndent(jsonArray(listResp.Policies), "", "  ")
 	default:
-		// Convert JSON → YAML via round-trip
+		// Convert JSON → YAML via round-trip. Decode with yaml.v3, not
+		// encoding/json: json.Unmarshal into `any` turns every number into
+		// float64, so an int64 precedence such as -1787403521042488196 was
+		// rendered as `-1.7874035210424883e+18` and the re-import POSTed a
+		// float the server's `Precedence int` rejects (P9F-051 / B7).
+		// yaml.v3 parses JSON flow syntax and keeps integers as int/int64.
+		// json.Decoder.UseNumber is not an option either — yaml.v3 marshals
+		// json.Number as a quoted string, which the server also rejects.
 		var policies []any
 		for _, raw := range listResp.Policies {
 			var p any
-			if jerr := json.Unmarshal(raw, &p); jerr == nil {
+			if yerr := yaml.Unmarshal(raw, &p); yerr == nil {
 				policies = append(policies, p)
 			}
 		}
@@ -1267,19 +1276,44 @@ func runPolicyImport(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
 	if dryRun {
+		// --dry-run is the "will this work?" affordance. It must not answer
+		// "would import N" for a file that cannot be imported faithfully
+		// (P9F-UD-05), so it runs the same fidelity check the real path does.
+		refused := 0
 		fmt.Fprintf(out, "Would import %d policies (dry-run):\n", len(policies))
 		for _, p := range policies {
+			if ferr := checkPolicyNumberFidelity(file, p); ferr != nil {
+				fmt.Fprintf(out, "  REFUSE %v: %v\n", p["name"], ferr)
+				refused++
+				continue
+			}
 			fmt.Fprintf(out, "  - %v (mode: %v, status: %v)\n", p["name"], p["mode"], p["status"])
+		}
+		if refused > 0 {
+			return fmt.Errorf("policy import would fail: %d of %d policies refused (see above)", refused, len(policies))
 		}
 		return nil
 	}
 
-	created, skipped := 0, 0
+	created, skipped, refused := 0, 0, 0
 	for _, p := range policies {
 		// Strip server-assigned fields so the server generates new ones.
 		delete(p, "id")
 		delete(p, "createdAt")
 		delete(p, "updatedAt")
+
+		// P9F-UD-05: an export taken before commit 72445469 renders int64
+		// precedence in float notation. yaml.v3 decodes it to float64 and
+		// encoding/json re-emits it as a DIFFERENT plain integer, which the
+		// server accepts — the row imports with a corrupted precedence and
+		// nothing anywhere says so. The original cannot be recovered (256
+		// int64 values share that float64), so refuse the row loudly rather
+		// than guess. See policy_import_repair.go.
+		if ferr := checkPolicyNumberFidelity(file, p); ferr != nil {
+			fmt.Fprintf(out, "  refuse %v: %v\n", p["name"], ferr)
+			refused++
+			continue
+		}
 
 		var resp map[string]any
 		if cerr := client.Post("/api/policies", p, &resp); cerr != nil {
@@ -1294,10 +1328,192 @@ func runPolicyImport(cmd *cobra.Command, args []string) error {
 	// in CI. Treat created==0 with skipped>0 as a hard failure: warn and
 	// exit non-zero. Partial success (some created, some skipped) keeps the
 	// success line. An empty input file (skipped==0) stays a non-error.
-	if created == 0 && skipped > 0 {
-		fmt.Fprintf(out, "No policies imported — all %d skipped\n", skipped)
-		return fmt.Errorf("policy import failed: 0 created, %d skipped", skipped)
+	if created == 0 && skipped+refused > 0 {
+		fmt.Fprintf(out, "No policies imported — all %d skipped\n", skipped+refused)
+		return fmt.Errorf("policy import failed: 0 created, %d skipped", skipped+refused)
+	}
+	// A refused row is a policy the user asked for and did not get. Partial
+	// success on a server rejection stays exit 0 (unchanged), but a fidelity
+	// refusal must never be reported as a plain success — that silence is the
+	// defect P9F-UD-05 is about.
+	if refused > 0 {
+		fmt.Fprintf(out, "Imported %d policies (%d skipped, %d refused)\n", created, skipped, refused)
+		return fmt.Errorf("policy import incomplete: %d of %d policies in %s were refused before being sent because they cannot be imported faithfully as written (see the refuse lines above)",
+			refused, len(policies), file)
 	}
 	printSuccess(out, cmd, fmt.Sprintf("Imported %d policies (%d skipped)", created, skipped))
 	return nil
+}
+
+// ── audit ─────────────────────────────────────────────────────────────────────
+
+// policyAuditSchemaVersion identifies the wire shape of the
+// `policy audit` --json envelope. Bumped only when a field is removed or
+// its meaning changes; purely-additive fields keep the same version.
+const policyAuditSchemaVersion = "1.0"
+
+type policyAuditReport struct {
+	SchemaVersion string `json:"schemaVersion"`
+	// Policies is the number of live rows inspected, so a clean report
+	// can be told apart from a report over an empty org.
+	Policies int                        `json:"policies"`
+	Errors   int                        `json:"errors"`
+	Warnings int                        `json:"warnings"`
+	Findings []policy.RangeAuditFinding `json:"findings"`
+}
+
+var policyAuditCmd = &cobra.Command{
+	Use:   "audit",
+	Short: "Report live policies whose thresholds can never fire, or fire on everything",
+	Long: `Inspect this org's LIVE policies for numeric thresholds the evaluator can
+never satisfy, or always satisfies.
+
+(Unrelated to ` + "`chainsaw audit`" + `, which reads the audit-event log.
+` + "`policy lint`" + ` asks the same kind of question of policy FILES on disk;
+this asks it of the rows the server is enforcing right now.)
+
+Two shapes, and they are opposite problems:
+
+  never fires        e.g. cvssMin: 999. No package can score above 10, and a
+                     policy's conditions are AND-ed, so a BLOCK policy carrying
+                     it blocks nothing — while every screen that lists it reads
+                     "we refuse criticals".
+
+  matches everything e.g. cvssMin: 0, which every package satisfies including
+                     ones with no CVE at all (they score 0). If nothing else on
+                     the policy narrows it, a BLOCK policy carrying it blocks
+                     every request that reaches it.
+
+Each finding names the row, the field, the value, the valid range, and what
+the policy actually does — derived from the evaluator's own comparison, which
+is quoted in the finding.
+
+Policy writes have been bounds-checked since v0.21.19, but only for the
+violations a write INTRODUCES: an existing row can still be disabled,
+approved or rolled back without being rewritten, which is deliberate and is
+also why bad rows written earlier survive untouched. This command is how you
+find them.
+
+This command is READ-ONLY and does not repair anything. It deliberately has
+no --fix: rewriting a block policy's threshold changes what that policy
+refuses, and that is an operator's decision, not a sweep's. Fix a row with
+` + "`chainsaw policy create`" + ` / the policy API once you have decided what it
+was meant to say.
+
+Exit codes:
+  0  no out-of-range or match-all thresholds
+  1  warnings only — values inside the accepted range that still match every
+     package (cvssMin: 0 and friends)
+  2  any error — a value outside the range the API accepts today
+
+Examples:
+  chainsaw policy audit
+  chainsaw policy audit --json`,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE:         runPolicyAudit,
+}
+
+func init() {
+	policyAuditCmd.Flags().Bool("json", false, "Output as JSON")
+	policyCmd.AddCommand(policyAuditCmd)
+}
+
+func runPolicyAudit(cmd *cobra.Command, _ []string) error {
+	client := newClient()
+	if client.baseURL == "" {
+		return errServerNotConfigured(cmd)
+	}
+
+	// Decoded as policy.Policy, not policyItem: the audit needs the typed
+	// Conditions, the Kind (an exception's conditions are never read by the
+	// evaluator) and the Identifier/Scope that decide whether a match-all
+	// threshold makes the policy match everything or merely makes that one
+	// condition inert.
+	var resp struct {
+		Policies []policy.Policy `json:"policies"`
+	}
+	if err := client.Get("/api/policies", &resp); err != nil {
+		return err
+	}
+
+	// The org is not on the wire — /api/policies answers for the caller's
+	// own org, taken from the token identity — so findings carry an empty
+	// orgId here. The store-side entry point (policy.Store.AuditRanges)
+	// stamps the real one.
+	findings := policy.AuditPolicyRanges("", resp.Policies)
+	report := policyAuditReport{
+		SchemaVersion: policyAuditSchemaVersion,
+		Policies:      len(resp.Policies),
+		// Empty slice, never nil: `jq '.findings[]'` errors on null and a
+		// clean org is the common case for a command built to gate CI.
+		Findings: append([]policy.RangeAuditFinding{}, findings...),
+	}
+	for _, f := range findings {
+		switch f.Severity {
+		case policy.RangeAuditSeverityError:
+			report.Errors++
+		case policy.RangeAuditSeverityWarning:
+			report.Warnings++
+		}
+	}
+
+	out := outWriterOr(cmd, cmd.OutOrStdout())
+	if useJSON(cmd) {
+		if err := encodeJSON(out, report); err != nil {
+			return err
+		}
+	} else {
+		printPolicyAuditText(out, report)
+	}
+
+	// Same ladder as `policy lint`, and for the same reason: a CI gate has
+	// to tell "your policies have problems" from "they have smells". The
+	// result is printed before the coded error so the operator sees the
+	// findings, not just a number.
+	switch {
+	case report.Errors > 0:
+		return &ExitCodeError{Code: lintExitError}
+	case report.Warnings > 0:
+		return &ExitCodeError{Code: lintExitWarning}
+	}
+	return nil
+}
+
+func printPolicyAuditText(out io.Writer, r policyAuditReport) {
+	fmt.Fprintf(out, "Inspected %d live policy row(s)\n", r.Policies)
+	fmt.Fprintf(out, "Findings: %d error(s), %d warning(s)\n\n", r.Errors, r.Warnings)
+	if len(r.Findings) == 0 {
+		fmt.Fprintln(out, "No out-of-range or match-all thresholds found.")
+		return
+	}
+	for _, f := range r.Findings {
+		fmt.Fprintf(out, "%s  %s (%s)\n", strings.ToUpper(f.Severity), f.PolicyName, f.PolicyID)
+		fmt.Fprintf(out, "  mode=%s status=%s", f.Mode, f.Status)
+		if f.Kind != "" {
+			fmt.Fprintf(out, " kind=%s", f.Kind)
+		}
+		if f.OrgID != "" {
+			fmt.Fprintf(out, " org=%s", f.OrgID)
+		}
+		fmt.Fprintln(out)
+		// The range is worded differently per severity on purpose: for a
+		// warning the value IS inside the accepted range, and printing a
+		// bare "valid: 0 to 10" next to `cvssMin = 0` reads as a
+		// contradiction rather than as the point.
+		bound := fmt.Sprintf("outside the accepted range %s", f.ValidRange)
+		if f.Severity == policy.RangeAuditSeverityWarning {
+			bound = fmt.Sprintf("inside the accepted range %s, but degenerate", f.ValidRange)
+		}
+		fmt.Fprintf(out, "  %s = %s   (%s)\n", f.Field, strconv.FormatFloat(f.Value, 'f', -1, 64), bound)
+		fmt.Fprintf(out, "  effect: %s\n", f.Effect)
+		fmt.Fprintf(out, "  what it does: %s\n", f.Consequence)
+		fmt.Fprintf(out, "  why: %s\n", f.Comparison)
+		if f.Suggestion != "" {
+			fmt.Fprintf(out, "  suggestion: %s\n", f.Suggestion)
+		}
+		fmt.Fprintln(out)
+	}
+	fmt.Fprintln(out, "Nothing was changed. Editing a threshold changes what the policy refuses,")
+	fmt.Fprintln(out, "so decide each row deliberately rather than rewriting them in bulk.")
 }

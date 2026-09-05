@@ -405,12 +405,29 @@ func verdictDisplay(v string) string {
 
 // renderEvaluation prints a single Evaluation to stdout in the human
 // text form documented in chainsaw intel package --help.
-func renderEvaluation(w io.Writer, ev *v1Evaluation) {
+//
+// federatedAbsence is the A7 display override: when a federated registry
+// (repo1, proxy.golang.org) did not have the coordinate, every category
+// score is a 100 base rather than a measurement, so the grade line is
+// replaced by NOT EVALUATED and the reason. The wire verdict is unchanged
+// and --json still prints exactly what the server said.
+func renderEvaluation(w io.Writer, ev *v1Evaluation, federatedAbsence string) {
 	if ev == nil {
 		fmt.Fprintln(w, "No evaluation available for this package.")
 		return
 	}
 	fmt.Fprintf(w, "%s %s (%s)\n", ev.Key.Package, ev.Key.Version, ev.Key.Ecosystem)
+	if federatedAbsence != "" {
+		fmt.Fprintf(w, "Verdict: %-8s Overall: -  (not scored)\n", "NOT EVALUATED")
+		fmt.Fprintf(w, "Reason:  %s\n", federatedAbsence)
+		if ev.EngineVersion != "" {
+			fmt.Fprintf(w, "Engine:  v%s\n", ev.EngineVersion)
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "No category scores are shown because no registry metadata was")
+		fmt.Fprintln(w, "retrieved; a grade here would be a default, not a measurement.")
+		return
+	}
 	fmt.Fprintf(w, "Verdict: %-8s Overall: %d (%s)\n",
 		verdictDisplay(ev.Verdict), ev.RolledUp.Overall, gradeFor(ev.RolledUp.Overall))
 	if ev.EngineVersion != "" {

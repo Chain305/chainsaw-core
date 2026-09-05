@@ -143,7 +143,14 @@ func TestProjectToRiskInput_FixAvailable(t *testing.T) {
 func TestProjectToRiskInput_PublisherChangedPointerDeref(t *testing.T) {
 	changed := true
 	r := &Report{
-		SupplyChain: SupplyChainSection{PublisherChanged: &changed},
+		// With evidence: the projection fires on the added/removed names
+		// rather than on the bare bool, so that a fact whose evidence was
+		// dropped in transit cannot bind a verdict. The evidence-less case
+		// is covered by TestPublisherChangedRequiresEvidence.
+		SupplyChain: SupplyChainSection{
+			PublisherChanged: &changed,
+			PublisherAdded:   []string{"new-maintainer"},
+		},
 	}
 	if !ProjectToRiskInput(r).PublisherChanged {
 		t.Fatalf("PublisherChanged pointer=true should produce true")

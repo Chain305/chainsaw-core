@@ -104,9 +104,33 @@ func applyStickySupplyChain(next *Report, prior *Report) {
 	// the package to clean. Never "once true, always true" — that would
 	// leave a package flagged forever after one legitimate maintainer
 	// handover, with no path back.
+	//
+	// AND IT TRAVELS WITH ITS EVIDENCE, for the same reason VersionAnomaly
+	// does below. Carrying the bool alone is what put `publisherChanged:
+	// true` with an empty added AND removed list on 30 of the 66 flagged
+	// production rows — `requests 2.31.0` among them, capped at WARN 40 on
+	// a maintainer change nobody can name. provider_metadiff computes
+	// `changed := len(added) > 0 || len(removed) > 0`, so it can never
+	// emit true with empty lists; every such row was minted here.
 	if sc.PublisherChanged == nil && ps.PublisherChanged != nil {
 		v := *ps.PublisherChanged
-		sc.PublisherChanged = &v
+		hasEvidence := len(ps.PublisherAdded) > 0 || len(ps.PublisherRemoved) > 0
+		// A TRUE is only revived together with the names that justify it.
+		// A FALSE carries freely: it is an observation of absence and has
+		// no evidence to lose. Reviving a bare true is what produced the
+		// evidence-less rows, and it would ALSO break the P8-71 invariant
+		// that the stored report and the stored verdict describe the same
+		// fact — the row would claim a publisher change the evaluation
+		// could not see.
+		if !v || hasEvidence {
+			sc.PublisherChanged = &v
+			if len(sc.PublisherAdded) == 0 && len(ps.PublisherAdded) > 0 {
+				sc.PublisherAdded = append([]string(nil), ps.PublisherAdded...)
+			}
+			if len(sc.PublisherRemoved) == 0 && len(ps.PublisherRemoved) > 0 {
+				sc.PublisherRemoved = append([]string(nil), ps.PublisherRemoved...)
+			}
+		}
 	}
 
 	// VersionAnomaly travels WITH ITS FLAGS, as one fact.
@@ -124,11 +148,21 @@ func applyStickySupplyChain(next *Report, prior *Report) {
 	// explicit incoming bool — true or false — is an observation, and
 	// reviving stale flags underneath an explicit `false` would fire the
 	// signal on a package the latest scan just cleared.
+	// Symmetric with PublisherChanged above: a TRUE is only revived
+	// together with the flags that justify it. Carrying it alone left the
+	// stored row claiming an anomaly its own verdict never saw — the
+	// signal fires on `len(flags) > 0`, so a flagless true is inert for
+	// enforcement and misleading on screen. Measured 2026-09-05: 117 of
+	// the 1,157 rows carrying versionAnomaly=true had an empty flag list.
+	// A FALSE still carries freely; an observation of absence has no
+	// evidence to lose.
 	if sc.VersionAnomaly == nil && ps.VersionAnomaly != nil {
 		v := *ps.VersionAnomaly
-		sc.VersionAnomaly = &v
-		if len(sc.VersionAnomalyFlags) == 0 && len(ps.VersionAnomalyFlags) > 0 {
-			sc.VersionAnomalyFlags = append([]string(nil), ps.VersionAnomalyFlags...)
+		if !v || len(ps.VersionAnomalyFlags) > 0 {
+			sc.VersionAnomaly = &v
+			if len(sc.VersionAnomalyFlags) == 0 && len(ps.VersionAnomalyFlags) > 0 {
+				sc.VersionAnomalyFlags = append([]string(nil), ps.VersionAnomalyFlags...)
+			}
 		}
 	}
 

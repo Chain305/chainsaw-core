@@ -63,15 +63,14 @@ var npmPopularSeed []byte
 //go:embed seeds/pypi_popular.txt
 var pypiPopularSeed []byte
 
-// knownMaliciousSeed is the offline known-malicious FLOOR — a curated set of the
-// famous, well-documented supply-chain attacks (event-stream/flatmap-stream,
-// ua-parser-js, node-ipc, the PyPI colorama/dateutil/jellyfish typosquat-malware).
-// Version-exact so it never false-positives a clean release. The full
-// OpenSSF malicious-packages DB is too large to embed; a signal bundle enriches
-// this floor when present.
-//
-//go:embed seeds/known_malicious.json
-var knownMaliciousSeed []byte
+// The offline known-malicious FLOOR — a curated set of the famous,
+// well-documented supply-chain attacks (event-stream/flatmap-stream,
+// ua-parser-js, node-ipc, the PyPI colorama/dateutil/jellyfish
+// typosquat-malware) — is embedded by core/malware as malware.Floor(), because
+// the server's OpenSSF syncer needs the same floor (plan_qa_phase9_fresh A6).
+// Version-exact so it never false-positives a clean release. The full OpenSSF
+// malicious-packages DB is too large to embed; a signal bundle enriches this
+// floor when present.
 
 // guardDBEnv overrides the local known-malicious cache path (written by
 // `chainsaw guard update`). Default: <user-cache>/chainsaw/known_malicious.json.
@@ -101,16 +100,24 @@ func guardDBPath() string {
 // source that could plausibly BE the full OpenSSF set, from a channel we trust,
 // counts toward `extra`. See guardMalwareFeedFloor.
 func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor, extra int) {
-	entries := malware.ParseOSVBlob(knownMaliciousSeed)
+	entries := malware.Floor()
 	floor = len(entries)
 
 	if path := guardDBPath(); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
+		data, err := os.ReadFile(path)
+		switch {
+		case err != nil && !errors.Is(err, os.ErrNotExist):
+			// The file IS there and we could not read it (permissions, a
+			// directory, a dead symlink, an I/O error). Never silent — see
+			// warnGuardCacheUnusable.
+			warnGuardCacheUnusable(path, fmt.Sprintf("could not be read (%v)", err), floor)
+		case err == nil:
 			more := malware.ParseOSVBlob(data)
 			entries = append(entries, more...)
-			if len(more) >= guardMalwareFeedFloor {
+			switch {
+			case len(more) >= guardMalwareFeedFloor:
 				extra += len(more)
-			} else if len(more) > 0 {
+			case len(more) > 0:
 				// LOUD on purpose, and never suppressed by --quiet: this file is
 				// what an operator's `CHAINSAW_COVERAGE_REQUIRED=malware` gate
 				// hangs on. Silently accepting a 1-entry stub as "the full set"
@@ -120,6 +127,16 @@ func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor,
 					"chainsaw: WARNING — %s (%s) holds only %d known-malicious entries; the full OpenSSF set is ~200,000. "+
 						"Treating it as PARTIAL coverage (not the full feed); re-run `chainsaw guard update`.\n",
 					guardDBEnv, path, len(more))
+			case len(data) == 0:
+				warnGuardCacheUnusable(path, "is empty", floor)
+			default:
+				// Truncated download, a single malformed record inside the JSON
+				// ARRAY `guard update` writes (json.Unmarshal is all-or-nothing,
+				// so one bad record costs the whole file — the NDJSON path only
+				// skips the bad LINE), or a file that was never a cache at all.
+				warnGuardCacheUnusable(path,
+					"holds no readable known-malicious entries (truncated download, one malformed record in the JSON array, or not a known-malicious cache)",
+					floor)
 			}
 		}
 	}
@@ -138,6 +155,33 @@ func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor,
 
 	idx.Load(entries)
 	return floor, extra
+}
+
+// warnGuardCacheUnusable reports a `guard update` cache file that EXISTS but
+// contributed nothing to the index.
+//
+// WHY IT IS LOUD, AND WHY IT IS NOT A NOTICE. Every corruption shape is
+// fail-SAFE — the embedded floor is compiled into the binary, so a broken
+// cache can never remove it, and `extra` stays 0 so the coverage ledger keeps
+// reporting `malware` UNAVAILABLE (a `CHAINSAW_COVERAGE_REQUIRED=malware` gate
+// still refuses). What was missing is the operator's ability to TELL. Without
+// this line, a truncated, empty, unreadable, or one-bad-record cache produces
+// output byte-identical to a machine that never ran `guard update` at all:
+// the same `guardUpdateNudge()` line, no error, exit 0. An operator who ran
+// `guard update` last week and was told "wrote 237,079 known-malicious
+// entries" has no way to learn that the 200 MB file on disk is now dead
+// weight — the guard silently degrades to the ~11-entry floor and keeps
+// printing "offline known-malicious + typosquat active".
+//
+// So it goes to stderr directly, on the same channel and under the same rule
+// as the sub-floor PARTIAL warning above it: unsuppressable by --quiet,
+// because a degraded coverage assumption is exactly what a scripted CI run
+// must not lose.
+func warnGuardCacheUnusable(path, why string, floor int) {
+	fmt.Fprintf(os.Stderr,
+		"chainsaw: WARNING — %s (%s) %s; the guard is running on the EMBEDDED FLOOR ONLY "+
+			"(%d famous attacks), NOT the full OpenSSF set. Re-run `chainsaw guard update`.\n",
+		guardDBEnv, path, why, floor)
 }
 
 // parsePopularSeed turns a newline-delimited seed (blank lines + '#' comments

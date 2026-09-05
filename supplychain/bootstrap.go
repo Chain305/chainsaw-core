@@ -53,8 +53,28 @@ type BootstrapConfig struct {
 	// restricted deployments. Zero-length slice means all ecosystems
 	// enabled.
 	ProvenanceOptions []provenance.CheckerOption
-	// EnableGHSAMalware toggles the supplementary GHSA Swift malware
-	// fetcher in the malware syncer. Defaults to false when this field
+	// Offline, when non-nil and returning true, forbids every outbound
+	// call the malware feeds make: the OpenSSF tarball download, the
+	// supplementary GHSA fetch, and the optional remote Docker /
+	// HuggingFace feed URLs. The index is then built from whatever is
+	// already staged on disk plus the embedded seeds and the embedded
+	// malware floor.
+	//
+	// nil falls back to the CHAINSAW_OFFLINE env var — the umbrella flag
+	// documented in core/config/offline.go. That fallback is what makes
+	// an air-gapped deployment safe TODAY without a change in
+	// cmd/chainsaw-proxy: core/supplychain does not import
+	// chainsaw-core/config, so it cannot call cfg.IsOffline() itself.
+	// A caller that does hold the Config (init_server.go) should pass
+	// `deps.Cfg.IsOffline` here so the `runtime.offline` YAML mirror is
+	// honoured too; the env var alone is the reliable knob until then.
+	//
+	// Evaluated per call, not sampled once, so a runtime flip takes
+	// effect without a restart — same shape as
+	// swift.GitUpstream.Offline.
+	Offline func() bool
+	// EnableGHSAMalware toggles the supplementary GHSA malware fetcher
+	// in the malware syncer, across every ecosystem GHSA serves. Defaults to false when this field
 	// is left unset; main.go should pass cfg.Malware.GHSAEnabled() so
 	// the user-facing default-on contract is preserved.
 	EnableGHSAMalware bool
@@ -243,10 +263,20 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 		}
 	}
 
+	// Air-gap gate for every malware feed below. Resolved once here, but
+	// the resulting predicate is CALLED per sync, so flipping the env var
+	// on a running process takes effect at the next tick.
+	offlineCheck := resolveOfflineCheck(cfg.Offline)
+
 	var syncerOpts []malware.SyncerOption
 	if cfg.EnableGHSAMalware {
 		syncerOpts = append(syncerOpts, malware.WithGHSAFetcher(malware.NewGHSAFetcher(logger)))
 	}
+	// The gate goes on unconditionally: it is the syncer's own predicate
+	// that decides, and passing it here is what closes the gap where
+	// `malware.enable_ghsa` was the only switch on any of this and the
+	// OpenSSF tarball fetch honoured nothing at all.
+	syncerOpts = append(syncerOpts, malware.WithOfflineCheck(offlineCheck))
 	malwareSyncer := malware.NewSyncer(malwareIdx, cfg.DataDir, logger, syncerOpts...)
 
 	// Docker malware syncer. Default-on: nil means "enabled", an
@@ -257,8 +287,19 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 	var dockerSyncer *malware.DockerSyncer
 	if dockerMalwareEnabled {
 		var dockerOpts []malware.DockerSyncerOption
+		// The Docker feed only reaches the network when an operator has
+		// configured a remote URL; offline, that URL is dropped and the
+		// syncer runs from its embedded seed alone. Gated at the wiring
+		// rather than inside the feed because "no URL" is already the
+		// feed's own no-network mode.
 		if url := cfg.DockerMalwareFeedURL; url != "" {
-			dockerOpts = append(dockerOpts, malware.WithDockerFeedURL(url))
+			if offlineCheck() {
+				logger.Info("docker malware remote feed skipped: offline mode is enabled "+
+					"(CHAINSAW_OFFLINE / runtime.offline); using the embedded Docker seed only",
+					"url", url)
+			} else {
+				dockerOpts = append(dockerOpts, malware.WithDockerFeedURL(url))
+			}
 		}
 		dockerSyncer = malware.NewDockerSyncer(malwareIdx, logger, dockerOpts...)
 	}
@@ -272,8 +313,17 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 	var hfSyncer *malware.HuggingFaceSyncer
 	if hfMalwareEnabled {
 		var hfOpts []malware.HuggingFaceSyncerOption
+		// Same shape as the Docker feed above: remote only when an
+		// operator supplied a URL, and offline drops it back to the
+		// embedded seed.
 		if url := cfg.HuggingFaceMalwareFeedURL; url != "" {
-			hfOpts = append(hfOpts, malware.WithHuggingFaceFeedURL(url))
+			if offlineCheck() {
+				logger.Info("huggingface malware remote feed skipped: offline mode is enabled "+
+					"(CHAINSAW_OFFLINE / runtime.offline); using the embedded HuggingFace seed only",
+					"url", url)
+			} else {
+				hfOpts = append(hfOpts, malware.WithHuggingFaceFeedURL(url))
+			}
 		}
 		hfSyncer = malware.NewHuggingFaceSyncer(malwareIdx, logger, hfOpts...)
 	}
@@ -519,4 +569,35 @@ func refreshPopularPackages(ctx context.Context, fetcher *typosquat.Fetcher, det
 		}
 	}
 	logger.Info("popular package index refresh complete")
+}
+
+// offlineEnvVar is the CHAINSAW_OFFLINE umbrella flag. core/supplychain
+// does not import chainsaw-core/config (config pulls in policy, pgstore
+// and tenancy; the dependency would be an inversion), so — like
+// core/intelligence.IsOffline and core/cli's guard-update gate — it reads
+// the env var directly. core/config/offline.go documents this set of
+// subsystems explicitly: they "gate on the CHAINSAW_OFFLINE ENV VAR
+// directly and never see this Config".
+const offlineEnvVar = "CHAINSAW_OFFLINE"
+
+// resolveOfflineCheck returns the predicate the malware feeds consult. An
+// explicit BootstrapConfig.Offline always wins — that is the seam for a
+// caller holding a *config.Config, which additionally honours the
+// `runtime.offline` YAML mirror. Otherwise the env var is read on EVERY
+// call, so the returned predicate never goes stale.
+//
+// Tolerant parsing (1/true/yes/on, any case, trimmed) matching
+// intelligence.IsOffline and config.parseOfflineEnv. Anything else,
+// including unset, means online.
+func resolveOfflineCheck(explicit func() bool) func() bool {
+	if explicit != nil {
+		return explicit
+	}
+	return func() bool {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv(offlineEnvVar))) {
+		case "1", "true", "yes", "on":
+			return true
+		}
+		return false
+	}
 }

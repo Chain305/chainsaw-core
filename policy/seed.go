@@ -83,6 +83,12 @@ func seedPolicies(execer policyExecutor, orgID string, policies []Policy) (int, 
 		if err := validatePolicy(pol); err != nil {
 			return created, err
 		}
+		// A1 — this path INSERTs directly rather than via Store.Create, so
+		// the numeric bounds have to be applied here too or a seed could
+		// land a value the REST surface would refuse.
+		if violations := policyRangeViolations(pol); len(violations) > 0 {
+			return created, violations[0]
+		}
 		id, err := newID()
 		if err != nil {
 			return created, err

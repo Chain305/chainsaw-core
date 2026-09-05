@@ -58,8 +58,14 @@ func TestPublisherChangedClearsOnExplicitFalse(t *testing.T) {
 }
 
 func TestPublisherChangedSurvivesSilence(t *testing.T) {
+	// With its evidence, as provider_metadiff always emits it: `changed`
+	// is derived from these lists, so a true without them is a shape the
+	// provider cannot produce and the sticky rule declines to revive.
 	got := mergeSticky(t,
-		&Report{SupplyChain: SupplyChainSection{PublisherChanged: boolp(true)}},
+		&Report{SupplyChain: SupplyChainSection{
+			PublisherChanged: boolp(true),
+			PublisherAdded:   []string{"new-maintainer"},
+		}},
 		&Report{SupplyChain: SupplyChainSection{PublisherChanged: nil}},
 	)
 	if got.SupplyChain.PublisherChanged == nil || !*got.SupplyChain.PublisherChanged {
@@ -77,11 +83,31 @@ func TestVersionAnomalyFollowsTheSameStickyRule(t *testing.T) {
 	if cleared.SupplyChain.VersionAnomaly == nil || *cleared.SupplyChain.VersionAnomaly {
 		t.Error("explicit false did not clear VersionAnomaly")
 	}
+	// With its flags, as the provider always emits it: the signal fires on
+	// `len(flags) > 0`, so a flagless true is inert for enforcement, and
+	// the sticky rule declines to revive an anomaly it cannot name.
 	kept := mergeSticky(t,
-		&Report{SupplyChain: SupplyChainSection{VersionAnomaly: boolp(true)}},
+		&Report{SupplyChain: SupplyChainSection{
+			VersionAnomaly:      boolp(true),
+			VersionAnomalyFlags: []string{"version_gap"},
+		}},
 		&Report{SupplyChain: SupplyChainSection{VersionAnomaly: nil}},
 	)
 	if kept.SupplyChain.VersionAnomaly == nil || !*kept.SupplyChain.VersionAnomaly {
 		t.Error("silence withdrew a prior VersionAnomaly observation")
+	}
+}
+
+// The flagless half, which is what 117 of the 1,157 flagged production
+// rows looked like: the bool alone is not an observation, and reviving it
+// would leave the row claiming an anomaly its own verdict never saw.
+func TestVersionAnomalyWithoutFlagsIsNotRevived(t *testing.T) {
+	got := mergeSticky(t,
+		&Report{SupplyChain: SupplyChainSection{VersionAnomaly: boolp(true)}},
+		&Report{SupplyChain: SupplyChainSection{VersionAnomaly: nil}},
+	)
+	if got.SupplyChain.VersionAnomaly != nil && *got.SupplyChain.VersionAnomaly {
+		t.Error("a flagless versionAnomaly=true was revived; the stored row would " +
+			"claim an anomaly the evaluation could not see")
 	}
 }

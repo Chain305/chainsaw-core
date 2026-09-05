@@ -66,7 +66,9 @@ inputs:
       `client_id:client_secret` package-registry credential, and it must
       never be base64-encoded. See docs/CONFIG_REFERENCE.md section B30.
       Store as an Actions secret; never commit.
-      Only required when `server` is set.
+      Only required when `server` is set. An empty value (the default)
+      runs anonymously and never falls back to a credential stored on
+      the runner.
     required: false
     default: ""
   attest:

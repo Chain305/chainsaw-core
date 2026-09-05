@@ -10,6 +10,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,6 +91,75 @@ func TestPolicyExportImport_RoundTripsThroughJSONExtension(t *testing.T) {
 	}
 	if created[0]["name"] != "block-criticals" {
 		t.Fatalf("imported policy lost its fields: %#v", created[0])
+	}
+}
+
+// TestPolicyExportYAMLKeepsInt64Precedence is the P9F-051 / B7 regression.
+// The YAML export used to decode each policy with json.Unmarshal into `any`,
+// which turns every number into float64, so a precedence the server stored as
+// int64 -1787403521042488196 came out as `-1.7874035210424883e+18`.
+//
+// (The B7 write-up said re-importing such a file was rejected by the server's
+// `Precedence int`. It was not — encoding/json re-emits the float64 as the
+// plain literal -1787403521042488300 and the server accepts it, so the row
+// imported with a corrupted precedence. That residual is P9F-UD-05; see
+// policy_import_repair_test.go.)
+//
+// The export must carry the literal integer and the import must POST it back
+// unchanged — asserted on the raw request bytes, not a decoded map, because a
+// decoded map would itself go through float64.
+func TestPolicyExportYAMLKeepsInt64Precedence(t *testing.T) {
+	const precedence = "-1787403521042488196"
+
+	var posted [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			posted = append(posted, body)
+			_ = json.NewEncoder(w).Encode(map[string]any{"policy": policyItem{ID: "pol-new"}})
+			return
+		}
+		_, _ = w.Write([]byte(`{"policies":[{"id":"pol-1","name":"lowest","mode":"block","status":"active","precedence":` + precedence + `}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	setViperServer(t, srv.URL)
+
+	path := filepath.Join(t.TempDir(), "policies.yaml")
+
+	exp := newPolicyExportCmdForTest()
+	exp.SetArgs([]string{"--format", "yaml", "--output", path})
+	var expBuf bytes.Buffer
+	exp.SetOut(&expBuf)
+	exp.SetErr(&expBuf)
+	if err := exp.Execute(); err != nil {
+		t.Fatalf("export: %v\n%s", err, expBuf.String())
+	}
+
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("read export: %v", rerr)
+	}
+	if !strings.Contains(string(data), precedence) {
+		t.Fatalf("YAML export lost the int64 precedence; want literal %s in:\n%s", precedence, data)
+	}
+	if strings.Contains(string(data), "e+18") {
+		t.Fatalf("YAML export rendered precedence as a float:\n%s", data)
+	}
+
+	imp := newPolicyImportCmdForTest()
+	imp.SetArgs([]string{path})
+	var impBuf bytes.Buffer
+	imp.SetOut(&impBuf)
+	imp.SetErr(&impBuf)
+	if err := imp.Execute(); err != nil {
+		t.Fatalf("re-importing the export failed: %v\n%s", err, impBuf.String())
+	}
+	if len(posted) != 1 {
+		t.Fatalf("expected 1 policy POSTed, got %d", len(posted))
+	}
+	if want := `"precedence":` + precedence; !bytes.Contains(posted[0], []byte(want)) {
+		t.Fatalf("import must POST the integer precedence unchanged; want %s in body:\n%s", want, posted[0])
 	}
 }
 

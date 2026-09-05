@@ -114,7 +114,7 @@ func TestAuthLogout_WarnsWhenTokenFlagKeepsSessionAlive(t *testing.T) {
 // TestAuthLogout_QuietWhenNothingOverrides pins the normal case: no warning,
 // rc=0, X8 stdout unchanged.
 func TestAuthLogout_QuietWhenNothingOverrides(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	stdout, stderr, err := runAuthLogout(t, false, "")
 	if err != nil {
@@ -162,7 +162,7 @@ func TestAuthLogout_JSONReportsEnvTokenActive(t *testing.T) {
 
 // TestAuthLogout_JSONEnvTokenInactiveWhenClean is the negative half.
 func TestAuthLogout_JSONEnvTokenInactiveWhenClean(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	stdout, _, err := runAuthLogout(t, true, "")
 	if err != nil {
@@ -236,7 +236,7 @@ func runAuthLogoutBare(t *testing.T, asJSON bool, tokenFlag string) (dir, stdout
 
 // TestAuthLogout_BareInstallSaysNothingToDo is the headline Z4 regression.
 func TestAuthLogout_BareInstallSaysNothingToDo(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	_, stdout, stderr, err := runAuthLogoutBare(t, false, "")
 	if err != nil {
@@ -257,7 +257,7 @@ func TestAuthLogout_BareInstallSaysNothingToDo(t *testing.T) {
 // clearConfig removed the whole YAML, so the "reassuring" no-op deleted the
 // user's server_url and org_id.
 func TestAuthLogout_BareInstallPreservesServerConfig(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	dir, _, _, err := runAuthLogoutBare(t, false, "")
 	if err != nil {
@@ -288,7 +288,7 @@ func TestAuthLogout_BareInstallPreservesServerConfig(t *testing.T) {
 // TestAuthLogout_BareInstallJSONReportsLoggedOutFalse: a script must be able to
 // tell "I removed a session" from "there was nothing to remove".
 func TestAuthLogout_BareInstallJSONReportsLoggedOutFalse(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	_, stdout, _, err := runAuthLogoutBare(t, true, "")
 	if err != nil {
@@ -335,7 +335,7 @@ func TestAuthLogout_BareInstallWithEnvTokenStillWarns(t *testing.T) {
 // --token flag, so counting it would make `chainsaw --token X auth logout`
 // report a logout AND delete config.yaml on a machine that never logged in.
 func TestAuthLogout_TokenFlagAloneIsNotAStoredCredential(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	dir, stdout, _, err := runAuthLogoutBare(t, false, "flag-token")
 	if err != nil {
@@ -352,7 +352,7 @@ func TestAuthLogout_TokenFlagAloneIsNotAStoredCredential(t *testing.T) {
 // TestAuthLogout_IsIdempotent: the second logout is the bare case, and it must
 // stay rc=0 and stop reporting a removal.
 func TestAuthLogout_IsIdempotent(t *testing.T) {
-	t.Setenv("CHAINSAW_TOKEN", "")
+	unsetEnv(t, "CHAINSAW_TOKEN")
 
 	stdout, _, err := runAuthLogout(t, false, "")
 	if err != nil {

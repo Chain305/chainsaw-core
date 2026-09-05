@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -136,8 +135,15 @@ func (e *apiError) Error() string {
 //     error. This is the shape the CLI previously could not read at all.
 //  2. LEGACY FLAT — {"code":…,"message":…}, written by handlers predating
 //     errcodes. Kept so a mixed-version fleet degrades cleanly.
-//  3. SYNTHESIZED — neither parsed (an HTML page, a bare
-//     {"error":"authentication required","hint":…}, an empty body): Code
+//  3. FLAT STRING (B1) — {"error":"authentication required","hint":…} or
+//     {"error":…,"reason":…}: what respondUnauthorized, respondEmailNotVerified
+//     and a few admin/huggingface handlers write. `error` is decoded as `any`
+//     and accepted only when it is a non-empty string, so a nested object
+//     without code/message ({"error":{"reason":"x"}}) does NOT match here.
+//     Message=error, Reason=hint (falling back to reason), Code="HTTP <status>".
+//     Before this the raw JSON landed in Message and the user read
+//     `HTTP 401: {"error":"authentication required","hint":"…"}`.
+//  4. SYNTHESIZED — nothing parsed (an HTML page, an empty body): Code
 //     becomes "HTTP <status>" and the raw body becomes Message. Byte-identical
 //     to the pre-A1′ fallback, so nothing regresses on those wire shapes.
 //
@@ -182,6 +188,23 @@ func parseAPIError(status int, body []byte) *apiError {
 		return out
 	}
 
+	var flatString struct {
+		Error  any    `json:"error"`
+		Hint   string `json:"hint"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(body, &flatString); err == nil {
+		if msg, ok := flatString.Error.(string); ok && strings.TrimSpace(msg) != "" {
+			out.Code = fmt.Sprintf("HTTP %d", status)
+			out.Message = strings.TrimSpace(msg)
+			out.Reason = flatString.Hint
+			if out.Reason == "" {
+				out.Reason = flatString.Reason
+			}
+			return out
+		}
+	}
+
 	out.Code = fmt.Sprintf("HTTP %d", status)
 	out.Message = strings.TrimSpace(string(body))
 	return out
@@ -190,11 +213,11 @@ func parseAPIError(status int, body []byte) *apiError {
 func (c *APIClient) do(method, path string, body, out any) error {
 	// X4 preflight: refuse before the network call rather than after a 401.
 	// Only clients built by newClient() opt into this (see requireToken).
+	// A2: when the token is missing because --token / CHAINSAW_TOKEN was
+	// passed EMPTY, say so — the stored credential exists and was skipped on
+	// purpose, so "run auth login" would send the operator the wrong way.
 	if c.requireToken && c.token == "" {
-		return &ExitCodeError{
-			Code: ExitConfigAuth,
-			Err:  errors.New("not authenticated — run 'chainsaw auth login' first"),
-		}
+		return notAuthenticatedError(nil)
 	}
 	var bodyReader io.Reader
 	if body != nil {
@@ -245,9 +268,11 @@ func (c *APIClient) do(method, path string, body, out any) error {
 			return hint
 		}
 		apiErr := parseAPIError(resp.StatusCode, respBody)
+		// B1: no 401 suffix here. renderError's classifier already prints
+		// "Hint: run `chainsaw auth login`" for Status==401 (root.go), so a
+		// suffix on the message made the same hint print twice. 403 and 429
+		// keep theirs — no classifier hint exists for them.
 		switch resp.StatusCode {
-		case 401:
-			apiErr.Message = apiErr.Message + " — run 'chainsaw auth login' to authenticate"
 		case 403:
 			apiErr.Message = apiErr.Message + " — your token does not have permission for this action"
 		case 429:

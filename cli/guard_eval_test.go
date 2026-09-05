@@ -424,3 +424,26 @@ func TestGuardNeverWarnsOnLowConfidenceCombosquat(t *testing.T) {
 		t.Errorf("lodash-es is a first-party lodash sibling and must be exempt, got %+v", res)
 	}
 }
+
+// TestGuardLoadMalwareSourcesCarriesFloor pins the guard side of A6: the
+// floor now comes from core/malware (shared with the server's syncer), the
+// guard still merges it into ONE Load call, and the index reports it — so the
+// CLI path that appends the seed itself stays a first-class loader under the
+// FloorLoaded marker rather than a special case it has to skip.
+func TestGuardLoadMalwareSourcesCarriesFloor(t *testing.T) {
+	t.Setenv(guardDBEnv, filepath.Join(t.TempDir(), "absent.json"))
+	idx := malware.NewIndex(nil)
+	floor, extra := loadMalwareSources(idx, nil)
+	if want := len(malware.Floor()); floor != want {
+		t.Fatalf("floor = %d, want %d (len(malware.Floor()))", floor, want)
+	}
+	if extra != 0 {
+		t.Fatalf("extra = %d, want 0 with no cache and no bundle", extra)
+	}
+	if !idx.FloorLoaded() {
+		t.Fatal("FloorLoaded() = false after loadMalwareSources; the guard dropped the floor")
+	}
+	if res := idx.Lookup(context.Background(), "npm", "event-stream", "3.3.6"); !res.IsKnownMalicious {
+		t.Fatalf("event-stream 3.3.6 not blocked by the guard's index (lookup = %+v)", res)
+	}
+}

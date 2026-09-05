@@ -375,7 +375,12 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	// registry and artifact facts that make a marked row worth keeping,
 	// and suppressing them here would trade a documented blind spot for
 	// an undocumented one.
+	//
+	// markMalformedCoordinate is the name-side twin (Phase 9 A5): a
+	// package string no registry can serve is stamped coordinate_malformed
+	// at the same site, for the same reasons.
 	markUnevaluableVersion(report, now)
+	markMalformedCoordinate(report, now)
 
 	// Fan out providers in tiered phases:
 	//   - Tier 1+2 run in parallel first (no `prior`),
@@ -1322,9 +1327,9 @@ func mergeSupplyChain(dst *SupplyChainSection, src SupplyChainSection) {
 	if src.TrustScore != 0 {
 		dst.TrustScore = src.TrustScore
 	}
-	if src.TrustScoreBreakdown != "" {
-		dst.TrustScoreBreakdown = src.TrustScoreBreakdown
-	}
+	// No TrustScoreBreakdown copy: the field was removed 2026-09-04 as a
+	// write-only fossil (P9F-307). ComputeTrustScore recomputes TrustScore
+	// after this merge anyway, so nothing is lost.
 	if src.PublisherChanged != nil {
 		dst.PublisherChanged = src.PublisherChanged
 	}

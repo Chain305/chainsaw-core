@@ -61,7 +61,6 @@ func sampleReport() *Report {
 			TyposquatConfidence: "high",
 			TyposquatSimilarTo:  "good",
 			TrustScore:          42,
-			TrustScoreBreakdown: `{"malwareCheck":-100}`,
 			PublisherChanged:    &pubChanged,
 			PublisherAdded:      []string{"carol"},
 			PublisherRemoved:    []string{"alice"},

@@ -43,6 +43,14 @@ var unavailabilityCodes = map[string]string{
 	"WarnVersionNotEvaluable": "versionNotEvaluableReason",
 	"WarnPackageNotFound":     "packageNotFoundReason",
 	"WarnUnsupported":         "noAdvisorySourceReason",
+	// The name-side twin of WarnVersionNotEvaluable (Phase 9 A5): a
+	// coordinate no registry can serve must not be scored off an empty
+	// fact set the way `<script>alert(1)</script>` was graded ALLOW 96.
+	"WarnCoordinateMalformed": "coordinateMalformedReason",
+	// The weak absence code, which until Phase 9 A8 had no consumer at
+	// all: a federated registry's 404 left the coordinate fully scored
+	// off metadata that was never retrieved.
+	"WarnRegistryNotFound": "federatedRegistryAbsenceReason",
 }
 
 func packageSources(t *testing.T) map[string]string {

@@ -460,6 +460,32 @@ func TestEcosystemsDocMatchesSupportMatrix(t *testing.T) {
 			t.Errorf("%s does not list condition %s", path, c)
 		}
 	}
+
+	// core/README.md repeats three of these numbers in prose ("of N policy
+	// conditions, npm supports N fully and APT supports N"). It sat at the
+	// pre-P8-14 46/40/12 for a full release while this test passed, because
+	// nothing read it. The sentence wraps at 80 columns, so whitespace between
+	// words is matched as \s+.
+	readmePath := filepath.Join(filepath.Dir(path), "..", "README.md")
+	readmeRaw, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatalf("read core README: %v", err)
+	}
+	claim := regexp.MustCompile(`of\s+(\d+)\s+policy\s+conditions,\s+npm\s+supports\s+(\d+)\s+fully\s+and\s+APT\s+supports\s+(\d+)`)
+	m := claim.FindStringSubmatch(string(readmeRaw))
+	if m == nil {
+		t.Fatalf("%s no longer contains the \"of N policy conditions, npm supports N fully and APT supports N\" sentence", readmePath)
+	}
+	gotCols, _ := strconv.Atoi(m[1])
+	gotNPM, _ := strconv.Atoi(m[2])
+	gotAPT, _ := strconv.Atoi(m[3])
+	wantNPM, _, _ := countSupportLevels(EcoNPM)
+	wantAPT, _, _ := countSupportLevels(EcoAPT)
+	if gotCols != len(columns) || gotNPM != wantNPM || gotAPT != wantAPT {
+		t.Errorf("core/README.md drift: says %d conditions / npm %d full / APT %d full; "+
+			"SupportMatrix has %d columns / npm %d full / APT %d full",
+			gotCols, gotNPM, gotAPT, len(columns), wantNPM, wantAPT)
+	}
 }
 
 func countSupportLevels(eco Ecosystem) (full, partial, none int) {
@@ -513,4 +539,128 @@ func findEcosystemsDoc(t *testing.T) string {
 	}
 	t.Fatal("could not locate core/docs/ecosystems.md")
 	return ""
+}
+
+// TestAllConditionsPublishesExactlyTheMatrixColumns pins the resolution of the
+// Phase-9-fresh §5 item "AllConditions() under-reports by one".
+//
+// The undercount was real: SupportMatrix carried 53 distinct columns and
+// AllConditions() returned 52, because ConditionMaintainerAccountAge was held
+// out. GET /api/policies/support-matrix and `chainsaw policy preflight` both
+// enumerate the matrix through AllConditions(), so both were blind to a column
+// with a cell in all 16 rows.
+//
+// The decision, and the evidence behind it, so nobody re-litigates it from the
+// comment alone:
+//
+//   - The signal has a real producer. internal/intelligence/premium/
+//     provider_wave4_maintainer_age.go is registered (register.go, Order 28),
+//     gated on CHAINSAW_WAVE4_MAINTAINER_AGE, and writes
+//     Report.Scan.MaintainerAccountAgeDays; core/intelligence/scanner.go
+//     merges it (youngest non-zero wins) and core/intelligence/
+//     risk_projection.go projects it into risk.Input, where three signals in
+//     core/risk/registry_supplychain.go score it. It is not a phantom column.
+//
+//   - The evaluator has a real comparison for it (evaluator.go, the
+//     MaintainerAccountAgeDaysMax block) with a documented <= 0 fail-open
+//     sentinel, pinned by evaluator_guard_hardening_test.go.
+//
+//   - It does NOT yet fire in a live policy evaluation, because nothing in
+//     production copies Report.Scan.* onto EvaluationContext — but that is
+//     true of the entire Wave-3 / Wave-4 / Wave-6 family, and AllConditions()
+//     already publishes twenty conditions in exactly that state (UsesEval …
+//     MinifiedCode, TrivialPackage … SuspiciousRepoStars, and the six AI
+//     conditions P8-14 added). "It can never fire" therefore does not
+//     distinguish this column from the ones already published; it is an
+//     argument about the missing hydration step, not about this list.
+//
+//   - Publishing it is verdict-neutral. detectUnsupported and the
+//     policy.rule.skipped audit event read ConditionsUsedBy + IsUnsupported,
+//     never AllConditions; the save-time validator runs off the separate
+//     internal/formats key list, which is untouched.
+//
+//   - Withholding it made preflight LIE. ConditionsUsedBy already emits
+//     ConditionMaintainerAccountAge for a rule with maintainerAccountAgeDaysMax,
+//     so such a policy hit preflight's unknownPolicyConditions branch: "this
+//     CLI is newer than the proxy it asked", exit 12 — a false version-skew
+//     diagnosis for a column the proxy has had all along.
+//
+// The assertion is set equality against the matrix, computed mechanically, so
+// it fails in BOTH directions: dropping this column again fails here, and so
+// does adding a new SupportMatrix column without publishing it.
+func TestAllConditionsPublishesExactlyTheMatrixColumns(t *testing.T) {
+	columns := matrixColumns()
+
+	published := make(map[ConditionType]struct{}, len(AllConditions()))
+	for _, c := range AllConditions() {
+		if _, dup := published[c]; dup {
+			t.Errorf("AllConditions() lists %s twice", c)
+		}
+		published[c] = struct{}{}
+	}
+
+	inMatrix := make(map[ConditionType]struct{}, len(columns))
+	for _, c := range columns {
+		inMatrix[c] = struct{}{}
+		if _, ok := published[c]; !ok {
+			t.Errorf("SupportMatrix column %s is not published by AllConditions(); "+
+				"GET /api/policies/support-matrix and `chainsaw policy preflight` are blind to it",
+				c)
+		}
+	}
+	for c := range published {
+		if _, ok := inMatrix[c]; !ok {
+			t.Errorf("AllConditions() publishes %s, which has no cell in SupportMatrix; "+
+				"the support-matrix API would report it as unsupported everywhere", c)
+		}
+	}
+	if len(published) != len(columns) {
+		t.Errorf("AllConditions() returns %d conditions; SupportMatrix has %d columns",
+			len(published), len(columns))
+	}
+}
+
+// TestMaintainerAccountAgeColumnIsFullyWired is the narrow rail for the same
+// decision: it names the one condition the exclusion used to cover, so a
+// future edit that quietly drops it produces a failure that says WHICH
+// condition went missing rather than only "counts disagree".
+func TestMaintainerAccountAgeColumnIsFullyWired(t *testing.T) {
+	// 1. ConditionsUsedBy emits it for the field that configures it, so
+	//    preflight and the skip auditor already see it on a real policy.
+	max := 90
+	used := ConditionsUsedBy(Conditions{MaintainerAccountAgeDaysMax: &max})
+	if !containsCondition(used, ConditionMaintainerAccountAge) {
+		t.Fatalf("ConditionsUsedBy(maintainerAccountAgeDaysMax) = %v, want it to include %s",
+			used, ConditionMaintainerAccountAge)
+	}
+
+	// 2. Every SupportMatrix row carries a cell for it — this was the fact
+	//    that made the old "the per-ecosystem cells do not apply" rationale
+	//    factually wrong.
+	for eco, row := range SupportMatrix {
+		if _, ok := row[ConditionMaintainerAccountAge]; !ok {
+			t.Errorf("SupportMatrix[%s] has no %s cell", eco, ConditionMaintainerAccountAge)
+		}
+	}
+
+	// 3. And AllConditions() publishes it, so the API/preflight report those
+	//    cells instead of reporting the column as absent.
+	if !containsCondition(AllConditions(), ConditionMaintainerAccountAge) {
+		t.Errorf("AllConditions() does not publish %s. It has a cell in all %d SupportMatrix "+
+			"rows and ConditionsUsedBy emits it, so withholding it makes `chainsaw policy "+
+			"preflight` report a maintainerAccountAgeDaysMax rule as absent from the proxy's "+
+			"matrix and exit 12 (\"this CLI is newer than the proxy\") — a false version-skew "+
+			"diagnosis. See TestAllConditionsPublishesExactlyTheMatrixColumns for the full "+
+			"evidence before changing this.",
+			ConditionMaintainerAccountAge, len(SupportMatrix))
+	}
+}
+
+func containsCondition(list []ConditionType, want ConditionType) bool {
+	for _, c := range list {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }

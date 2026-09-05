@@ -35,20 +35,27 @@ With --strict, also check project-scope config overrides, registry-
 pointing env vars (NPM_CONFIG_REGISTRY, PIP_INDEX_URL, GOPROXY, ...),
 lockfiles for hardcoded public-registry URLs, and direct-egress
 reachability to public registries. Exits non-zero when any of those
-drift signals fire, so CI can wire --strict as a preflight gate.
+drift signals fire, so CI can wire --strict as a preflight gate. Exit
+codes: 0 compliant · 1 egress probe inconclusive (network could not be
+confirmed blocked; --no-egress-probe reports "skipped" and never trips
+this) · 10 drift · 30 direct egress to a public registry reachable · 40
+installed package manager without an enforcer. The --upgrade-check
+ladder below is different.
 
 With --attest, additionally POST the strict report to the configured
 Chainsaw server at /api/attestations so the org compliance dashboard
 sees this endpoint.
 
 With --upgrade-check, diagnose the local chainsaw-proxy server install
-before upgrading: env vars, config YAML parse, data-dir perms, port
-availability, upstream-registry reachability, TLS cert validity,
-docker-compose version drift, and — critically — any removed flags
-(e.g. --embedded-ui) or deprecated env defaults (e.g. CHAINSAW_STRICT_JWT)
-that would brick a systemd unit on boot. Exit 0 = safe to upgrade,
-1 = warnings worth acknowledging, 2 = breaking changes present. See
-MIGRATIONS.md for the manual upgrade path when breaking changes land.
+before upgrading. Scope: self-hosted chainsaw-proxy server preflight;
+not needed for CLI-only installs (see MIGRATIONS.md). It checks env
+vars, config YAML parse, data-dir perms, port availability,
+upstream-registry reachability, TLS cert validity, docker-compose
+version drift, and — critically — any removed flags (e.g. --embedded-ui)
+or deprecated env defaults (e.g. CHAINSAW_STRICT_JWT) that would brick a
+systemd unit on boot. Exit 0 = safe to upgrade, 1 = warnings worth
+acknowledging, 2 = breaking changes present. See MIGRATIONS.md for the
+manual upgrade path when breaking changes land.
 
 With --fix, apply auto-fixable remediations surfaced by --upgrade-check
 (today: chmod 0400 on stale generated_password / generated_jwt_secret

@@ -410,8 +410,16 @@ func TestMergeReportPayload_PreservesSupplyChainTier3(t *testing.T) {
 			RepoLinkStatus:   "ok",
 			RepoLastCommitAt: &lastCommit,
 			PublisherChanged: &tru,
-			VersionAnomaly:   &tru,
-			TrustScore:       72,
+			// The publisher names are what make the bool a fact: the
+			// sticky rule declines to revive a change it cannot name, so
+			// without these the Tier-3 preservation this test is about
+			// would stop being exercised.
+			PublisherAdded: []string{"new-maintainer"},
+			VersionAnomaly: &tru,
+			// Same rule: the flags are what make the bool a fact, and the
+			// sticky carry declines to revive an anomaly it cannot name.
+			VersionAnomalyFlags: []string{"version_gap"},
+			TrustScore:          72,
 		},
 	}
 	priorPayload, err := json.Marshal(prior)

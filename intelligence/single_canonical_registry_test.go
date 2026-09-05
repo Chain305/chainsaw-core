@@ -24,6 +24,7 @@ package intelligence
 
 import (
 	"context"
+	"github.com/chain305/chainsaw-core/coverage"
 	"net/http"
 	"testing"
 
@@ -104,8 +105,23 @@ var federatedAbsences = []struct {
 
 // A federated ecosystem's total 404 keeps the pre-P8-04 `not_found`. That
 // code says the true thing — "not found in the registry we checked" — and
-// core/coverage classifies it as an OK answer, so these coordinates grade
-// exactly as they did before P8-04.
+// core/coverage classifies it as an OK answer.
+//
+// CHANGED DELIBERATELY IN PHASE 9 A8. Until then this test also asserted
+// that the VERDICT was untouched, which is how `maven invalid:coord:format`
+// came back ALLOW 96 (A) with four categories at their 100 base and no
+// metadata behind any of them. The code is still the honest `not_found`
+// and coverage still reads it as an answer — both asserted below, and both
+// are what keep an opt-in fail-closed gate from refusing these installs —
+// but the coordinate is now projected as an unavailable evaluation, so the
+// verdict is NOT EVALUATED rather than a grade painted on nothing.
+//
+// The androidx population that motivated P8-04's restriction is answered
+// upstream now: fetchMavenTimelineDoc falls back to maven.google.com for
+// the namespaces Google hosts (TestGoogleMavenFallbackAnswersAndroidX).
+// What still reaches this arm has been missed by BOTH repositories that
+// serve the ecosystem — or is a private module, which the product has
+// genuinely never evaluated and must not report as clean.
 func TestFederatedEcosystemsKeepNotFound(t *testing.T) {
 	for _, tc := range federatedAbsences {
 		t.Run(tc.eco+"/"+tc.pkg, func(t *testing.T) {
@@ -125,17 +141,30 @@ func TestFederatedEcosystemsKeepNotFound(t *testing.T) {
 				t.Fatalf("expected the honest not_found to survive, got %+v", pr.Warnings)
 			}
 
-			// And the verdict is unchanged: not_found is an OK answer,
-			// so the coordinate is not routed into the unavailability
-			// machinery by THIS warning.
+			// The coverage gate must still read this as an ANSWER, not
+			// an outage: that is what stops an org running the opt-in
+			// fail-closed gate from refusing these installs.
+			if coverage.StatusForWarnCode("not_found") != coverage.StatusOK {
+				t.Fatal("not_found stopped being an OK coverage code — an org " +
+					"with mode: closed would start refusing these installs")
+			}
+
+			// And the verdict IS now unavailable (A8). Nothing was
+			// measured, so a grade here would be a default rather than a
+			// finding.
 			r := &Report{}
 			r.Identity.Ecosystem = tc.eco
 			r.Identity.Package = tc.pkg
 			r.Identity.Version = tc.ver
 			r.Observation.Warnings = pr.Warnings
-			if in := ProjectToRiskInput(r); in.SignalsUnavailable {
-				t.Fatalf("a registry-coverage gap was projected as an " +
-					"unavailable evaluation")
+			in := ProjectToRiskInput(r)
+			if !in.SignalsUnavailable {
+				t.Fatalf("%s/%s was scored off an empty fact set — no registry "+
+					"metadata was retrieved, so the categories are 100 bases, "+
+					"not measurements", tc.eco, tc.pkg)
+			}
+			if in.UnavailableReason == "" {
+				t.Error("unavailable with no reason — the operator cannot act on that")
 			}
 		})
 	}

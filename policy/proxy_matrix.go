@@ -224,33 +224,48 @@ func AllConditions() []ConditionType {
 		ConditionAgentToolDangerousCapability,
 		ConditionMCPServerDeclared,
 		ConditionPromptTemplateInjection,
-		// NOTE: ConditionMaintainerAccountAge is the ONE ConditionType
-		// deliberately held out of AllConditions(). Read this before
-		// "fixing" it either way:
+		// Socket-gap Wave 4. ConditionMaintainerAccountAge used to be the
+		// ONE ConditionType held out of this list, and the exclusion was
+		// never justified — read this before removing it again.
 		//
-		//   - The original rationale recorded here — that it is a
-		//     numeric-threshold condition, so "the per-ecosystem support
-		//     matrix and POLICY_PROXY_MATRIX.md cells do not apply" — is
-		//     FACTUALLY WRONG and has been since the constant landed.
-		//     Every SupportMatrix row carries a
-		//     ConditionMaintainerAccountAge cell, POLICY_PROXY_MATRIX.md
-		//     has a "maintainer account age" column, and
-		//     TestSupportMatrixMatchesMarkdown asserts the two agree.
-		//     ConditionCooldown and ConditionPackageAge are numeric-
-		//     threshold conditions too and both are listed above.
+		// The recorded rationale was that it is a numeric-threshold
+		// condition, so "the per-ecosystem support matrix and
+		// POLICY_PROXY_MATRIX.md cells do not apply". That was factually
+		// wrong from the day the constant landed: every SupportMatrix row
+		// carries a ConditionMaintainerAccountAge cell (all 16),
+		// POLICY_PROXY_MATRIX.md has a "maintainer account age" column, and
+		// TestSupportMatrixMatchesMarkdown asserts the two agree.
+		// ConditionCooldown and ConditionPackageAge are numeric-threshold
+		// conditions too and have always been listed here.
 		//
-		//   - So the exclusion is currently UNJUSTIFIED, not principled:
-		//     it makes the support-matrix API and preflight blind to
-		//     maintainerAccountAgeDaysMax in exactly the way P8-14
-		//     describes for the six AI conditions.
+		// The cost of holding it out was not a cosmetic undercount.
+		// ConditionsUsedBy DOES emit it for a rule with
+		// maintainerAccountAgeDaysMax, so such a policy fell into `chainsaw
+		// policy preflight`'s unknown-condition branch: "this CLI is newer
+		// than the proxy it asked", exit 12 — a version-skew diagnosis for
+		// a column the proxy has carried all along.
 		//
-		// It is held out here only because the Phase-8 remediation plan
-		// scoped this change to the six AI conditions. Adding it is
-		// verdict-neutral for the same reason they were (detectUnsupported
-		// reads ConditionsUsedBy, never AllConditions) and should be its
-		// own follow-up. TestEveryEmittedConditionIsInAllConditions
-		// carries it as the single documented exclusion, with this
-		// reason attached.
+		// Publishing it is verdict-neutral, exactly as the six AI conditions
+		// above were: detectUnsupported and the policy.rule.skipped audit
+		// event read ConditionsUsedBy + IsUnsupported, never AllConditions,
+		// and the save-time validator runs off the separate
+		// internal/formats key list.
+		//
+		// One thing that is NOT a reason to remove it: the condition cannot
+		// fire in a live evaluation today, because nothing in production
+		// copies Report.Scan.* onto EvaluationContext. That is true of the
+		// whole Wave-3 / Wave-4 / Wave-6 family — twenty conditions listed
+		// above are in the identical state — so it is an argument about the
+		// missing hydration step, not about this list. The signal itself has
+		// a real producer (internal/intelligence/premium/
+		// provider_wave4_maintainer_age.go, registered at Order 28, gated on
+		// CHAINSAW_WAVE4_MAINTAINER_AGE), a merge rule in
+		// core/intelligence/scanner.go, and three scoring signals in
+		// core/risk/registry_supplychain.go.
+		//
+		// Pinned by TestAllConditionsPublishesExactlyTheMatrixColumns and
+		// TestMaintainerAccountAgeColumnIsFullyWired.
+		ConditionMaintainerAccountAge,
 	}
 }
 

@@ -25,6 +25,69 @@ var sensitiveKeyPatterns = []string{
 	"cookie", "session_cookie", "credit", "card_number",
 }
 
+// tokenExemptKeys lists the property names that are EXEMPT FROM THE
+// TOKEN-SHAPE RULE ONLY (tokenLike, below). Every other rule — the
+// sensitive-key rule, the bearer rule, the email rule, the URL rule — still
+// applies to them, and the sensitive-key rule is still evaluated FIRST, so a
+// key here can never outrank it.
+//
+// WHY THIS EXISTS. tokenLike matches any run of 32+ word characters. That is
+// a fair shape for an API token, but it is also the shape of a long package
+// name: `babel-plugin-transform-react-remove-prop-types` (46) and
+// `opentelemetry-instrumentation-fastapi` (37) are real registry packages,
+// and npm's own limit is 214 characters. Guard blocks now persist the
+// coordinate (see core/pgstore/guardblocks.go), so those blocks were being
+// stored and charted as the literal "[REDACTED]" — truthful, and useless.
+//
+// WHY IT IS A KEY LIST AND NOT A SMARTER REGEX. A token and a long package
+// name are not reliably distinguishable by shape. Any regex that tried to
+// tell them apart would leak a credential the first time it guessed wrong.
+// Naming the exact properties is the only exemption whose blast radius can
+// be stated and tested.
+//
+// ADMISSION CRITERION. A property belongs here only if the emitters can
+// never put a user secret in it. The four below are package coordinates:
+// their only writers are names/versions parsed out of a package-manager
+// argv or a lockfile (core/cli/guard_nudge.go emitGuardTelemetry, from
+// packageSpec.Name/.Version, and the proxy's per-request coordinate).
+// Package-manager flags are dropped before parsing (parseNpmInstall skips
+// anything starting with "-"), so a `--//registry:_authToken=` style
+// argument never becomes a coordinate.
+//
+// RESIDUAL RISK, STATED. npm accepts a positional URL install
+// (`npm i https://user:tok@host/p.tgz`), which the parser would treat as a
+// coordinate. The email rule still redacts the `user:tok@host` userinfo
+// form, and reaching the block emitter at all requires the guard to have
+// BLOCKED that coordinate, which needs a feed/typosquat/byte-scan hit. The
+// exemption is nonetheless a deliberate tradeoff, pinned by
+// TestScrubExemptPropertyTokenTradeoff so it cannot change silently.
+//
+// DELIBERATELY NOT EXEMPT:
+//   - "ecosystem"/"ecosystems": values are short registry ids ("npm",
+//     "maven-central"); they never reach 32 characters, so exempting them
+//     would widen the surface for no gain.
+//   - "reason", "rule_id": NOT a fixed vocabulary. Guard reasons are built
+//     with fmt.Sprintf and interpolate arbitrary error values (e.g.
+//     "invalid coverage configuration: %v" in core/cli/guard_eval.go), and
+//     rule ids come from operator-authored policy. Either can carry text
+//     the scrubber is the last line of defence for, so both stay scrubbed.
+//
+// Keys are matched EXACTLY (after lowercasing), never by substring, so
+// "package_token" and "packages" are unaffected.
+var tokenExemptKeys = map[string]struct{}{
+	"package":         {},
+	"package_name":    {},
+	"version":         {},
+	"package_version": {},
+}
+
+// isTokenExemptKey reports whether the token-shape rule should be skipped
+// for this property name.
+func isTokenExemptKey(k string) bool {
+	_, ok := tokenExemptKeys[strings.ToLower(k)]
+	return ok
+}
+
 // tokenLike matches common token shapes that sometimes appear inline in
 // stringified errors or arg buffers. We're deliberately aggressive here;
 // the cost of a scrambled diagnostic message is low.
@@ -95,15 +158,21 @@ func scrubString(key, s string) string {
 		}
 	}
 	s = bearerRE.ReplaceAllString(s, "Bearer [REDACTED]")
-	s = tokenLike.ReplaceAllStringFunc(s, func(m string) string {
-		// Keep UUIDs (which contain hyphens at fixed positions) and
-		// short hex strings. The cheap heuristic: if it looks like a
-		// v4/v7 UUID, leave it.
-		if looksLikeUUID(m) {
-			return m
-		}
-		return "[REDACTED]"
-	})
+	// The token-shape rule is skipped for package-coordinate properties,
+	// whose legitimate values share the shape. See tokenExemptKeys for the
+	// admission criterion and the residual risk. Every other rule in this
+	// function still runs for those keys.
+	if !isTokenExemptKey(key) {
+		s = tokenLike.ReplaceAllStringFunc(s, func(m string) string {
+			// Keep UUIDs (which contain hyphens at fixed positions) and
+			// short hex strings. The cheap heuristic: if it looks like a
+			// v4/v7 UUID, leave it.
+			if looksLikeUUID(m) {
+				return m
+			}
+			return "[REDACTED]"
+		})
+	}
 	s = emailRE.ReplaceAllStringFunc(s, func(m string) string {
 		d := EmailDomain(m)
 		if d == "" {

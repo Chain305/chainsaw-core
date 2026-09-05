@@ -6,9 +6,8 @@ package intelligence
 // providers have contributed their slices.
 //
 // The function is intentionally pure: it reads from the Report and writes
-// TrustScore + TrustScoreBreakdown back onto Report.SupplyChain. Callers
-// decide when to invoke it (typically once, after the merge, before
-// persistence).
+// TrustScore back onto Report.SupplyChain. Callers decide when to invoke
+// it (typically once, after the merge, before persistence).
 
 import (
 	"os"
@@ -73,9 +72,8 @@ var OrgSignalWeightsResolver func(orgID string) map[string]int = func(string) ma
 const publishVelocityAnomalyThreshold = 20
 
 // ComputeTrustScore projects the merged Report onto a trustscore.Signals,
-// runs trustscore.Compute, and writes the result back onto
-// report.SupplyChain.TrustScore / TrustScoreBreakdown (as the Breakdown
-// JSON string trustscore.BreakdownJSON produces).
+// runs the risk-V2 evaluator, and writes the composite back onto
+// report.SupplyChain.TrustScore (plus report.Risk).
 //
 // Safe to call with a nil Report — the function no-ops. Idempotent: the
 // score is recomputed from whatever the Report currently says, so calling
@@ -170,11 +168,19 @@ func ComputeTrustScoreForOrg(report *Report, orgID string) {
 
 	// Legacy Compute() still runs, but its Total is no longer
 	// authoritative — Risk-V2 below overwrites SupplyChain.TrustScore.
-	// We keep computing Compute() because the per-signal Breakdown JSON
-	// it produces is rendered by the UI and audit-log explanation paths.
-	// See internal/trustscore/score.go header for the contract.
+	// The ONLY reason it still runs is the defensive `eval == nil` branch
+	// further down, which falls back to score.Total so the field is at
+	// least populated.
+	//
+	// It used to also write score.BreakdownJSON() onto
+	// SupplyChain.TrustScoreBreakdown, and the comment here claimed that
+	// blob was "rendered by the UI and audit-log explanation paths". That
+	// was false — audited 2026-09-04 (P9F-307), the field had exactly this
+	// one writer and no reader anywhere: no column (F-02 dropped it), no
+	// OpenAPI entry, and the one UI component that could render the shape
+	// was reachable only through an empty named import. Both field and
+	// write are gone. See trustscore_breakdown_fossil_test.go.
 	score := trustscore.Compute(signals)
-	report.SupplyChain.TrustScoreBreakdown = score.BreakdownJSON()
 
 	// --- Risk-V2 is authoritative ---
 	//

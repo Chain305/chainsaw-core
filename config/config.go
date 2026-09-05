@@ -209,10 +209,14 @@ type ProvenanceConfig struct {
 // MalwareConfig controls the malicious-package syncer.
 //
 // EnableGHSA defaults to true: most deployments benefit from the broader
-// coverage GHSA provides for Swift. Air-gapped operators set it to false.
+// coverage GHSA provides. Air-gapped operators set it to false — it is the
+// only gate on this outbound call.
 type MalwareConfig struct {
 	// EnableGHSA toggles supplementary ingestion from the GitHub
-	// Security Advisory database (`ecosystem=swift&type=malware`).
+	// Security Advisory database across every ecosystem GHSA serves,
+	// over two lanes: `type=malware` and `cwes=506` (malicious code).
+	// The second lane is the one that carries reviewed advisories such
+	// as event-stream 3.3.6, which `type=malware` never returns.
 	// Pointer-to-bool so an absent YAML key keeps the default-on
 	// behavior; explicit `enable_ghsa: false` opts out.
 	EnableGHSA *bool `yaml:"enable_ghsa"`

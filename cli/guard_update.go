@@ -248,9 +248,7 @@ func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	entries := collectOSVEntries(filepath.Join(syncDir, "malicious-packages", "active", "osv", "malicious"), indexProgress)
-	if stderrTTY {
-		fmt.Fprintln(os.Stderr) // close the in-place progress line
-	}
+	finishIndexProgress(os.Stderr, stderrTTY, len(entries))
 	if len(entries) == 0 {
 		return fmt.Errorf("dataset fetch produced no entries (layout change?)")
 	}
@@ -283,6 +281,28 @@ func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 	// cache file would let a compromised install self-exempt by editing it.
 	fmt.Fprintln(os.Stderr, "chainsaw: typosquat corpus refreshes via chainsaw upgrades or a signed intelligence bundle (CHAINSAW_INTEL_BUNDLE_PATH).")
 	return nil
+}
+
+// finishIndexProgress closes the in-place indexing progress line.
+//
+// BUG-F-005: on a TTY the heartbeat redraws "\r  indexed 220,000 advisories…"
+// every osvIndexProgressStep, and the close used to be a bare newline — so the
+// last thing the user saw on that line was the final HEARTBEAT (220,000), not
+// the total (237,079), and the two numbers read as an undercount. The close is
+// now a final redraw carrying the total. The trailing space before the newline
+// overwrites the heartbeat's "…" (the total is the same width as the last tick
+// minus the ellipsis), so the finished line does not read as still-running.
+//
+// The non-TTY path writes nothing here: its heartbeats are newline-terminated
+// log lines and the "writing the offline cache (N advisories)" line that
+// follows already carries the total. The hook is deliberately NOT fired inside
+// collectOSVEntries, which would change its tick sequence and break the
+// `[2 4]` pin in TestCollectOSVEntriesProgress.
+func finishIndexProgress(w io.Writer, tty bool, n int) {
+	if !tty {
+		return
+	}
+	fmt.Fprintf(w, "\r  indexed %s advisories \n", humanCount(n))
 }
 
 // osvIndexProgressStep is how often collectOSVEntries reports its running

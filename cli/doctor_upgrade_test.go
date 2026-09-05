@@ -171,6 +171,9 @@ func TestDoctorUpgradeCheck_JSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
 		t.Fatalf("invalid JSON: %v\nraw: %s", err, out.String())
 	}
+	if strings.Contains(out.String(), upgradeCheckScope) {
+		t.Errorf("--json must stay a bare Report; the text renderer's scope line leaked into it:\n%s", out.String())
+	}
 	if len(report.Findings) == 0 {
 		t.Fatalf("expected >= 1 finding, got 0")
 	}
@@ -234,9 +237,34 @@ func TestDoctorHelp_MentionsUpgradeCheck(t *testing.T) {
 	// Note: --json is a persistent flag on rootCmd, not on newDoctorCmd()
 	// in isolation. End-to-end invocations inherit it; the help body
 	// itself lists the doctor-local flags.
-	for _, want := range []string{"--upgrade-check", "--fix", "MIGRATIONS.md"} {
-		if !strings.Contains(out.String(), want) {
+	// Long is a wrapped raw string; collapse the wrapping so the scope
+	// sentence, which straddles a line break, still matches verbatim.
+	help := strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{"--upgrade-check", "--fix", "MIGRATIONS.md", upgradeCheckScope} {
+		if !strings.Contains(help, want) {
 			t.Errorf("--help missing %q", want)
 		}
+	}
+}
+
+// TestPrintUpgradeReport_ScopeLine pins the one line that tells a CLI-only
+// user to stop reading: --upgrade-check is a self-hosted server preflight,
+// and on a laptop with no chainsaw-proxy every one of its findings is noise.
+// The line is text-only — TestDoctorUpgradeCheck_JSON proves --json stays a
+// bare Report object.
+func TestPrintUpgradeReport_ScopeLine(t *testing.T) {
+	cmd := newDoctorCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	printUpgradeReport(cmd, &doctor.Report{Version: "test", Platform: "test/test"})
+
+	text := out.String()
+	want := "  scope   : " + upgradeCheckScope + "\n"
+	if !strings.Contains(text, want) {
+		t.Fatalf("text renderer missing scope line %q, got:\n%s", want, text)
+	}
+	// It belongs in the header, before the STATUS table.
+	if strings.Index(text, want) > strings.Index(text, "STATUS") {
+		t.Errorf("scope line must precede the findings table, got:\n%s", text)
 	}
 }

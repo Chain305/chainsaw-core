@@ -46,9 +46,15 @@ import (
 
 // Default public registry base URLs. Overridable for tests.
 type registryEndpoints struct {
-	npm               string
-	pypi              string
-	maven             string
+	npm   string
+	pypi  string
+	maven string
+	// mavenGoogle is the SECOND Maven repository, and the reason the
+	// Maven family can now be answered rather than shrugged at. See
+	// fetchMavenTimelineDoc: repo1 is not the whole of Maven, and the
+	// namespaces Google publishes are the measured majority of what
+	// repo1 misses.
+	mavenGoogle       string
 	cargo             string
 	rubygems          string
 	nuget             string
@@ -72,6 +78,7 @@ func defaultRegistryEndpoints() registryEndpoints {
 		npm:               "https://registry.npmjs.org",
 		pypi:              "https://pypi.org",
 		maven:             "https://repo1.maven.org/maven2",
+		mavenGoogle:       "https://maven.google.com",
 		cargo:             "https://crates.io",
 		rubygems:          "https://rubygems.org",
 		nuget:             "https://api.nuget.org/v3-flatcontainer",
@@ -158,6 +165,58 @@ func ecosystemTimeout(ctx context.Context) time.Duration {
 		return d
 	}
 	return defaultRegistryTimeout
+}
+
+// RegistryRejectKey labels one bucket of the intel_registry_non404_4xx_total
+// counter: the ecosystem whose registry answered, and the status it
+// answered with.
+type RegistryRejectKey struct {
+	Ecosystem string
+	Status    int
+}
+
+// registryNon404FourXX counts canonical-registry answers in the 4xx range
+// other than 404 — a 403 from an edge WAF, a 405 for a URL-unsafe name, a
+// 410 for a withdrawn package — labelled by ecosystem and status. It is
+// MEASUREMENT ONLY (Phase 9 fresh QA, A5-ext, as amended): the row's
+// handling is unchanged. The draft routed these through unavailableInput
+// as `registry_rejected`; that arm was dropped because unavailableInput
+// carries only the malware fact and would have discarded the OSV
+// vulnerability lane, so a Cloudflare 403 burst on a popular package would
+// have converted CVE-based blocks to Monitored for 24h per coordinate, on
+// the proxy. A vuln-preserving unavailable variant is its own wave and
+// needs this number first. Same shape as recomputeSweptTotal: a
+// process-local counter with an exported reader for the metrics exporter
+// (internal/observability) to wrap as a Prometheus CounterVec.
+var registryNon404FourXX struct {
+	mu sync.Mutex
+	n  map[RegistryRejectKey]uint64
+}
+
+func recordRegistryNon404FourXX(ctx context.Context, status int) {
+	eco, _ := ctx.Value(ecosystemCtxKey{}).(string)
+	if eco == "" {
+		eco = "unknown"
+	}
+	registryNon404FourXX.mu.Lock()
+	defer registryNon404FourXX.mu.Unlock()
+	if registryNon404FourXX.n == nil {
+		registryNon404FourXX.n = map[RegistryRejectKey]uint64{}
+	}
+	registryNon404FourXX.n[RegistryRejectKey{Ecosystem: eco, Status: status}]++
+}
+
+// RegistryNon404FourXXTotals returns a snapshot of the
+// intel_registry_non404_4xx_total counter, one entry per
+// (ecosystem, status) bucket seen since process start. The map is a copy.
+func RegistryNon404FourXXTotals() map[RegistryRejectKey]uint64 {
+	registryNon404FourXX.mu.Lock()
+	defer registryNon404FourXX.mu.Unlock()
+	out := make(map[RegistryRejectKey]uint64, len(registryNon404FourXX.n))
+	for k, v := range registryNon404FourXX.n {
+		out[k] = v
+	}
+	return out
 }
 
 // jitterRand is package-scoped so retry sleeps don't collide with the
@@ -402,7 +461,7 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return &Warning{Provider: "registrymetadata", Code: "not_found", Message: endpoint, At: p.now()}, false, resp.StatusCode, nil
+		return &Warning{Provider: "registrymetadata", Code: WarnRegistryNotFound, Message: endpoint, At: p.now()}, false, resp.StatusCode, nil
 	}
 	if resp.StatusCode >= 500 {
 		// Drain a small amount so the connection can be reused.
@@ -410,6 +469,14 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 		return &Warning{Provider: "registrymetadata", Code: fmt.Sprintf("http_%d", resp.StatusCode), Message: endpoint, At: p.now()}, true, resp.StatusCode, nil
 	}
 	if resp.StatusCode >= 400 {
+		// Count, do not reclassify. A non-404 4xx from a canonical registry
+		// (405 on a URL-unsafe name, 403 on a burst) leaves the row scored
+		// off whatever the other lanes found, exactly as before — routing it
+		// through the unavailable path would discard the OSV vulnerability
+		// facts and turn a CVE block into Monitored under throttling. The
+		// counter is here so the population can be measured before anyone
+		// proposes that change. See §5 of plan_qa_phase9_fresh_remediation.
+		recordRegistryNon404FourXX(ctx, resp.StatusCode)
 		return &Warning{Provider: "registrymetadata", Code: fmt.Sprintf("http_%d", resp.StatusCode), Message: endpoint, At: p.now()}, false, resp.StatusCode, nil
 	}
 
@@ -1211,9 +1278,23 @@ type mavenPOM struct {
 	Name        string `xml:"name"`
 	Description string `xml:"description"`
 	URL         string `xml:"url"`
-	Parent      struct {
-		GroupID string `xml:"groupId"`
-		Version string `xml:"version"`
+	// Parent is the POM's `<parent>` coordinate. ArtifactID is as
+	// load-bearing as the other two: it is what turns the element into a
+	// resolvable repository path (see fetchMavenPOM). It was not parsed
+	// before the parent-licence walk, which is why guava and log4j-core
+	// — both of which declare their licence ONLY in a parent — came back
+	// with an empty LicenseExpression and scored lic.missing (-15) plus
+	// license.unidentified (-15).
+	//
+	// `<relativePath>` is deliberately NOT modelled. It is a filesystem
+	// hint for a local reactor build ("../pom.xml"); against a registry
+	// it is meaningless, and honouring it could only ever produce a URL
+	// that is not the parent's published location. We always resolve the
+	// parent from groupId/artifactId/version.
+	Parent struct {
+		GroupID    string `xml:"groupId"`
+		ArtifactID string `xml:"artifactId"`
+		Version    string `xml:"version"`
 	} `xml:"parent"`
 	Licenses struct {
 		License []struct {
@@ -1574,6 +1655,192 @@ func mavenProjectVersion(pom *mavenPOM, requestedVersion string) string {
 	return strings.TrimSpace(requestedVersion)
 }
 
+// maxMavenParentDepth bounds the `<parent>` chain walk.
+//
+// Five is chosen from the shape of real chains, not from caution: the two
+// coordinates that motivated this work are two and three hops deep
+// (guava -> guava-parent; log4j-core -> log4j -> logging-parent), and the
+// deepest published chains in common use — the Spring Boot starters
+// (starter -> spring-boot-starters -> spring-boot-parent -> spring-boot-build)
+// and the Sonatype/Apache house parents (foo -> foo-parent -> oss-parent ->
+// apache) — reach four. Five clears both with one hop of headroom while
+// capping the worst case at five extra HTTP requests per Maven coordinate.
+// Anything deeper is answered with silence, which is the same answer the
+// reader gave before this walk existed.
+const maxMavenParentDepth = 5
+
+// isSafeMavenCoordinateSegment reports whether one component of a parent
+// coordinate can be pasted into a repository URL.
+//
+// A POM is bytes fetched from a registry, so `<parent>` is attacker-
+// influenced input and this is the only place where its contents become a
+// URL we then fetch. The accepted set is what Maven itself allows in a
+// groupId / artifactId / version — letters, digits, `.`, `_`, `-`, `+` —
+// which excludes path separators, `%`, `:`, `@`, whitespace and `${`, and
+// therefore excludes traversal, scheme injection and host smuggling. `..`
+// is rejected outright even though both its characters are on the list.
+//
+// A rejected coordinate is not an error: the walk stops and the artifact
+// keeps the licence (or the absence of one) it already had.
+func isSafeMavenCoordinateSegment(s string) bool {
+	if s == "" || len(s) > 200 {
+		return false
+	}
+	if strings.Contains(s, "..") {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-' || r == '+':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// mavenCoordKey is the visited-set key for one point in a parent chain.
+func mavenCoordKey(group, artifact, version string) string {
+	return group + ":" + artifact + ":" + version
+}
+
+// mavenDeclaredLicense returns the licence this ONE document declares,
+// interpolated against its own `<properties>` where it has to be.
+//
+// A `${...}` that the document cannot answer is skipped rather than
+// emitted. Storing the literal `${license.name}` where an SPDX id belongs
+// is the licence-shaped version of the defect Phase 7 Wave 5 fixed for
+// versions: it does not read as missing (so lic.missing stays quiet) and
+// it does not classify (so license.unidentified fires anyway), which is
+// strictly worse than declaring nothing. Silence is the honest answer.
+func mavenDeclaredLicense(pom *mavenPOM, requestedVersion string) string {
+	if pom == nil {
+		return ""
+	}
+	var (
+		props          map[string]string
+		projectVersion string
+		loaded         bool
+	)
+	for _, l := range pom.Licenses.License {
+		s := strings.TrimSpace(l.Name)
+		if s == "" {
+			continue
+		}
+		if strings.Contains(s, unresolvedPropertyMarker) {
+			if !loaded {
+				props = mavenPOMProperties(pom)
+				projectVersion = mavenProjectVersion(pom, requestedVersion)
+				loaded = true
+			}
+			expanded, ok := expandMavenProperties(s, props, projectVersion)
+			if !ok || strings.Contains(expanded, unresolvedPropertyMarker) {
+				continue
+			}
+			s = strings.TrimSpace(expanded)
+			if s == "" {
+				continue
+			}
+		}
+		return s
+	}
+	return ""
+}
+
+// fetchMavenPOM reads one published POM. Returns (nil, false) for every
+// failure — a 404, a 5xx, a parse error — because the only caller is the
+// parent walk, where "could not read it" and "it said nothing" have the
+// same correct outcome: leave the artifact as it is.
+//
+// Base-URL selection mirrors fetchMavenTimelineDoc exactly: repo1 first,
+// and for the namespaces Google hosts, maven.google.com on a DEFINITE
+// absence only. A parent hosted on maven.google.com (every androidx
+// artifact inherits from `androidx:androidx-*`) therefore resolves, and a
+// repo1 outage still costs one request, not two.
+func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, artifact, version string) (*mavenPOM, bool) {
+	groupPath := strings.ReplaceAll(group, ".", "/")
+	pom, warn, err := p.fetchMavenPOMFrom(ctx, p.endpoints.maven, groupPath, artifact, version)
+	if err == nil && warn == nil {
+		return pom, true
+	}
+	if isDefiniteAbsence(warn) && groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != "" {
+		if alt, w, e := p.fetchMavenPOMFrom(ctx, p.endpoints.mavenGoogle, groupPath, artifact, version); e == nil && w == nil {
+			return alt, true
+		}
+	}
+	return nil, false
+}
+
+func (p *registryMetadataProvider) fetchMavenPOMFrom(ctx context.Context, base, groupPath, artifact, version string) (*mavenPOM, *Warning, error) {
+	endpoint := fmt.Sprintf("%s/%s/%s/%s/%s-%s.pom", base, groupPath, artifact, version, artifact, version)
+	var pom mavenPOM
+	warn, err := p.fetchXML(ctx, endpoint, &pom)
+	if err != nil || warn != nil {
+		return nil, warn, err
+	}
+	return &pom, nil, nil
+}
+
+// inheritMavenLicense walks the `<parent>` chain looking for the licence
+// the artifact's own POM did not declare.
+//
+// This is Maven's own rule, not an invention: `<licenses>` is an
+// inherited element, so a child that declares none IS licensed under its
+// parent's terms. guava (33.x) and log4j-core (2.x) are the two most
+// visible examples in any Java tree; before this walk both rendered a
+// licence-missing warning on an Apache-2.0 artifact.
+//
+// Four properties, each pinned by a test:
+//
+//   - Bounded: at most maxMavenParentDepth hops.
+//   - Cycle-safe: a self-parent, or A->B->A, terminates.
+//   - Each coordinate is fetched at most once. The visited set IS the
+//     cache — within one walk a repeated coordinate can only be a cycle,
+//     so the right response is to stop, not to serve it again from a map.
+//     (A cache spanning packages would have to live on the provider,
+//     which is process-lifetime, unbounded and stale-prone; deliberately
+//     not done.)
+//   - A missing or unfetchable parent is silence. No warning is added to
+//     the artifact's report: the artifact itself was fetched fine, and a
+//     parent's 404 is not a fact about the artifact.
+func (p *registryMetadataProvider) inheritMavenLicense(ctx context.Context, pom *mavenPOM, group, artifact, version string) string {
+	if pom == nil {
+		return ""
+	}
+	seen := map[string]struct{}{mavenCoordKey(group, artifact, version): {}}
+	cur := pom
+	for depth := 0; depth < maxMavenParentDepth; depth++ {
+		pg := strings.TrimSpace(cur.Parent.GroupID)
+		pa := strings.TrimSpace(cur.Parent.ArtifactID)
+		pv := strings.TrimSpace(cur.Parent.Version)
+		if pg == "" || pa == "" || pv == "" {
+			return "" // no parent, or one we cannot address
+		}
+		// A `${revision}`-style parent version (the flatten-plugin
+		// idiom) is not resolvable from the child document, and the
+		// coordinate has to be URL-safe before it becomes a request.
+		if !isSafeMavenCoordinateSegment(pg) || !isSafeMavenCoordinateSegment(pa) || !isSafeMavenCoordinateSegment(pv) {
+			return ""
+		}
+		key := mavenCoordKey(pg, pa, pv)
+		if _, dup := seen[key]; dup {
+			return "" // cycle
+		}
+		seen[key] = struct{}{}
+
+		parent, ok := p.fetchMavenPOM(ctx, pg, pa, pv)
+		if !ok {
+			return ""
+		}
+		if lic := mavenDeclaredLicense(parent, pv); lic != "" {
+			return lic
+		}
+		cur = parent
+	}
+	return ""
+}
+
 func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string) (PartialReport, error) {
 	group, artifact, classifier := splitMavenCoordinate(pkg)
 	if group == "" || artifact == "" {
@@ -1597,12 +1864,15 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 		return pr, nil
 	}
 
-	license := ""
-	for _, l := range pom.Licenses.License {
-		if s := strings.TrimSpace(l.Name); s != "" {
-			license = s
-			break
-		}
+	// `<licenses>` is an INHERITED POM element. An artifact that declares
+	// none is not unlicensed — it is licensed under its parent's terms,
+	// which is how guava and log4j-core (Apache-2.0 both) used to arrive
+	// here with nothing and score lic.missing + license.unidentified.
+	// Read this document first; only walk the parent chain when it is
+	// genuinely silent. See inheritMavenLicense.
+	license := mavenDeclaredLicense(&pom, ver)
+	if license == "" {
+		license = p.inheritMavenLicense(ctx, &pom, group, artifact, ver)
 	}
 
 	people := &PeopleSection{}
@@ -1890,8 +2160,60 @@ func (p *registryMetadataProvider) fetchMavenTimeline(ctx context.Context, group
 
 // fetchMavenTimelineDoc is the fetch+parse half, returning the RAW fetch
 // warning. See timelineDoc.
+// googleMavenGroupPrefixes are the groupId namespaces Google publishes to
+// its own Maven repository instead of to Maven Central. They are the
+// measured reason the Maven family could not be answered: 1,405 of the
+// 1,699 registrymetadata `not_found` rows in the 2026-08-25 production
+// export are `androidx.*` / `com.android.tools.*` coordinates that are
+// real, ubiquitous, and simply absent from repo1.
+//
+// Matched on the dotted groupId, so `androidx` matches `androidx.work`
+// but not `androidxfoo`.
+var googleMavenGroupPrefixes = []string{
+	"androidx",
+	"com.android",
+	"com.google.android",
+	"com.google.firebase",
+}
+
+// groupUsesGoogleMaven reports whether a Maven groupPath (slash-separated,
+// as it appears in the repository layout) belongs to a namespace Google
+// hosts.
+func groupUsesGoogleMaven(groupPath string) bool {
+	group := strings.ReplaceAll(groupPath, "/", ".")
+	for _, prefix := range googleMavenGroupPrefixes {
+		if group == prefix || strings.HasPrefix(group, prefix+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchMavenTimelineDoc reads a coordinate's published version timeline.
+//
+// It asks repo1 first and, for the namespaces Google hosts, falls back to
+// maven.google.com when repo1 does not have the artifact. That fallback is
+// what makes the federated-absence verdict honest rather than noisy: with
+// it, a Maven coordinate that still comes back not-found has been missed by
+// BOTH of the repositories that actually serve this ecosystem, and calling
+// that "not evaluated" is a statement about the coordinate. Without it, the
+// same verdict would land on every androidx dependency in the fleet.
+//
+// The fallback fires only on a definite miss, never on an outage, so a
+// repo1 5xx does not produce a second outbound request. Ecosystems and
+// namespaces outside the Google set are untouched.
 func (p *registryMetadataProvider) fetchMavenTimelineDoc(ctx context.Context, groupPath, artifact string) timelineDoc {
-	endpoint := fmt.Sprintf("%s/%s/%s/maven-metadata.xml", p.endpoints.maven, groupPath, artifact)
+	doc := p.fetchMavenTimelineDocFrom(ctx, p.endpoints.maven, groupPath, artifact)
+	if isDefiniteAbsence(doc.probeWarning()) && groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != "" {
+		if alt := p.fetchMavenTimelineDocFrom(ctx, p.endpoints.mavenGoogle, groupPath, artifact); alt.probeWarning() == nil {
+			return alt
+		}
+	}
+	return doc
+}
+
+func (p *registryMetadataProvider) fetchMavenTimelineDocFrom(ctx context.Context, base, groupPath, artifact string) timelineDoc {
+	endpoint := fmt.Sprintf("%s/%s/%s/maven-metadata.xml", base, groupPath, artifact)
 	var meta mavenMetadataXML
 	warn, err := p.fetchXML(ctx, endpoint, &meta)
 	if err != nil || warn != nil {
@@ -5134,7 +5456,7 @@ func (p *registryMetadataProvider) gitHubFetchOnce(ctx context.Context, endpoint
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return &Warning{Provider: "registrymetadata", Code: "not_found", Message: endpoint, At: p.now()}
+		return &Warning{Provider: "registrymetadata", Code: WarnRegistryNotFound, Message: endpoint, At: p.now()}
 	}
 	if resp.StatusCode >= 400 {
 		return &Warning{Provider: "registrymetadata", Code: fmt.Sprintf("http_%d", resp.StatusCode), Message: endpoint, At: p.now()}

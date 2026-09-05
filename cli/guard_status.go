@@ -81,7 +81,7 @@ func guardDashboardURL() string {
 
 var guardStatusCmd = &cobra.Command{
 	Use:          "status",
-	Short:        "Show local guard activity, privacy state, and account sync status",
+	Short:        "Show local guard activity and privacy state",
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
 	RunE:         runGuardStatus,
@@ -133,16 +133,7 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 		firstRun = time.Unix(st.FirstRunUnix, 0).Format("2006-01-02")
 	}
 
-	// "Activated" is the first-block milestone (set once, persisted). Show the
-	// date when it happened, "no" while the guard hasn't blocked anything yet.
-	activated := "no"
-	if st.Activated {
-		if st.FirstBlockAtUnix != 0 {
-			activated = "yes (" + time.Unix(st.FirstBlockAtUnix, 0).Format("2006-01-02") + ")"
-		} else {
-			activated = "yes"
-		}
-	}
+	firstBlock := firstBlockLabel(st)
 
 	out := cmd.OutOrStdout()
 
@@ -151,7 +142,7 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(tw, "  Installs checked\t%d\n", st.InstallsChecked)
 	fmt.Fprintf(tw, "  Packages scanned\t%d\n", st.PackagesScanned)
 	fmt.Fprintf(tw, "  Blocks\t%d\n", st.Blocks)
-	fmt.Fprintf(tw, "  Activated\t%s\n", activated)
+	fmt.Fprintf(tw, "  First block\t%s\n", firstBlock)
 	fmt.Fprintf(tw, "  First run\t%s\n", firstRun)
 	_ = tw.Flush()
 
@@ -164,13 +155,46 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out, "  Change with: chainsaw telemetry on | off")
 
 	fmt.Fprintln(out)
+	// B8: what actually leaves the machine. With consent, the guard emits
+	// install.guard.block/.activated/.daily_active to /api/telemetry/ingest,
+	// which is forwarded to PostHog; nothing in the server or the UI reads
+	// those events back, and the /api/scan preflight persists nothing. So
+	// "your guard activity syncs to your account" was true only as
+	// consent-gated analytics attribution and false as anything a user could
+	// open on the dashboard. Say exactly that, and never the word "sync".
 	if cfgToken() == "" {
-		fmt.Fprintln(out, "Not signed in. Sign up free to sync these across your team and see org-wide threats → "+guardCTA(guardNudgeBaseSignup, st.Consent))
+		fmt.Fprintln(out, "Not signed in. Sign up free to see org-wide threats → "+guardCTA(guardNudgeBaseSignup, st.Consent))
 	} else {
-		fmt.Fprintln(out, "Signed in — your guard activity syncs to your account. See the dashboard → "+guardDashboardURL())
+		fmt.Fprintln(out, "Signed in. With telemetry on, guard blocks from this machine are recorded against your org and appear on the dashboard alongside proxy and CI activity. With telemetry off, blocks stay on this machine and this command is the only record.")
+		fmt.Fprintln(out, "See the dashboard → "+guardDashboardURL())
 	}
 
 	return nil
+}
+
+// firstBlockLabel renders the first-block milestone for the text table.
+//
+// B5 (BUG-F-006): this row used to be labelled "Activated" and read "no" on a
+// fresh install, which a tester took to mean the guard itself was not active.
+// Activated is the persisted first-EVER-block milestone (guard_nudge.go) —
+// the funnel event install.guard.activated keeps that name (TELEMETRY.md) —
+// but the user-facing label is now the fact it records. Three renders:
+//
+//	none yet                 — nothing blocked on this machine so far
+//	<YYYY-MM-DD>             — the milestone with its stamped date
+//	yes (date not recorded)  — legacy state files written before
+//	                           FirstBlockAtUnix existed (Activated=true, 0 stamp)
+//
+// The --json keys `activated` / `first_block_unix` are untouched.
+func firstBlockLabel(st *guardState) string {
+	switch {
+	case !st.Activated:
+		return "none yet"
+	case st.FirstBlockAtUnix != 0:
+		return time.Unix(st.FirstBlockAtUnix, 0).Format("2006-01-02")
+	default:
+		return "yes (date not recorded)"
+	}
 }
 
 func onOff(b bool) string {

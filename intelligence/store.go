@@ -304,7 +304,12 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	//
 	// This mutates the caller's Report on purpose: a caller that inspects
 	// what it just persisted should see the same warning the row carries.
+	//
+	// markMalformedCoordinate is the name-side twin (Phase 9 A5), stamped
+	// here for the same reason: a hand-built Report for a name no registry
+	// can serve must not land as a row that reads scanned-and-clean.
 	markUnevaluableVersion(r, r.Observation.CollectedAt)
+	markMalformedCoordinate(r, r.Observation.CollectedAt)
 
 	// Wrap the read-then-write in a transaction so a concurrent Upsert
 	// for the same key cannot race between SELECT and INSERT. The
@@ -456,9 +461,8 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 //     FirstTimeCollaborator, NonExistentAuthor)
 //     plus Tier-1 MalwareStatus/TyposquatStatus
 //     when the new report's fields are empty.
-//     TrustScore + TrustScoreBreakdown are
-//     always taken from the incoming report
-//     (recomputed every scan).
+//     TrustScore is always taken from the
+//     incoming report (recomputed every scan).
 //   - report.people                — Authors / Maintainers / PublisherIDs /
 //     TrustedPublisher (Tier-1 sourced, but
 //     FirstTimeCollaborator reads prior.People
@@ -564,9 +568,9 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 		merged.Artifact.SignatureKeyID = prior.Artifact.SignatureKeyID
 	}
 
-	// SupplyChain: per-field preservation. TrustScore + TrustScoreBreakdown
-	// are deliberately NOT preserved — they are recomputed by the risk
-	// engine on every scan and must reflect the latest evaluation.
+	// SupplyChain: per-field preservation. TrustScore is deliberately NOT
+	// preserved — it is recomputed by the risk engine on every scan and
+	// must reflect the latest evaluation.
 	//
 	// The sticky-on-silence rules themselves live in applyStickySupplyChain
 	// (sticky.go) because runFanout must apply the SAME rules to the risk

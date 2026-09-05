@@ -36,7 +36,7 @@ package cli
 //
 // The gate used to be "does ANY printed cell say none", which read as a
 // policy check but was really a property of the product's coverage
-// matrix. Measured: 16 ecosystems × 46 conditions = 736 cells, 281 of
+// matrix. Measured at the time: 16 ecosystems × 46 conditions = 736 cells, 281 of
 // them none, and all 16 rows contain at least one — so preflight exited 1
 // for every org, every ecosystem filter and every policy set, forever. A
 // CI job wired exactly as this file's help text documents failed 100% of

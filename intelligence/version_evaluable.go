@@ -45,8 +45,14 @@ package intelligence
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
+
+	"golang.org/x/mod/module"
+
+	"github.com/chain305/chainsaw-core/intelligence/osv"
 )
 
 // Reason codes attached to WarnVersionNotEvaluable, and mirrored by the
@@ -180,6 +186,221 @@ func UnevaluableVersionReason(ecosystem, version string) string {
 // about whether any advisory actually matches.
 func EvaluableVersion(ecosystem, version string) bool {
 	return UnevaluableVersionReason(ecosystem, version) == ""
+}
+
+// WarnCoordinateMalformed is the sibling of WarnVersionNotEvaluable for the
+// NAME half of a coordinate: the package string is one no registry in that
+// ecosystem can serve, so the row was recorded but NOT evaluated.
+//
+// Stamped by markMalformedCoordinate at the same two sites as its sibling
+// (runFanout and Store.Upsert) with provider "coordinate", consumed by
+// risk_projection.go as an unavailability arm (VerdictUnknown → Monitored),
+// and classified not_applicable in core/coverage/status.go — it is a fact
+// about the coordinate, not about any source, so it can never trip the
+// opt-in fail-closed gate on its own.
+//
+// Why it exists (Phase 9 fresh QA, P9F-063): `intel package npm
+// "<script>alert(1)</script>" 1.0.0` scored ALLOW 96 (A). registry.npmjs.org
+// answers 405 for that name, provider_registrymetadata.go maps only 404 to
+// not_found, so the http_405 warning was never read as "package absent" and
+// the report was scored on an empty fact set. Names the registry 404s
+// (`.hidden`, `a..b`) already reach package_not_found; the URL-unsafe class
+// was the one still scored. The gate closes it without a registry call.
+const WarnCoordinateMalformed = "coordinate_malformed"
+
+// pypiNameRE is PEP 508's name grammar, applied to the RAW name — before
+// A4's canonicalisation — so a non-canonical but legal spelling
+// (`Django`, `typing_extensions`, `zope.interface`) passes.
+var pypiNameRE = regexp.MustCompile(`(?i)^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`)
+
+// MalformedCoordinateReason reports WHY a package name can never be served
+// by its ecosystem's registry, or "" when the name is syntactically
+// possible. It is the name-side sibling of UnevaluableVersionReason and is
+// held to the same discipline: each rule is the ecosystem's OWN grammar,
+// not a tightening of it, so nothing a registry serves is rejected.
+//
+//	go / gomod     — golang.org/x/mod/module.CheckPath, the rule `go` itself
+//	                 applies to a `require` line. Proxy keys pass by
+//	                 construction: the gomod resolver decodes the `!x`
+//	                 case escaping before building the coordinate, and
+//	                 TestProxyResolverKeysAreNeverMalformed pins it.
+//	maven / gradle — an empty or whitespace-only colon segment, or a
+//	                 character outside Maven's own ID grammar
+//	                 ([A-Za-z0-9_.-], DefaultModelValidator's ID_REGEX) in
+//	                 the group or artifact. NO segment-count rule:
+//	                 g:a:packaging:classifier:version is a valid five-part
+//	                 form that splitMavenCoordinate scores today.
+//	npm / yarn / bun — validate-npm-package-name's OLD-package rules, the
+//	                 ones the registry applies to names that already exist:
+//	                 non-empty, no surrounding or embedded whitespace, no
+//	                 leading `.` or `_`, no `..`, not node_modules or
+//	                 favicon.ico, and URL-friendly (encodeURIComponent(name)
+//	                 == name) apart from the single `/` of an optional
+//	                 `@scope/`. Uppercase is PERMITTED — the new-package
+//	                 lowercase rule would flip every legacy mixed-case name
+//	                 such as JSONStream — and there is no 214-char cap, which
+//	                 is new-package-only.
+//	pypi / pip     — PEP 508's name grammar on the raw name.
+//	anything else  — "" (no rule). A new ecosystem cannot be gated by
+//	                 accident.
+//
+// The returned text is operator-facing and lands in the warning message.
+func MalformedCoordinateReason(ecosystem, pkg string) string {
+	eco := strings.ToLower(strings.TrimSpace(ecosystem))
+	if isMavenFamily(eco) {
+		return malformedMavenCoordinate(pkg)
+	}
+	switch osv.CanonicalEcosystem(eco) {
+	case "go":
+		return malformedGoModulePath(pkg)
+	case "npm":
+		return malformedNPMName(pkg)
+	case "pypi":
+		return malformedPyPIName(pkg)
+	}
+	return ""
+}
+
+func malformedGoModulePath(pkg string) string {
+	if err := module.CheckPath(pkg); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// mavenIDChar is Maven's own ID grammar for groupId and artifactId.
+func mavenIDChar(r rune) bool {
+	return r == '_' || r == '.' || r == '-' ||
+		('0' <= r && r <= '9') || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z')
+}
+
+func malformedMavenCoordinate(pkg string) string {
+	segs := strings.Split(pkg, ":")
+	for i, s := range segs {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Sprintf("maven coordinate %q: segment %d is empty", pkg, i+1)
+		}
+	}
+	// Group and artifact only. Packaging, classifier and version, when
+	// present, are shape questions for splitMavenCoordinate.
+	names := []string{"groupId", "artifactId"}
+	for i := 0; i < len(segs) && i < len(names); i++ {
+		for _, r := range segs[i] {
+			if !mavenIDChar(r) {
+				return fmt.Sprintf("maven coordinate %q: invalid char %q in %s", pkg, r, names[i])
+			}
+		}
+	}
+	return ""
+}
+
+// npmURLFriendly mirrors encodeURIComponent's unreserved set — the exact
+// test validate-npm-package-name applies (`encodeURIComponent(name) !==
+// name` is an error). Note this is NOT url.PathEscape: Go's path escaping
+// leaves `$&+:=@` alone and escapes `!'()*`, which is backwards from
+// npm's rule in both directions, and `!'()*` appear in legacy served names.
+func npmURLFriendly(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		case c == '-', c == '_', c == '.', c == '!', c == '~', c == '*', c == '\'', c == '(', c == ')':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func malformedNPMName(name string) string {
+	if name == "" {
+		return "npm name is empty"
+	}
+	if strings.TrimSpace(name) != name {
+		return fmt.Sprintf("npm name %q has leading or trailing whitespace", name)
+	}
+	for _, r := range name {
+		if unicode.IsSpace(r) {
+			return fmt.Sprintf("npm name %q contains whitespace", name)
+		}
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Sprintf("npm name %q contains \"..\"", name)
+	}
+	switch strings.ToLower(name) {
+	case "node_modules", "favicon.ico":
+		return fmt.Sprintf("npm name %q is reserved", name)
+	}
+	bare := name
+	if strings.HasPrefix(name, "@") {
+		i := strings.IndexByte(name, '/')
+		if i < 0 {
+			return fmt.Sprintf("npm name %q: scope without a package", name)
+		}
+		scope := name[1:i]
+		if scope == "" {
+			return fmt.Sprintf("npm name %q: empty scope", name)
+		}
+		if !npmURLFriendly(scope) {
+			return fmt.Sprintf("npm name %q: scope is not URL-friendly", name)
+		}
+		bare = name[i+1:]
+	}
+	if bare == "" {
+		return fmt.Sprintf("npm name %q: empty package name", name)
+	}
+	if bare[0] == '.' {
+		return fmt.Sprintf("npm name %q: package name starts with a period", name)
+	}
+	if bare[0] == '_' {
+		return fmt.Sprintf("npm name %q: package name starts with an underscore", name)
+	}
+	if !npmURLFriendly(bare) {
+		return fmt.Sprintf("npm name %q: package name is not URL-friendly", name)
+	}
+	return ""
+}
+
+func malformedPyPIName(name string) string {
+	if !pypiNameRE.MatchString(name) {
+		return fmt.Sprintf("pypi name %q does not match the PEP 508 name grammar", name)
+	}
+	return ""
+}
+
+// markMalformedCoordinate stamps WarnCoordinateMalformed on a Report whose
+// package name no registry can serve, and reports whether it did. Same
+// store-with-a-marker doctrine, same two call sites, same idempotency as
+// markUnevaluableVersion above — read that comment; nothing here is
+// different except which half of the coordinate is being judged.
+//
+// A coordinate can carry both stamps (`:x` at `${v}`); neither hides the
+// other, and the projection reads either as NOT EVALUATED.
+func markMalformedCoordinate(r *Report, at time.Time) bool {
+	if r == nil {
+		return false
+	}
+	reason := MalformedCoordinateReason(r.Identity.Ecosystem, r.Identity.Package)
+	if reason == "" {
+		return false
+	}
+	for _, w := range r.Observation.Warnings {
+		if w.Code == WarnCoordinateMalformed {
+			return true
+		}
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	r.Observation.Warnings = append(r.Observation.Warnings, Warning{
+		Provider: unevaluableVersionWarningProvider,
+		Code:     WarnCoordinateMalformed,
+		Message: fmt.Sprintf(
+			"%s; no registry can serve this name, so the coordinate is recorded but NOT evaluated",
+			reason),
+		At: at,
+	})
+	return true
 }
 
 // isMavenFamily reports whether the caller-facing ecosystem name resolves

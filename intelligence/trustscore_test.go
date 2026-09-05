@@ -1,7 +1,6 @@
 package intelligence
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
@@ -53,11 +52,12 @@ func TestComputeTrustScore_PopulatedReportYieldsNonZero(t *testing.T) {
 	if report.SupplyChain.TrustScore <= 0 {
 		t.Fatalf("expected positive score for clean package, got %d", report.SupplyChain.TrustScore)
 	}
-	if report.SupplyChain.TrustScoreBreakdown == "" {
-		t.Fatalf("expected breakdown JSON to be populated")
-	}
-	if !strings.Contains(report.SupplyChain.TrustScoreBreakdown, "malwareCheck") {
-		t.Fatalf("breakdown JSON should contain malwareCheck key: %s", report.SupplyChain.TrustScoreBreakdown)
+	// The legacy per-signal breakdown used to be asserted here. It was
+	// removed 2026-09-04 (P9F-307) — write-only fossil. The signal
+	// contributions it carried are covered directly in
+	// core/trustscore/score_test.go; what this test owns is the composite.
+	if report.Risk == nil {
+		t.Fatalf("expected report.Risk to be populated by the risk-V2 evaluator")
 	}
 }
 
@@ -69,13 +69,11 @@ func TestComputeTrustScore_MaliciousReportLowScore(t *testing.T) {
 		},
 	}
 	ComputeTrustScore(report)
-	// trustscore.Compute clamps malicious packages to Total=0 (with a
-	// -100 MalwareCheck in the breakdown).
+	// A malicious package scores 0. The -100 MalwareCheck contribution
+	// that drives the legacy blend to the same place is asserted in
+	// core/trustscore/score_test.go, against trustscore.Compute directly.
 	if report.SupplyChain.TrustScore != 0 {
 		t.Fatalf("expected score 0 for malicious package, got %d", report.SupplyChain.TrustScore)
-	}
-	if !strings.Contains(report.SupplyChain.TrustScoreBreakdown, "-100") {
-		t.Fatalf("breakdown should include -100 malware penalty, got %s", report.SupplyChain.TrustScoreBreakdown)
 	}
 }
 
@@ -93,32 +91,48 @@ func TestComputeTrustScore_EmptyReportHandled(t *testing.T) {
 	if report.SupplyChain.TrustScore < 0 {
 		t.Fatalf("empty report should not produce negative score, got %d", report.SupplyChain.TrustScore)
 	}
-	if report.SupplyChain.TrustScoreBreakdown == "" {
-		t.Fatalf("expected breakdown JSON for empty report")
-	}
 }
 
+// TestComputeTrustScore_InstallScriptFetchesRemoteHurtsScore checks that a
+// remote-fetching install script costs the package points.
+//
+// It used to assert `"installScript":-20` inside the legacy breakdown
+// STRING on the report. That field is gone (P9F-307), and the string match
+// was the wrong assertion anyway: it pinned the legacy blend, not the
+// composite the policy evaluator actually gates on. Now it compares the
+// served score against an otherwise-identical clean report.
 func TestComputeTrustScore_InstallScriptFetchesRemoteHurtsScore(t *testing.T) {
-	report := &Report{
-		Scan: ArtifactScanSection{
-			Performed:            true,
-			HasInstallScript:     true,
-			InstallScriptFetches: true,
-			InstallScriptKind:    "fetches_remote",
-		},
+	build := func(fetchesRemote bool) *Report {
+		r := &Report{
+			Identity: IdentitySection{Ecosystem: "npm", Package: "acme", Version: "1.0.0"},
+			Scan:     ArtifactScanSection{Performed: true},
+		}
+		if fetchesRemote {
+			r.Scan.HasInstallScript = true
+			r.Scan.InstallScriptFetches = true
+			r.Scan.InstallScriptKind = "fetches_remote"
+		}
+		return r
 	}
-	ComputeTrustScore(report)
-	if !strings.Contains(report.SupplyChain.TrustScoreBreakdown, `"installScript":-20`) {
-		t.Fatalf("expected installScript penalty -20, got %s", report.SupplyChain.TrustScoreBreakdown)
+
+	clean := build(false)
+	dirty := build(true)
+	ComputeTrustScore(clean)
+	ComputeTrustScore(dirty)
+
+	if dirty.SupplyChain.TrustScore >= clean.SupplyChain.TrustScore {
+		t.Fatalf("a remote-fetching install script must lower the composite score: "+
+			"with=%d, without=%d", dirty.SupplyChain.TrustScore, clean.SupplyChain.TrustScore)
 	}
 }
 
 func boolPtr(b bool) *bool { return &b }
 
 // TestComputeTrustScore_RiskV2IsAuthoritative locks in the post-cutover
-// contract: v2 always runs, report.Risk is populated, the legacy
-// breakdown JSON still flows through, and the score field comes from
-// risk.Evaluation.RolledUp.Overall — not from legacy.Compute().Total.
+// contract: v2 always runs, report.Risk is populated, and the score field
+// comes from risk.Evaluation.RolledUp.Overall — not from
+// legacy.Compute().Total. (The legacy breakdown JSON that used to ride
+// along on the report was removed 2026-09-04; see P9F-307.)
 func TestComputeTrustScore_RiskV2IsAuthoritative(t *testing.T) {
 	past := time.Now().Add(-200 * 24 * time.Hour)
 	report := &Report{
@@ -152,13 +166,6 @@ func TestComputeTrustScore_RiskV2IsAuthoritative(t *testing.T) {
 	if report.SupplyChain.TrustScore != report.Risk.RolledUp.Overall {
 		t.Fatalf("score field should mirror Risk-V2 RolledUp.Overall: score=%d v2=%d",
 			report.SupplyChain.TrustScore, report.Risk.RolledUp.Overall)
-	}
-	if report.SupplyChain.TrustScoreBreakdown == "" {
-		t.Fatalf("legacy Breakdown JSON must still be populated for explanation paths")
-	}
-	if !strings.Contains(report.SupplyChain.TrustScoreBreakdown, "malwareCheck") {
-		t.Fatalf("breakdown should contain legacy per-signal keys, got %s",
-			report.SupplyChain.TrustScoreBreakdown)
 	}
 }
 

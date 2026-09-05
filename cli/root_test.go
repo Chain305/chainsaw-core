@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -249,6 +250,24 @@ func rebindRootFlagsAfterReset(t *testing.T) {
 	rootCmd.PersistentFlags().Lookup("token").Changed = false
 	_ = rootCmd.PersistentFlags().Set("server", "")
 	rootCmd.PersistentFlags().Lookup("server").Changed = false
+	_ = rootCmd.PersistentFlags().Set("org", "")
+	rootCmd.PersistentFlags().Lookup("org").Changed = false
+	_ = rootCmd.PersistentFlags().Set("quiet", "false")
+	rootCmd.PersistentFlags().Lookup("quiet").Changed = false
+}
+
+// unsetEnv removes key for the duration of the test. t.Setenv(key, "") is NOT
+// the same thing: it leaves the variable PRESENT with an empty value, which
+// for CHAINSAW_TOKEN now means "explicitly no credential, skip the keyring"
+// (A2, tokenExplicitlyEmpty). Tests that mean "no ambient override" want the
+// variable gone. t.Setenv is still called first so the original value is
+// restored at cleanup.
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
 }
 
 // TestCfgToken_FlagWinsOverKeychain is the **regression guard** for the
@@ -548,4 +567,136 @@ func TestClassifyCLIError_Buckets(t *testing.T) {
 			t.Errorf("classifyCLIError(%q) = %q, want %q", msg, got, want)
 		}
 	}
+}
+
+// ── B6: the root --org flag is local-only, and says so ───────────────────────
+//
+// No request the CLI makes carries an org header; the server resolves the org
+// from the token. `chainsaw --org other policy list` therefore silently lists
+// YOUR org, which every reader of the flag took to be a cross-org override.
+// The root PersistentPreRunE now prints one stderr note when the ROOT --org
+// is set on a command that is not one of its local consumers. Commands with a
+// shadowing local --org (install-hook, auth sso, sbom vex export) own their
+// flag and must not trigger it — ownsGlobalFlag is what tells them apart.
+
+const orgLocalOnlyNote = "note: --org is local-only; the server resolves your org from your token"
+
+// runRootForOrgNote drives the real rootCmd through Execute with args and
+// returns what reached stderr. Errors are expected (no server is configured,
+// so the server-required commands fail fast right after PreRun) and ignored:
+// the note is printed by PreRun, before RunE gets a say.
+func runRootForOrgNote(t *testing.T, args ...string) string {
+	t.Helper()
+	withIsolatedConfigHome(t)
+	withFileCredStore(t)
+	rebindRootFlagsAfterReset(t)
+	unsetEnv(t, "CHAINSAW_TOKEN")
+	unsetEnv(t, "CHAINSAW_QUIET")
+	prevStdin := stdinIsTerminal
+	stdinIsTerminal = func() bool { return false }
+	t.Cleanup(func() { stdinIsTerminal = prevStdin })
+
+	rootCmd.SetArgs(args)
+	var stderr string
+	_ = captureStdout(t, func() {
+		stderr = captureStderr(t, func() { _ = rootCmd.Execute() })
+	})
+	return stderr
+}
+
+func TestOrgNote_PrintedForServerCommandUsingRootFlag(t *testing.T) {
+	stderr := runRootForOrgNote(t, "policy", "list", "--org", "x")
+	if !strings.Contains(stderr, orgLocalOnlyNote) {
+		t.Fatalf("`policy list --org x` did not print the local-only note; stderr = %q", stderr)
+	}
+	if strings.Count(stderr, orgLocalOnlyNote) != 1 {
+		t.Fatalf("the note printed more than once; stderr = %q", stderr)
+	}
+}
+
+func TestOrgNote_PrintedWhenRootFlagPrecedesSubcommand(t *testing.T) {
+	stderr := runRootForOrgNote(t, "--org", "x", "policy", "list")
+	if !strings.Contains(stderr, orgLocalOnlyNote) {
+		t.Fatalf("`--org x policy list` did not print the local-only note; stderr = %q", stderr)
+	}
+}
+
+func TestOrgNote_SilentForLocalConsumers(t *testing.T) {
+	cases := [][]string{
+		{"status", "--org", "x"},
+		{"org", "delete", "--org", "x", "--dry-run"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			stderr := runRootForOrgNote(t, args...)
+			if strings.Contains(stderr, orgLocalOnlyNote) {
+				t.Fatalf("%v is a local consumer of --org and must not be told it is local-only; stderr = %q", args, stderr)
+			}
+		})
+	}
+}
+
+func TestOrgNote_SilentForShadowingLocalOrgFlags(t *testing.T) {
+	cases := [][]string{
+		{"install-hook", "--org", "acme"},
+		{"sbom", "vex", "export", "--org", "x"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			stderr := runRootForOrgNote(t, args...)
+			if strings.Contains(stderr, orgLocalOnlyNote) {
+				t.Fatalf("%v defines its own --org; the root note must not fire; stderr = %q", args, stderr)
+			}
+		})
+	}
+}
+
+func TestOrgNote_SilentUnderQuiet(t *testing.T) {
+	stderr := runRootForOrgNote(t, "--quiet", "policy", "list", "--org", "x")
+	if strings.Contains(stderr, orgLocalOnlyNote) {
+		t.Fatalf("--quiet must suppress the note (it is chatter); stderr = %q", stderr)
+	}
+}
+
+func TestOrgNote_SilentWhenOrgNotPassed(t *testing.T) {
+	stderr := runRootForOrgNote(t, "policy", "list")
+	if strings.Contains(stderr, orgLocalOnlyNote) {
+		t.Fatalf("the note fired without --org; stderr = %q", stderr)
+	}
+}
+
+// TestOrgNote_LocalConsumersAreExactlyStatusAndOrgDelete pins the allow-list
+// so a new local consumer is added deliberately rather than by editing a map
+// nobody reads.
+func TestOrgNote_LocalConsumersAreExactlyStatusAndOrgDelete(t *testing.T) {
+	want := []string{"chainsaw org delete", "chainsaw status"}
+	var got []string
+	for path := range localOrgConsumers {
+		got = append(got, path)
+	}
+	sort.Strings(got)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("localOrgConsumers = %v, want %v", got, want)
+	}
+	for _, path := range want {
+		if findCommandByPath(t, path) == nil {
+			t.Fatalf("%q is listed as a local --org consumer but no such command exists", path)
+		}
+	}
+}
+
+func findCommandByPath(t *testing.T, path string) *cobra.Command {
+	t.Helper()
+	var found *cobra.Command
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.CommandPath() == path {
+			found = c
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(rootCmd)
+	return found
 }

@@ -7,8 +7,10 @@ package cli
 // inline. These cover the count formatting and the progress-callback wiring.
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -73,4 +75,42 @@ func TestCollectOSVEntriesNilCallback(t *testing.T) {
 	if got := collectOSVEntries(dir, nil); len(got) != 1 {
 		t.Fatalf("parsed %d entries with nil callback, want 1", len(got))
 	}
+}
+
+// TestFinishIndexProgress pins B4 (BUG-F-005): the in-place TTY progress line
+// used to be closed with a bare newline, so the LAST heartbeat (e.g. 220,000)
+// stayed on screen while the true total (237,079) only appeared further down.
+// The TTY close is now a final redraw carrying the total; the non-TTY path
+// writes nothing here because its per-step log lines already end in newlines
+// and the following "writing the offline cache (N advisories)" line carries
+// the total.
+func TestFinishIndexProgress(t *testing.T) {
+	t.Run("tty redraws the line with the total", func(t *testing.T) {
+		var buf bytes.Buffer
+		finishIndexProgress(&buf, true, 237079)
+		got := buf.String()
+		if !strings.HasPrefix(got, "\r") {
+			t.Fatalf("TTY close must redraw in place (start with \\r); got %q", got)
+		}
+		if !strings.HasSuffix(got, "\n") {
+			t.Fatalf("TTY close must end the line; got %q", got)
+		}
+		line := strings.TrimRight(strings.TrimPrefix(got, "\r"), " \n")
+		if line != "  indexed 237,079 advisories" {
+			t.Fatalf("final progress line = %q, want %q", line, "  indexed 237,079 advisories")
+		}
+		if strings.Contains(got, "…") {
+			t.Fatalf("final redraw must not read as still-in-progress; got %q", got)
+		}
+		if strings.Count(got, "\n") != 1 {
+			t.Fatalf("exactly one newline expected; got %q", got)
+		}
+	})
+	t.Run("non-tty writes nothing", func(t *testing.T) {
+		var buf bytes.Buffer
+		finishIndexProgress(&buf, false, 237079)
+		if buf.Len() != 0 {
+			t.Fatalf("non-TTY close must write nothing; got %q", buf.String())
+		}
+	})
 }

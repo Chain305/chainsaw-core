@@ -121,6 +121,43 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		return unavailableInput(r, reason)
 	}
 
+	// The name-side twin of the arm above (Phase 9 A5): a package string
+	// no registry can serve — `<script>alert(1)</script>` on npm, `:x` on
+	// Maven, `INVALID` as a Go module path. Scoring one produced ALLOW 96
+	// (A) on an empty fact set because the registry answered 405 rather
+	// than 404 and nothing read that as "absent". Placed with
+	// versionNotEvaluableReason because it is the same kind of claim — a
+	// fact about the coordinate, not about the package or about us — and
+	// it inherits the P8-44 malware carry through unavailableInput.
+	if reason, ok := coordinateMalformedReason(r); ok {
+		return unavailableInput(r, reason)
+	}
+
+	// FEDERATED ABSENCE (Phase 9 A8). The Maven family and Go are served
+	// by more than one repository, so a repo1 / proxy.golang.org 404 is
+	// not a statement about the package — which is exactly why P8-04 left
+	// them on the weak `not_found` code. What P8-04 did not do is give
+	// that code a consumer, so the coordinate came back fully scored:
+	// every category at its 100 base and a composite in the nineties, on
+	// a fact set where no metadata was retrieved at all. `maven
+	// invalid:coord:format` rendered ALLOW 96 (A), and the QA vendor
+	// filed it as a firewall bypass.
+	//
+	// The reason it is now safe to say "not evaluated" is upstream, not
+	// here: fetchMavenTimelineDoc falls back to maven.google.com for the
+	// namespaces Google hosts, so the 1,405 androidx coordinates that
+	// dominated this population get a real answer instead of this arm.
+	// What reaches here has been missed by BOTH repositories that serve
+	// the ecosystem.
+	//
+	// Unknown is Monitored on the proxy, never Blocked, and the coverage
+	// gate keys on the warning CODE — still `not_found`, still an okCode —
+	// so an org running the opt-in fail-closed gate does not start
+	// refusing installs over this.
+	if reason, ok := federatedRegistryAbsenceReason(r); ok {
+		return unavailableInput(r, reason)
+	}
+
 	// THIRD unavailability arm, and the one without which P8-05's warning
 	// is inert (see advisory_coverage.go, trap 1). Seven ecosystems —
 	// huggingface, swift, cocoapods, docker, apt, yum, dnf — have no
@@ -172,7 +209,15 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		TyposquatConfidence:  r.SupplyChain.TyposquatConfidence,
 		TyposquatSimilarTo:   r.SupplyChain.TyposquatSimilarTo,
 
-		PublisherChanged: deref(r.SupplyChain.PublisherChanged),
+		// Fires on the EVIDENCE, not on the bool — the same rule
+		// qual.version_anomaly follows. provider_metadiff derives the bool
+		// from the added/removed sets, so a true with both sets empty is
+		// not an observation: it is a fact whose evidence was dropped in
+		// transit, and it cannot bind a verdict. This also heals the rows
+		// already stored that way (30 of 66 in production) without a
+		// backfill, because the projection runs on every read.
+		PublisherChanged: deref(r.SupplyChain.PublisherChanged) &&
+			(len(r.SupplyChain.PublisherAdded) > 0 || len(r.SupplyChain.PublisherRemoved) > 0),
 
 		HasInstallScript:           r.Scan.HasInstallScript,
 		InstallScriptFetchesRemote: r.Scan.InstallScriptFetches,
@@ -363,11 +408,12 @@ func ProjectToRiskInput(r *Report) risk.Input {
 // reversed, and it is reversed for exactly two fields.
 //
 // Every unavailability return in this file goes through here — today
-// versionNotFoundReason, versionNotEvaluableReason and
-// packageNotFoundReason. A fourth added later inherits the malware carry
-// automatically, which is the point: the defect this fixes was one of
-// three sibling returns being written without it and nothing joining
-// them. TestEveryUnavailableReturnCarriesMalware pins that.
+// versionNotFoundReason, versionNotEvaluableReason, packageNotFoundReason,
+// coordinateMalformedReason and noAdvisorySourceReason. One added later
+// inherits the malware carry automatically, which is the point: the
+// defect this fixes was one of three sibling returns being written
+// without it and nothing joining them.
+// TestEveryUnavailableReturnCarriesMalware pins that.
 //
 // What is carried, and why only this:
 //
@@ -485,6 +531,44 @@ func versionNotEvaluableReason(r *Report) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// coordinateMalformedReason reports whether the ingest guard stamped this
+// report as carrying a package name no registry can serve (see
+// MalformedCoordinateReason). Phrased as a clause to match its siblings:
+// it is rendered inside UnavailableEvaluation's summary sentence, so no
+// leading capital, no trailing period, no em dash.
+func coordinateMalformedReason(r *Report) (string, bool) {
+	for _, w := range r.Observation.Warnings {
+		if w.Code == WarnCoordinateMalformed {
+			return "the package name is not a valid coordinate in this ecosystem and " +
+				"no registry can serve it; check for a typo, an injected string, or " +
+				"a name that was never a package", true
+		}
+	}
+	return "", false
+}
+
+// federatedRegistryAbsenceReason reports whether the registry-metadata
+// lane came back not-found on an ecosystem served by more than one
+// repository. Shares its predicate with the renderer
+// (FederatedRegistryAbsence) so the verdict and the sentence on screen
+// cannot disagree about what happened.
+//
+// Phrased as a clause to match its siblings: rendered inside
+// UnavailableEvaluation's summary sentence, so no leading capital, no
+// trailing period, no em dash.
+func federatedRegistryAbsenceReason(r *Report) (string, bool) {
+	if _, ok := FederatedRegistryAbsence(r); !ok {
+		return "", false
+	}
+	registry := federatedRegistryName[normalizeEcosystemKey(r.Identity.Ecosystem)]
+	if registry == "" {
+		registry = "the registry we checked"
+	}
+	return "the coordinate was not found in " + registry + ", and this " +
+		"ecosystem is served by more than one repository, so nothing was " +
+		"measured; it may exist in a private mirror or another repository", true
 }
 
 // projectActionsSection walks the report's Action findings (if any) and
