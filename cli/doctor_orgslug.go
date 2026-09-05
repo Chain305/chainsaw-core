@@ -28,6 +28,24 @@ package cli
 //   WRONGSLUG the probe came back CHW-4314 (400) or CHW-1303 (404 unknown
 //             org). The slug is wrong/missing — LOUD failure + remediation,
 //             non-zero exit.
+//
+// WHAT THIS PROBE CAN NO LONGER SEE. The server used to answer an unknown
+// @<slug> with 404/CHW-1303 to anyone, which made the unauthenticated
+// /repository/@<slug>/… path an org-enumeration oracle: a real slug 401'd,
+// an invented one 404'd, so the internet could ask "does @acme exist?" for
+// free. It now masks an unknown slug as the same 401 a real one returns
+// unless the caller presents valid repository credentials
+// (server_repo_pipeline.go, repositoryPreflight).
+//
+// This probe sends the user's session token, which is NOT a repository
+// credential, so it is anonymous as far as that endpoint is concerned and
+// its WRONGSLUG arm is now reachable only for the CHW-4314 missing-slug
+// case. That is an acceptable trade because the slug this check probes
+// always comes from /api/orgs — the caller's own slug, never a typed one —
+// so a typo could not reach here anyway, and a client that IS misconfigured
+// sends its own credentials and still gets the full CHW-1303 diagnostic on
+// its first install. What the 401 branch must NOT do is keep claiming it
+// verified the slug; see the reason string in probeOrgSlug.
 //   UNROUTED  the probe came back 404 with no CHW envelope: nothing is
 //             mounted at the repository path this client would use. Same
 //             dead-on-arrival consequence as a wrong slug, different cause
@@ -270,6 +288,18 @@ func probeOrgSlug(ctx context.Context, server, token, slug string) orgSlugResult
 	if resp.StatusCode == http.StatusNotFound {
 		res.Outcome = orgSlugUnrouted
 		res.Reason = "nothing is served at the org-scoped repository path; every install through this config would 404"
+		return res
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		// A 401 proves the proxy serves this path, which is what rules out
+		// the dead-on-arrival config this check exists for. It does NOT
+		// prove the slug resolves: the server deliberately answers an
+		// unknown slug with this same 401 so the endpoint cannot be used to
+		// enumerate orgs. Say so rather than certifying "the guard would
+		// fire", which is the overclaim that would let a real break pass.
+		res.Outcome = orgSlugOK
+		res.Reason = "org-scoped repository path is served (401, credentials required). Unknown slugs are masked as 401 too, so this does not by itself confirm the slug resolves — a wrong slug surfaces on the first real install, which sends credentials"
 		return res
 	}
 
