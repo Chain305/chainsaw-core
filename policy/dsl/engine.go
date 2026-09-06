@@ -124,6 +124,32 @@ type Engine struct {
 	prepared rego.PreparedEvalQuery
 	digest   string // sha256 of the loaded source set, hex
 	modules  []string
+	skipped  []Skip
+}
+
+// Skip records a source path that could not be read while discovering
+// the bundle. It exists because the two ways discovery can come up
+// short — a path that is absent, and a path that is present but
+// unreadable — were previously handled by `continue` and by returning
+// the error, and only one of those is loud.
+//
+// A caller that gates on this engine MUST treat a non-empty skip list
+// as fatal. A bundle that was not fully read cannot produce a
+// trustworthy allow, and `policy gate` printing "action=allow
+// violations=0" over a bundle it failed to open is the exact defect
+// this type was added for.
+type Skip struct {
+	Path   string
+	Reason string
+}
+
+// Skipped returns the source paths discovery could not read. Empty on
+// a bundle that was read completely.
+func (e *Engine) Skipped() []Skip {
+	if e == nil {
+		return nil
+	}
+	return e.skipped
 }
 
 // Empty reports whether the engine has no rules loaded. Callers can
@@ -189,12 +215,17 @@ type Options struct {
 // .rego files are discovered — that lets callers wire the engine
 // unconditionally and treat "no custom rules" as a no-op.
 func New(ctx context.Context, opts Options) (*Engine, error) {
-	files, err := discover(opts.Sources)
+	files, skips, err := discover(opts.Sources)
 	if err != nil {
 		return nil, err
 	}
 	if len(files) == 0 && len(opts.Modules) == 0 {
-		return &Engine{}, nil
+		// Still an empty engine, never an error: the loader contract
+		// promises empty-in/empty-out so the guard and the proxy can
+		// wire a bundle unconditionally. The skip ledger rides along so
+		// a CALLER that gates can tell "no rules configured" apart from
+		// "the rules were there and I could not read them".
+		return &Engine{skipped: skips}, nil
 	}
 
 	q := opts.Query
@@ -231,6 +262,7 @@ func New(ctx context.Context, opts Options) (*Engine, error) {
 		prepared: pq,
 		digest:   bundleDigest(files, opts.Modules, inline),
 		modules:  append(append([]string{}, files...), inline...),
+		skipped:  skips,
 	}, nil
 }
 
@@ -317,15 +349,24 @@ func violationFromMap(m map[string]any) (Violation, bool) {
 // discover walks Sources and returns *.rego files in a deterministic
 // order. Files are accepted directly; directories are walked
 // recursively.
-func discover(sources []string) ([]string, error) {
+func discover(sources []string) ([]string, []Skip, error) {
 	var out []string
+	var skips []Skip
 	for _, src := range sources {
 		info, err := os.Stat(src)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
+				// RECORDED, not swallowed. A `--bundle` pointing at a
+				// path that does not exist used to `continue` silently,
+				// which yields an empty engine, which makes Decide
+				// short-circuit to ActionAllow. A typo'd flag or a wrong
+				// CI working directory therefore turned the gate into a
+				// rubber stamp. The caller decides what a skip means;
+				// discovery's job is to stop hiding it.
+				skips = append(skips, Skip{Path: src, Reason: "does not exist"})
 				continue
 			}
-			return nil, err
+			return nil, skips, err
 		}
 		if !info.IsDir() {
 			if strings.HasSuffix(src, ".rego") {
@@ -335,7 +376,17 @@ func discover(sources []string) ([]string, error) {
 		}
 		err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				// Tolerate-and-record, mirroring collectPolicyFiles in
+				// core/cli/policy_lint.go. Returning the error here
+				// discarded the WHOLE bundle over one ACL-restricted
+				// directory; returning nil would hide it. Neither is
+				// acceptable for a gate, so the path is recorded and the
+				// walk continues.
+				skips = append(skips, Skip{Path: path, Reason: err.Error()})
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
 			}
 			if d.IsDir() {
 				return nil
@@ -346,7 +397,7 @@ func discover(sources []string) ([]string, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, skips, err
 		}
 	}
 	sort.Strings(out)
@@ -360,7 +411,7 @@ func discover(sources []string) ([]string, error) {
 		seen[p] = struct{}{}
 		uniq = append(uniq, p)
 	}
-	return uniq, nil
+	return uniq, skips, nil
 }
 
 // sourceDigest hashes the (path, content) pairs that make up the

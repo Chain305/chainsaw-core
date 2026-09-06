@@ -748,6 +748,11 @@ func (s *Store) ProjectSLSAFields(ctx context.Context, r SLSAReport) error {
 	if s == nil || s.sql == nil || s.sql.DB() == nil {
 		return ErrUnavailable
 	}
+	// Enforced at the DB boundary too, not only in SLSAReportSink.Project:
+	// this method is exported and any future caller reaching it directly
+	// must not be able to land unverified attestation identity in a
+	// policy-gated column. Idempotent — Project has already applied it.
+	r = r.WithoutUnverifiedIdentity()
 	now := time.Now().UTC()
 	setClauses := []string{"updated_at=$1"}
 	args := []any{now}
@@ -762,24 +767,56 @@ func (s *Store) ProjectSLSAFields(ctx context.Context, r SLSAReport) error {
 		args = append(args, r.SLSALevel)
 		idx++
 	}
-	if r.AttestationBuilderID != "" {
+	// Attestation identity is the one group that can be written EMPTY.
+	//
+	// Every other column here is non-empty-wins: a report with nothing to
+	// say leaves the stored value alone. That is right for facts which
+	// only ever accumulate, and it is exactly wrong for these four, which
+	// are policy-gated (RequireBuilderID / RequireBuilderIssuer /
+	// RequireSourceRepo / RequireTransparencyLog) and can be poisoned by
+	// an upstream publisher. Under non-empty-wins a single bad write is
+	// PERMANENT: no later scan can ever retract it, so gating the writers
+	// alone would leave every already-poisoned row poisoned forever and
+	// the one-shot backfill in core/pgstore would be re-poisoned on the
+	// next scan that still carried the stale value.
+	//
+	// The licence to clear is deliberately narrow: the report ran a
+	// provenance check (status non-empty) AND that check did not end in
+	// "verified". Exactly the reports whose identity WithoutUnverifiedIdentity
+	// has just zeroed, so this writes SQL NULL over the poison.
+	//
+	// Two cases are excluded on purpose, and both matter:
+	//
+	//   - EMPTY status — the report has no opinion on provenance (an
+	//     ecosystem with no checker, or a registry-metadata provider that
+	//     only filled in a display field). It must not erase a genuine
+	//     verified identity, so it keeps non-empty-wins.
+	//   - VERIFIED status with no identity — a real verification that
+	//     simply carries no builder/repo (apt and yum are gpg-only, and
+	//     AttestationIssuer has no producer at all today). Clearing on
+	//     these would let two providers for one coordinate flap the
+	//     columns against each other. Non-empty-wins is right here: the
+	//     value is proven, and nothing unproven can overwrite it because
+	//     the unverified lane arrives empty.
+	clearIdentity := r.ProvenanceAuthoritative() && !r.ProvenanceVerified()
+	if clearIdentity || r.AttestationBuilderID != "" {
 		setClauses = append(setClauses, fmt.Sprintf("attestation_builder_id=$%d", idx))
-		args = append(args, r.AttestationBuilderID)
+		args = append(args, nullIfEmpty(r.AttestationBuilderID))
 		idx++
 	}
-	if r.AttestationIssuer != "" {
+	if clearIdentity || r.AttestationIssuer != "" {
 		setClauses = append(setClauses, fmt.Sprintf("attestation_issuer=$%d", idx))
-		args = append(args, r.AttestationIssuer)
+		args = append(args, nullIfEmpty(r.AttestationIssuer))
 		idx++
 	}
-	if r.AttestationSourceRepo != "" {
+	if clearIdentity || r.AttestationSourceRepo != "" {
 		setClauses = append(setClauses, fmt.Sprintf("attestation_source_repo=$%d", idx))
-		args = append(args, r.AttestationSourceRepo)
+		args = append(args, nullIfEmpty(r.AttestationSourceRepo))
 		idx++
 	}
-	if r.AttestationTransparencyLog != "" {
+	if clearIdentity || r.AttestationTransparencyLog != "" {
 		setClauses = append(setClauses, fmt.Sprintf("attestation_transparency_log=$%d", idx))
-		args = append(args, r.AttestationTransparencyLog)
+		args = append(args, nullIfEmpty(r.AttestationTransparencyLog))
 		idx++
 	}
 	if r.AttestationCacheStale {

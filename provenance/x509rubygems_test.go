@@ -148,8 +148,18 @@ func TestVerifyGemSignature_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if res.Status != StatusVerified {
-		t.Fatalf("Status=%q want verified; warnings=%v err=%q", res.Status, res.Warnings, res.Error)
+	// UNVERIFIED, not verified: the cert is bundled inside the gem and
+	// chains to no external root, so a good signature proves internal
+	// consistency and not authorship. See the block comment on the
+	// success path in x509rubygems.go.
+	if res.Status != StatusUnverified {
+		t.Fatalf("Status=%q want unverified; warnings=%v err=%q", res.Status, res.Warnings, res.Error)
+	}
+	if res.Reason != ReasonSelfAttestedTrust {
+		t.Errorf("Reason=%q want %q", res.Reason, ReasonSelfAttestedTrust)
+	}
+	if strings.TrimSpace(res.Error) == "" {
+		t.Error("Error is empty; every non-verified Result must explain itself")
 	}
 	if res.AttestationType != "x509-gemcert" {
 		t.Errorf("AttestationType=%q want x509-gemcert", res.AttestationType)
@@ -253,8 +263,8 @@ func TestVerifyGemSignature_LegacySHA1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if res.Status != StatusVerified {
-		t.Fatalf("Status=%q want verified (SHA-1 fallback); err=%q", res.Status, res.Error)
+	if res.Status != StatusUnverified {
+		t.Fatalf("Status=%q want unverified (SHA-1 fallback still self-attested); err=%q", res.Status, res.Error)
 	}
 }
 
@@ -268,7 +278,7 @@ func TestVerifyGemSignature_SignerIDMatchesDERSHA256(t *testing.T) {
 		"cert.pem":        certPEM(g.certDER),
 	})
 	res, err := VerifyGemSignature(context.Background(), gem)
-	if err != nil || res.Status != StatusVerified {
+	if err != nil || res.Status != StatusUnverified {
 		t.Fatalf("unexpected: status=%q err=%v", res.Status, err)
 	}
 	expected := sha256.Sum256(g.certDER)

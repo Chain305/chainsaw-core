@@ -91,7 +91,7 @@ func New(cfg Config, opts ...Option) *Client {
 	c := &Client{
 		cfg:     cfg,
 		limiter: NewInProcessHostLimiter(cfg),
-		base:    httpclient.New(httpclient.WithTimeout(30 * time.Second)),
+		base:    httpclient.New(httpclient.WithTimeout(30*time.Second), httpclient.WithSSRFGuard()),
 		now:     time.Now,
 	}
 	for _, opt := range opts {
@@ -101,7 +101,7 @@ func New(cfg Config, opts ...Option) *Client {
 		c.limiter = NewInProcessHostLimiter(cfg)
 	}
 	if c.base == nil {
-		c.base = httpclient.New(httpclient.WithTimeout(30 * time.Second))
+		c.base = httpclient.New(httpclient.WithTimeout(30*time.Second), httpclient.WithSSRFGuard())
 	}
 	if c.now == nil {
 		c.now = time.Now

@@ -459,10 +459,15 @@ func TestSkipReasonsAreEnumerated(t *testing.T) {
 	want := map[string]struct{}{
 		"unsupported_ecosystem": {},
 		"checksum_unavailable":  {},
+		// no_advisory_source is the one reason that does NOT mean the
+		// rule was skipped — it rides RuleEvaluated=true. See
+		// advisory_lane.go and TestDarkAdvisoryLaneIsRecordOnly.
+		"no_advisory_source": {},
 	}
 	got := map[string]struct{}{
 		SkipReasonUnsupportedEcosystem: {},
 		SkipReasonChecksumUnavailable:  {},
+		SkipReasonNoAdvisorySource:     {},
 	}
 	if len(got) != len(want) {
 		t.Errorf("expected %d distinct reasons, got %d", len(want), len(got))

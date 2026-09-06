@@ -145,6 +145,13 @@ type FacetConfig struct {
 	// UpstreamTracker, when set, records per-upstream request metrics for
 	// the observability endpoint /api/upstream/status.
 	UpstreamTracker *UpstreamTracker
+	// MetadataTTL bounds how long a MUTABLE registry document (npm
+	// packument, pip simple-index page) may be served from cache without
+	// revalidating upstream. Zero disables expiry, which is the
+	// pre-existing behaviour: every cached document, mutable or not, was
+	// served forever. Immutable artifacts are never expired by this
+	// regardless of value — see isMutableDocument.
+	MetadataTTL time.Duration
 }
 
 type facet struct {
@@ -164,6 +171,7 @@ type facet struct {
 	fetchGroup         singleflight.Group
 	circuitBreaker     *CircuitBreaker
 	upstreamTracker    *UpstreamTracker
+	metadataTTL        time.Duration
 }
 
 // NewFacet wires a proxy facet similar to ProxyFacetSupport.
@@ -187,6 +195,7 @@ func NewFacet(cfg FacetConfig) Facet {
 		internalChecker:    cfg.InternalChecker,
 		circuitBreaker:     cfg.CircuitBreaker,
 		upstreamTracker:    cfg.UpstreamTracker,
+		metadataTTL:        cfg.MetadataTTL,
 	}
 }
 
@@ -228,6 +237,12 @@ func (f *facet) Get(ctx context.Context, req *Request) (*Response, error) {
 // Returns (response, nil) on a usable hit, (nil, nil) on miss or
 // encoding-repair fall-through, and (nil, err) on storage failure other
 // than NotFound.
+//
+// The freshness check lives HERE, not at the call sites, because there
+// are two of them — Get and fetchAndStore's singleflight re-check — and
+// a guard on only one would let concurrent callers disagree about
+// whether the same entry is expired: the leader would fetch while a
+// coalesced waiter served the stale body, or vice versa.
 func (f *facet) tryCacheHit(ctx context.Context, logicalPath string) (*Response, error) {
 	content, err := f.storage.Get(ctx, logicalPath)
 	if err != nil {
@@ -236,18 +251,56 @@ func (f *facet) tryCacheHit(ctx context.Context, logicalPath string) (*Response,
 		}
 		return nil, err
 	}
-	if coord, ok := f.describe(logicalPath); ok {
-		if content.Metadata.PackageName != coord.Name || content.Metadata.PackageVersion != coord.Version {
-			content.Metadata.PackageName = coord.Name
-			content.Metadata.PackageVersion = coord.Version
-		}
-		if content.Metadata.PackageSubtype != coord.Subtype {
-			content.Metadata.PackageSubtype = coord.Subtype
-		}
-	}
+	f.applyCoordinateMetadata(logicalPath, content)
 	if needsEncodingRepair(content.Metadata) {
 		return nil, nil
 	}
+
+	stale := false
+	if f.metadataExpired(logicalPath, content.Metadata) {
+		if f.upstreamReachable() {
+			// Expired with a live upstream: treat as a miss so the
+			// fetch path revalidates (conditionally — see
+			// addRevalidationHeaders).
+			return nil, nil
+		}
+		// THE AIR-GAP GUARD. No upstream is reachable, so a "miss"
+		// would route into a fetch that cannot succeed and would only
+		// fail the request. An air-gapped box with a warm cache must
+		// keep serving without ever touching the network.
+		stale = true
+		recordMetadataRevalidation(f.format, revalidationStaleServed)
+		if f.logger != nil {
+			f.logger.Warn("metadata cache entry expired but no upstream is reachable; serving stale",
+				"path", logicalPath, "cached_at", content.Metadata.CachedAt)
+		}
+	}
+
+	return f.respondFromCache(ctx, logicalPath, content, stale)
+}
+
+// applyCoordinateMetadata refreshes the package coordinate fields on a
+// cached entry from the resolver, so entries stored before a resolver
+// change still report the right name/version/subtype.
+func (f *facet) applyCoordinateMetadata(logicalPath string, content *storage.CachedContent) {
+	coord, ok := f.describe(logicalPath)
+	if !ok {
+		return
+	}
+	if content.Metadata.PackageName != coord.Name || content.Metadata.PackageVersion != coord.Version {
+		content.Metadata.PackageName = coord.Name
+		content.Metadata.PackageVersion = coord.Version
+	}
+	if content.Metadata.PackageSubtype != coord.Subtype {
+		content.Metadata.PackageSubtype = coord.Subtype
+	}
+}
+
+// respondFromCache finishes a cache hit: applies the response
+// transformer when one is installed, then assembles headers. When stale
+// is true the RFC 7234 Warning: 110 header is added, matching what
+// tryStaleCache serves on the upstream-failure path.
+func (f *facet) respondFromCache(ctx context.Context, logicalPath string, content *storage.CachedContent, stale bool) (*Response, error) {
 	if f.rewriter != nil {
 		rewritten, rewriteErr := f.rewriteCachedContent(ctx, logicalPath, content)
 		if rewriteErr != nil {
@@ -257,9 +310,13 @@ func (f *facet) tryCacheHit(ctx context.Context, logicalPath string) (*Response,
 			content = rewritten
 		}
 	}
+	headers := headersFromMetadata(content.Metadata)
+	if stale {
+		headers.Set("Warning", staleWarning)
+	}
 	return &Response{
 		StatusCode: http.StatusOK,
-		Headers:    headersFromMetadata(content.Metadata),
+		Headers:    headers,
 		Content:    content,
 		FromCache:  true,
 	}, nil
@@ -324,7 +381,13 @@ func (f *facet) fetchAndStore(fetchCtx context.Context, req *Request, remote Rem
 	}
 
 	header := cloneHeader(req.Header)
+	// The CLIENT's conditional headers are always stripped: it is
+	// validating against ITS copy, whose validators mean nothing to our
+	// upstream, and a 304 answered to them would starve the cache. What
+	// follows adds the PROXY's OWN conditional, derived from the entry
+	// we hold. The two must not be confused — hence strip, then add.
 	stripConditionalHeaders(header)
+	revalidating := f.addRevalidationHeaders(fetchCtx, logicalPath, header)
 
 	remoteResp, fetchErr := f.fetchWithRetry(fetchCtx, remote, logicalPath, header)
 	if fetchErr != nil {
@@ -345,6 +408,15 @@ func (f *facet) fetchAndStore(fetchCtx context.Context, req *Request, remote Rem
 	defer remoteResp.Body.Close()
 
 	f.recordCircuitOutcome(remoteResp.StatusCode)
+
+	if revalidating {
+		switch {
+		case remoteResp.StatusCode == http.StatusNotModified:
+			recordMetadataRevalidation(f.format, revalidationFresh)
+		case remoteResp.StatusCode < 400:
+			recordMetadataRevalidation(f.format, revalidationChanged)
+		}
+	}
 
 	if handled, resp := f.handleUpstreamStatus(fetchCtx, logicalPath, cacheKey, remoteResp); handled {
 		return resp, nil
@@ -381,6 +453,31 @@ func (f *facet) handleUpstreamStatus(fetchCtx context.Context, logicalPath, cach
 		return true, &Response{StatusCode: http.StatusNotFound, Headers: cloneHeader(remoteResp.Header)}
 	}
 
+	// 304 Not Modified carries an EMPTY body. It must never reach
+	// storeUpstream, which would write those zero bytes over a perfectly
+	// good cached packument.
+	//
+	// This branch is now LIVE. It was written while unreachable — the
+	// client's conditionals are stripped and the proxy sent none of its
+	// own — as a guard against exactly the change that has since landed:
+	// addRevalidationHeaders now sends If-None-Match / If-Modified-Since
+	// from the stored validators, so upstream has something to answer
+	// 304 to.
+	//
+	// Serving from cache is the correct handling: 304 means "what you
+	// have is current". Falling back to a passthrough when the cache has
+	// since gone means the caller gets an honest empty 304 rather than a
+	// silently blanked entry.
+	if remoteResp.StatusCode == http.StatusNotModified {
+		if fresh := f.serveRevalidated(fetchCtx, logicalPath); fresh != nil {
+			return true, fresh
+		}
+		return true, &Response{
+			StatusCode: http.StatusNotModified,
+			Headers:    cloneHeader(remoteResp.Header),
+		}
+	}
+
 	if remoteResp.StatusCode >= 500 {
 		// Upstream server error — try serving stale cache if available.
 		if stale := f.tryStaleCache(fetchCtx, logicalPath); stale != nil {
@@ -404,7 +501,7 @@ func (f *facet) handleUpstreamStatus(fetchCtx context.Context, logicalPath, cach
 func (f *facet) storeUpstream(fetchCtx context.Context, remote RemoteDefinition, logicalPath string, remoteResp *http.Response) (*Response, error) {
 	meta := storage.ContentMetadata{
 		ContentType:     remoteResp.Header.Get("Content-Type"),
-		ContentEncoding: remoteResp.Header.Get("Content-Encoding"),
+		ContentEncoding: recordedContentEncoding(remoteResp.Header.Get("Content-Encoding")),
 		ETag:            remoteResp.Header.Get("ETag"),
 		OriginURL:       f.remoteURL(remote, logicalPath),
 		ReleasedAt:      releaseTimestamp(remoteResp),
@@ -626,6 +723,28 @@ func (f *facet) remoteURL(remote RemoteDefinition, logicalPath string) string {
 	return base.ResolveReference(ref).String()
 }
 
+// encodingIdentity marks "upstream sent no Content-Encoding", as distinct
+// from "we never recorded one".
+//
+// needsEncodingRepair keys on an EMPTY ContentEncoding to force a
+// re-fetch of pip simple-index pages cached before the encoding was
+// captured. But storeUpstream wrote the upstream header back verbatim,
+// so when upstream served the page identity-encoded the stored value was
+// empty again and the very next request missed again — a permanent
+// re-fetch loop with no caching at all for those paths, which is the
+// exact opposite of the freeze the same file suffers elsewhere.
+//
+// Recording "identity" terminates the repair after one pass while still
+// letting a genuinely unrecorded legacy entry be repaired once.
+const encodingIdentity = "identity"
+
+func recordedContentEncoding(upstream string) string {
+	if strings.TrimSpace(upstream) == "" {
+		return encodingIdentity
+	}
+	return upstream
+}
+
 func needsEncodingRepair(meta storage.ContentMetadata) bool {
 	if meta.ContentEncoding != "" {
 		return false
@@ -682,7 +801,10 @@ func headersFromMetadata(meta storage.ContentMetadata) http.Header {
 	if meta.ContentType != "" {
 		h.Set("Content-Type", meta.ContentType)
 	}
-	if meta.ContentEncoding != "" {
+	// "identity" is our internal marker for "upstream sent none", and
+	// RFC 7231 §3.1.2.2 says identity must not appear in a
+	// Content-Encoding header — so it is recorded but never served.
+	if meta.ContentEncoding != "" && !strings.EqualFold(meta.ContentEncoding, encodingIdentity) {
 		h.Set("Content-Encoding", meta.ContentEncoding)
 	}
 	if meta.ETag != "" {
@@ -749,15 +871,104 @@ func stripConditionalHeaders(header http.Header) {
 	}
 }
 
+// addRevalidationHeaders attaches the PROXY's own conditional request
+// headers, derived from the validators stored on the cached entry, and
+// reports whether it added any.
+//
+// This is what turns an expired packument from a ~190KB re-fetch into a
+// 304 with an empty body. Production metadata already carries what is
+// needed: undici.meta holds an ETag (W/"616f...") and a Last-Modified in
+// extra_headers, written by storeUpstream and — until now — never read.
+//
+// It is deliberately scoped to the same documents the TTL expires. On a
+// genuine first-time miss there is no cached entry, so nothing is added
+// and the fetch is unconditional; sending a conditional there could only
+// produce a 304 with no cache to serve from.
+func (f *facet) addRevalidationHeaders(ctx context.Context, logicalPath string, header http.Header) bool {
+	if f == nil || f.storage == nil || header == nil || f.metadataTTL <= 0 {
+		return false
+	}
+	if !isMutableDocument(f.format, logicalPath) {
+		return false
+	}
+	content, err := f.storage.Get(ctx, logicalPath)
+	if err != nil || content == nil {
+		return false
+	}
+	added := false
+	if etag := strings.TrimSpace(content.Metadata.ETag); etag != "" {
+		header.Set("If-None-Match", etag)
+		added = true
+	}
+	if lastModified := strings.TrimSpace(content.Metadata.ExtraHeaders["Last-Modified"]); lastModified != "" {
+		header.Set("If-Modified-Since", lastModified)
+		added = true
+	}
+	return added
+}
+
+// serveRevalidated answers a 304 from the cached copy, having first
+// refreshed its CachedAt stamp.
+//
+// The refresh is not optional. Without it the entry's age is still past
+// the TTL the instant this response is sent, so the very next request
+// expires it again and revalidates again — a revalidation loop that
+// costs one upstream round trip per hit forever. Refreshing the stamp is
+// what makes the 304 worth anything.
+//
+// Unlike tryStaleCache this serves NO Warning: 110. A 304 is upstream
+// stating the cached body is current, which is the opposite of stale.
+//
+// Returns nil when the entry has gone (evicted between the fetch and
+// here), leaving the caller to pass the bare 304 through.
+func (f *facet) serveRevalidated(ctx context.Context, logicalPath string) *Response {
+	if f == nil || f.storage == nil {
+		return nil
+	}
+	content, err := f.storage.Get(ctx, logicalPath)
+	if err != nil || content == nil {
+		return nil
+	}
+	meta := content.Metadata
+	meta.CachedAt = time.Now().UTC()
+	if updated, updErr := f.storage.UpdateMetadata(ctx, logicalPath, meta); updErr != nil {
+		// Not fatal — the body we hold is confirmed current, so the
+		// response is still correct. But the stamp did not move, so
+		// this entry will revalidate again next request. Say so.
+		if f.logger != nil {
+			f.logger.Warn("revalidated entry but could not refresh its cache timestamp; it will revalidate again",
+				"path", logicalPath, "error", updErr)
+		}
+	} else if updated != nil {
+		content = updated
+	}
+	f.applyCoordinateMetadata(logicalPath, content)
+	// Deliberately does NOT re-run the expiry check: if UpdateMetadata
+	// failed above, tryCacheHit would call this entry expired, return a
+	// miss, and leave the caller emitting a bare 304 to a client that
+	// sent no conditional. Build the response directly.
+	resp, respErr := f.respondFromCache(ctx, logicalPath, content, false)
+	if respErr != nil || resp == nil {
+		return nil
+	}
+	return resp
+}
+
 // tryStaleCache attempts to serve a previously cached copy of the artifact.
 // Used as a fallback when the upstream is unreachable or returns a server error.
 func (f *facet) tryStaleCache(ctx context.Context, logicalPath string) *Response {
+	// A facet with no storage is a real configuration (and a real test
+	// fixture); this is a fallback path, so a missing cache is "no stale
+	// copy available", never a panic.
+	if f == nil || f.storage == nil {
+		return nil
+	}
 	content, err := f.storage.Get(ctx, logicalPath)
 	if err != nil {
 		return nil
 	}
 	headers := headersFromMetadata(content.Metadata)
-	headers.Set("Warning", `110 chainsaw "Response is stale"`)
+	headers.Set("Warning", staleWarning)
 	return &Response{
 		StatusCode: http.StatusOK,
 		Headers:    headers,

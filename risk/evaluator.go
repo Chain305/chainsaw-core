@@ -962,6 +962,27 @@ func minCategoryScore(cats map[Category]CategoryScore) (int, Category) {
 //
 // Exported so API layers can construct the same result without routing a
 // synthetic Input through the whole evaluator.
+// UnavailableEvaluation builds the "we could not evaluate this" result.
+//
+// CONSUMER TRAP, deliberately not fixed here: Overall is 0 and every
+// category is 0, which a machine consumer reading only the number will
+// take for "worst possible package". It is not — it means no facts were
+// scored. The discriminators to key on instead are Verdict == unknown
+// and CategoryScore.DataAvailable == false; note Grade is deliberately
+// "" rather than "F" for exactly this reason.
+//
+// The 0 is left alone on purpose. It is load-bearing elsewhere: Overall
+// is mirrored into SupplyChain.TrustScore (core/intelligence/trustscore.go),
+// persisted by the store, compared during promotion, and used as the
+// worst-case floor in the transitive-risk comparison at
+// core/intelligence/provider_transitiverisk.go:496. Changing the
+// sentinel would move scores and thresholds across the product to fix a
+// presentation problem, which is the wrong trade.
+//
+// The presentation is fixed where it belongs: core/cli/intel.go renders
+// this as "Overall: -  (not scored)" with an explicit statement that the
+// package was PERMITTED, and the dashboard's decision badge already
+// renders "Monitored / Not evaluated".
 func UnavailableEvaluation(in Input, opts Options) *Evaluation {
 	cats := make(map[Category]CategoryScore, len(CategoryWeights))
 	for _, cat := range AllCategories() {

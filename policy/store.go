@@ -173,23 +173,50 @@ type Conditions struct {
 	// SLSALevel is below this. nil=any (don't constrain).
 	RequireSLSALevel *int `json:"requireSlsaLevel,omitempty" yaml:"requireSlsaLevel,omitempty"`
 
-	// RequireBuilderID is a substring allow-list against the OIDC
+	// RequireBuilderID is a substring match-list against the OIDC
 	// subject of the build (typically the GitHub Actions workflow URL
 	// for keyless Sigstore signing). Rule fires when the verified
-	// builder identity does not contain ANY of these substrings.
-	// Empty list = any builder accepted.
+	// builder identity CONTAINS one of these substrings.
+	// Empty list = this condition does not constrain the rule.
+	//
+	// POLARITY TRAP — read before authoring a rule with these. They are
+	// MATCH conditions, not filters: the rule fires when the identity IS
+	// in the list. matchesConditions returns false (rule does not apply)
+	// when containsAnySubstring finds nothing.
+	//
+	// So `mode: block` + `requireBuilderId: ["github.com/acme/"]` blocks
+	// ONLY acme's packages. It does NOT block everything not built by
+	// acme, which is the rule most operators are reaching for and which
+	// these comments described until 2026-09-06.
+	//
+	// To refuse anything outside an allow-list, author an allow rule
+	// listing the trusted builders and let the org's default posture
+	// refuse the rest — or use ForbidCacheStale / RequireTransparencyLog,
+	// which are genuine presence tests.
+	//
+	// Identity is only honoured when provenance actually verified: the
+	// evaluator zeroes all four fields unless ProvenanceStatus is
+	// "verified", so an unverified bundle cannot satisfy them.
+
 	RequireBuilderID []string `json:"requireBuilderId,omitempty" yaml:"requireBuilderId,omitempty"`
 
-	// RequireBuilderIssuer is a substring allow-list against the OIDC
+	// RequireBuilderIssuer is a substring match-list against the OIDC
 	// issuer URL (e.g. "https://token.actions.githubusercontent.com").
-	// Rule fires when the verified issuer does not contain ANY of
-	// these substrings. Empty list = any issuer accepted.
+	// Rule fires when the verified issuer CONTAINS one of these
+	// substrings. Empty list = this condition does not constrain the
+	// rule. Same polarity trap as RequireBuilderID above.
+	//
+	// DEAD CONTROL as of 2026-09-06: attestation_issuer has no
+	// production writer — slsaReportFromIntelligence leaves it empty
+	// because ProvenanceSection carries no issuer field — so this
+	// condition has never fired on any path.
 	RequireBuilderIssuer []string `json:"requireBuilderIssuer,omitempty" yaml:"requireBuilderIssuer,omitempty"`
 
-	// RequireSourceRepo is a substring allow-list against the
+	// RequireSourceRepo is a substring match-list against the
 	// canonicalised source repository URL extracted from the cert.
-	// Rule fires when the verified source repo does not contain ANY
-	// of these substrings. Empty list = any source repo accepted.
+	// Rule fires when the verified source repo CONTAINS one of these
+	// substrings. Empty list = this condition does not constrain the
+	// rule. Same polarity trap as RequireBuilderID above.
 	RequireSourceRepo []string `json:"requireSourceRepo,omitempty" yaml:"requireSourceRepo,omitempty"`
 
 	// RequireTransparencyLog requires (or forbids) a public

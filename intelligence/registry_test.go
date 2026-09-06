@@ -116,10 +116,13 @@ func TestBuildRegisteredProviders_CoreNilConfig(t *testing.T) {
 	// so it is intentionally NOT asserted here — see the premium package's
 	// own gating test.)
 	required := map[string]bool{
-		"reservednamespaces": false,
-		"registrymetadata":   false,
-		"checksum":           false,
-		"repolink":           false,
+		// reservedns registers this one; its runtime Name() is
+		// "namespace_extract" (it extracts a namespace and detects
+		// nothing) — see provider_reservedns.go.
+		"namespace_extract": false,
+		"registrymetadata":  false,
+		"checksum":          false,
+		"repolink":          false,
 	}
 	for _, p := range providers {
 		if _, ok := required[p.Name()]; ok {

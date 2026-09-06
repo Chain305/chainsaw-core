@@ -155,13 +155,20 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out, "  Change with: chainsaw telemetry on | off")
 
 	fmt.Fprintln(out)
-	// B8: what actually leaves the machine. With consent, the guard emits
-	// install.guard.block/.activated/.daily_active to /api/telemetry/ingest,
-	// which is forwarded to PostHog; nothing in the server or the UI reads
-	// those events back, and the /api/scan preflight persists nothing. So
-	// "your guard activity syncs to your account" was true only as
-	// consent-gated analytics attribution and false as anything a user could
-	// open on the dashboard. Say exactly that, and never the word "sync".
+	// B8, REVISED 2026-09-06. With consent the guard emits
+	// install.guard.block/.activated/.daily_active to /api/telemetry/ingest.
+	//
+	// This comment used to say "nothing in the server or the UI reads those
+	// events back", and that stopped being true when d8cf6ee4 built the
+	// feature. They ARE read back now: internal/server/telemetry_ingest_guard.go
+	// persists them via core/pgstore/guardblocks.go, guard_activity_api.go
+	// serves them, and the dashboard renders them. So the line below saying
+	// blocks "appear on the dashboard alongside proxy and CI activity" is
+	// correct — it was this comment that went stale, not that copy.
+	//
+	// What has NOT changed: never say "sync". Telemetry off means the events
+	// never leave the machine at all, and "sync" implies a two-way, always-on
+	// relationship that does not exist in either state.
 	if cfgToken() == "" {
 		fmt.Fprintln(out, "Not signed in. Sign up free to see org-wide threats → "+guardCTA(guardNudgeBaseSignup, st.Consent))
 	} else {

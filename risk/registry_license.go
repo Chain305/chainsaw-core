@@ -78,6 +78,25 @@ func init() {
 			if in.LicenseSPDX == "" {
 				return false, "", nil
 			}
+			// A non-empty string is not an SPDX expression. Registries
+			// hand us licence URLs constantly — NuGet's `licenseUrl`
+			// yields values like
+			// "https://raw.github.com/JamesNK/Newtonsoft.Json/master/LICENSE.md"
+			// — and firing on any non-empty value made this signal
+			// award +5 for "declares an SPDX license" on the SAME row
+			// where license.unidentified fired -15 for the same field
+			// not being recognisable as SPDX. Measured on production:
+			// 339 rows across six ecosystems carried both at once, and
+			// the package page rendered the contradiction to operators.
+			//
+			// Defer to the classifier that owns the question. It is the
+			// same predicate license.unidentified keys on, so the two
+			// signals can no longer disagree about one string.
+			for _, tag := range Classify(in.LicenseSPDX) {
+				if tag == LicenseTagUnidentified {
+					return false, "", nil
+				}
+			}
 			return true, "Package declares an SPDX license.",
 				map[string]any{"license": in.LicenseSPDX}
 		},

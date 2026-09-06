@@ -613,8 +613,32 @@ func classifyCLIError(err error) string {
 		return "other"
 	}
 	msg := strings.ToLower(err.Error())
+
+	// A1″: transport failures are classified BEFORE any status-code
+	// matching, because a transport error carries the full request URL and
+	// a URL carries digits.
+	//
+	// Measured 2026-09-06: TestWhy_ServerErrorWithNoLocalRecordStillSurfaces
+	// failed with classifyCLIError = "permission", want "network", because
+	// httptest happened to bind port 64403 and the dial error read
+	//
+	//   ... dial tcp 127.0.0.1:64403: connect: connection refused
+	//
+	// "403" matched inside the port number. It is a real flake — the next
+	// run draws a different port and passes — and it is not test-only: the
+	// telemetry errClass and the `chainsaw status` hint in renderError both
+	// key off this, so a developer whose server is down on a port
+	// containing 401/403/404 was told they had a permissions problem.
+	//
+	// This is the same class as A1′ below (a 500 carrying CHW-5401 read as
+	// "auth"). A1′ fixed it for enveloped errors by trusting the status;
+	// this fixes the remaining half for errors that never had an envelope.
+	if class := classifyTransportError(msg); class != "" {
+		return class
+	}
+
 	switch {
-	case strings.Contains(msg, "unauthorized") || strings.Contains(msg, "401"):
+	case strings.Contains(msg, "unauthorized") || hasStatusCode(msg, "401"):
 		return "auth"
 	// X3/X4: the two locally-produced configuration failures. Without these
 	// the exit code says ExitConfigAuth(3) while telemetry's errClass says
@@ -622,9 +646,9 @@ func classifyCLIError(err error) string {
 	case strings.Contains(msg, "server url not configured") ||
 		strings.Contains(msg, "not authenticated"):
 		return "auth"
-	case strings.Contains(msg, "forbidden") || strings.Contains(msg, "403"):
+	case strings.Contains(msg, "forbidden") || hasStatusCode(msg, "403"):
 		return "permission"
-	case strings.Contains(msg, "not found") || strings.Contains(msg, "404"):
+	case strings.Contains(msg, "not found") || hasStatusCode(msg, "404"):
 		return "not_found"
 	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline"):
 		return "timeout"
@@ -1185,3 +1209,122 @@ func moveIfAbsent(src, dst string) error {
 	}
 	return nil
 }
+
+// transportErrorMarkers are substrings that only appear in a Go transport
+// failure, never in an HTTP response the server actually produced. Their
+// presence means no status code was ever received, so any digits later in
+// the message belong to a URL, a port or a duration — not to a status.
+var transportErrorMarkers = []string{
+	"connection refused",
+	"connection reset",
+	"no such host",
+	"dial tcp",
+	"dial udp",
+	"network is unreachable",
+	"no route to host",
+	"broken pipe",
+	"tls handshake",
+	"server misbehaving",
+	"eof",
+}
+
+// classifyTransportError returns "timeout", "network", or "" when the
+// message is not a transport failure. msg must already be lower-cased.
+//
+// Timeout wins inside a transport failure so the pre-existing precedence
+// (timeout ahead of network) is preserved: an "i/o timeout" and a "TLS
+// handshake timeout" are both dial failures, and both were bucketed as
+// "timeout" before this function existed.
+func classifyTransportError(msg string) string {
+	transport := false
+	for _, marker := range transportErrorMarkers {
+		if strings.Contains(msg, marker) {
+			transport = true
+			break
+		}
+	}
+	if !transport {
+		return ""
+	}
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") {
+		return "timeout"
+	}
+	return "network"
+}
+
+// statusCodeContexts are the shapes in which a status code actually reaches
+// this function, from the server, from net/http, and from this CLI.
+var statusCodeContexts = []string{
+	"status %s",
+	"status: %s",
+	"status code %s",
+	"http %s",
+	"http/1.1 %s",
+	"http/2 %s",
+	"(%s)",
+}
+
+// durationSuffixes follow a number in a duration, never in a status.
+var durationSuffixes = []string{"ms", "µs", "us", "ns", "s", "m", "h"}
+
+// hasStatusCode reports whether code appears in a status-like position
+// rather than anywhere in the message.
+//
+// A bare strings.Contains(msg, "403") matches a port ("127.0.0.1:64403"),
+// an ID, a byte count, or a duration ("403ms"). The shapes accepted here
+// are the ones actually emitted; everything else is treated as a
+// coincidence, which is the safe direction — a missed classification
+// degrades to "other", while a false one sends the user to the wrong
+// remedy.
+func hasStatusCode(msg, code string) bool {
+	for _, shape := range statusCodeContexts {
+		if strings.Contains(msg, fmt.Sprintf(shape, code)) {
+			return true
+		}
+	}
+	// A bare code at a digit boundary, e.g. "unexpected response 403" or
+	// "403: forbidden".
+	for i := 0; i+len(code) <= len(msg); i++ {
+		if msg[i:i+len(code)] != code {
+			continue
+		}
+		// Neighbouring digits mean this is part of a longer number:
+		// rejects "64403" (a port) and "4031".
+		if i > 0 && isASCIIDigit(msg[i-1]) {
+			continue
+		}
+		after := i + len(code)
+		if after < len(msg) && isASCIIDigit(msg[after]) {
+			continue
+		}
+		// A preceding "." or ":" makes it an address component or a port
+		// even when no digit abuts it: ":403/api", "1.403.2.4".
+		if i > 0 && (msg[i-1] == '.' || msg[i-1] == ':') {
+			continue
+		}
+		// A duration unit makes it an elapsed time: "took 403ms".
+		if isDurationAt(msg, after) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// isDurationAt reports whether a duration unit starts at i, bounded so
+// "403something" is not mistaken for a duration.
+func isDurationAt(msg string, i int) bool {
+	for _, suffix := range durationSuffixes {
+		if !strings.HasPrefix(msg[i:], suffix) {
+			continue
+		}
+		end := i + len(suffix)
+		if end == len(msg) || !isASCIILetter(msg[end]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIDigit(b byte) bool  { return b >= '0' && b <= '9' }
+func isASCIILetter(b byte) bool { return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') }

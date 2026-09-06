@@ -11,8 +11,20 @@ package intelligence
 // 1,405 of 1,699 production `not_found` rows were real `androidx.*`
 // coordinates that live on maven.google.com.
 //
-// That is the right VERDICT call and this file does not touch it. What it
-// fixes is what the reader is shown. Nothing downstream consumes the weak
+// That was the right VERDICT call and this file did not touch it AT THE TIME
+// OF WRITING. **CORRECTED 2026-09-06: it does now.** Commit 5ac72dd2 (A8)
+// wired the same predicate this file defines into the verdict path —
+// risk_projection.go calls federatedRegistryAbsenceReason and returns
+// unavailableInput on a hit — so the paragraphs below that promise the
+// stored verdict and the proxy hot path are unchanged describe the state
+// before that commit, not the state now.
+//
+// What IS still true, and is the part worth keeping: the coverage
+// classification is unchanged. `not_found` remains an okCode, so an org
+// running the opt-in fail-closed gate does not begin refusing installs over
+// a federated 404.
+//
+// What this file fixes is also what the reader is shown. Nothing downstream consumes the weak
 // `not_found`, so those coordinates come back fully scored: every category
 // at its 100 base and a composite in the nineties, held off 100 only by the
 // license pair. `maven invalid:coord:format` rendered as

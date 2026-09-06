@@ -58,7 +58,7 @@ func TestReservedNamespacesProvider_EmitsWarningWhenNamespaced(t *testing.T) {
 	if partial.Warnings[0].Message != "@babel" {
 		t.Fatalf("warning message: got %q, want @babel", partial.Warnings[0].Message)
 	}
-	if partial.Warnings[0].Provider != "reservednamespaces" {
+	if partial.Warnings[0].Provider != "namespace_extract" {
 		t.Fatalf("warning provider: got %q", partial.Warnings[0].Provider)
 	}
 }
@@ -83,14 +83,18 @@ func TestReservedNamespacesProvider_AlwaysSupported(t *testing.T) {
 	p := newReservedNamespacesProvider()
 	for _, e := range []string{"npm", "pip", "docker", "maven", "go", "unknown-ecosystem"} {
 		if !p.Supports(e) {
-			t.Errorf("ecosystem %q should be supported by reservednamespaces", e)
+			t.Errorf("ecosystem %q should be supported by namespace_extract", e)
 		}
 	}
 }
 
 func TestReservedNamespacesProvider_ContractShape(t *testing.T) {
 	p := newReservedNamespacesProvider()
-	if p.Name() != "reservednamespaces" {
+	// The runtime Name() is deliberately NOT "reservednamespaces": this
+	// provider detects nothing, and that name reached operators as the
+	// Provider field of its Warning and ProviderTimings entry. See the
+	// header comment on provider_reservedns.go.
+	if p.Name() != "namespace_extract" {
 		t.Errorf("Name: got %q", p.Name())
 	}
 	if p.Signal() != SignalReservedNamespaces {

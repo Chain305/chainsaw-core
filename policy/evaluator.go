@@ -232,6 +232,25 @@ type SkipAuditEvent struct {
 	// without also updating the evaluator_supplychain_test enum
 	// check.
 	Reason string
+
+	// RuleEvaluated distinguishes the two things this event can now
+	// mean, which is the entire point of the dark-advisory-lane work:
+	//
+	//   false (the ZERO VALUE, and every historical emission) — the
+	//   rule did NOT run. The evaluator `continue`d past the whole
+	//   policy; no verdict of any kind came out of it.
+	//
+	//   true — the rule DID run and its verdict stands. The event
+	//   records only that one INPUT to it was structurally dark, so a
+	//   non-match may mean "could not look" rather than "looked and
+	//   found nothing".
+	//
+	// Sinks must key on this, not on the reason string, when deciding
+	// how to word the event: internal/server maps it to a distinct
+	// audit action so `policy.rule.skipped` never claims a rule was
+	// skipped when it was not. Zero value = the historical meaning, so
+	// every existing construction site stays correct untouched.
+	RuleEvaluated bool
 }
 
 // Skip-audit reason enum. Adding a new reason requires also teaching
@@ -250,6 +269,21 @@ const (
 	// to act on". See internal/checksum/enforcer.go and the PR-12
 	// patch in internal/server/checksum_enforce.go.
 	SkipReasonChecksumUnavailable = "checksum_unavailable"
+	// SkipReasonNoAdvisorySource fires when a policy references a
+	// vulnerability-lane condition (CVE / CVSS / EPSS) on an ecosystem
+	// no advisory lane covers — see advisory_lane.go. It is the ONE
+	// reason in this enum that does NOT mean the rule was skipped: the
+	// rule ran, its verdict stands, and RuleEvaluated is true. What is
+	// recorded is that an input to it was structurally dark, so a
+	// non-match may mean "could not look" rather than "looked and found
+	// nothing".
+	//
+	// It is deliberately distinct from SkipReasonUnsupportedEcosystem.
+	// That one says "this cell is ❌ and the rule was discarded"; this
+	// one says "this cell claims support, and the signal behind it is
+	// dark anyway". Collapsing them would re-create the conflation the
+	// operator needs to see through.
+	SkipReasonNoAdvisorySource = "no_advisory_source"
 )
 
 // SkipAuditor receives skip events. Implementations must be safe for
@@ -883,6 +917,19 @@ func (e *Evaluator) evaluatePolicies(ctx EvaluationContext, policies []Policy, e
 			}
 		}
 
+		// Dark advisory lane (advisory_lane.go). RECORD ONLY — there is
+		// deliberately NO `continue` here and there must never be one.
+		// The rule below evaluates exactly as it did before this line
+		// existed; all that changes is that the operator can now see
+		// that one of its inputs had no lane behind it. Adding a
+		// `continue` would convert this into the P8-17 fail-open: for a
+		// pure-AND condition set, discarding the policy and treating
+		// the dark column as a non-match are the same verdict, and both
+		// switch off the negative-polarity block rules
+		// (`isVulnerable: false`, `cvssMax`, `epssMax`) that fire today
+		// precisely because the dark signal reads as absent.
+		e.recordDarkAdvisoryLane(ctx, policy)
+
 		if matches := e.matchesPolicy(ctx, policy); matches {
 			action, reason := e.resolveAction(ctx, policy, now)
 			return EvaluationResult{
@@ -995,34 +1042,87 @@ func detectChecksumUnavailable(_ EvaluationContext, p Policy) []ConditionType {
 	return affected
 }
 
+// recordDarkAdvisoryLane emits one record-only event per (policy,
+// vulnerability-lane condition) pair when the request's ecosystem has no
+// advisory source behind that column. It NEVER changes a verdict: the
+// caller does not branch on its result, and it returns nothing.
+//
+// Two deliberate narrowings, both about signal quality rather than cost:
+//
+//   - the policy must actually USE a dark column, checked first because
+//     it is the cheap test and it is false for almost every policy; and
+//   - the policy must actually TARGET this coordinate. A rule scoped to
+//     another repo, package or client says nothing about this request,
+//     and one audit row per policy per request would bury the rows that
+//     mean something. This costs a second matchesIdentifier/matchesScope
+//     pass, but only for the rare policy that cleared the first test.
+func (e *Evaluator) recordDarkAdvisoryLane(ctx EvaluationContext, p Policy) {
+	if e == nil || (e.auditor == nil && e.logger == nil) {
+		return
+	}
+	eco := EcosystemForFormat(strings.ToLower(strings.TrimSpace(ctx.RepositoryFormat)))
+	if eco == "" {
+		return
+	}
+	dark := DarkAdvisoryConditions(eco, p.Conditions)
+	if len(dark) == 0 {
+		return
+	}
+	if !matchesIdentifier(ctx, p.Identifier) || !matchesScope(ctx, p.Scope) {
+		return
+	}
+	e.recordSkipEvents(ctx, p, dark, SkipReasonNoAdvisorySource, true)
+}
+
 // recordSkipped fires one audit event per (policy, unsupported condition) pair
 // and logs at INFO level. Both auditor and logger are optional.
+//
+// Every caller of THIS function is a genuine skip: the evaluator
+// `continue`d past the whole policy and no verdict came out of it. That
+// is why it hard-codes RuleEvaluated=false. A record-only emission goes
+// through recordSkipEvents directly.
 func (e *Evaluator) recordSkipped(ctx EvaluationContext, p Policy, conditions []ConditionType, reason string) {
+	e.recordSkipEvents(ctx, p, conditions, reason, false)
+}
+
+// recordSkipEvents is the shared emitter. ruleEvaluated=false is the
+// historical "the rule did not run" meaning; true is the record-only
+// dark-lane marker, where the rule DID run and its verdict stands.
+func (e *Evaluator) recordSkipEvents(ctx EvaluationContext, p Policy, conditions []ConditionType, reason string, ruleEvaluated bool) {
 	if strings.TrimSpace(reason) == "" {
 		reason = SkipReasonUnsupportedEcosystem
 	}
 	eco := strings.ToLower(strings.TrimSpace(ctx.RepositoryFormat))
 	for _, cond := range conditions {
 		ev := SkipAuditEvent{
-			OrgID:     ctx.OrgID,
-			PolicyID:  p.ID,
-			Ecosystem: eco,
-			Condition: string(cond),
-			Reason:    reason,
+			OrgID:         ctx.OrgID,
+			PolicyID:      p.ID,
+			Ecosystem:     eco,
+			Condition:     string(cond),
+			Reason:        reason,
+			RuleEvaluated: ruleEvaluated,
 		}
 		if e.auditor != nil {
 			e.auditor.RecordPolicyRuleSkipped(context.Background(), ev)
 		}
-		if e.logger != nil {
-			e.logger.Info("policy rule skipped",
-				"event", "policy.rule.skipped",
-				"policy_id", ev.PolicyID,
-				"ecosystem", ev.Ecosystem,
-				"condition", ev.Condition,
-				"reason", ev.Reason,
-				"package", ctx.PackageName,
-			)
+		if e.logger == nil {
+			continue
 		}
+		// The log line has to say which of the two things happened, or
+		// it re-creates the conflation in the operator's grep.
+		msg, event := "policy rule skipped", "policy.rule.skipped"
+		if ruleEvaluated {
+			msg, event = "policy rule evaluated against a dark signal", "policy.rule.signal_dark"
+		}
+		e.logger.Info(msg,
+			"event", event,
+			"policy_id", ev.PolicyID,
+			"ecosystem", ev.Ecosystem,
+			"condition", ev.Condition,
+			"reason", ev.Reason,
+			"rule_evaluated", ev.RuleEvaluated,
+			"package", ctx.PackageName,
+		)
 	}
 }
 
@@ -1273,23 +1373,72 @@ func matchesConditions(ctx EvaluationContext, cond Conditions) bool {
 			return false
 		}
 	}
+	// Attestation IDENTITY is only admissible as a policy signal when the
+	// verifier actually proved it. BuilderID / Issuer / SourceRepo /
+	// TransparencyLogURL are extracted best-effort from bundles this
+	// system explicitly DECLINED to verify — noteUnverifiedBundle's own
+	// contract says so, sigstoreverify.InspectBundleIdentity does no
+	// chain validation, and transparencyLogURL reads TLogEntries[0]
+	// straight out of publisher-supplied JSON with no Rekor lookup. A
+	// registry `repository.url` reaches the same columns. All of it is
+	// attacker-controlled text until a signature check passes, so an
+	// unverified coordinate is treated as carrying NO attestation
+	// identity at all.
+	//
+	// ABSENT, not "unsatisfiable" — the direction matters and getting it
+	// backwards is a fail-open. matchesConditions answers "does this rule
+	// APPLY", and the caller then applies the rule's Mode, so a blanket
+	// `return false` on unverified provenance means the rule never fires,
+	// which is fail-open for every block-mode rule keyed on the ABSENCE
+	// of something. RequireTransparencyLog is exactly that shape: the
+	// useful block rule is `requireTransparencyLog: false` = "block
+	// anything with no transparency-log entry" (the same negative
+	// polarity TestRequireAttestationFalseFiresOnMissing exercises for
+	// the baseline). Blanket-false would let a forged bundle escape that
+	// block; zeroing the field makes hasTLog false, so the block MATCHES
+	// and the package is refused. Fail closed.
+	//
+	// The three substring matchers are allowlist-shaped — a non-empty
+	// Require list can only be satisfied by content — so zeroing them
+	// makes containsAnySubstring return false and the rule stop
+	// matching. That is the correct closed direction for them: an
+	// allow-mode "trusted builders" rule must not be satisfiable by a
+	// string an attacker chose, and no positive Require list can express
+	// "block unless from acme" in the first place (there is no
+	// ForbidBuilderID). Forcing a match instead would make an unverified
+	// package match EVERY such rule regardless of content, including
+	// allow rules — strictly worse than the bug being fixed.
+	//
+	// SLSALevel and HasProvenance are already gated upstream:
+	// HasProvenance is set from `provenance_status == "verified"` at
+	// every producer, and d4f2bda5 stopped unverified bundles writing
+	// SLSALevel. Descriptive fields (SubjectDigest, SourceCommit) are
+	// untouched here and keep rendering in the UI beside the status
+	// badge — nothing gates on them.
+	builderID := ctx.AttestationBuilderID
+	issuer := ctx.AttestationIssuer
+	sourceRepo := ctx.AttestationSourceRepo
+	transparencyLog := ctx.AttestationTransparencyLog
+	if !provenanceVerified(ctx.ProvenanceStatus) {
+		builderID, issuer, sourceRepo, transparencyLog = "", "", "", ""
+	}
 	if len(cond.RequireBuilderID) > 0 {
-		if !containsAnySubstring(ctx.AttestationBuilderID, cond.RequireBuilderID) {
+		if !containsAnySubstring(builderID, cond.RequireBuilderID) {
 			return false
 		}
 	}
 	if len(cond.RequireBuilderIssuer) > 0 {
-		if !containsAnySubstring(ctx.AttestationIssuer, cond.RequireBuilderIssuer) {
+		if !containsAnySubstring(issuer, cond.RequireBuilderIssuer) {
 			return false
 		}
 	}
 	if len(cond.RequireSourceRepo) > 0 {
-		if !containsAnySubstring(ctx.AttestationSourceRepo, cond.RequireSourceRepo) {
+		if !containsAnySubstring(sourceRepo, cond.RequireSourceRepo) {
 			return false
 		}
 	}
 	if cond.RequireTransparencyLog != nil {
-		hasTLog := ctx.AttestationTransparencyLog != ""
+		hasTLog := transparencyLog != ""
 		if *cond.RequireTransparencyLog != hasTLog {
 			return false
 		}
@@ -1729,6 +1878,21 @@ func matchesEcosystemList(format string, allowed []string) bool {
 // like "https://github.com/foo/bar/.github/workflows/release.yml@…" by
 // substring rather than exact equality, so policies survive workflow
 // path renames and ref/tag suffixes.
+// provenanceVerified reports whether a provenance status string means the
+// attestation was cryptographically verified. The wire value is
+// core/provenance.StatusVerified ("verified"); this package cannot import
+// core/provenance because core/provenance imports core/policy, so the
+// literal is duplicated here and pinned by
+// TestProvenanceVerifiedMatchesProvenancePackage.
+//
+// Trimmed and case-folded to agree with internal/server/policy_simulate.go,
+// which hydrates the same column with strings.EqualFold — a preview that
+// disagreed with enforcement on casing would report a block the proxy does
+// not deliver.
+func provenanceVerified(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "verified")
+}
+
 func containsAnySubstring(haystack string, needles []string) bool {
 	if haystack == "" {
 		return false

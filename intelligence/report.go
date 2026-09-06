@@ -439,12 +439,28 @@ type SupplyChainSection struct {
 	RepoLastCommitAt *time.Time `json:"repoLastCommitAt,omitempty"`
 	RepoArchived     *bool      `json:"repoArchived,omitempty"`
 
-	// ReservedNamespaceViolation is set by the reserved-namespace
-	// enforcement path when a public-ecosystem lookup targets a name
-	// that's reserved for a private registry (classic dep-confusion
-	// risk). The *bool distinguishes "not evaluated" (nil) from
-	// "evaluated and clean" (false) so the risk engine can keep the
-	// signal dormant rather than falsely reporting safety.
+	// ReservedNamespaceViolation WOULD be set by a reserved-namespace
+	// provider when a public-ecosystem lookup targets a name reserved
+	// for a private registry (classic dep-confusion bait). The *bool
+	// distinguishes "not evaluated" (nil) from "evaluated and clean"
+	// (false) so the risk engine can keep the signal dormant rather
+	// than falsely reporting safety.
+	//
+	// NOTHING IN PRODUCTION SETS IT. The field is declared here, merged
+	// in scanner.go and read by risk_projection.go, but no provider ever
+	// writes it — the provider named for this job (now
+	// core/intelligence/provider_reservedns.go, Name "namespace_extract")
+	// is a documented no-op. So `sc.reserved_namespace`
+	// (core/risk/registry_supplychain.go:395, SevHigh, weight -25) can
+	// never fire, and this comment previously asserted the opposite.
+	//
+	// This is a SCORING gap, not an enforcement gap: policy enforcement
+	// of reserved namespaces is independent and does work — the
+	// evaluator string-matches the operator's own declared patterns
+	// against the package name (core/policy/evaluator.go
+	// matchesReservedNamespace). A package that squats a declared
+	// namespace is still refused; it just does not lose risk points
+	// for it, and no dashboard surface reports the reason.
 	ReservedNamespaceViolation *bool  `json:"reservedNamespaceViolation,omitempty"`
 	ReservedNamespaceReason    string `json:"reservedNamespaceReason,omitempty"`
 

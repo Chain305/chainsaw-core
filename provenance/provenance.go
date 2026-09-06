@@ -102,6 +102,23 @@ const (
 	// could not be fetched.
 	ReasonTrustRootsUnavailable = "trust_roots_unavailable"
 
+	// ReasonSelfAttestedTrust — the signature checked out
+	// cryptographically, but ONLY against a key the artifact supplied
+	// about itself. Distinct from ReasonTrustRootsUnavailable ("the
+	// anchors exist, we could not fetch them") and from
+	// ReasonPresenceOnly ("we deliberately did not validate"): here
+	// validation ran and passed, and there is no external anchor to run
+	// it against in the first place.
+	//
+	// The RubyGems gem-cert path is the case. VerifyGemSignature reads
+	// the signing cert out of the .gem it is checking and verifies the
+	// detached .sig entries against that cert's own public key, so any
+	// publisher who re-signs a tampered gem with a freshly minted
+	// self-signed cert passes. It proves internal consistency, not
+	// authorship — which makes it a display signal, never an
+	// enforcement one.
+	ReasonSelfAttestedTrust = "self_attested_trust"
+
 	// ReasonOfflineMode / ReasonEcosystemDisabled — verification was
 	// switched off by configuration, not by anything about the package.
 	ReasonOfflineMode        = "offline_mode"
@@ -291,7 +308,11 @@ func NewChecker(logger *slog.Logger, opts ...CheckerOption) *Checker {
 		logger = slog.Default()
 	}
 	c := &Checker{
-		client:   httpclient.New(httpclient.WithTimeout(15 * time.Second)),
+		// SSRF guard: UpstreamURL on a CheckRequest comes from the
+		// repository's operator-set remote base, so this is a
+		// tenant-influenced egress path (P8-52). WithHTTPClient can still
+		// swap this out below; every replacement must be guarded too.
+		client:   httpclient.New(httpclient.WithTimeout(15*time.Second), httpclient.WithSSRFGuard()),
 		logger:   logger,
 		checkers: map[string]EcosystemChecker{},
 		disabled: map[string]bool{},

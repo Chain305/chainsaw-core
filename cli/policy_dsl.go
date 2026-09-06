@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -102,6 +104,9 @@ func runPolicyEval(cmd *cobra.Command, _ []string) error {
 		// the wrapped OPA error already carries the offending .rego file:line.
 		return cliExitErr(2, "compile bundle %s: %v", bundle, err)
 	}
+	if err := refuseIncompleteBundle(eng, bundle); err != nil {
+		return err
+	}
 	if eng.Empty() {
 		return cliExitErr(2, "bundle %s contains no rego sources", bundle)
 	}
@@ -142,6 +147,37 @@ func runPolicyEval(cmd *cobra.Command, _ []string) error {
 // which includes RESERVED tags with no production caller (pr, promote,
 // runtime — see core/policy/input.go). Accepting a tag here therefore
 // says nothing about whether an enforcement point consumes it.
+// refuseIncompleteBundle turns a partially-read bundle into a hard stop.
+//
+// WHY FATAL AND NOT A WARNING: both `policy eval` and `policy gate`
+// answer a yes/no question about whether something may ship. A bundle
+// that was not fully read cannot answer it. Before this, a `--bundle`
+// path that did not exist was skipped silently inside dsl.discover,
+// which produced an empty engine, which made Decide short-circuit to
+// ActionAllow — so a typo'd flag, a deleted .rego, or a CI job started
+// in the wrong working directory printed "action=allow violations=0"
+// and exited 0.
+//
+// The resolved ABSOLUTE path is named deliberately: a wrong working
+// directory is the likeliest cause, and the relative string the user
+// typed is exactly the thing that will not reveal it.
+func refuseIncompleteBundle(eng *dsl.Engine, bundle string) error {
+	skips := eng.Skipped()
+	if len(skips) == 0 {
+		return nil
+	}
+	abs, absErr := filepath.Abs(bundle)
+	if absErr != nil {
+		abs = bundle
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "bundle %s was not fully read, so no verdict is trustworthy:", abs)
+	for _, sk := range skips {
+		fmt.Fprintf(&b, "\n  %s: %s", sk.Path, sk.Reason)
+	}
+	return cliExitErr(ExitOpError, "%s", b.String())
+}
+
 func runPolicyGate(cmd *cobra.Command, args []string) error {
 	surface := policy.SurfaceTag(args[0])
 	valid := false
@@ -167,6 +203,15 @@ func runPolicyGate(cmd *cobra.Command, args []string) error {
 		// Name the bundle root and surface the loader's diagnostic verbatim;
 		// the wrapped OPA error already carries the offending .rego file:line.
 		return cliExitErr(2, "compile bundle %s: %v", bundle, err)
+	}
+	if err := refuseIncompleteBundle(eng, bundle); err != nil {
+		return err
+	}
+	// The check runPolicyEval has had at :105 and this command did not.
+	// `gate` is the one verb in the CLI shaped like a CI gate, so it was
+	// the worst possible place for an empty bundle to mean allow.
+	if eng.Empty() {
+		return cliExitErr(ExitOpError, "bundle %s contains no rego sources", bundle)
 	}
 
 	in, err := readInputFixture(inputPath)

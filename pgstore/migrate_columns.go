@@ -63,6 +63,14 @@ func (s *Store) ensureEnhancedColumns() error {
 	if err := s.ensureBillyProposalsSchema(); err != nil {
 		return err
 	}
+	// Runs LAST, and must: it UPDATEs package_metadata columns that
+	// ensurePackageRegistryColumns adds above (migrate_packages.go:114-126),
+	// so ordering it before that call would fail on a pre-Phase-5 database.
+	// See migrate_attestation_identity.go for why unverified attestation
+	// identity has to be cleared rather than merely stopped at the writer.
+	if _, err := s.clearUnverifiedAttestationIdentity(); err != nil {
+		return err
+	}
 	return nil
 }
 

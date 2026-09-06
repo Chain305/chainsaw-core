@@ -673,3 +673,123 @@ func TestUnknownPolicyConditions_EmptyMatrixReportsNothing(t *testing.T) {
 		t.Fatalf("empty matrix must report nothing, got %v", got)
 	}
 }
+
+// --- dark advisory lane ------------------------------------------------
+
+// darkLaneConditionMatrix mirrors the real matrix for the case this whole
+// change exists for: apt declares CVE/CVSS SupportFull, and NO lane in the
+// build populates a vulnerability for it (no case in
+// internal/hooks.selectTrivialTarget, no bucket in
+// core/intelligence.supportedOSVEcosystems). npm is the control.
+func darkLaneConditionMatrix() supportMatrixResponseDTO {
+	full := map[string]string{
+		string(policy.ConditionHasInstallScript): "full",
+		string(policy.ConditionCVE):              "full",
+		string(policy.ConditionCVSS):             "full",
+	}
+	clone := func() map[string]string {
+		out := make(map[string]string, len(full))
+		for k, v := range full {
+			out[k] = v
+		}
+		return out
+	}
+	return supportMatrixResponseDTO{
+		Ecosystems: []string{"npm", "apt"},
+		Conditions: []string{
+			string(policy.ConditionHasInstallScript),
+			string(policy.ConditionCVE),
+			string(policy.ConditionCVSS),
+		},
+		Matrix: []supportMatrixRowDTO{
+			{Ecosystem: "npm", Conditions: clone()},
+			{Ecosystem: "apt", Conditions: clone()},
+		},
+	}
+}
+
+// TestRunPolicyPreflight_DarkAdvisoryLaneFires is the operator-facing half
+// of the fix. `cvssMin: 7.0` on apt is DECLARED SUPPORTED — every existing
+// gate says the policy is fine — and it can never match, because
+// CVSSScore is 0.0 forever. Before this, preflight printed the green tick.
+func TestRunPolicyPreflight_DarkAdvisoryLaneFires(t *testing.T) {
+	dir := writePreflightPolicy(t, `{
+		"id":"p1","name":"block-criticals","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"cvssMin":7.0}
+	}`)
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, darkLaneConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "apt")
+
+	err := runPolicyPreflight(cmd, nil)
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) || coded.Code != preflightUnsupportedExitCode {
+		t.Fatalf("expected ExitCodeError{%d}, got %v\n%s", preflightUnsupportedExitCode, err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"CANNOT BE EVALUATED",
+		"block-criticals",
+		"apt",
+		"no vulnerability advisory source",
+		"could not look",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report must contain %q, got:\n%s", want, out)
+		}
+	}
+	// The two findings must stay distinguishable: this is NOT an
+	// "unsupported / inert" finding, and saying so would send the
+	// operator to raise a matrix cell that is already correct.
+	if strings.Contains(out, "conditions your policies use that are inert") {
+		t.Errorf("dark-lane finding must not be reported as inert:\n%s", out)
+	}
+	if strings.Contains(out, "every condition used by") {
+		t.Errorf("never a green tick over a control that cannot run:\n%s", out)
+	}
+}
+
+// TestRunPolicyPreflight_DarkAdvisoryLaneSilentOnCoveredEcosystem — npm
+// has an OSV bucket, so the same rule is a clean pass there.
+func TestRunPolicyPreflight_DarkAdvisoryLaneSilentOnCoveredEcosystem(t *testing.T) {
+	dir := writePreflightPolicy(t, `{
+		"id":"p1","name":"block-criticals","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"cvssMin":7.0}
+	}`)
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, darkLaneConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "npm")
+
+	if err := runPolicyPreflight(cmd, nil); err != nil {
+		t.Fatalf("npm has an advisory source; the gate must pass, got %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "every condition used by") {
+		t.Errorf("expected the all-clear line, got:\n%s", buf.String())
+	}
+}
+
+// TestRunPolicyPreflight_DarkAdvisoryLaneIgnoresUnrelatedConditions — a
+// dark ECOSYSTEM does not make every condition dark. hasInstallScript on
+// apt rides a different lane entirely and must not be reported.
+func TestRunPolicyPreflight_DarkAdvisoryLaneIgnoresUnrelatedConditions(t *testing.T) {
+	dir := writePreflightPolicy(t, `{
+		"id":"p1","name":"block-install-scripts","mode":"block","status":"enabled","precedence":100,
+		"conditions":{"hasInstallScript":true}
+	}`)
+
+	var buf bytes.Buffer
+	cmd := newPreflightTestCmd(t, &buf, darkLaneConditionMatrix())
+	_ = cmd.Flags().Set("policy", dir)
+	_ = cmd.Flags().Set("ecosystem", "apt")
+
+	if err := runPolicyPreflight(cmd, nil); err != nil {
+		t.Fatalf("hasInstallScript is not a vulnerability-lane condition, got %v\n%s", err, buf.String())
+	}
+	if strings.Contains(buf.String(), "CANNOT BE EVALUATED") {
+		t.Errorf("only vulnerability-lane conditions are dark on apt:\n%s", buf.String())
+	}
+}

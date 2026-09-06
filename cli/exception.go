@@ -106,9 +106,11 @@ var exceptionCreateCmd = &cobra.Command{
 		"  chainsaw exception create --repository npm-proxy --package left-pad --version 1.3.0 \\\n" +
 		"      --reason \"transitive dep, upstream fix pending\" --expires 7d\n" +
 		"\n" +
-		"  # VEX-friendly: mark log4j-core 2.14.1 as not_affected because we\n" +
-		"  # don't invoke the JNDI lookup path. The CVE + decision are what\n" +
-		"  # `chainsaw sbom vex export` needs to emit a CycloneDX VEX row.\n" +
+		"  # VEX-friendly: record an accepted risk on log4j-core 2.14.1. The\n" +
+		"  # CVE + decision are what `chainsaw sbom vex export` needs to emit\n" +
+		"  # a CycloneDX VEX row. An exception exports as exploitable +\n" +
+		"  # will_not_fix: you are accepting a real risk, not asserting the\n" +
+		"  # vulnerable code is absent.\n" +
 		"  chainsaw exception create --repository maven-central --package log4j:log4j-core \\\n" +
 		"      --version 2.14.1 --cve CVE-2021-44228 --decision allow \\\n" +
 		"      --reason \"JNDI lookup path not invoked in our codebase\"\n" +
@@ -129,7 +131,7 @@ func init() {
 	exceptionCreateCmd.Flags().String("expires-at", "", "Explicit RFC3339 timestamp for expiry (mutually exclusive with --days and --expires)")
 	exceptionCreateCmd.Flags().String("from-file", "", "Read request body as JSON from file (--ecosystem/--days/--expires-at/--reason still apply on top)")
 	exceptionCreateCmd.Flags().String("cve", "", "CVE ID (or comma-separated list) the exception applies to (e.g. CVE-2021-44228). Required for 'chainsaw sbom vex export' to emit a VEX row.")
-	exceptionCreateCmd.Flags().String("decision", "", "VEX decision: 'allow' (default — maps to not_affected), 'monitor' (in_triage), or 'deny'. Empty falls through to the server default of allow.")
+	exceptionCreateCmd.Flags().String("decision", "", "VEX decision: 'allow' (default — exports as exploitable + will_not_fix, i.e. an accepted risk), 'monitor' (in_triage), or 'deny'. Empty falls through to the server default of allow.")
 	exceptionCreateCmd.Flags().String("vex-note", "", "Free-text justification used in the CycloneDX VEX 'analysis.detail' field. Falls back to --reason when omitted.")
 	exceptionCreateCmd.Flags().Bool("json", false, "Print created exception as JSON")
 	exceptionCmd.AddCommand(exceptionCreateCmd)

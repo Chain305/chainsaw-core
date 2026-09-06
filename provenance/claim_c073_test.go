@@ -49,8 +49,12 @@ var c073Rows = []c073Row{
 		ecosystem:             "rubygems",
 		mechanism:             "RubyGems gem-cert (x509) / sigstore",
 		verifiableOutOfTheBox: true,
-		precondition: "Reaches VERIFIED only for gems that actually ship a cert; most gems are " +
-			"unsigned and correctly return MISSING.",
+		precondition: "Reaches VERIFIED only via the RubyGems Sigstore attestations API, which " +
+			"rubygems.go tries FIRST. The gem-cert fallback returns UNVERIFIED " +
+			"(reason self_attested_trust): the x509 cert is bundled inside the gem it " +
+			"signs and chains to no external root, so a re-signed tampered gem passes " +
+			"— it proves internal consistency, not authorship. Most gems are unsigned " +
+			"and correctly return MISSING.",
 	},
 	{
 		ecosystem:             "apt",

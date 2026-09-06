@@ -25,7 +25,6 @@ package sbom
 
 import (
 	"encoding/json"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -83,20 +82,36 @@ type Exception struct {
 	CreatedAt  time.Time
 }
 
-// VEX analysis state strings — pinned by the CycloneDX 1.6 schema.
+// VEX analysis strings — members of the CycloneDX 1.6 impactAnalysisState
+// and impactAnalysisResponse enums.
+//
+// A Chainsaw exception is a risk ACCEPTANCE: the operator has confirmed the
+// vulnerable package is present and chosen to allow it anyway. That is
+// `exploitable` + `will_not_fix`, not `not_affected`.
+//
+// This used to emit `not_affected` with justification `code_not_present` —
+// a positive machine assertion that the vulnerable code is absent from the
+// product, i.e. the opposite of what the operator recorded. Downstream
+// consumers (Dependency-Track, Grype) suppress a finding on that basis, so
+// every consciously-accepted CVE disappeared from the customer's scanner
+// and an auditor comparing the VEX against the SBOM would find the product
+// asserting the absence of code the SBOM lists.
+//
+// The old code also upgraded the justification to
+// "vulnerable_code_not_in_execute_path" from a regex over the operator's
+// free-text note — machine-asserting that a reachability analysis had been
+// performed because someone typed "not reachable". That string is not a
+// member of the CycloneDX impactAnalysisJustification enum at all, so the
+// document was schema-invalid whenever the regex hit. Both are gone.
+//
+// No justification is emitted now: `justification` is only meaningful
+// alongside `not_affected`, which this code no longer produces.
 const (
-	vexStateNotAffected = "not_affected"
+	vexStateExploitable = "exploitable"
 	vexStateInTriage    = "in_triage"
 
-	vexJustifCodeNotPresent    = "code_not_present"
-	vexJustifVulnNotInExecPath = "vulnerable_code_not_in_execute_path"
+	vexResponseWillNotFix = "will_not_fix"
 )
-
-// reachabilityNotePattern catches the operator-written shorthand for "the
-// vulnerable code path is unreachable from our usage". We map this to the
-// CycloneDX "vulnerable_code_not_in_execute_path" justification because it
-// is materially stronger than the default "code_not_present".
-var reachabilityNotePattern = regexp.MustCompile(`(?i)not in (the )?execution path|not reachable|unreachable`)
 
 // BuildVEX converts active exceptions into a CycloneDX 1.6 VEX document.
 // orgID is reserved for future serialNumber derivation; today it is not
@@ -149,11 +164,14 @@ func BuildVEX(orgID string, exceptions []Exception) (CycloneDXVEX, error) {
 func analyzeException(ex Exception) (CycloneDXVulnAnalysis, bool) {
 	switch strings.ToLower(strings.TrimSpace(ex.Decision)) {
 	case "allow":
-		justif := vexJustifCodeNotPresent
-		if reachabilityNotePattern.MatchString(ex.Note) {
-			justif = vexJustifVulnNotInExecPath
-		}
-		return CycloneDXVulnAnalysis{State: vexStateNotAffected, Justification: justif}, true
+		// An accepted risk is exploitable-and-knowingly-unfixed. The
+		// operator's note rides along in Analysis.Detail (set by the
+		// caller) rather than being pattern-matched into a stronger
+		// machine claim than they made.
+		return CycloneDXVulnAnalysis{
+			State:    vexStateExploitable,
+			Response: []string{vexResponseWillNotFix},
+		}, true
 	case "monitor":
 		return CycloneDXVulnAnalysis{State: vexStateInTriage}, true
 	default:

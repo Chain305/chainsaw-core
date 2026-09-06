@@ -139,6 +139,7 @@ var settingsBackedFields = map[string]string{
 	"Repositories[].Remote.TimeoutSeconds":    "repositories.remote_timeout_seconds",
 	"Repositories[].Remote.Headers":           "repositories.remote_headers",
 	"Repositories[].Cache.NegativeTTLSeconds": "repositories.cache_negative_ttl_seconds",
+	"Repositories[].Cache.MetadataTTLSeconds": "repositories.format_options",
 	"Repositories[].ClientConfigurationGuide": "repositories.client_configuration_guide_template",
 	"Repositories[].PublicBaseURL":            "repositories.public_base_url",
 	"Repositories[].APT.Suites":               "repositories.format_options",

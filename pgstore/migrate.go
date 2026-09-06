@@ -2508,6 +2508,23 @@ func (s *Store) migrateSchema() error {
 			return fmt.Errorf("apply billy RLS migration %q: %w", stmt[:min(len(stmt), 60)], err)
 		}
 	}
+	// Append-only-except-erasure on audit_events: BEFORE UPDATE/DELETE and
+	// BEFORE TRUNCATE triggers that refuse, with one transaction-scoped GUC
+	// escape for the right-to-erasure purge, plus a per-org hash chain that
+	// makes tampering evident even to someone who drops the triggers. See
+	// core/pgstore/audit_append_only.go for why this is triggers and a chain
+	// rather than `REVOKE UPDATE, DELETE` (that would strand every purged org
+	// in an unrecoverable half-state, and the app owns the table anyway).
+	//
+	// Runs after ensureEnhancedColumns for the same reason the Billy RLS
+	// block does: audit_events and all of its late-added columns
+	// (source, requesting_ip, ...) must exist before the hash function is
+	// defined over them.
+	for _, stmt := range auditAppendOnlyStatements() {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("apply audit append-only migration %q: %w", stmt[:min(len(stmt), 60)], err)
+		}
+	}
 	// Record the schema revision after every table/column change
 	// above has been applied. ensureSchemaVersion runs last so the
 	// stored version only advances when the rest of migrate()

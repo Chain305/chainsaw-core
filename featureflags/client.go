@@ -16,6 +16,8 @@ package featureflags
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -161,31 +163,102 @@ var (
 // Prefer Eval over the older IsEnabled signature for new call sites:
 // it accepts ctx (for future cancellation propagation) and gives ops
 // a uniform escape hatch for any flag.
-func (c *Client) Eval(_ context.Context, flag, userID, orgID string, defaultValue bool) bool {
+//
+// Eval CANNOT tell you which of those four steps produced the answer —
+// steps 1-3 and step 4 return an indistinguishable bool. Any caller
+// gating a security control on a flag must use EvalStrict instead and
+// decide explicitly what to do when the provider never answered.
+func (c *Client) Eval(ctx context.Context, flag, userID, orgID string, defaultValue bool) bool {
+	v, _ := c.EvalStrict(ctx, flag, userID, orgID, defaultValue)
+	return v
+}
+
+// Sentinel errors returned by EvalStrict. Each one names exactly ONE of
+// the branches on which Eval falls back to defaultValue, so a caller can
+// tell "the flag provider said no" apart from "we never got an answer".
+//
+// Eval collapses all six into a bare defaultValue, which is fine for a
+// rollout toggle and actively dangerous for a security control: a
+// control that is ON only while a third-party SaaS is reachable silently
+// turns itself OFF during an outage, an ad-block, or a DNS blip, with
+// nothing in the response to distinguish that from normal operation.
+//
+// Use errors.Is against these. The three "we could not evaluate"
+// branches are deliberately NOT merged:
+//
+//   - ErrProviderUnreachable — PostHog IS configured and we asked it,
+//     and the ask failed (transport error, 5xx, malformed payload).
+//     This is the only branch a security-gating caller should read as
+//     "unknown, assume the strict posture". It cannot fire on an install
+//     that never configured PostHog.
+//   - ErrProviderNotConfigured — no PostHog client at all. This is EVERY
+//     self-hosted install (POSTHOG_API_KEY unset ⇒ New() returns the
+//     sentinel with a nil inner client) and every nil *Client. Nothing
+//     is broken; the org simply has no flag provider, and there is
+//     nothing to be unavailable. Treating it as unreachable would flip
+//     every fail-closed gate ON for every self-hosted install — a
+//     product change wearing a bug fix's clothes.
+//   - ErrNoIdentity — neither a userID nor an orgID, so there is no
+//     entity to bucket. Bucketing "anonymous" globally yields a stable
+//     but arbitrary answer, which is worse than admitting we have none.
+//
+// ErrFlagKeyEmpty is a programmer error (empty key), surfaced rather
+// than silently defaulted so it shows up in a test instead of in prod.
+var (
+	ErrFlagKeyEmpty          = errors.New("featureflags: empty flag key")
+	ErrProviderNotConfigured = errors.New("featureflags: no flag provider configured")
+	ErrNoIdentity            = errors.New("featureflags: no user or org identity to evaluate against")
+	ErrProviderUnreachable   = errors.New("featureflags: flag provider unreachable")
+)
+
+// EvalStrict is Eval with the reason attached. It returns the same
+// boolean Eval does — callers that want today's behaviour can ignore the
+// error entirely — plus a sentinel naming which branch produced it.
+//
+// A nil error means the value is AUTHORITATIVE: it came from an env
+// override, a SetOverride, or an actual provider answer. A non-nil error
+// means the returned bool is just defaultValue and the provider never
+// spoke; the sentinel says why, and only ErrProviderUnreachable means
+// "something is broken right now".
+//
+// Resolution order is identical to Eval's, and deliberately so — this is
+// the same function with its silence made legible, not a second policy:
+//
+//  1. CHAINSAW_FF_<UPPER_FLAG> env override        → (value, nil)
+//  2. SetOverride (test-only)                      → (value, nil)
+//  3. PostHog evaluation                           → (value, nil)
+//  4. defaultValue                                 → (default, sentinel)
+//
+// Safe on a nil receiver.
+func (c *Client) EvalStrict(_ context.Context, flag, userID, orgID string, defaultValue bool) (bool, error) {
 	if flag == "" {
-		return defaultValue
+		return defaultValue, ErrFlagKeyEmpty
 	}
-	// Env override always wins, including on nil receivers.
+	// Env override always wins, including on nil receivers. Authoritative:
+	// an operator said so out loud, and recordEnvOverride leaves the trace.
 	if raw, ok := os.LookupEnv(envOverrideKey(flag)); ok {
 		if v, present := parseEnvBool(raw); present {
-			return v
+			recordEnvOverride(envOverrideKey(flag), raw)
+			return v, nil
 		}
 	}
 	if c == nil {
-		return defaultValue
+		return defaultValue, ErrProviderNotConfigured
 	}
 	if v, ok := c.overrides[flag]; ok {
-		return v
+		return v, nil
 	}
+	// Distinct from the unreachable branch below: there is no provider to
+	// be unreachable. See the ErrProviderNotConfigured doc above.
 	if c.client == nil {
-		return defaultValue
+		return defaultValue, ErrProviderNotConfigured
 	}
 	distinct := "user:" + userID
 	if userID == "" {
 		distinct = "org:" + orgID
 	}
 	if distinct == "user:" || distinct == "org:" {
-		return defaultValue
+		return defaultValue, ErrNoIdentity
 	}
 	payload := posthog.FeatureFlagPayload{
 		Key:        flag,
@@ -196,16 +269,28 @@ func (c *Client) Eval(_ context.Context, flag, userID, orgID string, defaultValu
 	}
 	result, err := c.client.IsFeatureEnabled(payload)
 	if err != nil {
-		return defaultValue
+		return defaultValue, fmt.Errorf("%w: %v", ErrProviderUnreachable, err)
 	}
 	switch v := result.(type) {
 	case bool:
-		return v
+		return v, nil
 	case string:
-		return strings.EqualFold(v, "true") || v == "1"
+		return strings.EqualFold(v, "true") || v == "1", nil
 	default:
-		return defaultValue
+		// The SDK answered with something we cannot interpret. We asked a
+		// configured provider and did not get a usable answer, so this is
+		// an unreachable-class failure, not a flag-is-off.
+		return defaultValue, fmt.Errorf("%w: unexpected value type %T", ErrProviderUnreachable, result)
 	}
+}
+
+// Unavailable reports whether err means "a configured flag provider was
+// asked and did not answer". It is FALSE for a missing provider, a
+// missing identity, and an empty key — none of those are outages.
+//
+// Security-gating callers should fail closed on this and only this.
+func Unavailable(err error) bool {
+	return errors.Is(err, ErrProviderUnreachable)
 }
 
 // IsEnabled is the original (pre-Eval) signature retained for the
@@ -230,4 +315,39 @@ func (c *Client) Close() {
 		return
 	}
 	_ = c.client.Close()
+}
+
+// observedEnvOverrides records every CHAINSAW_FF_* override this process
+// has actually consulted.
+//
+// The override returns before every logging path in Eval and "always
+// wins" over the flag provider, including on a nil receiver — so until
+// this existed, a security control could be forced off process-wide with
+// no trace anywhere. That is a worse property than the fail-open the
+// override was added to work around.
+//
+// Recording on read rather than scanning the environment is deliberate:
+// it captures exactly the flags that influenced a decision, and it does
+// not invite a reader to assume an unread variable had an effect.
+var (
+	observedEnvOverridesMu sync.RWMutex
+	observedEnvOverrides   = map[string]string{}
+)
+
+func recordEnvOverride(env, raw string) {
+	observedEnvOverridesMu.Lock()
+	defer observedEnvOverridesMu.Unlock()
+	observedEnvOverrides[env] = raw
+}
+
+// ObservedEnvOverrides returns a copy of the CHAINSAW_FF_* overrides this
+// process has consulted, for the startup enforcement-posture inventory.
+func ObservedEnvOverrides() map[string]string {
+	observedEnvOverridesMu.RLock()
+	defer observedEnvOverridesMu.RUnlock()
+	out := make(map[string]string, len(observedEnvOverrides))
+	for k, v := range observedEnvOverrides {
+		out[k] = v
+	}
+	return out
 }

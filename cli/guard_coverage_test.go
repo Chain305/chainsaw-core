@@ -74,6 +74,9 @@ func TestGuardPostureRejectsBadConfig(t *testing.T) {
 }
 
 func TestGuardPostureBreakGlassForcesOff(t *testing.T) {
+	// guardPosture now spools a durable break-glass record; isolate the
+	// config home so it lands in a temp dir rather than the package sandbox.
+	withTempConfigHome(t)
 	t.Setenv(coverageModeEnv, "closed")
 	t.Setenv(coverageRequiredEnv, "malware")
 	t.Setenv(coverageBreakGlassEnv, "1")

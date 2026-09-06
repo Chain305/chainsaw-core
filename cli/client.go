@@ -291,6 +291,13 @@ func (c *APIClient) do(method, path string, body, out any) error {
 			return fmt.Errorf("decode response: %w", err)
 		}
 	}
+	// Opportunistic passenger: this is the moment we know we have a working
+	// authenticated connection to this server, which is exactly what the
+	// coverage break-glass spool has been waiting for. It returns nothing,
+	// cannot error, cannot panic out, and re-enters this function at most
+	// once (see breakGlassFlushAttempted) — it must never be able to change
+	// what this call returns. Keep it AFTER every branch that can fail.
+	maybeFlushBreakGlassSpool(c.baseURL, c.token)
 	return nil
 }
 

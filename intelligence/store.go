@@ -373,11 +373,31 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	// Marshal the v2 risk evaluation if present; leaving riskPayload nil
 	// preserves the "flag-off" contract that no new column writes happen
 	// for reports without Risk attached.
+	// verdict / overall_score are DENORMALISED PROJECTIONS of risk_evaluation,
+	// added so the admin list page can filter and sort without reading JSONB
+	// on every row. They were written once by the backfill migration and then
+	// never again: neither column appeared in this statement's INSERT list or
+	// its DO UPDATE SET, while risk_evaluation beside them was refreshed on
+	// every upsert.
+	//
+	// So the index drifted from the JSON it projects. Measured on production
+	// before the fix: 2,532 of 7,875 rows (32%) carried a stale verdict and
+	// 4,649 (59%) a stale score — including 67 rows the engine quarantines
+	// that the admin surface listed as `allow`.
+	//
+	// NULL when there is no Risk, which is what the backfill's COALESCE
+	// expects and what the filter treats as "not yet evaluated".
+	var verdict any
+	var overallScore any
 	if r.Risk != nil {
 		riskPayload, err = json.Marshal(r.Risk)
 		if err != nil {
 			return fmt.Errorf("intelligence: encode risk evaluation: %w", err)
 		}
+		if v := strings.TrimSpace(string(r.Risk.Verdict)); v != "" {
+			verdict = v
+		}
+		overallScore = r.Risk.RolledUp.Overall
 	}
 
 	// L-02 slice 1 — MEASUREMENT ONLY. Nothing here changes what is written.
@@ -405,8 +425,9 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 			ecosystem, package_name, version, report,
 			collected_at, fresh_until, artifact_sha256, has_artifact_scan,
 			is_malicious, is_typosquat, trust_score, max_cvss, warning_count,
-			risk_evaluation, authored_by_org, typosquat_confidence
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+			risk_evaluation, authored_by_org, typosquat_confidence,
+			verdict, overall_score
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT (ecosystem, package_name, version) DO UPDATE SET
 			report = EXCLUDED.report,
 			collected_at = EXCLUDED.collected_at,
@@ -420,12 +441,15 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 			max_cvss = EXCLUDED.max_cvss,
 			warning_count = EXCLUDED.warning_count,
 			risk_evaluation = EXCLUDED.risk_evaluation,
-			authored_by_org = EXCLUDED.authored_by_org
+			authored_by_org = EXCLUDED.authored_by_org,
+			verdict = EXCLUDED.verdict,
+			overall_score = EXCLUDED.overall_score
 	`,
 		r.Identity.Ecosystem, r.Identity.Package, r.Identity.Version, payload,
 		r.Observation.CollectedAt, r.Observation.FreshUntil, artifactSHA, hasArtifactScan,
 		isMalicious, isTyposquat, trustScore, maxCVSS, len(r.Observation.Warnings),
 		riskPayload, strings.TrimSpace(orgID), tsConfidence,
+		verdict, overallScore,
 	)
 	if err != nil {
 		return fmt.Errorf("intelligence: upsert report: %w", err)

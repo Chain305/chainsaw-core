@@ -1520,13 +1520,26 @@ func upsertRepository(tx *sql.Tx, orgID string, repo RepositoryConfig) error {
 type repoFormatOptions struct {
 	APT *APTRepoConfig `json:"apt,omitempty"`
 	Yum *YumRepoConfig `json:"yum,omitempty"`
+	// MetadataTTLSeconds rides in this envelope rather than getting its
+	// own column: the repositories table needs no migration for it, and
+	// without a durable home the per-repository override would be
+	// dropped on every boot of every DB-backed deployment — the same bug
+	// that put apt/yum in here. The EFFECTIVE ttl would still fall back
+	// to the per-format builtin (RepositoryConfig.MetadataTTL resolves
+	// it), so the failure would have been silent rather than loud, which
+	// is worse.
+	MetadataTTLSeconds int `json:"metadata_ttl_seconds,omitempty"`
 }
 
 func encodeRepoFormatOptions(repo RepositoryConfig) (string, error) {
-	if repo.APT == nil && repo.Yum == nil {
+	if repo.APT == nil && repo.Yum == nil && repo.Cache.MetadataTTLSeconds == 0 {
 		return "", nil
 	}
-	encoded, err := json.Marshal(repoFormatOptions{APT: repo.APT, Yum: repo.Yum})
+	encoded, err := json.Marshal(repoFormatOptions{
+		APT:                repo.APT,
+		Yum:                repo.Yum,
+		MetadataTTLSeconds: repo.Cache.MetadataTTLSeconds,
+	})
 	if err != nil {
 		return "", fmt.Errorf("encode repository %q format options: %w", repo.Name, err)
 	}
@@ -1547,6 +1560,7 @@ func decodeRepoFormatOptions(raw string, repo *RepositoryConfig) {
 	}
 	repo.APT = decoded.APT
 	repo.Yum = decoded.Yum
+	repo.Cache.MetadataTTLSeconds = decoded.MetadataTTLSeconds
 }
 
 func setSettingForOrg(store *pgstore.Store, orgID, key, value string) error {

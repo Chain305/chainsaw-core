@@ -117,13 +117,46 @@ func VerifyGemSignature(ctx context.Context, gemBytes []byte) (*Result, error) {
 		}, nil
 	}
 
+	// StatusUnverified, NOT StatusVerified — and the Warning below has said
+	// why since this checker was written: the cert is bundled inside the
+	// very .gem it attests, and is validated against no external root.
+	// findSigningCert pulls it out of the artifact and verifyRSASignature
+	// checks the detached .sig entries against that cert's own public key,
+	// so a publisher who tampers with a gem and re-signs it with a freshly
+	// minted self-signed cert passes every check above. What this proves is
+	// internal consistency; what StatusVerified claims is authorship.
+	//
+	// The gap mattered because BuilderID here is the cert's Subject CN —
+	// attacker-chosen text — and BuilderID is what RequireBuilderID gates
+	// on. Returning StatusVerified made that text authoritative on the
+	// enforcement path, and it is the only producer in the package that
+	// reached a policy-gated identity column with a "verified" status
+	// beside it.
+	//
+	// SignerID and BuilderID are still returned: the dashboard renders them
+	// beside the status badge, which now reads "unverified" and carries the
+	// reason. The projection gate (core/metadata.SLSAReport) keeps them out
+	// of package_metadata's policy-gated columns.
+	//
+	// BLAST RADIUS, deliberate and bounded. rubygems.go tries the RubyGems
+	// Sigstore attestations API FIRST and only falls back here when the
+	// coordinate ships no bundle, so Sigstore-attested gems are unaffected
+	// and RubyGems provenance is not disabled. For gem-cert-only gems this
+	// flips hasProvenance true→false, which means a `hasProvenance: false`
+	// block rule NEWLY matches them and a `requireAttestation: true` rule
+	// STOPS matching them. That is the correct direction — those gems never
+	// had verifiable provenance — but it is a live verdict change for any
+	// org running either rule against rubygems.
 	return &Result{
-		Status:          StatusVerified,
+		Status:          StatusUnverified,
 		Ecosystem:       "rubygems",
 		AttestationType: "x509-gemcert",
 		BundleFormat:    "x509-detached",
 		SignerID:        signerID,
 		BuilderID:       builderID,
+		Reason:          ReasonSelfAttestedTrust,
+		Error: "gem signature is valid against a cert bundled inside the gem itself; " +
+			"no external trust root attests the signer, so authorship is unproven",
 		Warnings: []string{
 			"x509 cert is gem-bundled; trust not validated against external root",
 		},

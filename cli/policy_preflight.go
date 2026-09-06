@@ -20,8 +20,16 @@ package cli
 //	0 — nothing YOUR policies depend on is unsupported on the printed
 //	    ecosystems (and, with no --policy, always: the bare matrix dump
 //	    is informational)
-//	1 — a condition one of your --policy rules USES is "none" on a
-//	    printed ecosystem (CI signal)
+//	1 — a condition one of your --policy rules USES cannot produce a
+//	    verdict on a printed ecosystem (CI signal). TWO shapes, reported
+//	    separately because the fix differs:
+//	      * the cell is "none" — the proxy DISCARDS the whole rule; or
+//	      * the cell is full/partial but the ecosystem has no
+//	        vulnerability advisory source, so the rule RUNS and
+//	        evaluates against a signal nothing populates
+//	        (core/policy/advisory_lane.go). A `cvssMin: 7.0` block rule
+//	        on an apt repo is checked on every request against a
+//	        CVSSScore of 0.0 and can never match.
 //	2 — usage / network / other errors (cobra/RunE default)
 //	12 — the gate did not cover the whole policy set, either because the
 //	    --policy tree could not be fully read OR because a condition your
@@ -92,8 +100,17 @@ condition inputs in the dashboard.
 
 Use this in CI to catch policies that reference conditions silently inert
 on the target ecosystem before applying them. Pass --policy <file-or-dir>
-and the command exits 1 when a condition YOUR rules use is unsupported on
-a printed ecosystem — and names the rule, the condition and the ecosystem.
+and the command exits 1 when a condition YOUR rules use cannot produce a
+verdict on a printed ecosystem — and names the rule, the condition and the
+ecosystem.
+
+Two shapes are reported separately, because the fix differs. A condition
+the matrix marks unsupported is DISCARDED by the proxy: the whole rule
+stops enforcing. A condition the matrix marks supported on an ecosystem
+with no vulnerability advisory source (apt, yum, dnf, swift, huggingface,
+cocoapods) is EVALUATED, against a signal nothing populates — so it never
+matches, and a non-match means "could not look", not "looked and found
+nothing".
 
 When --policy names a DIRECTORY, the sweep skips .git/node_modules/vendor
 and friends and ignores JSON/YAML that is not a policy document; anything it
@@ -225,6 +242,47 @@ func runPolicyPreflight(cmd *cobra.Command, _ []string) error {
 				u.Rule, u.Condition, u.File, u.Line)
 		}
 		fmt.Fprintf(out, "  %s this CLI is newer than the proxy it asked. Those rules cannot fire there.\n", g.dash)
+	}
+
+	// SURFACE the DARK ADVISORY LANE. Fourth outcome, and the one the
+	// other three could not express: the matrix says full/partial, the
+	// condition IS evaluated, and no lane in this build can produce the
+	// signal it evaluates against. `cvssMin: 7.0` on an apt repo is
+	// checked on every request, against a CVSSScore of 0.0 that nothing
+	// could ever have set, so it never matches and never blocks.
+	//
+	// It is reported SEPARATELY from `inert` on purpose. "Unsupported"
+	// means the proxy discarded the rule; this means the proxy ran it
+	// and the answer was worthless. Folding them together would tell an
+	// operator to go fix the wrong thing, and the whole point of the
+	// change is that a control which CANNOT RUN must be distinguishable
+	// from one that ran and found nothing.
+	//
+	// The fact comes from this CLI's linked core/policy table rather
+	// than from the response, because it is a static product fact and a
+	// missing JSON field would deserialise to the Go zero value —
+	// silently reporting EVERY ecosystem as dark against an older
+	// proxy. One source, no skew hazard, no new server surface.
+	dark := darkAdvisoryPolicyConditions(rows, usage)
+	if len(dark) > 0 {
+		fmt.Fprintf(out, "\n%s conditions your policies use that CANNOT BE EVALUATED on the printed ecosystem(s):\n", g.fail)
+		for _, d := range dark {
+			fmt.Fprintf(out, "  - %s: condition %s is declared supported on %s, but %s has no vulnerability advisory source in this build (%s:%d)\n",
+				d.Rule, d.Condition, d.Ecosystem, d.Ecosystem, d.File, d.Line)
+		}
+		fmt.Fprintf(out, "  %s the rule still runs; it evaluates against an empty signal, so a non-match means \"could not look\", not \"looked and found nothing\".\n", g.dash)
+	}
+
+	if len(inert) == 0 && len(dark) > 0 {
+		// Never a green tick over a control that cannot run. Same
+		// doctrine as the unreadable-path and version-skew branches
+		// above: the tick is this gate's ANSWER, and it has no answer
+		// for a rule whose input no lane populates.
+		return &ExitCodeError{
+			Code: preflightUnsupportedExitCode,
+			Err: fmt.Errorf("policy preflight: %d rule/ecosystem pair(s) reference a condition with no advisory source on that ecosystem",
+				len(dark)),
+		}
 	}
 
 	if len(inert) == 0 {
@@ -370,6 +428,75 @@ func inertPolicyConditions(rows []supportMatrixRowDTO, usage []preflightConditio
 		return out[i].Condition < out[j].Condition
 	})
 	return out
+}
+
+// darkAdvisoryPolicyConditions returns the (rule, condition, ecosystem)
+// triples where the printed row says the condition is SUPPORTED (not
+// "none" — those are already reported as inert) but the ecosystem has no
+// vulnerability advisory source behind it, so the rule evaluates against
+// a signal nothing populates.
+//
+// Rows the CLI's linked matrix does not recognise are skipped rather than
+// reported: EcosystemHasAdvisorySource answers true for an unknown key on
+// purpose (see advisory_lane.go), so a proxy that grew a new ecosystem is
+// never accused of a coverage gap this CLI cannot see.
+func darkAdvisoryPolicyConditions(rows []supportMatrixRowDTO, usage []preflightConditionUse) []preflightInertCondition {
+	var out []preflightInertCondition
+	for _, row := range rows {
+		eco := policy.Ecosystem(strings.ToLower(strings.TrimSpace(row.Ecosystem)))
+		if policy.EcosystemHasAdvisorySource(eco) {
+			continue
+		}
+		for _, u := range usage {
+			level, listed := row.Conditions[string(u.Condition)]
+			if !listed || level == "none" {
+				// Absent → unknownPolicyConditions owns it.
+				// "none" → inertPolicyConditions owns it, and the rule
+				// is discarded outright rather than run blind.
+				continue
+			}
+			if len(policy.DarkAdvisoryConditions(eco, conditionsUsing(u.Condition))) == 0 {
+				continue
+			}
+			out = append(out, preflightInertCondition{
+				File: u.File, Line: u.Line, Rule: u.Rule,
+				Condition: u.Condition, Ecosystem: row.Ecosystem,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Ecosystem != out[j].Ecosystem {
+			return out[i].Ecosystem < out[j].Ecosystem
+		}
+		if out[i].Rule != out[j].Rule {
+			return out[i].Rule < out[j].Rule
+		}
+		return out[i].Condition < out[j].Condition
+	})
+	return out
+}
+
+// conditionsUsing builds the minimal Conditions value that
+// policy.ConditionsUsedBy reports the given column for, so the CLI can
+// ask core/policy the SAME question the evaluator asks rather than
+// re-deriving "is this a vulnerability-lane column" from a second list
+// that would drift.
+//
+// Only the vulnerability-lane columns need an arm; every other column
+// returns the zero Conditions, for which DarkAdvisoryConditions is empty.
+func conditionsUsing(c policy.ConditionType) policy.Conditions {
+	zero := 0.0
+	switch c {
+	case policy.ConditionCVE:
+		t := true
+		return policy.Conditions{IsVulnerable: &t}
+	case policy.ConditionCVSS:
+		return policy.Conditions{CVSSMin: &zero}
+	case policy.ConditionEPSS:
+		return policy.Conditions{EPSSMin: &zero}
+	default:
+		return policy.Conditions{}
+	}
 }
 
 // unknownPolicyConditions returns the conditions a --policy rule uses that

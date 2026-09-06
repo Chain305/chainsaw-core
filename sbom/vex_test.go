@@ -20,21 +20,22 @@ func TestBuildVEX_MappingTable(t *testing.T) {
 		ex                Exception
 		wantIncluded      bool
 		wantState         string
+		wantResponse      string
 		wantJustification string
 	}{
 		{
-			name: "allow + cve, no note → not_affected/code_not_present",
+			name: "allow + cve, no note → exploitable/will_not_fix",
 			ex: Exception{
 				ID: "e1", Decision: "allow", Ecosystem: "npm",
 				Name: "lodash", Version: "4.17.20",
 				CVE: "CVE-2024-12345", ExpiresAt: future,
 			},
-			wantIncluded:      true,
-			wantState:         "not_affected",
-			wantJustification: "code_not_present",
+			wantIncluded: true,
+			wantState:    "exploitable",
+			wantResponse: "will_not_fix",
 		},
 		{
-			name: "allow + cve + execution-path note → vulnerable_code_not_in_execute_path",
+			name: "allow + reachability note → still exploitable, note is not promoted to a claim",
 			ex: Exception{
 				ID: "e2", Decision: "allow", Ecosystem: "npm",
 				Name: "lodash", Version: "4.17.20",
@@ -42,9 +43,9 @@ func TestBuildVEX_MappingTable(t *testing.T) {
 				Note:      "the affected sink is not in execution path for our usage",
 				ExpiresAt: future,
 			},
-			wantIncluded:      true,
-			wantState:         "not_affected",
-			wantJustification: "vulnerable_code_not_in_execute_path",
+			wantIncluded: true,
+			wantState:    "exploitable",
+			wantResponse: "will_not_fix",
 		},
 		{
 			name: "monitor → in_triage",
@@ -109,6 +110,11 @@ func TestBuildVEX_MappingTable(t *testing.T) {
 			}
 			if tc.wantJustification != "" && got.Analysis.Justification != tc.wantJustification {
 				t.Errorf("Analysis.Justification = %q, want %q", got.Analysis.Justification, tc.wantJustification)
+			}
+			if tc.wantResponse != "" {
+				if len(got.Analysis.Response) != 1 || got.Analysis.Response[0] != tc.wantResponse {
+					t.Errorf("Analysis.Response = %v, want [%q]", got.Analysis.Response, tc.wantResponse)
+				}
 			}
 			if len(got.Affects) != 1 || got.Affects[0].Ref == "" {
 				t.Errorf("want a single non-empty affects ref, got %+v", got.Affects)
@@ -201,7 +207,7 @@ func TestBuildVEX_MixedDecisionBatch(t *testing.T) {
 		t.Fatalf("want 3 vulns (2 allow + 1 monitor), got %d: %+v", len(vex.Vulnerabilities), vex.Vulnerabilities)
 	}
 
-	// Collect distinct analysis states; both not_affected and in_triage
+	// Collect distinct analysis states; both exploitable and in_triage
 	// must appear so the downstream consumer can branch on them.
 	stateCounts := map[string]int{}
 	justifCounts := map[string]int{}
@@ -211,18 +217,20 @@ func TestBuildVEX_MixedDecisionBatch(t *testing.T) {
 			justifCounts[v.Analysis.Justification]++
 		}
 	}
-	if stateCounts["not_affected"] != 2 {
-		t.Errorf("want 2 not_affected, got %d (states=%v)", stateCounts["not_affected"], stateCounts)
+	if stateCounts["exploitable"] != 2 {
+		t.Errorf("want 2 exploitable, got %d (states=%v)", stateCounts["exploitable"], stateCounts)
+	}
+	if stateCounts["not_affected"] != 0 {
+		t.Errorf("not_affected must never be emitted for a risk acceptance, got %d", stateCounts["not_affected"])
 	}
 	if stateCounts["in_triage"] != 1 {
 		t.Errorf("want 1 in_triage, got %d (states=%v)", stateCounts["in_triage"], stateCounts)
 	}
-	// The reachability-note allow should pick the stronger justification.
-	if justifCounts["vulnerable_code_not_in_execute_path"] != 1 {
-		t.Errorf("want 1 vulnerable_code_not_in_execute_path justification, got %v", justifCounts)
-	}
-	if justifCounts["code_not_present"] != 1 {
-		t.Errorf("want 1 code_not_present justification, got %v", justifCounts)
+	// No justification at all: `justification` is only meaningful next to
+	// `not_affected`, and an operator's free-text note must never be
+	// promoted into a machine claim about reachability.
+	if len(justifCounts) != 0 {
+		t.Errorf("want no justifications emitted, got %v", justifCounts)
 	}
 }
 

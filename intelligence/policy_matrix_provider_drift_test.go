@@ -244,6 +244,86 @@ func TestEveryProxyFormatStringMapsToAMatrixRow(t *testing.T) {
 	}
 }
 
+// TestPolicyAdvisoryLaneMatchesIntelligenceCoverage pins core/policy's
+// mirrored advisory-coverage table (core/policy/advisory_lane.go) to the
+// authority in this package.
+//
+// core/policy CANNOT import core/intelligence — this package already
+// imports core/policy, so the edge would be a cycle — and injecting the
+// fact through a collaborator seam was rejected because an un-wired seam
+// is a guard that cannot run. The table is therefore mirrored, and this
+// test is the thing that makes the mirror honest. It lives here because
+// this is the only package that can see BOTH sides.
+//
+// The authority is a UNION, and both halves matter:
+//
+//   - ecosystemHasAdvisorySource — an OSV bucket exists
+//     (supportedOSVEcosystems), so the intel lane can answer; or
+//   - ecosystemHasScannerAdvisorySource — the Trivy-backed scanner lane
+//     structurally advises on it (scannerAdvisedEcosystems: docker only),
+//     so an empty proxy-lane result is a real negative.
+//
+// An ecosystem in NEITHER is dark: a policy condition keyed on CVE / CVSS
+// / EPSS there evaluates against a zero value no lane could have set.
+// Today that is huggingface, cocoapods, swift, apt, yum, dnf.
+//
+// PROVE IT CAN FAIL before trusting it: add "apt" to
+// scannerAdvisedEcosystems, or drop EcoDocker from
+// ecosystemsWithAdvisorySource, and this must go red.
+func TestPolicyAdvisoryLaneMatchesIntelligenceCoverage(t *testing.T) {
+	for _, eco := range policy.AllEcosystems() {
+		// Ask through the same alias set the evaluator uses, so a row
+		// is covered when ANY of its format aliases is (pypi/pip,
+		// gomod/go, gradle/maven, ...).
+		authority := false
+		for _, f := range allProxyFormatStrings {
+			if policy.EcosystemForFormat(f) != eco {
+				continue
+			}
+			if ecosystemHasAdvisorySource(f) || ecosystemHasScannerAdvisorySource(f) {
+				authority = true
+				break
+			}
+		}
+		mirror := policy.EcosystemHasAdvisorySource(eco)
+		if mirror == authority {
+			continue
+		}
+		if mirror && !authority {
+			t.Errorf("ADVERTISED-AND-DARK %s: core/policy/advisory_lane.go says an advisory source exists, "+
+				"but neither supportedOSVEcosystems (provider_osv.go) nor scannerAdvisedEcosystems "+
+				"(advisory_coverage.go) covers it. Operators get no dark-lane warning for CVE/CVSS/EPSS "+
+				"rules on this ecosystem, and those rules evaluate against a zero score forever. "+
+				"Remove it from ecosystemsWithAdvisorySource.", eco)
+			continue
+		}
+		t.Errorf("FALSE ALARM %s: core/policy/advisory_lane.go calls this ecosystem dark, but %s covers it. "+
+			"Preflight will exit 1 and the audit trail will carry policy.rule.signal_dark rows for a "+
+			"control that actually runs. Add it to ecosystemsWithAdvisorySource.", eco,
+			"supportedOSVEcosystems / scannerAdvisedEcosystems")
+	}
+}
+
+// TestPolicyAdvisoryLaneDarkSetIsTheExpectedSix is a second, blunter rail
+// on the same table: it names today's dark set literally, so a change to
+// EITHER module that happens to keep the two sides agreeing still has to
+// be acknowledged here. The union test above catches drift BETWEEN the
+// modules; this one catches a coordinated change nobody reviewed.
+func TestPolicyAdvisoryLaneDarkSetIsTheExpectedSix(t *testing.T) {
+	want := []string{"apt", "cocoapods", "dnf", "huggingface", "swift", "yum"}
+	var got []string
+	for _, eco := range policy.EcosystemsWithoutAdvisorySource() {
+		got = append(got, string(eco))
+	}
+	sort.Strings(got)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("dark advisory-lane set changed\n got: %v\nwant: %v\n"+
+			"If a lane genuinely gained (or lost) coverage this is correct — update the literal AND "+
+			"docs/POLICY_PROXY_MATRIX.md's 'Dark advisory lane' section. If it changed by accident, "+
+			"an operator either lost a warning or gained a false one.", got, want)
+	}
+}
+
 // coverageByEcosystem collapses per-format coverage onto matrix rows: a row is
 // covered when ANY of its aliases is.
 func coverageByEcosystem(t *testing.T, covers func(string) bool) map[policy.Ecosystem]bool {

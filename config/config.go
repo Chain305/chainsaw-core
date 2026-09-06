@@ -622,6 +622,41 @@ type RemoteConfig struct {
 // CacheConfig defines pull-through cache behaviour knobs.
 type CacheConfig struct {
 	NegativeTTLSeconds int `yaml:"negative_ttl_seconds"`
+
+	// MetadataTTLSeconds bounds how long a MUTABLE registry document
+	// (an npm packument, a pip simple-index page) may be served from
+	// the pull-through cache without revalidating upstream.
+	//
+	// It applies ONLY to mutable documents. Immutable artifacts —
+	// tarballs, wheels, jars, gems, crates — are content-addressed by
+	// version and are never expired by this knob, regardless of value.
+	//
+	//	0  — unset; resolve the per-format builtin (MetadataTTL).
+	//	<0 — explicitly disabled; metadata never expires.
+	//	>0 — expire after this many seconds.
+	MetadataTTLSeconds int `yaml:"metadata_ttl_seconds"`
+}
+
+// builtinMetadataTTLSeconds is the per-format positive TTL applied when
+// a repository does not set metadata_ttl_seconds explicitly.
+//
+// Only formats with a mutable-document classifier in core/proxy carry a
+// non-zero default; for every other format the knob resolves to 0 and
+// the cache keeps its previous never-expire behaviour. Adding a format
+// here without also teaching core/proxy's isMutableDocument about it is
+// a no-op, not a bug.
+//
+// 600s (10 min) for npm and pip: it is the same order as the negative
+// TTL those two formats already run (600s, below), it is well inside a
+// typical CI window so a freshly published version becomes installable
+// within minutes rather than never, and — because revalidation is
+// conditional (If-None-Match) — the steady-state cost of a miss on an
+// unchanged packument is a 304, not a ~190KB re-fetch.
+var builtinMetadataTTLSeconds = map[string]int{
+	"npm":  600,
+	"yarn": 600,
+	"bun":  600,
+	"pip":  600,
 }
 
 // RemoteDefaults defines fallback remote URLs per format.
@@ -914,6 +949,29 @@ func (r RepositoryConfig) AnonymousAccessValue() bool {
 // NegativeTTL returns the configured negative cache TTL.
 func (r RepositoryConfig) NegativeTTL() time.Duration {
 	return time.Duration(r.Cache.NegativeTTLSeconds) * time.Second
+}
+
+// MetadataTTL returns the positive cache TTL for mutable registry
+// metadata. Zero means "never expires".
+//
+// Unlike NegativeTTLSeconds, the default is resolved HERE rather than in
+// normalize(). normalize() runs on the YAML load path only: repositories
+// hydrated from the database build a RepositoryConfig by hand and set
+// Cache.NegativeTTLSeconds directly (store.go, fetchRepositories and
+// fetchRepository), never calling normalize. A default applied only in
+// normalize would therefore be silently absent for every DB-backed
+// deployment — which is every production deployment — and the TTL would
+// read as 0 (disabled) exactly where it is needed. Resolving in the
+// accessor gives one code path that both hydrations share.
+func (r RepositoryConfig) MetadataTTL() time.Duration {
+	seconds := r.Cache.MetadataTTLSeconds
+	if seconds == 0 {
+		seconds = builtinMetadataTTLSeconds[strings.ToLower(strings.TrimSpace(r.Format))]
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func cloneMap(m map[string]string) map[string]string {

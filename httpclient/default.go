@@ -15,6 +15,7 @@ type defaultClientConfig struct {
 	maxIdleConnsPerHost int
 	idleConnTimeout     time.Duration
 	transportFn         func(*http.Transport) http.RoundTripper
+	ssrfGuard           bool
 }
 
 // DefaultOption configures an HTTP client built by New. The name is
@@ -53,6 +54,26 @@ func WithIdleConnTimeout(d time.Duration) DefaultOption {
 // installed on the client.
 func WithTransport(fn func(*http.Transport) http.RoundTripper) DefaultOption {
 	return func(c *defaultClientConfig) { c.transportFn = fn }
+}
+
+// WithSSRFGuard installs the SafeDialer on the client's transport and
+// refuses to follow redirects. Use it for any egress path whose target
+// URL is attacker- or tenant-influenced.
+//
+// It exists because the WithTransport incantation in the New doc comment
+// below is three lines of boilerplate that is easy to get subtly wrong,
+// and two call sites did get it wrong: core/provenance.NewChecker and
+// core/upstreamhttp.New both built a bare client and were then fed an
+// org admin's repository remote_url. The redirect half matters as much
+// as the dial half — without it an allowed public host can 302 to
+// 169.254.169.254 and the address check never sees the metadata IP.
+//
+// CHAINSAW_ALLOW_PRIVATE_UPSTREAMS=1 still overrides the dial block for
+// operators proxying an internal registry, exactly as it does on the
+// repository fetch path (see cmd/chainsaw-proxy/main.go's
+// registerRepositoriesFromConfig).
+func WithSSRFGuard() DefaultOption {
+	return func(c *defaultClientConfig) { c.ssrfGuard = true }
 }
 
 // AllowPrivateUpstreams reports whether the operator has opted out of the
@@ -124,9 +145,22 @@ func New(opts ...DefaultOption) *http.Client {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
+	if cfg.ssrfGuard {
+		base.DialContext = NewSafeDialer(nil).DialContext
+	}
 	var rt http.RoundTripper = base
 	if cfg.transportFn != nil {
 		rt = cfg.transportFn(base)
 	}
-	return &http.Client{Transport: rt, Timeout: cfg.timeout}
+	client := &http.Client{Transport: rt, Timeout: cfg.timeout}
+	if cfg.ssrfGuard {
+		// Refuse redirects rather than re-validating each hop: the
+		// dialer would catch a redirect to a blocked address anyway,
+		// but a silent 302 chain off a tenant-supplied URL is not
+		// something any of these callers want to follow.
+		client.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+	return client
 }

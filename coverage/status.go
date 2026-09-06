@@ -38,8 +38,21 @@ const (
 // The strings here are the codes providers ACTUALLY emit, which is not the
 // same as the WarnXxx constants declared in intelligence/report.go — several
 // of those (WarnUpstream5xx, WarnUpstream4xx, WarnBreakerOpen,
-// WarnRateLimited, WarnUnsupported) have zero emission sites in the tree. See
-// the P0 section of docs/plan_optional_fail_closed.md.
+// WarnRateLimited) have zero emission sites in the tree. See the P0 section
+// of docs/plan_optional_fail_closed.md.
+//
+// CORRECTED 2026-09-06: WarnUnsupported was in that list and does NOT belong
+// there — advisory_coverage.go:411 emits it, which is the P8-05 fix. The
+// clause was load-bearing reasoning inside this gate's own classification
+// table, so it mattered more than a stale comment usually would: it read as
+// "this code cannot occur", when in fact it occurs for the seven ecosystems
+// with no advisory feed.
+//
+// Its ABSENCE from unavailableCodes below is therefore a live decision, not
+// a dead-code footnote. An ecosystem with no advisory source is a known
+// permanent gap, not a source we failed to reach, so it is deliberately not
+// treated as "unavailable" by the fail-closed gate. Whoever owns
+// plan_optional_fail_closed.md should confirm that is still the intent.
 var unavailableCodes = map[string]bool{
 	"timeout":                          true,
 	"context_cancelled":                true,

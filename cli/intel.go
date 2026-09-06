@@ -403,6 +403,31 @@ func verdictDisplay(v string) string {
 	}
 }
 
+// notRefusedNote is the closing paragraph on every NOT EVALUATED render.
+//
+// "NOT EVALUATED" alone is refusal-shaped: it sits where a verdict goes,
+// in the same column that otherwise says QUARANTINE, and a reader who
+// scans the banner without parsing the words concludes Chainsaw stopped
+// something. It did not. `risk.VerdictUnknown` maps through
+// `decision.FromRiskVerdict` to Monitored — permitted, and flagged for
+// review — so the install went ahead.
+//
+// This is not a hypothetical misreading. A QA pass filed three rows (a
+// typosquat, a container base image, and a model coordinate) as
+// successful security interceptions on the strength of this output, and
+// concluded from them that the product fails closed. It does not, by
+// design: refusing what cannot be evaluated is the opt-in coverage gate,
+// which is off unless an operator turns it on. An operator who reads
+// grade F on every unpulled container image concludes containers are
+// already being refused, and never enables the gate that would actually
+// refuse them.
+//
+// Same register as scan.go's unscanned-package warning: state plainly
+// that absence of a result is not a result.
+const notRefusedNote = "This package was NOT refused. Chainsaw could not evaluate it, so it was\n" +
+	"PERMITTED and flagged for review. To refuse packages Chainsaw cannot\n" +
+	"evaluate, enable the coverage gate (see docs/COVERAGE_SOURCES.md)."
+
 // renderEvaluation prints a single Evaluation to stdout in the human
 // text form documented in chainsaw intel package --help.
 //
@@ -411,6 +436,14 @@ func verdictDisplay(v string) string {
 // score is a 100 base rather than a measurement, so the grade line is
 // replaced by NOT EVALUATED and the reason. The wire verdict is unchanged
 // and --json still prints exactly what the server said.
+//
+// A wire verdict of "unknown" gets the same not-scored treatment, for the
+// same reason and one more: `risk.UnavailableEvaluation` builds it with
+// Overall=0 and every category DataAvailable=false, so the old code path
+// printed "Overall: 0 (F)" — a bottom grade manufactured out of an
+// evaluation that never ran. Paired with a verdict that reads as a
+// refusal, that output was misread as a successful interception in a
+// client-facing QA document, three separate times. See notRefusedNote.
 func renderEvaluation(w io.Writer, ev *v1Evaluation, federatedAbsence string) {
 	if ev == nil {
 		fmt.Fprintln(w, "No evaluation available for this package.")
@@ -426,6 +459,23 @@ func renderEvaluation(w io.Writer, ev *v1Evaluation, federatedAbsence string) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "No category scores are shown because no registry metadata was")
 		fmt.Fprintln(w, "retrieved; a grade here would be a default, not a measurement.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, notRefusedNote)
+		return
+	}
+	if ev.Verdict == "unknown" {
+		fmt.Fprintf(w, "Verdict: %-8s Overall: -  (not scored)\n", "NOT EVALUATED")
+		if reason := strings.TrimSpace(ev.Resolution.Summary); reason != "" {
+			fmt.Fprintf(w, "Reason:  %s\n", reason)
+		}
+		if ev.EngineVersion != "" {
+			fmt.Fprintf(w, "Engine:  v%s\n", ev.EngineVersion)
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "No category scores are shown because the engine had no facts to")
+		fmt.Fprintln(w, "score; a grade here would be a default, not a measurement.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, notRefusedNote)
 		return
 	}
 	fmt.Fprintf(w, "Verdict: %-8s Overall: %d (%s)\n",

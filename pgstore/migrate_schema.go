@@ -213,6 +213,21 @@ func (s *Store) ensurePlanAssignmentAndAuditSchema() error {
 	if err := s.addColumnIfMissing("audit_events", "source", "TEXT"); err != nil {
 		return fmt.Errorf("backfill audit_events.source: %w", err)
 	}
+	// Enterprise audit requirement: "Per-transaction audit logging (User, IP,
+	// Package, Action, Severity)". The table named the user but could not
+	// answer "from where", so a revoked API key or a deleted policy left no
+	// address to correlate against VPN logs and no way to tell the operator
+	// from a session-token thief.
+	//
+	// Named to match the existing precedent columns `events.requesting_ip`
+	// (migrate_columns.go) and `client_credentials.last_request_ip`, and
+	// nullable like both: every pre-backfill row, and every writer with no
+	// HTTP request in scope (background evaluators, the org-purge worker),
+	// legitimately has no address and must persist NULL rather than a
+	// fabricated one.
+	if err := s.addColumnIfMissing("audit_events", "requesting_ip", "TEXT"); err != nil {
+		return fmt.Errorf("backfill audit_events.requesting_ip: %w", err)
+	}
 	if err := s.addColumnIfMissing("policies", "source", "TEXT"); err != nil {
 		return fmt.Errorf("backfill policies.source: %w", err)
 	}

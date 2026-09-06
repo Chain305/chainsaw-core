@@ -261,9 +261,25 @@ func noteUnverifiedBundle(r *Result, bundleJSON []byte, reason string) {
 					r.SubjectDigest = "sha256:" + sha
 				}
 			}
-			if level := slsaLevelFromPredicate(stmt.PredicateType, stmt.Predicate); level > 0 {
-				r.SLSALevel = level
-			}
+			// DELIBERATELY NOT SET HERE. This function's contract, three
+			// lines up, is that full verification could not run and that
+			// best-effort identity extraction "is *not* a substitute for
+			// real verification". SLSALevel is not identity — it is the
+			// field policy conditions gate on (RequireSLSALevel,
+			// RequireAttestation), and slsaLevelFromPredicate awards
+			// level 1 to any statement whose predicateType merely
+			// contains "slsa.dev/provenance/v1": no builder, no
+			// signature, no trusted root.
+			//
+			// Writing it from an unverified bundle let an upstream
+			// publisher set a security-relevant field by publishing a
+			// JSON blob. The field is also sticky and monotonic — merges
+			// are max-wins and a later zero re-inherits the prior
+			// non-zero — so a single unverified write never decays.
+			//
+			// SubjectDigest and SourceCommit stay: they are descriptive
+			// identity, nothing gates on them, and surfacing them is the
+			// point of this path.
 			if c := sourceCommitFromPredicate(stmt.Predicate); c != "" {
 				r.SourceCommit = c
 			}

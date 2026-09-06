@@ -441,6 +441,11 @@ func (s *exportSink) abort() {
 var auditCSVHeaders = []string{
 	"id", "timestamp", "actor", "action", "resource",
 	"client", "decision", "status", "severity", "metadata",
+	// requesting_ip is appended LAST on purpose: an existing pipeline that
+	// keys by position keeps every index it already had, and one that keys
+	// by name simply gains a column. Empty for rows with no HTTP request in
+	// scope and for every row written before the column existed.
+	"requesting_ip",
 }
 
 func writeAuditCSV(w io.Writer, events []auditEvent) error {
@@ -466,6 +471,7 @@ func writeAuditCSV(w io.Writer, events []auditEvent) error {
 			e.Status,
 			e.Severity,
 			meta,
+			e.RequestingIP,
 		}
 		// Same guard as the server-side exporter (internal/server/dashboard.go):
 		// audit rows carry registry-supplied coordinates, and this file is what

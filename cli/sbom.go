@@ -135,12 +135,20 @@ var sbomVexExportCmd = &cobra.Command{
 	Short: "Export org exceptions as a CycloneDX 1.6 VEX document",
 	Long: `Export active exceptions as CycloneDX VEX statements. Each active
 exception with a CVE reference becomes a vulnerabilities[] entry whose
-analysis.state and analysis.justification reflect Chainsaw's stance:
+analysis.state reflects Chainsaw's stance:
 
-  decision=allow → not_affected (code_not_present, or
-                   vulnerable_code_not_in_execute_path when the note
-                   indicates the vulnerable sink is unreachable)
+  decision=allow   → exploitable, response=[will_not_fix]
   decision=monitor → in_triage
+
+A Chainsaw exception is a risk acceptance: the vulnerable package is
+present and you have chosen to ship it. That is exploitable, not
+not_affected — encoding it as not_affected tells a downstream scanner the
+vulnerable code is absent from your product and it will suppress the
+finding.
+
+The exception's note rides along in analysis.detail verbatim. It is not
+parsed into a justification: only you can assert reachability, and
+Chainsaw will not make that claim on your behalf.
 
 Denied and expired exceptions are excluded.`,
 	RunE: runSBOMVexExport,

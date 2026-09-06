@@ -20,6 +20,12 @@ type auditEvent struct {
 	Severity  string                 `json:"severity"`
 	Timestamp time.Time              `json:"timestamp"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	// RequestingIP is the resolved client address of the request that made
+	// the change — the "IP" half of the per-transaction audit requirement.
+	// Empty for rows written with no HTTP request in scope (background
+	// evaluators, org purge) and for rows predating the column, so an
+	// exporter must render "" as unknown rather than as "no address".
+	RequestingIP string `json:"requesting_ip,omitempty"`
 }
 
 type auditLogResponse struct {
