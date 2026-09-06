@@ -255,41 +255,52 @@ func TestAuthClientDelete_CallsDELETE(t *testing.T) {
 	}
 }
 
-func TestAuthClientRotate_DeletesAndRecreates(t *testing.T) {
-	var (
-		methodSeq []string
-		pathSeq   []string
-	)
+func rotateListResponse(w http.ResponseWriter) {
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"clients": []map[string]any{
+			{
+				"client_id":   "ci-frontend",
+				"name":        "frontend CI",
+				"client_type": "end-user",
+				"enabled":     true,
+				"status":      "active",
+				"created_at":  time.Now().UTC(),
+			},
+		},
+	})
+}
+
+func rotateSuccessResponse(w http.ResponseWriter, secret string) {
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"client": map[string]any{
+			"client_id":   "ci-frontend",
+			"client_type": "end-user",
+			"enabled":     true,
+			"status":      "active",
+			"created_at":  time.Now().UTC(),
+		},
+		"client_secret": secret,
+	})
+}
+
+// TestAuthClientRotate_UsesTheAtomicEndpoint pins the migration away from
+// delete+recreate.
+//
+// The old flow deleted the credential and then created it again under the
+// same id, which left a window where it could not authenticate and, if the
+// create failed, left the operator with NO credential at all. The atomic
+// endpoint removes both. A DELETE appearing in this sequence means the
+// migration regressed.
+func TestAuthClientRotate_UsesTheAtomicEndpoint(t *testing.T) {
+	var methodSeq, pathSeq []string
 	srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		methodSeq = append(methodSeq, r.Method)
 		pathSeq = append(pathSeq, r.URL.Path)
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/clients":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"clients": []map[string]any{
-					{
-						"client_id":   "ci-frontend",
-						"name":        "frontend CI",
-						"client_type": "end-user",
-						"enabled":     true,
-						"status":      "active",
-						"created_at":  time.Now().UTC(),
-					},
-				},
-			})
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/clients/ci-frontend":
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/clients":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"client": map[string]any{
-					"client_id":   "ci-frontend",
-					"client_type": "end-user",
-					"enabled":     true,
-					"status":      "active",
-					"created_at":  time.Now().UTC(),
-				},
-				"client_secret": "rotated-secret",
-			})
+			rotateListResponse(w)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/clients/ci-frontend/rotate":
+			rotateSuccessResponse(w, "rotated-secret")
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -306,10 +317,158 @@ func TestAuthClientRotate_DeletesAndRecreates(t *testing.T) {
 		t.Fatalf("rotate: %v\nstderr: %s", err, errb.String())
 	}
 
-	if len(methodSeq) != 3 {
-		t.Fatalf("expected 3 server calls (list, delete, create), got %d: %v %v", len(methodSeq), methodSeq, pathSeq)
+	for _, m := range methodSeq {
+		if m == http.MethodDelete {
+			t.Fatalf("rotate issued a DELETE; the atomic endpoint must not "+
+				"delete the credential: %v %v", methodSeq, pathSeq)
+		}
 	}
-	if methodSeq[0] != http.MethodGet || methodSeq[1] != http.MethodDelete || methodSeq[2] != http.MethodPost {
-		t.Errorf("call order = %v, want [GET DELETE POST]", methodSeq)
+	if len(pathSeq) == 0 || pathSeq[len(pathSeq)-1] != "/api/clients/ci-frontend/rotate" {
+		t.Errorf("last call = %v, want the rotate endpoint: %v", pathSeq, methodSeq)
 	}
+	// Output assertions are deliberately absent: this command writes the
+	// secret to the real os.Stdout/os.Stderr, not the cobra buffers, so an
+	// assertion on out.String() silently passes on an empty buffer. The
+	// request sequence is the observable contract here.
+	if len(methodSeq) != 2 {
+		t.Errorf("expected exactly 2 calls (list, rotate), got %v %v", methodSeq, pathSeq)
+	}
+}
+
+// TestAuthClientRotate_SendsExplicitExpiry pins the A7 decision across the
+// migration.
+//
+// The endpoint PRESERVES expiry when expiry_date is absent, which is right
+// for its own default case. This command means the opposite — a fresh
+// 90-day window, because rotation usually happens because a credential is
+// near expiry. If the field is ever omitted here, rotation silently stops
+// extending the credential and an operator rotating a nearly-expired
+// credential gets one that still expires tomorrow.
+func TestAuthClientRotate_SendsExplicitExpiry(t *testing.T) {
+	var gotBody map[string]any
+	srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/clients":
+			rotateListResponse(w)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/clients/ci-frontend/rotate":
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			rotateSuccessResponse(w, "rotated-secret")
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	})
+	withConfiguredServer(t, srv.URL)
+
+	cmd := authClientRotateCmd()
+	cmd.SetArgs([]string{"ci-frontend", "--yes", "--json"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	raw, ok := gotBody["expiry_date"].(string)
+	if !ok || raw == "" {
+		t.Fatalf("rotate did not send expiry_date; the 90-day reset was lost: %v", gotBody)
+	}
+	got, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("expiry_date is not RFC3339: %q", raw)
+	}
+	want := time.Now().UTC().Add(90 * 24 * time.Hour)
+	if got.Sub(want).Abs() > time.Hour {
+		t.Errorf("expiry_date = %v, want ~90 days out (%v)", got, want)
+	}
+}
+
+// TestAuthClientRotate_FallsBackOnlyOn404 covers a current CLI talking to a
+// server that predates the rotate endpoint.
+//
+// The fallback is deliberately narrow. A 404 means "no such route" and
+// delete+recreate is the honest older path. A 403 means the caller may not
+// manage this credential — falling back there would send a DELETE for a
+// credential they were just told they cannot touch.
+func TestAuthClientRotate_FallsBackOnlyOn404(t *testing.T) {
+	t.Run("404 falls back to delete+recreate", func(t *testing.T) {
+		var methodSeq, pathSeq []string
+		srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			methodSeq = append(methodSeq, r.Method)
+			pathSeq = append(pathSeq, r.URL.Path)
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/clients":
+				rotateListResponse(w)
+			case r.Method == http.MethodPost && r.URL.Path == "/api/clients/ci-frontend/rotate":
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": "CHW-0404", "message": "not found"},
+				})
+			case r.Method == http.MethodDelete && r.URL.Path == "/api/clients/ci-frontend":
+				w.WriteHeader(http.StatusNoContent)
+			case r.Method == http.MethodPost && r.URL.Path == "/api/clients":
+				rotateSuccessResponse(w, "legacy-secret")
+			default:
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		})
+		withConfiguredServer(t, srv.URL)
+
+		cmd := authClientRotateCmd()
+		cmd.SetArgs([]string{"ci-frontend", "--yes", "--json"})
+		var out, errb bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errb)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("rotate: %v\nstderr: %s", err, errb.String())
+		}
+		sawDelete := false
+		for _, m := range methodSeq {
+			if m == http.MethodDelete {
+				sawDelete = true
+			}
+		}
+		if !sawDelete {
+			t.Errorf("fallback did not delete+recreate: %v %v", methodSeq, pathSeq)
+		}
+		// The fallback's warning goes to the real os.Stderr, so it cannot be
+		// asserted from the cobra buffer. What IS observable is that the
+		// legacy path ran: rotate 404 -> DELETE -> POST /api/clients.
+		if len(pathSeq) != 4 || pathSeq[3] != "/api/clients" {
+			t.Errorf("unexpected fallback sequence: %v %v", methodSeq, pathSeq)
+		}
+	})
+
+	t.Run("403 does not fall back", func(t *testing.T) {
+		var methodSeq []string
+		srv := withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			methodSeq = append(methodSeq, r.Method)
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/clients":
+				rotateListResponse(w)
+			case r.Method == http.MethodPost && r.URL.Path == "/api/clients/ci-frontend/rotate":
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": "CHW-1801", "message": "forbidden"},
+				})
+			default:
+				t.Errorf("unexpected request after a 403: %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		})
+		withConfiguredServer(t, srv.URL)
+
+		cmd := authClientRotateCmd()
+		cmd.SetArgs([]string{"ci-frontend", "--yes", "--json"})
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		if err := cmd.Execute(); err == nil {
+			t.Fatal("a 403 rotate returned success")
+		}
+		for _, m := range methodSeq {
+			if m == http.MethodDelete {
+				t.Fatal("a 403 triggered the delete+recreate fallback; the CLI " +
+					"deleted a credential the caller was told it cannot manage")
+			}
+		}
+	})
 }

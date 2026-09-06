@@ -221,3 +221,83 @@ func TestUnavailable_IgnoresNonProviderFailures(t *testing.T) {
 		t.Error("Unavailable(ErrProviderUnreachable) = false, want true")
 	}
 }
+
+// TestEnvOverridesInEffect_SeesOverridesBeforeAnyFlagIsRead pins the defect
+// production surfaced on 2026-09-06.
+//
+// The startup enforcement-posture line read ObservedEnvOverrides, which is
+// populated on read. At boot nothing has read a flag yet, so on a pod
+// carrying EIGHT CHAINSAW_FF_* overrides — including
+// CHAINSAW_FF_EXCEPTION_APPROVAL_GATING, which gates the two-person
+// exception approval — the line logged "no enforcement-weakening
+// environment variables set". It said the opposite of the truth at exactly
+// the moment an operator reads it.
+func TestEnvOverridesInEffect_SeesOverridesBeforeAnyFlagIsRead(t *testing.T) {
+	// The real production environment shape, verbatim.
+	environ := []string{
+		"PATH=/usr/bin",
+		"CHAINSAW_FF_CONNECTORS_WIZARD=1",
+		"CHAINSAW_FF_ARTIFACT_UPLOAD_API=1",
+		"CHAINSAW_FF_POLICY_GRACE_MODE=true",
+		"CHAINSAW_FF_EXCEPTION_APPROVAL_GATING=true",
+		"CHAINSAW_FF_BILLY_EXECUTE=true",
+		"CHAINSAW_FF_CONNECTORS_SLACK_OAUTH=0",
+		"CHAINSAW_DATABASE_URL=postgres://redacted",
+	}
+
+	got := EnvOverridesInEffect(environ)
+
+	if len(got) != 6 {
+		t.Fatalf("EnvOverridesInEffect found %d overrides, want 6: %v", len(got), got)
+	}
+	if _, ok := got["CHAINSAW_FF_EXCEPTION_APPROVAL_GATING"]; !ok {
+		t.Error("the flag gating two-person exception approval was not reported")
+	}
+	// An explicitly-off override still overrides, and must be reported.
+	if v, ok := got["CHAINSAW_FF_CONNECTORS_SLACK_OAUTH"]; !ok || v != "0" {
+		t.Errorf("an explicitly-off override was dropped: %q ok=%v", v, ok)
+	}
+	if _, ok := got["CHAINSAW_DATABASE_URL"]; ok {
+		t.Error("a non-flag variable was reported as a flag override")
+	}
+}
+
+// TestEnvOverridesInEffect_MatchesEvalSemantics is the negative control, and
+// it corrected my own assumption while writing it.
+//
+// parseEnvBool returns (value, present), where ANY non-truthy string is
+// (false, true) — "explicitly set to off". So a value Eval cannot read as
+// true is not ignored by Eval, it is honoured as an override that forces
+// the flag OFF. Forcing a security flag off is the case this inventory
+// exists to surface, so it must be reported, not filtered.
+//
+// Only an EMPTY value is (false, false), i.e. not an override at all.
+func TestEnvOverridesInEffect_MatchesEvalSemantics(t *testing.T) {
+	got := EnvOverridesInEffect([]string{
+		"CHAINSAW_FF_GARBAGE=banana", // Eval honours this as force-OFF
+		"CHAINSAW_FF_REAL=true",
+		"CHAINSAW_FF_EMPTY=", // not an override
+	})
+
+	if _, ok := got["CHAINSAW_FF_GARBAGE"]; !ok {
+		t.Error("a force-OFF override was filtered out; forcing a security flag off " +
+			"is exactly what this inventory exists to surface")
+	}
+	if _, ok := got["CHAINSAW_FF_REAL"]; !ok {
+		t.Errorf("the truthy override was dropped: %v", got)
+	}
+	if _, ok := got["CHAINSAW_FF_EMPTY"]; ok {
+		t.Error("an empty value is not an override and must not be reported")
+	}
+	if len(got) != 2 {
+		t.Errorf("want exactly the two overrides, got %v", got)
+	}
+
+	// Cross-check against Eval itself, so this test cannot drift from the
+	// behaviour it claims to describe.
+	t.Setenv("CHAINSAW_FF_GARBAGE", "banana")
+	if v := (&Client{}).Eval(context.Background(), "garbage", "u", "o", true); v {
+		t.Error("Eval did not honour the non-truthy override as force-OFF; " +
+			"this test's premise no longer holds")
+	}
+}

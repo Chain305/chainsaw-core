@@ -257,6 +257,91 @@ func UpdateClientType(store *pgstore.Store, orgID, id, clientType string) (Clien
 	return fetchClientCredential(store.DB(), orgID, clientID)
 }
 
+// RotateClientCredentialSecret issues a new secret for an EXISTING client
+// credential and returns the cleartext once. Everything else about the
+// record is deliberately untouched: id, name, client_type, enabled, expiry,
+// authorized_repositories, created_at and first_request_at all survive, so
+// rotating a credential does not silently widen or narrow what it can reach.
+//
+// This exists because there was no rotation path at all. The update handler
+// accepts enabled/client_type/expiry/authorized_repositories and nothing
+// else, and CreateClientCredential refuses an existing id — while
+// server_clients.go told operators to "rotate the credential before it
+// expires". The one field that looked like rotation, `reset_secret`, only
+// changed an analytics event name.
+//
+// The gap had a cost: rotating qa-datafill-npm-01 on 2026-09-06, after its
+// secret was found legible in five QA evidence screenshots, meant editing
+// secret_hash directly in the database and restarting the proxy to drop its
+// credential cache. That is not a procedure anyone should have to invent
+// under time pressure with a leaked secret in the wild.
+//
+// Callers MUST invoke the server's reloadClientCredentials after this: the
+// proxy caches credentials in memory, so a rotation that skips the reload
+// leaves the OLD secret working until the process restarts — which is the
+// dangerous direction for a rotation.
+func RotateClientCredentialSecret(store *pgstore.Store, orgID, id string, expiry *time.Time, expirySet bool) (ClientCredential, string, error) {
+	if store == nil {
+		return ClientCredential{}, "", errors.New("database store is required")
+	}
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return ClientCredential{}, "", fmt.Errorf("%w: org_id is required", ErrInvalidClientCredential)
+	}
+	clientID := normalizeClientID(id)
+	if clientID == "" {
+		return ClientCredential{}, "", fmt.Errorf("%w: client_id is required", ErrInvalidClientCredential)
+	}
+
+	// Same generator and cost as CreateClientCredential, so a rotated
+	// secret is indistinguishable in strength from a freshly issued one.
+	secret, err := generateRandomPassword()
+	if err != nil {
+		return ClientCredential{}, "", err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	if err != nil {
+		return ClientCredential{}, "", fmt.Errorf("hash client secret: %w", err)
+	}
+
+	// Expiry is the one field a caller may change while rotating, and only
+	// when they say so. The CLI's delete+recreate rotate resets to a fresh
+	// 90-day window on purpose (see the A7 note in core/cli/auth_client.go:
+	// rotation often happens BECAUSE a credential is near expiry, and
+	// carrying the old absolute expiry would mint a replacement that expires
+	// tomorrow). Preserving is the right default for the other case — a
+	// leaked secret, where nothing but the secret should move — so the
+	// endpoint takes it explicitly instead of guessing which one you meant.
+	var res sql.Result
+	if expirySet {
+		res, err = store.DB().Exec(
+			`UPDATE client_credentials SET secret_hash=?, expiry_date=?, updated_at=? WHERE org_id=? AND client_id=?`,
+			string(hash), nullableTime(expiry), time.Now().UTC(), orgID, clientID)
+	} else {
+		res, err = store.DB().Exec(
+			`UPDATE client_credentials SET secret_hash=?, updated_at=? WHERE org_id=? AND client_id=?`,
+			string(hash), time.Now().UTC(), orgID, clientID)
+	}
+	if err != nil {
+		return ClientCredential{}, "", err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return ClientCredential{}, "", err
+	}
+	if rows == 0 {
+		// Not found, or belongs to another org. Both answer the same way:
+		// a caller must not be able to probe for client ids across tenants.
+		return ClientCredential{}, "", fmt.Errorf("%w: %s", ErrClientCredentialNotFound, clientID)
+	}
+
+	record, err := fetchClientCredential(store.DB(), orgID, clientID)
+	if err != nil {
+		return ClientCredential{}, "", err
+	}
+	return record, secret, nil
+}
+
 // UpdateClientCredentialAccess changes expiry and repository scope fields.
 func UpdateClientCredentialAccess(store *pgstore.Store, orgID, id string, expiry *time.Time, expirySet bool, authorizedRepos []string, reposSet bool) (ClientCredential, error) {
 	if store == nil {

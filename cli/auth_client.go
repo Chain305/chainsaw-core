@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -348,19 +349,29 @@ func runAuthClientDelete(cmd *cobra.Command, args []string) error {
 
 // ── rotate ────────────────────────────────────────────────────────────────────
 
-// The server has no first-class rotate verb for client_credentials —
-// the PATCH /api/clients/{id} surface accepts every mutable field
-// EXCEPT the secret. Rotation is therefore implemented client-side as
-// "delete + recreate with the same id" and we surface the trade-off
-// loudly: there is a short window where the credential cannot
-// authenticate, and the dashboard will not list "rotated_at" — the row
-// is genuinely new. Doc the pattern instead of pretending we have
-// atomic rotation we don't.
+// This uses the server's atomic rotate verb, POST /api/clients/{id}/rotate
+// (added 2026-09-06). The row survives, so there is no window where the
+// credential cannot authenticate and created_at / first_request_at are
+// preserved — the credential's history is continuous rather than restarting
+// on every rotation.
+//
+// The A7 decision below is preserved across the migration, and it is the
+// reason expiry_date is sent EXPLICITLY rather than omitted. The endpoint
+// preserves expiry when the field is absent, which is right for its own
+// default case (rotate a leaked secret, change nothing else). This command
+// means the opposite: a fresh 90-day window, because rotation usually
+// happens because a credential is near expiry. Omitting the field would
+// have silently changed what `auth client rotate` does.
+//
+// The old delete+recreate survives as legacyRotateByRecreate, used only
+// when the server answers 404 — a current CLI against an older self-hosted
+// server. That path still has the window, and the command says so out loud
+// when it takes it.
 
 func authClientRotateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rotate <client_id>",
-		Short: "Rotate a client_credential's secret (delete + recreate)",
+		Short: "Rotate a client_credential's secret in place",
 		// A7 — DOCS FIX, deliberately not a code change. The list below used
 		// to include "expiry" among the preserved metadata, which the code
 		// never read. Making the code match the doc was rejected as net
@@ -370,18 +381,20 @@ func authClientRotateCmd() *cobra.Command {
 		// credential already deleted and no undo. The 90-day reset is the
 		// safer default and matches --expires-at's own help text; the doc is
 		// what was wrong.
-		Long: "Rotate a registry client_credential. The server does not expose " +
-			"an atomic rotate verb, so the CLI performs:\n\n" +
-			"  1. fetches the existing credential's metadata (name, type, " +
-			"authorized_repositories),\n" +
-			"  2. deletes it,\n" +
-			"  3. recreates it with the same client_id.\n\n" +
+		Long: "Rotate a registry client_credential's secret in place. The id, " +
+			"name, type and authorized_repositories are preserved, and the " +
+			"credential keeps authenticating right up to the moment the new " +
+			"secret replaces the old one — there is no window where it is " +
+			"unusable.\n\n" +
 			"The rotated credential gets a FRESH 90-day window; the previous " +
 			"expiry is deliberately not carried over (rotation usually happens " +
 			"because a credential is near expiry). Override with --expires-at.\n\n" +
-			"There is a short window between steps 2 and 3 where the credential " +
-			"cannot authenticate. The new secret is shown ONCE — save it " +
-			"immediately. Use --yes to skip the confirmation prompt.",
+			"Against a server older than 2026-09-06 this falls back to the " +
+			"previous delete-and-recreate, which DOES have a brief window " +
+			"where the credential cannot authenticate; the command says so " +
+			"when that happens.\n\n" +
+			"The new secret is shown ONCE — save it immediately. Use --yes to " +
+			"skip the confirmation prompt.",
 		Args: cobra.ExactArgs(1),
 		RunE: runAuthClientRotate,
 	}
@@ -433,8 +446,12 @@ func runAuthClientRotate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Step 1: fetch existing metadata so the recreated credential keeps
-	// its description / type / repo list.
+	// The atomic endpoint preserves metadata server-side, so this fetch is
+	// no longer needed to CARRY anything. It is kept for two reasons: it
+	// fails early and clearly when the id does not exist, so the operator is
+	// never asked to confirm rotating a credential that isn't there; and
+	// legacyRotateByRecreate still needs the metadata when falling back to
+	// an older server.
 	existing, err := findClientCredential(client, id)
 	if err != nil {
 		return err
@@ -442,7 +459,7 @@ func runAuthClientRotate(cmd *cobra.Command, args []string) error {
 
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
-		fmt.Fprintln(os.Stderr, "Rotation deletes and recreates this credential. There is a brief window where authentication fails.")
+		fmt.Fprintln(os.Stderr, "Rotation replaces this credential's secret immediately. The current secret stops working.")
 		// A5 — see the identical guard on policy delete. A scripted rotate
 		// without --yes silently no-op'd at exit 0, so the operator believed
 		// the secret had been replaced when it had not.
@@ -465,30 +482,44 @@ func runAuthClientRotate(cmd *cobra.Command, args []string) error {
 		expiry = t
 	}
 
-	// Step 2: delete.
-	if err := client.Delete("/api/clients/" + id); err != nil {
-		return fmt.Errorf("delete old credential: %w", err)
-	}
-
-	// Step 3: recreate with the same id, preserved metadata. The server
-	// generates a fresh secret.
-	body := map[string]any{
-		"client_id":   id,
-		"name":        existing.Name,
-		"client_type": existing.ClientType,
-		"expiry_date": expiry.Format(time.RFC3339),
-	}
-	if existing.AuthorizedRepositories != nil {
-		body["authorized_repositories"] = existing.AuthorizedRepositories
-	}
-
 	var resp struct {
 		Client         clientCredItem               `json:"client"`
 		ClientSecret   string                       `json:"client_secret"`
 		ConfigSnippets map[string]configSnippetItem `json:"config_snippets,omitempty"`
 	}
-	if err := client.Post("/api/clients", body, &resp); err != nil {
-		return fmt.Errorf("recreate credential (the old credential was already deleted; re-run `chainsaw auth client create --name %s` to recover): %w", id, err)
+
+	// Atomic rotate. The server keeps the row — id, name, client_type,
+	// enabled and authorized_repositories all survive — so nothing has to
+	// be echoed back from `existing`, and there is no window where the
+	// credential cannot authenticate.
+	//
+	// expiry_date is sent EXPLICITLY rather than omitted. The endpoint
+	// preserves expiry when the field is absent, which is right for
+	// "rotate a leaked secret and change nothing else" — but this command's
+	// contract is the opposite (see A7 above): rotation usually happens
+	// because a credential is near expiry, so it resets to a fresh 90-day
+	// window. Omitting the field here would silently change what
+	// `auth client rotate` does.
+	rotateErr := client.Post("/api/clients/"+id+"/rotate", map[string]any{
+		"expiry_date": expiry.Format(time.RFC3339),
+	}, &resp)
+
+	if rotateErr != nil {
+		if !serverLacksRotateEndpoint(rotateErr) {
+			return fmt.Errorf("rotate credential: %w", rotateErr)
+		}
+		// The server predates POST /api/clients/{id}/rotate (added
+		// 2026-09-06). Fall back to the old delete+recreate so a current
+		// CLI still works against an older self-hosted server — but say so,
+		// because the fallback reintroduces a real window where the
+		// credential cannot authenticate, and the operator should know
+		// which one they got.
+		fmt.Fprintln(os.Stderr, "note: this server has no atomic rotate endpoint; falling back to delete+recreate.")
+		fmt.Fprintln(os.Stderr, "      There is a brief window where the credential cannot authenticate.")
+		fmt.Fprintln(os.Stderr, "      Upgrade the server to remove that window.")
+		if err := legacyRotateByRecreate(client, id, existing, expiry, &resp); err != nil {
+			return err
+		}
 	}
 
 	if useJSON(cmd) {
@@ -505,5 +536,54 @@ func runAuthClientRotate(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintf(out, "CLIENT_ID=%s\n", resp.Client.ClientID)
 	fmt.Fprintf(out, "CLIENT_SECRET=%s\n", resp.ClientSecret)
+	return nil
+}
+
+// serverLacksRotateEndpoint reports whether an error means "this server has
+// no /rotate route", as opposed to any other failure.
+//
+// Keyed on the HTTP status the transport stamped, not on the CHW code or the
+// message text: a 404 from an unrouted path does not carry a stable code,
+// and matching on prose is how a rename turns a compatibility shim into a
+// silent misclassification.
+//
+// Only 404 falls back. A 403 means the caller may not manage this
+// credential and a 401 means they are not authenticated — retrying either
+// through delete+recreate would just fail again, later, after an alarming
+// message.
+func serverLacksRotateEndpoint(err error) bool {
+	var ae *apiError
+	if !errors.As(err, &ae) {
+		return false
+	}
+	return ae.Status == http.StatusNotFound
+}
+
+// legacyRotateByRecreate is the pre-2026-09-06 rotation: delete the
+// credential, then recreate it under the same id with its metadata echoed
+// back from the client.
+//
+// Kept only for older servers. It has two properties the atomic endpoint
+// does not: a window between the delete and the create where the credential
+// cannot authenticate, and a failure mode where the delete succeeds and the
+// create does not — leaving the operator with NO credential. The error text
+// for that case tells them how to recover, because at that point the old
+// secret is already gone.
+func legacyRotateByRecreate(client *APIClient, id string, existing *clientCredItem, expiry time.Time, resp any) error {
+	if err := client.Delete("/api/clients/" + id); err != nil {
+		return fmt.Errorf("delete old credential: %w", err)
+	}
+	body := map[string]any{
+		"client_id":   id,
+		"name":        existing.Name,
+		"client_type": existing.ClientType,
+		"expiry_date": expiry.Format(time.RFC3339),
+	}
+	if existing.AuthorizedRepositories != nil {
+		body["authorized_repositories"] = existing.AuthorizedRepositories
+	}
+	if err := client.Post("/api/clients", body, resp); err != nil {
+		return fmt.Errorf("recreate credential (the old credential was already deleted; re-run `chainsaw auth client create --name %s` to recover): %w", id, err)
+	}
 	return nil
 }

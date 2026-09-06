@@ -340,6 +340,41 @@ func recordEnvOverride(env, raw string) {
 	observedEnvOverrides[env] = raw
 }
 
+// EnvOverridesInEffect returns every CHAINSAW_FF_* override present in the
+// environment, whether or not a flag has been read yet.
+//
+// ObservedEnvOverrides alone is wrong for the startup inventory, and
+// production proved it: the posture line logged "no enforcement-weakening
+// environment variables set" on a pod carrying EIGHT CHAINSAW_FF_*
+// overrides, including CHAINSAW_FF_EXCEPTION_APPROVAL_GATING. Nothing had
+// read a flag yet at boot, so the observed set was legitimately empty —
+// and the line said the opposite of the truth at exactly the moment an
+// operator reads it.
+//
+// The prefix is enumerable without a read, so the inventory scans for it.
+// ObservedEnvOverrides stays for the narrower question it answers well:
+// which overrides actually influenced a decision in this process.
+func EnvOverridesInEffect(environ []string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range environ {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := kv[:eq]
+		if !strings.HasPrefix(key, envOverridePrefix) {
+			continue
+		}
+		// Only a parseable boolean actually overrides anything; Eval
+		// ignores the rest, so reporting them would be a false positive.
+		if _, present := parseEnvBool(kv[eq+1:]); !present {
+			continue
+		}
+		out[key] = kv[eq+1:]
+	}
+	return out
+}
+
 // ObservedEnvOverrides returns a copy of the CHAINSAW_FF_* overrides this
 // process has consulted, for the startup enforcement-posture inventory.
 func ObservedEnvOverrides() map[string]string {
