@@ -72,8 +72,34 @@ func runIntelPackage(cmd *cobra.Command, args []string) error {
 	}
 
 	printLatestResolutionNotice(os.Stdout, key, data.Risk)
-	renderEvaluation(os.Stdout, data.Risk, federatedAbsenceNote(data.Report))
+	renderEvaluation(os.Stdout, data.Risk, federatedAbsenceNote(data.Report),
+		reportWarnCodes(data.Report))
 	return nil
+}
+
+// reportWarnCodes lifts the provider warn codes off the report so the
+// NOT EVALUATED closing paragraph can say something that applies to THIS
+// unavailability rather than to unavailability in general. See
+// notRefusedAdviceFor.
+//
+// An unparseable or absent report yields no codes, which keeps the
+// pre-existing coverage-gate wording — a display nicety must never turn
+// silence into a claim.
+func reportWarnCodes(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var rep intelligence.Report
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		return nil
+	}
+	codes := make([]string, 0, len(rep.Observation.Warnings))
+	for _, w := range rep.Observation.Warnings {
+		if c := strings.TrimSpace(w.Code); c != "" {
+			codes = append(codes, c)
+		}
+	}
+	return codes
 }
 
 // federatedAbsenceNote decodes just enough of the report to ask the one

@@ -702,7 +702,12 @@ func TestGraceDaysAndPendingApprovalRoundTrip(t *testing.T) {
 		Kind:       KindException,
 		Status:     StatusPendingApproval,
 		CreatedBy:  "user-requester",
-		Identifier: Identifier{TargetPackageName: "pending", TargetPackageRepo: "npm-prod", TargetPackageVersion: "1.0.0"},
+		// The credential, distinct from the human it belongs to. The two
+		// differ exactly when CI acts through someone's API key, and the
+		// separation-of-duties check reads this column, so losing it in
+		// the store layer silently reverts SoD to comparing owners.
+		CreatedByPrincipal: "key-ci-pipeline",
+		Identifier:         Identifier{TargetPackageName: "pending", TargetPackageRepo: "npm-prod", TargetPackageVersion: "1.0.0"},
 	})
 	if err != nil {
 		t.Fatalf("create pending exception: %v", err)
@@ -716,6 +721,54 @@ func TestGraceDaysAndPendingApprovalRoundTrip(t *testing.T) {
 	}
 	if gotPending.CreatedBy != "user-requester" {
 		t.Fatalf("Get().CreatedBy = %q, want user-requester", gotPending.CreatedBy)
+	}
+	if gotPending.CreatedByPrincipal != "key-ci-pipeline" {
+		t.Fatalf("Get().CreatedByPrincipal = %q, want key-ci-pipeline", gotPending.CreatedByPrincipal)
+	}
+
+	// A row written WITHOUT a principal must read back empty rather than
+	// borrowing CreatedBy. Empty is the signal the approval check uses to
+	// recognise a pre-column row and keep its original behaviour; filling
+	// it in defensively would re-interpret every historical exception.
+	legacy, err := grace.Create(Policy{
+		Name:       "Exception: legacy@1.0.0",
+		Precedence: 31,
+		Mode:       ModeAllow,
+		Kind:       KindException,
+		Status:     StatusPendingApproval,
+		CreatedBy:  "user-requester",
+		Identifier: Identifier{TargetPackageName: "legacy", TargetPackageRepo: "npm-prod", TargetPackageVersion: "1.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("create legacy exception: %v", err)
+	}
+	gotLegacy, err := grace.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("get legacy exception: %v", err)
+	}
+	if gotLegacy.CreatedByPrincipal != "" {
+		t.Fatalf("Get().CreatedByPrincipal = %q for a row created without one, want empty", gotLegacy.CreatedByPrincipal)
+	}
+
+	// Approval goes through Update, so an Update that drops the principal
+	// would erase the requester the moment someone approved — turning a
+	// principal-bearing row back into a legacy one and quietly restoring
+	// the owner-comparison the column exists to replace.
+	approving := gotPending
+	approving.Status = StatusEnabled
+	approving.ApproverID = "user-approver"
+	if _, err := grace.Update(pending.ID, approving); err != nil {
+		t.Fatalf("update pending exception to approved: %v", err)
+	}
+	gotApproved, err := grace.Get(pending.ID)
+	if err != nil {
+		t.Fatalf("get approved exception: %v", err)
+	}
+	if gotApproved.CreatedByPrincipal != "key-ci-pipeline" {
+		t.Fatalf("after Update, CreatedByPrincipal = %q, want key-ci-pipeline preserved", gotApproved.CreatedByPrincipal)
+	}
+	if gotApproved.ApproverID != "user-approver" {
+		t.Fatalf("after Update, ApproverID = %q, want user-approver", gotApproved.ApproverID)
 	}
 }
 

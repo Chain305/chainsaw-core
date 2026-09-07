@@ -137,8 +137,8 @@ func (s *Store) ensurePolicyColumns() error {
 	// Exception-mode metadata: nullable (no DEFAULT) so existing rows aren't
 	// rewritten and empty/NULL on the read path falls through to the VEX
 	// adapter's "decision='' → allow" back-compat fallback. See
-	// internal/cli/sbom.go::exceptionItemsToVEXInput and
-	// internal/sbom/vex.go::analyzeException.
+	// core/cli/sbom.go::exceptionItemsToVEXInput and
+	// core/sbom/vex.go::analyzeException.
 	if err := s.addColumnIfMissing("policies", "decision", "TEXT"); err != nil {
 		return err
 	}
@@ -146,6 +146,22 @@ func (s *Store) ensurePolicyColumns() error {
 		return err
 	}
 	if err := s.addColumnIfMissing("policies", "note", "TEXT"); err != nil {
+		return err
+	}
+	// created_by_principal records WHICH credential made the request, as
+	// distinct from created_by, which records the human it belongs to.
+	//
+	// For an API-key request identity.UserID is the key's OWNER, so a CI
+	// pipeline's exception has always been attributed to whoever minted the
+	// key. The separation-of-duties check then blocked that person from
+	// approving it — which in a single-admin org is a deadlock: the only
+	// person who can approve is the one the system believes requested it.
+	//
+	// Nullable with no default on purpose. NULL means "written before this
+	// column existed", and the SoD check falls back to created_by for those
+	// rows, so existing exceptions keep exactly their current behaviour
+	// rather than being silently re-interpreted.
+	if err := s.addColumnIfMissing("policies", "created_by_principal", "TEXT"); err != nil {
 		return err
 	}
 	if err := s.addColumnIfMissing("policies", "org_id", fmt.Sprintf("TEXT NOT NULL DEFAULT '%s'", tenancy.DefaultOrgID)); err != nil {

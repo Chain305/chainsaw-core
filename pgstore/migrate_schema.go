@@ -94,7 +94,7 @@ func (s *Store) ensureIntelligenceReportsDenormColumns() error {
 // EXISTS` so a fresh DB and an upgraded DB converge to the same shape.
 //
 // AuthZ: every read MUST filter by org_id (callers are in
-// internal/sbom/snapshot_store.go). The (org_id, taken_at DESC) index is the
+// core/sbom/snapshot_store.go). The (org_id, taken_at DESC) index is the
 // hot path for the /sbom Snapshots tab; the second index supports
 // per-client snapshot history on the inventory by-client view.
 //

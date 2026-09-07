@@ -250,3 +250,85 @@ func TestSBOMVexExport_RegistersAndProducesVEX(t *testing.T) {
 		t.Fatalf("vulnerabilities[] missing or wrong size: %v", parsed["vulnerabilities"])
 	}
 }
+
+// TestExceptionItemsToVEXInput_ForwardsStatus pins the F2 fix at the
+// adapter boundary. The defect was that exceptionItem.Status was parsed
+// off the wire and then dropped on the floor, so BuildVEX had no way to
+// tell an approved carve-out from a draft. Status must be forwarded
+// verbatim — including the empty string, which BuildVEX treats as "in
+// effect" — and must NOT be normalised here, or the deny-list judgement
+// would exist in two places.
+func TestExceptionItemsToVEXInput_ForwardsStatus(t *testing.T) {
+	for _, status := range []string{"", "active", "expiring_soon", "expired", "pending_approval", "denied", "  Pending_Approval  "} {
+		items := []exceptionItem{{
+			ID: "ex-status", Repository: "npm-prod", Format: "npm",
+			PackageID: "lodash", Version: "4.17.20",
+			Decision: "allow", CVE: "CVE-2024-12345",
+			Status: status,
+		}}
+		got := exceptionItemsToVEXInput(items)
+		if len(got) != 1 {
+			t.Fatalf("status=%q: want 1 adapted exception, got %d", status, len(got))
+		}
+		if got[0].Status != status {
+			t.Errorf("status=%q: Status = %q, want verbatim forward", status, got[0].Status)
+		}
+	}
+}
+
+// TestSBOMVexExport_ExcludesUnapprovedExceptions is the end-to-end half of
+// F2: adapter output fed straight into BuildVEX, asserting a pending
+// exception never reaches the CycloneDX document while an approved one
+// alongside it does. Both rows are decision=allow with a live expiry, so
+// the only thing separating them is the lifecycle status.
+func TestSBOMVexExport_ExcludesUnapprovedExceptions(t *testing.T) {
+	future := time.Now().UTC().Add(30 * 24 * time.Hour)
+	items := []exceptionItem{
+		{
+			ID: "approved", Repository: "npm-prod", Format: "npm",
+			PackageID: "lodash", Version: "4.17.20",
+			Decision: "allow", CVE: "CVE-2024-APPROVED",
+			Status: "active", CreatedAt: time.Now().UTC(), ExpiresAt: future,
+		},
+		{
+			ID: "pending", Repository: "npm-prod", Format: "npm",
+			PackageID: "left-pad", Version: "1.0.0",
+			Decision: "allow", CVE: "CVE-2024-PENDING",
+			Status: "pending_approval", CreatedAt: time.Now().UTC(), ExpiresAt: future,
+		},
+		{
+			ID: "denied", Repository: "npm-prod", Format: "npm",
+			PackageID: "blocked", Version: "1.0.0",
+			Decision: "allow", CVE: "CVE-2024-DENIED",
+			Status: "denied", CreatedAt: time.Now().UTC(), ExpiresAt: future,
+		},
+		{
+			// Inside the 14-day renew window: still enforced, still a true
+			// statement. An allow-list filter would drop this.
+			ID: "renewing", Repository: "npm-prod", Format: "npm",
+			PackageID: "renewing", Version: "1.0.0",
+			Decision: "allow", CVE: "CVE-2024-RENEWING",
+			Status: "expiring_soon", CreatedAt: time.Now().UTC(),
+			ExpiresAt: time.Now().UTC().Add(3 * 24 * time.Hour),
+		},
+	}
+
+	doc, err := sbom.BuildVEX("org-test", exceptionItemsToVEXInput(items))
+	if err != nil {
+		t.Fatalf("BuildVEX: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, v := range doc.Vulnerabilities {
+		ids[v.ID] = true
+	}
+	for _, want := range []string{"CVE-2024-APPROVED", "CVE-2024-RENEWING"} {
+		if !ids[want] {
+			t.Errorf("%s missing from VEX document; got %v", want, ids)
+		}
+	}
+	for _, forbidden := range []string{"CVE-2024-PENDING", "CVE-2024-DENIED"} {
+		if ids[forbidden] {
+			t.Errorf("%s was exported as an authoritative VEX statement; got %v", forbidden, ids)
+		}
+	}
+}

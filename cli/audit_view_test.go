@@ -188,3 +188,79 @@ func TestAuditLimitHelpCrossReference(t *testing.T) {
 		t.Errorf("audit export --limit help should reference `audit view`, got %q", exportHelp)
 	}
 }
+
+// TestAuditView_RendersClientAndRequestingIP pins the second half of F3.
+//
+// `chainsaw audit view` printed seven columns and neither CLIENT nor IP, while
+// the auditEvent struct parsed both off the wire and `audit export` wrote both
+// to CSV. So the documented command for inspecting the audit trail could not
+// show the "IP" half of the per-transaction audit requirement at all — the
+// column existed end to end and was invisible on the one surface an operator
+// actually reads.
+//
+// Deletion proof: drop "IP" from the PrintTable header slice (or the
+// auditCellOrDash(e.RequestingIP, g) cell) in runAuditView and this fails.
+func TestAuditView_RendersClientAndRequestingIP(t *testing.T) {
+	withStdoutTerminal(t, false)
+	auditServerWith(t, []auditEvent{
+		{
+			ID:           "ae-1",
+			Action:       "decision.blocked",
+			Actor:        "maven-central-proxy",
+			Client:       "ci-runner-a",
+			Resource:     "/org/apache/logging/log4j/log4j-core/2.14.1/log4j-core-2.14.1.jar",
+			Status:       "blocked",
+			Severity:     "high",
+			Timestamp:    time.Now(),
+			RequestingIP: "203.0.113.10",
+		},
+		{
+			// A row written with no HTTP request in scope — a background
+			// evaluator or a row predating the column. It must render the
+			// dash, not an empty cell that reads as a broken table and not a
+			// fabricated address.
+			ID:        "ae-2",
+			Action:    "policy.rule.skipped",
+			Actor:     "system",
+			Resource:  "policy",
+			Timestamp: time.Now(),
+		},
+	})
+
+	var out, errOut bytes.Buffer
+	cmd := newAuditViewTestCmd(&out, &errOut)
+	table := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	})
+
+	for _, header := range []string{"CLIENT", "IP"} {
+		if !strings.Contains(table, header) {
+			t.Errorf("audit view header has no %s column — the audit trail's %q is parsed off the wire and "+
+				"exported to CSV but invisible in the command operators actually run.\n%s", header, header, table)
+		}
+	}
+	if !strings.Contains(table, "203.0.113.10") {
+		t.Errorf("rendered table does not show the row's source IP:\n%s", table)
+	}
+	if !strings.Contains(table, "ci-runner-a") {
+		t.Errorf("rendered table does not show the row's client:\n%s", table)
+	}
+
+	// The IP-less row must show the dash glyph rather than trailing blank
+	// space. Locate its line and check the tail.
+	var bare string
+	for _, line := range strings.Split(table, "\n") {
+		if strings.Contains(line, "policy.rule.skipped") {
+			bare = line
+		}
+	}
+	if bare == "" {
+		t.Fatalf("could not find the address-less row in the rendered table:\n%s", table)
+	}
+	if !strings.HasSuffix(strings.TrimRight(bare, " "), glyphs().dash) {
+		t.Errorf("a row with no recorded address must end in the dash glyph %q, so the cell reads as "+
+			"\"this row has no such field\" rather than as a truncated table. got: %q", glyphs().dash, bare)
+	}
+}

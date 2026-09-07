@@ -471,6 +471,55 @@ func (s *Store) CanonicaliseReportNames(ctx context.Context, limit int) (Canonic
 	return canonicaliseReportNames(ctx, storeCanonicalBackend{s: s}, limit)
 }
 
+// ListNonCanonicalKeys is the exported dry-run LISTING: which rows the fold
+// would move, not just how many.
+//
+// It exists because folding the admin inspect handler (F7) removed the only
+// way an operator could reach a non-canonical row — typing its raw coordinate
+// into GET /api/intelligence/{eco}/{pkg}/{ver} now lands on the canonical
+// sibling. This listing is the replacement inspection surface, and wiring it
+// is what stops the whole cleanup from staying dead code (N2/N3): the counts,
+// the listing and the cleanup are now reachable from one admin route.
+//
+// Read-only. limit <= 0 means no limit.
+func (s *Store) ListNonCanonicalKeys(ctx context.Context, limit int) ([]Key, error) {
+	return s.listNonCanonicalKeys(ctx, limit)
+}
+
+// ---------------------------------------------------------------------------
+// Service-level delegation.
+//
+// The HTTP layer holds a Service, never a *Store, so without these the
+// cleanup is unreachable from any handler — which is exactly how it stayed
+// unwired. Declared here rather than in scanner.go so the whole canonical
+// story (fold, predicate, cleanup, exposure) reads in one file.
+// ---------------------------------------------------------------------------
+
+// CanonicalNameCleanupCounts delegates to the backing store. Read-only.
+func (s *DefaultService) CanonicalNameCleanupCounts(ctx context.Context) (map[string]int, error) {
+	if s == nil || s.store == nil {
+		return nil, nil
+	}
+	return s.store.CanonicalNameCleanupCounts(ctx)
+}
+
+// ListNonCanonicalKeys delegates to the backing store. Read-only.
+func (s *DefaultService) ListNonCanonicalKeys(ctx context.Context, limit int) ([]Key, error) {
+	if s == nil || s.store == nil {
+		return nil, nil
+	}
+	return s.store.ListNonCanonicalKeys(ctx, limit)
+}
+
+// CanonicaliseReportNames delegates to the backing store. MUTATES — the only
+// caller is the operator-triggered admin route, which defaults to a dry run.
+func (s *DefaultService) CanonicaliseReportNames(ctx context.Context, limit int) (CanonicalCleanupResult, error) {
+	if s == nil || s.store == nil {
+		return CanonicalCleanupResult{}, nil
+	}
+	return s.store.CanonicaliseReportNames(ctx, limit)
+}
+
 func (s *Store) listNonCanonicalKeys(ctx context.Context, limit int) ([]Key, error) {
 	if s == nil || s.sql == nil || s.sql.DB() == nil {
 		return nil, nil

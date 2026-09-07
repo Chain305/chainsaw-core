@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+
+	"github.com/chain305/chainsaw-core/typosquat"
 )
 
 // EvaluationContext captures the request context for policy evaluation.
@@ -284,6 +286,29 @@ const (
 	// dark anyway". Collapsing them would re-create the conflation the
 	// operator needs to see through.
 	SkipReasonNoAdvisorySource = "no_advisory_source"
+	// SkipReasonPublishDateUnavailable fires when a publish-age
+	// condition (packageAge, cooldownDays) is configured but the date
+	// it keys on is absent from the request context. Like
+	// SkipReasonNoAdvisorySource — and unlike the two reasons above it
+	// — the rule DID run and its verdict stands: it rides
+	// RuleEvaluated=true.
+	//
+	// This is the F5 observability half, and it is deliberately ONLY
+	// the observability half. The evaluator's publish-age branches
+	// return "no match" on an absent date on purpose ("so a slow
+	// registry never converts into a spurious block"), so a non-match
+	// there means "could not tell", not "old enough". Nothing
+	// distinguished those two outcomes before this reason existed.
+	//
+	// Do NOT convert this into a skip (`continue`) or into a match. The
+	// condition language is a pure conjunction, so discarding the
+	// policy and treating the column as a non-match are the same
+	// verdict; and flipping the branch to "match" turns every undated
+	// package into a block and silently strengthens every unrelated
+	// rule that happens to carry cooldownDays. Fail-closed posture for
+	// a missing publish date belongs in the opt-in coverage gate,
+	// outside the evaluator.
+	SkipReasonPublishDateUnavailable = "publish_date_unavailable"
 )
 
 // SkipAuditor receives skip events. Implementations must be safe for
@@ -624,6 +649,58 @@ func recordConditionFire(condition ConditionType, result string) {
 	rec(string(condition), result)
 }
 
+// publishDateUnavailableRecorder is the third package-level callback
+// (F5). It counts publish-age gates that could not be decided because
+// the date they key on was absent — the numerator an operator needs
+// before "no cooldown blocks fired" can be read as "nothing was too
+// young" rather than "we never knew". Labels are (condition,
+// ecosystem); both are bounded enums, so cardinality stays small.
+//
+// It carries no dependency on prometheus (core/policy has none, by
+// design) — the observability wiring installs a closure over the
+// counter vec at startup, exactly as the two recorders above do.
+var publishDateUnavailableRecorder func(condition, ecosystem string)
+
+// SetPublishDateUnavailableRecorder installs (or clears) the
+// publish-date-unavailable recorder. Intended to be called once at
+// process startup from cmd/chainsaw-proxy/init_server.go alongside
+// SetEvalMetricsRecorder. Pass nil to disable.
+func SetPublishDateUnavailableRecorder(rec func(condition, ecosystem string)) {
+	publishDateUnavailableRecorder = rec
+}
+
+// recordPublishDateUnavailable routes one indeterminate publish-age
+// gate to the installed recorder. Safe for nil.
+func recordPublishDateUnavailable(condition ConditionType, ecosystem string) {
+	ReportPublishDateUnavailable(string(condition), ecosystem)
+}
+
+// ReportPublishDateUnavailable is the exported entry point for
+// publish-age gates that live OUTSIDE the evaluator and therefore
+// cannot reach the unexported recorder — specifically the settings
+// gate `ReleaseMinAgeDays` in internal/server, which keys on the
+// artifact's frozen `Last-Modified` snapshot and is permanently dark
+// for any artifact first fetched without that header.
+//
+// Both gates share one counter on purpose: an operator asking "is my
+// publish-age control actually deciding anything" must not have to
+// know which of two implementations answered. The `condition` label
+// keeps them distinguishable.
+func ReportPublishDateUnavailable(condition, ecosystem string) {
+	rec := publishDateUnavailableRecorder
+	if rec == nil {
+		return
+	}
+	ecosystem = strings.ToLower(strings.TrimSpace(ecosystem))
+	if ecosystem == "" {
+		// A fixed sentinel, never the empty string: an empty label
+		// value is indistinguishable from an unset label in a
+		// PromQL selector.
+		ecosystem = "unknown"
+	}
+	rec(condition, ecosystem)
+}
+
 // WithSkipAuditor wires an auditor that will receive a `policy.rule.skipped`
 // event whenever a rule's condition is ❌ for the request's ecosystem per the
 // proxy compatibility matrix. Returns the same Evaluator for chaining.
@@ -930,6 +1007,15 @@ func (e *Evaluator) evaluatePolicies(ctx EvaluationContext, policies []Policy, e
 		// precisely because the dark signal reads as absent.
 		e.recordDarkAdvisoryLane(ctx, policy)
 
+		// Dark publish date (F5). RECORD ONLY, for the same reason and
+		// with the same prohibition on a `continue` as the line above:
+		// a packageAge / cooldownDays rule whose keying date is absent
+		// evaluates to "no match", which is indistinguishable from
+		// "old enough" to anyone reading the audit trail. See
+		// SkipReasonPublishDateUnavailable for why the branch itself
+		// must not change.
+		e.recordDarkPublishDate(ctx, policy)
+
 		if matches := e.matchesPolicy(ctx, policy); matches {
 			action, reason := e.resolveAction(ctx, policy, now)
 			return EvaluationResult{
@@ -1074,6 +1160,86 @@ func (e *Evaluator) recordDarkAdvisoryLane(ctx EvaluationContext, p Policy) {
 	e.recordSkipEvents(ctx, p, dark, SkipReasonNoAdvisorySource, true)
 }
 
+// darkPublishDateConditions returns the publish-age columns this
+// policy uses whose keying date is absent from the request context.
+//
+// The two columns key on DIFFERENT dates and are reported separately:
+// packageAge on PackageReleaseDate (package creation) and cooldownDays
+// on VersionReleaseDate (this version's publish). Collapsing them
+// would tell the operator a control is dark without saying which one.
+//
+// The iteration order here is FIXED and deliberately not derived from
+// matchesConditions' branch order. matchesConditions short-circuits on
+// the first non-match, so an emitter placed inside it would produce a
+// count that depended on Conditions' struct field order — a metric
+// that moves when someone reorders a struct is worse than no metric.
+// Hoisting it out is what makes the emission order-independent; that
+// is the reason for the shape, not a convenience.
+func darkPublishDateConditions(ctx EvaluationContext, c Conditions) []ConditionType {
+	var out []ConditionType
+	if c.PackageAge != nil && ctx.PackageReleaseDate == nil {
+		out = append(out, ConditionPackageAge)
+	}
+	if c.CooldownDays != nil && ctx.VersionReleaseDate == nil {
+		out = append(out, ConditionCooldown)
+	}
+	return out
+}
+
+// recordDarkPublishDate emits one metric sample — and, when an auditor
+// or logger is wired, one record-only audit event — per (policy,
+// publish-age condition) pair whose keying date is missing. It NEVER
+// changes a verdict: the caller does not branch on it and it returns
+// nothing.
+//
+// It carries the same two narrowings as recordDarkAdvisoryLane: the
+// policy must actually USE a dark column (cheap, and false for almost
+// every policy), and it must actually TARGET this coordinate — a rule
+// scoped to another repo/package/client says nothing about this
+// request, and one row per policy per request would bury the rows that
+// mean something.
+//
+// The IsUnsupported guard is the third thing copied from the dark-lane
+// emitter, and it is load-bearing rather than defensive tidiness.
+// ConditionCooldown and ConditionPackageAge are SupportNone for APT
+// (proxy_matrix.go), where detectUnsupported already discards the whole
+// policy and emits `policy.rule.skipped`. Without the guard, a future
+// reordering that put this emitter ahead of that skip — or any new
+// SupportNone cell — would report the same rule as both skipped and
+// evaluated-against-a-dark-signal, which is precisely the conflation
+// the two audit actions exist to remove.
+func (e *Evaluator) recordDarkPublishDate(ctx EvaluationContext, p Policy) {
+	if e == nil {
+		return
+	}
+	dark := darkPublishDateConditions(ctx, p.Conditions)
+	if len(dark) == 0 {
+		return
+	}
+	if !matchesIdentifier(ctx, p.Identifier) || !matchesScope(ctx, p.Scope) {
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(ctx.RepositoryFormat))
+	// An unresolved format does NOT suppress the report: a missing
+	// publish date is a fact about the coordinate, not about the
+	// ecosystem, and the CLI/simulate surfaces routinely evaluate with
+	// the format blank. Only the IsUnsupported guard needs a resolved
+	// ecosystem, and it is skipped when there is none.
+	eco := EcosystemForFormat(format)
+	reportable := make([]ConditionType, 0, len(dark))
+	for _, cond := range dark {
+		if eco != "" && IsUnsupported(eco, cond) {
+			continue
+		}
+		recordPublishDateUnavailable(cond, format)
+		reportable = append(reportable, cond)
+	}
+	if len(reportable) == 0 || (e.auditor == nil && e.logger == nil) {
+		return
+	}
+	e.recordSkipEvents(ctx, p, reportable, SkipReasonPublishDateUnavailable, true)
+}
+
 // recordSkipped fires one audit event per (policy, unsupported condition) pair
 // and logs at INFO level. Both auditor and logger are optional.
 //
@@ -1197,8 +1363,12 @@ func matchesIdentifier(ctx EvaluationContext, id Identifier) bool {
 		return false
 	}
 
-	// Check package name match
-	if id.TargetPackageName != "" && !matchesPattern(ctx.PackageName, id.TargetPackageName) {
+	// Check package name match. Ecosystem-aware: the ecosystem is in
+	// scope right here on the context, which is why the "matchesPattern
+	// has no ecosystem argument" objection does not survive contact
+	// with the call site — there are exactly two callers and both are
+	// in this function.
+	if id.TargetPackageName != "" && !matchesPackageName(ctx.RepositoryFormat, ctx.PackageName, id.TargetPackageName) {
 		return false
 	}
 
@@ -1817,6 +1987,50 @@ func matchesPattern(value, pattern string) bool {
 	}
 	// Exact match (case-insensitive)
 	return strings.EqualFold(value, pattern)
+}
+
+// matchesPackageName is matchesPattern for the NAME leg of an
+// identifier, with one ecosystem-specific fold: on pip/pypi it applies
+// PEP 503 normalisation (lowercase, and every run of `-`, `_`, `.`
+// collapsed to a single `-`) to BOTH sides before comparing.
+//
+// Why it has to exist. The proxy canonicalises pip coordinates, so a
+// request the operator typed as `foo_bar` reaches the evaluator as
+// `foo-bar`. A block policy authored with the underscore spelling then
+// matches nothing, forever, with no error at save time and no signal at
+// evaluation time — a silent no-op block rule, which is the worst
+// failure this product has. PyPI itself treats the two spellings as the
+// same project (`pip install foo_bar` and `foo-bar` fetch identical
+// bytes), so folding is not a heuristic here, it is the ecosystem's own
+// identity rule.
+//
+// Why it is NOT unconditional. Separators are significant elsewhere:
+// npm `foo_bar` and `foo-bar` are two different packages owned by two
+// different people, and the same is true of maven artifactIds and Go
+// module paths. Folding there would make a block rule match a package
+// the operator never named — an over-block, and the mirror image of the
+// bug being fixed. Hence the ecosystem gate, resolved through
+// EcosystemForFormat so "pip" and "pypi" both land on EcoPyPI and
+// nothing else does.
+//
+// An empty format therefore means "no fold", i.e. today's behaviour.
+// That is fail-safe (no rule starts matching more than it did), and it
+// is the state `chainsaw policy simulate` is in whenever the corpus row
+// has no registered repository — see the sigRepositoryFormat coverage
+// gap in internal/server/policy_simulate.go, which is where that
+// divergence between the preview and the proxy is surfaced rather than
+// left silent.
+//
+// The repo leg keeps plain matchesPattern: repository names are
+// chainsaw's own, not the registry's, and are not PEP 503 identifiers.
+func matchesPackageName(format, value, pattern string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if EcosystemForFormat(strings.ToLower(strings.TrimSpace(format))) == EcoPyPI {
+		return typosquat.NormalizePyPI(value) == typosquat.NormalizePyPI(pattern)
+	}
+	return matchesPattern(value, pattern)
 }
 
 func matchesVersion(version, constraint string) bool {

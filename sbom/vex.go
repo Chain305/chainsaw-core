@@ -9,15 +9,23 @@ package sbom
 //
 // Exception → VEX statement mapping (the WHY):
 //
-//   decision=allow, not expired, has CVE
-//     - note matches /not in (the )?execution path|not reachable|unreachable/i
-//         → state=not_affected, justification=vulnerable_code_not_in_execute_path
-//     - else
-//         → state=not_affected, justification=code_not_present (default)
-//   decision=monitor, not expired, has CVE → state=in_triage
-//   decision=deny                          → excluded (denials are blocks, not exemptions)
-//   expired                                → excluded
-//   missing CVE id                         → excluded
+//   decision=allow, in effect, not expired, has CVE
+//     → state=exploitable, response=[will_not_fix]
+//   decision=monitor, in effect, not expired, has CVE
+//     → state=in_triage
+//   decision=deny                     → excluded (denials are blocks, not exemptions)
+//   status=pending_approval | denied  → excluded (not in effect; see below)
+//   expired                           → excluded
+//   missing CVE id                    → excluded
+//
+// No `justification` is ever emitted. In CycloneDX 1.6 `justification` is
+// only meaningful alongside `not_affected`, and a Chainsaw exception is a
+// risk ACCEPTANCE — the operator confirmed the vulnerable package is
+// present and chose to ship it. See the block above the vexState* consts
+// for the full history; the short version is that emitting a
+// justification next to `exploitable` recreates a schema-invalid document.
+// The operator's free-text note rides along verbatim in analysis.detail
+// and is never pattern-matched into a machine claim.
 //
 // affects[].ref is the affected component's PURL when available; otherwise
 // the bom-ref short form `<name>@<version>` so the statement is still
@@ -78,8 +86,71 @@ type Exception struct {
 	PURL       string
 	CVE        string
 	Note       string
-	ExpiresAt  time.Time // zero value means "no expiry configured"
-	CreatedAt  time.Time
+	// Status is the exception's wire lifecycle/expiry status, as stamped
+	// by the server's deriveExceptionStatus. BuildVEX excludes the
+	// not-in-effect lifecycle values — see ExceptionStatusNotInEffect.
+	// Empty means in effect.
+	Status    string
+	ExpiresAt time.Time // zero value means "no expiry configured"
+	CreatedAt time.Time
+}
+
+// Wire lifecycle statuses that mean "this exception is not in effect".
+//
+// These mirror the two lifecycle values the server's deriveExceptionStatus
+// can stamp (internal/server/entries.go). They are string literals rather
+// than an import because core/ is a separate module that must not depend
+// on the server; the missing compiler link is covered by a guard test on
+// the server side.
+const (
+	// ExceptionStatusPendingApproval is an exception that has been drafted
+	// but not approved. The policy evaluator only honours
+	// policy.StatusEnabled rules, so a pending exception grants nothing at
+	// enforcement time — exporting it as a VEX statement would assert the
+	// org formally accepted a risk it has not.
+	ExceptionStatusPendingApproval = "pending_approval"
+	// ExceptionStatusDenied is the wire label for policy.StatusDisabled:
+	// an exception an approver refused, or one that was later revoked.
+	ExceptionStatusDenied = "denied"
+)
+
+// ExceptionStatusNotInEffect reports whether a wire status means the
+// exception grants nothing and must therefore not appear in a VEX
+// document.
+//
+// This is a DENY-LIST on the lifecycle axis only, and both halves of that
+// are deliberate:
+//
+//   - Deny-list, not allow-list. deriveExceptionStatus emits five values
+//     across two independent axes: expiry (active / expiring_soon /
+//     expired) and lifecycle (pending_approval / denied). An allow-list of
+//     {"", "active"} would silently drop every "expiring_soon" exception —
+//     a live, enforced carve-out inside the 14-day renew window — and a
+//     compliance document quietly losing true statements is not detectable
+//     at runtime. A deny-list's residual risk (a future not-in-effect
+//     status leaking through) is closable with a guard test, and is.
+//
+//   - Lifecycle only, never expiry. Expiry is BuildVEX's own timestamp
+//     compare against ExpiresAt. The wire status truncates DaysRemaining
+//     to whole days and stamps "expired" at <= 0, so an exception with
+//     1-23 hours left reads "expired" on the wire while it is still
+//     enforced. Filtering on the display status would drop up to a day of
+//     genuinely in-effect statements.
+//
+// An empty status is in effect. The server always populates Status (all
+// eight response paths route through deriveExceptionStatus), so this is
+// not a compatibility shim; it is what makes the deny-list's default the
+// natural one and keeps a caller that forgets the field from producing an
+// empty document rather than a wrong one. A caller that forgets it does
+// over-export, which is why TestBuildVEX_ZeroValueDTOIsExported pins the
+// behaviour instead of a comment promising it.
+func ExceptionStatusNotInEffect(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case ExceptionStatusPendingApproval, ExceptionStatusDenied:
+		return true
+	default:
+		return false
+	}
 }
 
 // VEX analysis strings — members of the CycloneDX 1.6 impactAnalysisState
@@ -124,6 +195,14 @@ func BuildVEX(orgID string, exceptions []Exception) (CycloneDXVEX, error) {
 
 	for _, ex := range exceptions {
 		if strings.TrimSpace(ex.CVE) == "" {
+			continue
+		}
+		// Lifecycle gate. This must run independently of the expiry
+		// compare below: a pending exception is not required to carry an
+		// expiry (approveException sets one, drafting does not), so a
+		// pending row with a zero ExpiresAt passes the timestamp check
+		// forever and would otherwise be exported for good.
+		if ExceptionStatusNotInEffect(ex.Status) {
 			continue
 		}
 		if !ex.ExpiresAt.IsZero() && !ex.ExpiresAt.After(now) {

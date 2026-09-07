@@ -127,11 +127,15 @@ func reasonReleaseDateFetcher(format, fn string) string {
 	return fmt.Sprintf(""+
 		"P8-60 is a false finding. registryMetadataProvider is NOT the only "+
 		"producer of VersionReleaseDate: fetchReleaseDate "+
-		"(internal/server/package_metadata.go:274-316) dispatches %s to %s, "+
-		"and applyFetchedMetadataFields writes both PackageReleaseDate and "+
-		"VersionReleaseDate from it. APT is correctly SupportNone because it "+
-		"is the one OS-package format with no case in that switch — the "+
-		"matrix is not self-inconsistent, it mirrors the switch exactly.",
+		"(internal/server/package_metadata.go) falls through to "+
+		"fetchVersionReleaseDate, which dispatches %s to %s, and "+
+		"applyFetchedMetadataFields writes it to VersionReleaseDate. "+
+		"Since N1 it writes PackageReleaseDate ONLY from a genuine "+
+		"creation date (pip/npm/composer), so this cell justifies the "+
+		"Cooldown column, not the PackageAge column. APT is correctly "+
+		"SupportNone because it is the one OS-package format with no "+
+		"case in that switch — the matrix is not self-inconsistent, it "+
+		"mirrors the switch exactly.",
 		format, fn)
 }
 

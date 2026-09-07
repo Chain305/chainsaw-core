@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,6 +51,7 @@ var policyCmd = &cobra.Command{
 
 Examples:
   chainsaw policy list
+  chainsaw policy show pol_01H8...
   chainsaw policy create --name block-criticals --mode block --condition '{"cvssMin": 9.0}'
   chainsaw policy simulate lodash@4.17.11
   chainsaw policy export --format yaml --output policies.yaml`,
@@ -60,7 +62,16 @@ Examples:
 var policyListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List policies for the current org",
-	RunE:  runPolicyList,
+	Long: `List every policy in the current org with a summary of its conditions.
+
+The CONDITIONS column is width-bounded: a cell ending in "+N more" has been
+elided, and "-" means the rule has no runtime conditions and fires on every
+identifier match. A row in this table proves a policy EXISTS; it does not
+prove what the policy is configured to do.
+
+Run ` + "`chainsaw policy show <id>`" + ` for one policy's complete configuration,
+or ` + "`chainsaw policy list --json`" + ` for every field of every policy.`,
+	RunE: runPolicyList,
 }
 
 func init() {
@@ -100,11 +111,181 @@ func runPolicyList(cmd *cobra.Command, _ []string) error {
 			p.Mode,
 			string(p.Status),
 			fmt.Sprintf("%d", p.Precedence),
+			policyConditionsCell(p.Conditions),
 			p.UpdatedAt.Format("2006-01-02"),
 		}
 	}
-	PrintTable([]string{"ID", "NAME", "MODE", "STATUS", "PRIORITY", "UPDATED"}, rows)
+	PrintTable([]string{"ID", "NAME", "MODE", "STATUS", "PRIORITY", "CONDITIONS", "UPDATED"}, rows)
+	// The column is a hint, not the answer. A truncated cell cannot
+	// honestly settle "is this rule configured correctly", and a reader
+	// who greps this output for a condition that got elided would draw
+	// exactly the wrong conclusion — the failure mode that let a policy
+	// visible in this table be written up as "actively enforced". Name
+	// the authoritative command every time, not only when something was
+	// elided, because the reader who needs it is the one who found
+	// nothing.
+	fmt.Println()
+	fmt.Println("CONDITIONS is summarised; a cell ending in \"+N more\" is elided and \"-\" means the rule fires on every identifier match.")
+	fmt.Println("Run `chainsaw policy show <id>` (or `chainsaw policy list --json`) for a policy's complete configuration.")
 	return nil
+}
+
+// policyListConditionsWidth bounds the CONDITIONS cell. PrintTable
+// (output.go) sizes every column to its widest cell with no cap and no
+// truncation helper, so an unbounded cell — a policy may set any of
+// policy.Conditions' 67 fields — would push the table past any terminal.
+// The bound lives here, in the row builder, for that reason.
+const policyListConditionsWidth = 40
+
+// policyConditionsCell renders the bounded, deterministic CONDITIONS
+// cell. Conditions are already sorted by key, so the same policy always
+// elides the same way. Elision is always visible ("+N more"); the cell
+// never silently cuts, and the first condition is always kept even when
+// it alone exceeds the budget — an empty-looking cell on a configured
+// policy is the lie this whole column exists to stop.
+func policyConditionsCell(raw json.RawMessage) string {
+	conds := summarizeConditions(raw)
+	if len(conds) == 0 {
+		return "-"
+	}
+	kept, width := 0, 0
+	for _, c := range conds {
+		next := width + displayWidth(c)
+		if kept > 0 {
+			next += 2 // ", " gutter
+		}
+		if kept > 0 && next > policyListConditionsWidth {
+			break
+		}
+		kept++
+		width = next
+	}
+	cell := strings.Join(conds[:kept], ", ")
+	if n := len(conds) - kept; n > 0 {
+		cell += fmt.Sprintf(" +%d more", n)
+	}
+	return cell
+}
+
+// ── show ──────────────────────────────────────────────────────────────────────
+
+var policyShowCmd = &cobra.Command{
+	Use:   "show <policy-id>",
+	Short: "Show one policy's full configuration",
+	Long: `Print everything a policy is configured with — mode, status, expiry, the
+identifier it targets, the requester scope it is limited to, and every
+condition that must hold for it to fire.
+
+This is the command that answers "is this rule actually configured to do
+what I think". ` + "`chainsaw policy list`" + ` proves a row exists and summarises
+its conditions in a bounded column; it cannot show a policy's full
+configuration, and a policy with no conditions at all looks the same
+there as one with fifteen.
+
+Conditions are rendered from the server's own JSON, so a condition the
+engine understands is a condition this prints — there is no curated
+field list here to fall behind the engine.
+
+An empty Conditions block is not a rendering gap. It means the rule has
+no runtime conditions and fires on every identifier match.
+
+Examples:
+  chainsaw policy show pol_01H8...
+  chainsaw policy show pol_01H8... --json`,
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runPolicyShow,
+}
+
+func init() {
+	// --json is the persistent root flag (see root.go), as on `policy list`.
+	policyCmd.AddCommand(policyShowCmd)
+}
+
+func runPolicyShow(cmd *cobra.Command, args []string) error {
+	client := newClient()
+	if client.baseURL == "" {
+		return errServerNotConfigured(cmd)
+	}
+	id := strings.TrimSpace(args[0])
+	if id == "" {
+		return fmt.Errorf("missing policy id — usage: chainsaw policy show <policy-id>")
+	}
+
+	// Decode the policy leg as raw JSON, not into policyItem: --json must
+	// hand back exactly what the server said, not this CLI's
+	// re-serialisation of the fields it happens to know about. The human
+	// rendering below decodes the same bytes a second time.
+	var raw struct {
+		Policy json.RawMessage `json:"policy"`
+	}
+	if err := client.Get("/api/policies/"+id, &raw); err != nil {
+		return err
+	}
+	emit("cli.policy.shown", nil)
+
+	if useJSON(cmd) {
+		// The server's object, verbatim. --json stays the complete
+		// surface even if the human rendering below ever narrows.
+		return PrintJSONTo(cmd, raw.Policy)
+	}
+
+	var p policyItem
+	if err := json.Unmarshal(raw.Policy, &p); err != nil {
+		return fmt.Errorf("decode policy: %w", err)
+	}
+
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "ID:          %s\n", p.ID)
+	fmt.Fprintf(out, "Name:        %s\n", p.Name)
+	if p.Description != "" {
+		fmt.Fprintf(out, "Description: %s\n", p.Description)
+	}
+	if p.Kind != "" {
+		fmt.Fprintf(out, "Kind:        %s\n", p.Kind)
+	}
+	fmt.Fprintf(out, "Mode:        %s\n", p.Mode)
+	fmt.Fprintf(out, "Status:      %s\n", p.Status)
+	fmt.Fprintf(out, "Priority:    %d\n", p.Precedence)
+	if !p.CreatedAt.IsZero() {
+		fmt.Fprintf(out, "Created:     %s\n", p.CreatedAt.Format(time.RFC3339))
+	}
+	if !p.UpdatedAt.IsZero() {
+		fmt.Fprintf(out, "Updated:     %s\n", p.UpdatedAt.Format(time.RFC3339))
+	}
+	if p.ExpiresAt != nil {
+		expired := ""
+		if p.ExpiresAt.Before(time.Now()) {
+			// An expired exception is skipped by the evaluator
+			// (policy.IsExpiredException). Saying so here is the
+			// difference between "this rule exists" and "this rule runs".
+			expired = " (EXPIRED — the evaluator skips this rule)"
+		}
+		fmt.Fprintf(out, "Expires:     %s%s\n", p.ExpiresAt.Format(time.RFC3339), expired)
+	}
+
+	printPolicyBlock(out, "Identifier", renderPolicyJSONObject(p.Identifier),
+		"(none — this rule targets every coordinate)")
+	printPolicyBlock(out, "Scope", renderPolicyJSONObject(p.Scope),
+		"(none — this rule applies to every requester)")
+	printPolicyBlock(out, "Conditions", summarizeConditions(p.Conditions),
+		"(none — this rule fires on every identifier match, with no runtime condition)")
+	return nil
+}
+
+// printPolicyBlock writes one key/value section of `policy show`. The
+// empty case prints an explicit sentence rather than nothing: a blank
+// section reads as "the tool did not render it", which is precisely the
+// ambiguity that let an unconfigured policy pass for a configured one.
+func printPolicyBlock(out io.Writer, title string, lines []string, empty string) {
+	fmt.Fprintf(out, "\n%s:\n", title)
+	if len(lines) == 0 {
+		fmt.Fprintf(out, "  %s\n", empty)
+		return
+	}
+	for _, l := range lines {
+		fmt.Fprintf(out, "  %s\n", l)
+	}
 }
 
 // ── create ────────────────────────────────────────────────────────────────────
@@ -500,36 +681,6 @@ func init() {
 	policyCmd.AddCommand(policySimulateCmd)
 }
 
-type policyConditionsSummary struct {
-	IsVulnerable         *bool    `json:"isVulnerable,omitempty"`
-	PackageAge           *int     `json:"packageAge,omitempty"`
-	CVSSMin              *float64 `json:"cvssMin,omitempty"`
-	CVSSMax              *float64 `json:"cvssMax,omitempty"`
-	EPSSMin              *float64 `json:"epssMin,omitempty"`
-	EPSSMax              *float64 `json:"epssMax,omitempty"`
-	PackageLicense       []string `json:"packageLicense,omitempty"`
-	HasProvenance        *bool    `json:"hasProvenance,omitempty"`
-	IsSuspectedTyposquat *bool    `json:"isSuspectedTyposquat,omitempty"`
-	IsKnownMalicious     *bool    `json:"isKnownMalicious,omitempty"`
-	TrustScoreMin        *int     `json:"trustScoreMin,omitempty"`
-	TrustScoreMax        *int     `json:"trustScoreMax,omitempty"`
-	ReservedNamespaces   []string `json:"reservedNamespaces,omitempty"`
-
-	// Supply-chain condition surface added in the 13-PR consolidation.
-	// Mirrors internal/policy.Conditions — kept as pointer bools so the
-	// simulate view can distinguish "rule has no opinion" from "rule
-	// wants false" and render accordingly.
-	HasInstallScript            *bool    `json:"hasInstallScript,omitempty"`
-	InstallScriptFetchesRemote  *bool    `json:"installScriptFetchesRemote,omitempty"`
-	PublisherChanged            *bool    `json:"publisherChanged,omitempty"`
-	VersionAnomaly              *bool    `json:"versionAnomaly,omitempty"`
-	VersionAnomalyKinds         []string `json:"versionAnomalyKinds,omitempty"`
-	HasHiddenUnicode            *bool    `json:"hasHiddenUnicode,omitempty"`
-	HiddenUnicodeKinds          []string `json:"hiddenUnicodeKinds,omitempty"`
-	PublishVelocityAnomaly      *bool    `json:"publishVelocityAnomaly,omitempty"`
-	PublishVelocityThreshold24h *int     `json:"publishVelocityThreshold24h,omitempty"`
-}
-
 // simulateSchemaVersion identifies the wire shape of the `policy simulate`
 // --json envelope. Bumped only when a field is removed or its meaning changes;
 // purely-additive fields keep the same version. Consumers can branch on this to
@@ -629,22 +780,20 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		unevaluated = append(unevaluated, unevaluatedScopeDimensions(p.Scope)...)
-		// Parse conditions to describe what would trigger
-		var conds policyConditionsSummary
-		if len(p.Conditions) > 0 {
-			_ = json.Unmarshal(p.Conditions, &conds)
-		}
-		hasRuntimeConditions := conds.IsVulnerable != nil || conds.CVSSMin != nil ||
-			conds.CVSSMax != nil || conds.EPSSMin != nil || conds.EPSSMax != nil ||
-			conds.IsKnownMalicious != nil || conds.HasProvenance != nil ||
-			conds.IsSuspectedTyposquat != nil || conds.TrustScoreMin != nil ||
-			conds.TrustScoreMax != nil || len(conds.PackageLicense) > 0 ||
-			len(conds.ReservedNamespaces) > 0 ||
-			conds.HasInstallScript != nil || conds.InstallScriptFetchesRemote != nil ||
-			conds.PublisherChanged != nil ||
-			conds.VersionAnomaly != nil || len(conds.VersionAnomalyKinds) > 0 ||
-			conds.HasHiddenUnicode != nil || len(conds.HiddenUnicodeKinds) > 0 ||
-			conds.PublishVelocityAnomaly != nil || conds.PublishVelocityThreshold24h != nil
+		// Conditions are rendered from the RAW wire JSON, not from a Go
+		// view type. The view type this replaced listed 22 of
+		// policy.Conditions' 67 fields, so a cooldown-only, licence-only
+		// or attestation-only rule previewed with an EMPTY condition list
+		// — the command documented as the way to check a rule reported
+		// that the rule had no configuration at all.
+		conditions := summarizeConditions(p.Conditions)
+		// Any condition at all means the CLI cannot decide the verdict:
+		// it evaluates none of them. Deriving this from the rendered list
+		// rather than a field enumeration keeps the two halves of the
+		// output consistent — the old enumeration would have printed
+		// "cooldownDays=7" under a headline claiming an identifier-only
+		// match with no runtime conditions.
+		hasRuntimeConditions := len(conditions) > 0
 
 		switch {
 		case hasRuntimeConditions:
@@ -669,7 +818,7 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 		result.MatchedID = p.ID
 		result.PolicyName = p.Name
 		result.Mode = p.Mode
-		result.Conditions = summarizeConditions(conds)
+		result.Conditions = conditions
 		break
 	}
 
@@ -749,58 +898,109 @@ func simulateExitError(outcome string) error {
 }
 
 // summarizeConditions renders a policy's Conditions as a deterministic,
-// human-readable slice of "<key>=<value>" strings for use in the
-// simulate text/JSON output. Only fields that are actually set are
-// included — nil pointer bools and empty slices are skipped — so an
-// empty slice means "identifier-only policy, fires on every match".
-func summarizeConditions(c policyConditionsSummary) []string {
-	var out []string
-	appendBool := func(name string, p *bool) {
-		if p != nil {
-			out = append(out, fmt.Sprintf("%s=%v", name, *p))
-		}
-	}
-	appendInt := func(name string, p *int) {
-		if p != nil {
-			out = append(out, fmt.Sprintf("%s=%d", name, *p))
-		}
-	}
-	appendFloat := func(name string, p *float64) {
-		if p != nil {
-			out = append(out, fmt.Sprintf("%s=%g", name, *p))
-		}
-	}
-	appendSlice := func(name string, v []string) {
-		if len(v) > 0 {
-			out = append(out, fmt.Sprintf("%s=[%s]", name, strings.Join(v, ",")))
-		}
-	}
+// human-readable slice of "<key>=<value>" strings for the `policy show`
+// and `policy simulate` output. Only fields actually present on the
+// wire are included, so an empty slice means "identifier-only policy,
+// fires on every match".
+//
+// It renders the raw JSON the server sent rather than a hand-maintained
+// Go view type, and that is the whole point. The view type it replaced
+// (policyConditionsSummary) carried 22 of policy.Conditions' 67 fields;
+// cooldownDays, ecosystems, all six attestation conditions, the entire
+// licence family, dependency hygiene and the behavioural family were
+// absent. `policy simulate` therefore printed an EMPTY condition list
+// for those rules — an operator asked what a rule was configured to do
+// and was told it was configured to do nothing. A list derived from the
+// wire cannot drift that way: a condition the server marshals is a
+// condition this prints, including conditions added after this function
+// was written.
+func summarizeConditions(raw json.RawMessage) []string {
+	return renderPolicyJSONObject(raw)
+}
 
-	appendBool("isVulnerable", c.IsVulnerable)
-	appendInt("packageAge", c.PackageAge)
-	appendFloat("cvssMin", c.CVSSMin)
-	appendFloat("cvssMax", c.CVSSMax)
-	appendFloat("epssMin", c.EPSSMin)
-	appendFloat("epssMax", c.EPSSMax)
-	appendSlice("packageLicense", c.PackageLicense)
-	appendBool("hasProvenance", c.HasProvenance)
-	appendBool("isSuspectedTyposquat", c.IsSuspectedTyposquat)
-	appendBool("isKnownMalicious", c.IsKnownMalicious)
-	appendInt("trustScoreMin", c.TrustScoreMin)
-	appendInt("trustScoreMax", c.TrustScoreMax)
-	appendSlice("reservedNamespaces", c.ReservedNamespaces)
+// renderPolicyJSONObject flattens one JSON object from the policy wire
+// format into deterministic "<key>=<value>" lines, sorted by key.
+//
+// Skips only genuinely absent values — JSON null, "", [] and {}. It
+// deliberately does NOT skip false or 0: every condition is a pointer
+// field with omitempty, so a non-nil pointer to false ("must NOT have
+// provenance") or to 0 survives marshalling and is real configuration.
+// Dropping those would re-create the defect this function exists to
+// close, one value-shape lower down.
+func renderPolicyJSONObject(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	// UseNumber keeps 9 as "9" and 0.85 as "0.85"; float64 round-trips
+	// large ints through scientific notation.
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil {
+		return nil
+	}
+	return renderPolicyJSONMap(obj)
+}
 
-	appendBool("hasInstallScript", c.HasInstallScript)
-	appendBool("installScriptFetchesRemote", c.InstallScriptFetchesRemote)
-	appendBool("publisherChanged", c.PublisherChanged)
-	appendBool("versionAnomaly", c.VersionAnomaly)
-	appendSlice("versionAnomalyKinds", c.VersionAnomalyKinds)
-	appendBool("hasHiddenUnicode", c.HasHiddenUnicode)
-	appendSlice("hiddenUnicodeKinds", c.HiddenUnicodeKinds)
-	appendBool("publishVelocityAnomaly", c.PublishVelocityAnomaly)
-	appendInt("publishVelocityThreshold24h", c.PublishVelocityThreshold24h)
-
+func renderPolicyJSONMap(obj map[string]any) []string {
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		v, ok := renderPolicyJSONValue(obj[k])
+		if !ok {
+			continue
+		}
+		out = append(out, k+"="+v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
+}
+
+// renderPolicyJSONValue formats one decoded JSON value. ok=false means
+// "absent" (null, "", [], {}) and the caller drops the key.
+func renderPolicyJSONValue(v any) (string, bool) {
+	switch t := v.(type) {
+	case nil:
+		return "", false
+	case bool:
+		return strconv.FormatBool(t), true
+	case json.Number:
+		return t.String(), true
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64), true
+	case string:
+		if t == "" {
+			return "", false
+		}
+		return t, true
+	case []any:
+		if len(t) == 0 {
+			return "", false
+		}
+		parts := make([]string, 0, len(t))
+		for _, e := range t {
+			s, ok := renderPolicyJSONValue(e)
+			if !ok {
+				s = "null"
+			}
+			parts = append(parts, s)
+		}
+		return "[" + strings.Join(parts, ",") + "]", true
+	case map[string]any:
+		inner := renderPolicyJSONMap(t)
+		if len(inner) == 0 {
+			return "", false
+		}
+		return "{" + strings.Join(inner, ",") + "}", true
+	default:
+		return fmt.Sprintf("%v", t), true
+	}
 }
 
 // simulateIdentifierMatch answers "would this rule target this

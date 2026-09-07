@@ -84,6 +84,93 @@ func TestBuildVEX_MappingTable(t *testing.T) {
 			},
 			wantIncluded: false,
 		},
+		{
+			// The F2 defect: an exception the product itself prints as
+			// "NOT yet in effect — it is awaiting approval" was being
+			// exported into a client-facing CycloneDX attestation. The
+			// policy evaluator skips any rule that is not StatusEnabled,
+			// so enforcement refuses the carve-out while the compliance
+			// document asserted the org accepted it.
+			name: "status=pending_approval → excluded even though decision=allow",
+			ex: Exception{
+				ID: "e7", Decision: "allow", Ecosystem: "npm",
+				Name: "unapproved", Version: "1.0.0",
+				CVE: "CVE-2024-55555", Status: "pending_approval",
+				ExpiresAt: future,
+			},
+			wantIncluded: false,
+		},
+		{
+			// A pending row is not required to carry an expiry —
+			// approveException sets one, drafting does not — so the
+			// timestamp compare alone would export this forever.
+			name: "status=pending_approval with zero ExpiresAt → excluded (not exported forever)",
+			ex: Exception{
+				ID: "e8", Decision: "allow", Ecosystem: "npm",
+				Name: "unapproved-no-expiry", Version: "1.0.0",
+				CVE: "CVE-2024-55556", Status: "pending_approval",
+				// ExpiresAt deliberately zero.
+			},
+			wantIncluded: false,
+		},
+		{
+			name: "status=denied → excluded",
+			ex: Exception{
+				ID: "e9", Decision: "allow", Ecosystem: "npm",
+				Name: "refused", Version: "1.0.0",
+				CVE: "CVE-2024-55557", Status: "denied",
+				ExpiresAt: future,
+			},
+			wantIncluded: false,
+		},
+		{
+			// ALLOW-LIST REGRESSION GUARD. An allow-list of {"", "active"}
+			// passes every other row in this table and silently deletes
+			// this one: a live, enforced carve-out inside the 14-day renew
+			// window. Losing it is a compliance document quietly dropping
+			// a true statement, which nothing detects at runtime.
+			name: "status=expiring_soon → INCLUDED (still enforced inside the renew window)",
+			ex: Exception{
+				ID: "e10", Decision: "allow", Ecosystem: "npm",
+				Name: "renewing", Version: "1.0.0",
+				CVE: "CVE-2024-55558", Status: "expiring_soon",
+				ExpiresAt: time.Now().UTC().Add(3 * 24 * time.Hour),
+			},
+			wantIncluded: true,
+			wantState:    "exploitable",
+			wantResponse: "will_not_fix",
+		},
+		{
+			// The canary: core/cli/sbom_test.go builds exceptionItems with
+			// no Status at all. Empty means in effect.
+			name: "empty status → included",
+			ex: Exception{
+				ID: "e11", Decision: "allow", Ecosystem: "npm",
+				Name: "no-status", Version: "1.0.0",
+				CVE: "CVE-2024-55559", Status: "",
+				ExpiresAt: future,
+			},
+			wantIncluded: true,
+			wantState:    "exploitable",
+			wantResponse: "will_not_fix",
+		},
+		{
+			// Trap 2: the wire status truncates DaysRemaining to whole
+			// days and stamps "expired" at <= 0, so an exception with
+			// hours left reads "expired" while ExpiresAt.After(now) is
+			// still true and the evaluator still honours it. The filter
+			// must not touch the expiry axis.
+			name: "status=expired but ExpiresAt still in the future → INCLUDED (expiry axis is BuildVEX's own compare)",
+			ex: Exception{
+				ID: "e12", Decision: "allow", Ecosystem: "npm",
+				Name: "hours-left", Version: "1.0.0",
+				CVE: "CVE-2024-55560", Status: "expired",
+				ExpiresAt: time.Now().UTC().Add(6 * time.Hour),
+			},
+			wantIncluded: true,
+			wantState:    "exploitable",
+			wantResponse: "will_not_fix",
+		},
 	}
 
 	for _, tc := range tests {
@@ -256,5 +343,59 @@ func TestBuildVEX_PurlFallback(t *testing.T) {
 	ref := vex.Vulnerabilities[0].Affects[0].Ref
 	if !strings.HasPrefix(ref, "pkg:npm/lodash@") {
 		t.Errorf("affects ref = %q, want pkg:npm/lodash@…", ref)
+	}
+}
+
+// TestBuildVEX_ZeroValueDTOIsExported pins Trap 4 as a fact rather than a
+// promise. Defaulting Exception.Status == "" to "in effect" moves the
+// fail-open up a level: a Go caller that populates the DTO from a new
+// source and forgets Status exports everything, unfiltered.
+//
+// The alternative — an allow-list that requires an explicit "active" —
+// is worse (see the expiring_soon row in the mapping table), so the
+// behaviour is deliberate and stays. This test exists so the exposure is
+// recorded in the suite and a future caller can be found by grepping for
+// it, not so it can be silently changed.
+func TestBuildVEX_ZeroValueDTOIsExported(t *testing.T) {
+	vex, err := BuildVEX("org", []Exception{{
+		ID: "z1", Decision: "allow", Ecosystem: "npm",
+		Name: "zero-value", Version: "1.0.0",
+		CVE: "CVE-2024-00000",
+		// Status and ExpiresAt both zero.
+	}})
+	if err != nil {
+		t.Fatalf("BuildVEX: %v", err)
+	}
+	if len(vex.Vulnerabilities) != 1 {
+		t.Fatalf("a DTO with no Status is exported (documented fail-open); got %d vulns", len(vex.Vulnerabilities))
+	}
+	// Every producer of sbom.Exception must therefore forward Status.
+	// There is exactly one today (core/cli/sbom.go exceptionItemsToVEXInput),
+	// pinned by TestExceptionItemsToVEXInput_ForwardsStatus.
+}
+
+// TestExceptionStatusNotInEffect_Classification pins the deny-list shape
+// directly, independent of BuildVEX, so the server-side cross-module
+// guard has a stable function to assert against.
+func TestExceptionStatusNotInEffect_Classification(t *testing.T) {
+	cases := map[string]bool{
+		"":                 false,
+		"active":           false,
+		"expiring_soon":    false, // in effect; expiry is BuildVEX's own compare
+		"expired":          false, // ditto — Trap 2
+		"pending_approval": true,
+		"denied":           true,
+		// Case/whitespace tolerance: the filter must not be defeated by
+		// a producer that upper-cases or pads the wire value.
+		"  Pending_Approval  ": true,
+		"DENIED":               true,
+		// "rejected" appears nowhere in the tree and must not be
+		// introduced as a synonym for denied (internal/server/entries.go).
+		"rejected": false,
+	}
+	for status, want := range cases {
+		if got := ExceptionStatusNotInEffect(status); got != want {
+			t.Errorf("ExceptionStatusNotInEffect(%q) = %v, want %v", status, got, want)
+		}
 	}
 }

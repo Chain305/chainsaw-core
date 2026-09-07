@@ -463,11 +463,16 @@ func TestSkipReasonsAreEnumerated(t *testing.T) {
 		// rule was skipped — it rides RuleEvaluated=true. See
 		// advisory_lane.go and TestDarkAdvisoryLaneIsRecordOnly.
 		"no_advisory_source": {},
+		// publish_date_unavailable (F5) is the second RuleEvaluated=true
+		// reason: a packageAge / cooldownDays gate whose keying date is
+		// absent. See TestDarkPublishDateIsRecordOnly.
+		"publish_date_unavailable": {},
 	}
 	got := map[string]struct{}{
-		SkipReasonUnsupportedEcosystem: {},
-		SkipReasonChecksumUnavailable:  {},
-		SkipReasonNoAdvisorySource:     {},
+		SkipReasonUnsupportedEcosystem:   {},
+		SkipReasonChecksumUnavailable:    {},
+		SkipReasonNoAdvisorySource:       {},
+		SkipReasonPublishDateUnavailable: {},
 	}
 	if len(got) != len(want) {
 		t.Errorf("expected %d distinct reasons, got %d", len(want), len(got))

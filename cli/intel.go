@@ -48,6 +48,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/chain305/chainsaw-core/coverage"
+	"github.com/chain305/chainsaw-core/intelligence"
 )
 
 // ── Local shape definitions mirroring the v1 wire contract ──────────────────
@@ -403,7 +406,8 @@ func verdictDisplay(v string) string {
 	}
 }
 
-// notRefusedNote is the closing paragraph on every NOT EVALUATED render.
+// notRefusedPrefix opens the closing paragraph on every NOT EVALUATED
+// render. See notRefusedNote for how the advice sentence after it is chosen.
 //
 // "NOT EVALUATED" alone is refusal-shaped: it sits where a verdict goes,
 // in the same column that otherwise says QUARANTINE, and a reader who
@@ -424,9 +428,100 @@ func verdictDisplay(v string) string {
 //
 // Same register as scan.go's unscanned-package warning: state plainly
 // that absence of a result is not a result.
-const notRefusedNote = "This package was NOT refused. Chainsaw could not evaluate it, so it was\n" +
-	"PERMITTED and flagged for review. To refuse packages Chainsaw cannot\n" +
+//
+// The closing sentence is NOT constant, and that is the whole point of the
+// split below. The advice "enable the coverage gate" is correct only when a
+// source we needed was not reached. For the codes core/coverage classifies
+// as StatusOK (a registry 404 is an answer) or StatusNotApplicable (the
+// coordinate is not one any registry can serve, or the ecosystem has no
+// source at all), the gate will not refuse the package NO MATTER HOW IT IS
+// CONFIGURED — so printing that advice sends the operator to a control that
+// cannot help them.
+//
+// That is not hypothetical either: a vendor QA pass read this sentence on
+// package_not_found rows, concluded the gate was the remedy, tried it,
+// and filed the whole shape as unenforceable. Two of its five "coverage
+// gaps" were this paragraph.
+const notRefusedPrefix = "This package was NOT refused. Chainsaw could not evaluate it, so it was\n" +
+	"PERMITTED and flagged for review."
+
+// adviceCoverageGate — a source we needed genuinely was not reached
+// (transport, timeout, 5xx, breaker). The gate is exactly the control for
+// this, so keep the original wording.
+const adviceCoverageGate = "To refuse packages Chainsaw cannot\n" +
 	"evaluate, enable the coverage gate (see docs/COVERAGE_SOURCES.md)."
+
+// adviceAbsentCoordinate — the registry ANSWERED and the answer was "no
+// such package/version", or the coordinate is one no registry in that
+// ecosystem can serve. The coverage gate keys on unreached sources, so it
+// would not fire here whatever its mode; naming the control that DOES
+// refuse this shape is the only useful thing to say.
+const adviceAbsentCoordinate = "The coverage gate does not apply here:\n" +
+	"no source failed — either the registry answered \"no such package\", or\n" +
+	"this is a coordinate no registry in the ecosystem can serve. It simply\n" +
+	"does not exist upstream, and nothing needs to refuse a name no registry\n" +
+	"can serve. If you expected it to resolve, lookalikes are refused by the\n" +
+	"seeded \"Block suspected typosquats\" rule, which fires on a\n" +
+	"high-confidence typosquat verdict rather than on absence."
+
+// adviceEcosystemUnsupported — no data source covers this ecosystem, so
+// there is no missing source for the gate to key on. StatusNotApplicable,
+// and permanently so.
+const adviceEcosystemUnsupported = "The coverage gate does not apply here:\n" +
+	"no data source covers this ecosystem, so there is no unreached source\n" +
+	"for the gate to refuse on."
+
+// notRefusedNote assembles the closing paragraph for a NOT EVALUATED render
+// from the report's own warn codes.
+func notRefusedNote(warnCodes []string) string {
+	return notRefusedPrefix + " " + notRefusedAdviceFor(warnCodes)
+}
+
+// notRefusedAdviceFor picks the closing sentence.
+//
+// Gate-actionability is decided ONLY by coverage.StatusForWarnCode — the
+// single classification table this gate already uses. Copying its code
+// lists into the CLI is what produced the defect in the first place, so
+// the lists are deliberately not repeated; the switch below names
+// individual intelligence.Warn* constants purely to choose WHICH
+// non-gate sentence to print, and TestNonGateCodesAreNotGateActionable
+// fails if any of them is ever reclassified as unavailable.
+//
+// Unclassified / unrecognised codes fall through to the gate advice, i.e.
+// today's text. A code we do not understand must not silently acquire new
+// prose.
+func notRefusedAdviceFor(warnCodes []string) string {
+	absent := false
+	unsupported := false
+	for _, raw := range warnCodes {
+		code := strings.TrimSpace(raw)
+		if code == "" {
+			continue
+		}
+		if coverage.StatusForWarnCode(code) == coverage.StatusUnavailable {
+			// A source really was not reached. The gate is the answer,
+			// and it outranks anything else on the report.
+			return adviceCoverageGate
+		}
+		switch code {
+		case intelligence.WarnPackageNotFound,
+			intelligence.WarnRegistryNotFound,
+			intelligence.WarnVersionNotFound,
+			intelligence.WarnCoordinateMalformed,
+			intelligence.WarnVersionNotEvaluable:
+			absent = true
+		case intelligence.WarnUnsupported:
+			unsupported = true
+		}
+	}
+	switch {
+	case absent:
+		return adviceAbsentCoordinate
+	case unsupported:
+		return adviceEcosystemUnsupported
+	}
+	return adviceCoverageGate
+}
 
 // renderEvaluation prints a single Evaluation to stdout in the human
 // text form documented in chainsaw intel package --help.
@@ -444,7 +539,12 @@ const notRefusedNote = "This package was NOT refused. Chainsaw could not evaluat
 // evaluation that never ran. Paired with a verdict that reads as a
 // refusal, that output was misread as a successful interception in a
 // client-facing QA document, three separate times. See notRefusedNote.
-func renderEvaluation(w io.Writer, ev *v1Evaluation, federatedAbsence string) {
+//
+// warnCodes are the provider warn codes on the report that produced this
+// evaluation (nil when the caller has no report to hand). They select the
+// closing advice sentence — see notRefusedAdviceFor. An empty slice keeps
+// the pre-existing coverage-gate wording.
+func renderEvaluation(w io.Writer, ev *v1Evaluation, federatedAbsence string, warnCodes []string) {
 	if ev == nil {
 		fmt.Fprintln(w, "No evaluation available for this package.")
 		return
@@ -460,7 +560,7 @@ func renderEvaluation(w io.Writer, ev *v1Evaluation, federatedAbsence string) {
 		fmt.Fprintln(w, "No category scores are shown because no registry metadata was")
 		fmt.Fprintln(w, "retrieved; a grade here would be a default, not a measurement.")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, notRefusedNote)
+		fmt.Fprintln(w, notRefusedNote(warnCodes))
 		return
 	}
 	if ev.Verdict == "unknown" {
@@ -475,7 +575,7 @@ func renderEvaluation(w io.Writer, ev *v1Evaluation, federatedAbsence string) {
 		fmt.Fprintln(w, "No category scores are shown because the engine had no facts to")
 		fmt.Fprintln(w, "score; a grade here would be a default, not a measurement.")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, notRefusedNote)
+		fmt.Fprintln(w, notRefusedNote(warnCodes))
 		return
 	}
 	fmt.Fprintf(w, "Verdict: %-8s Overall: %d (%s)\n",

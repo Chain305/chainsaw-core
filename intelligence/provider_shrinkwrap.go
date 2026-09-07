@@ -85,6 +85,15 @@ func (p *shrinkwrapProvider) Supports(eco string) bool {
 }
 
 func (p *shrinkwrapProvider) Run(ctx context.Context, req Request, prior *Report) (PartialReport, error) {
+	// N5: a size/file-capped archive walk must not be reported as a clean
+	// absence. Wrapping run() rather than editing each early return is what
+	// makes that true for the paths that return PartialReport{} — which are
+	// precisely the ones that say "nothing found". Verdict-neutral.
+	partial, err := p.run(ctx, req, prior)
+	return withArtifactTruncationWarning(partial, p.Name(), req.Artifact), err
+}
+
+func (p *shrinkwrapProvider) run(ctx context.Context, req Request, prior *Report) (PartialReport, error) {
 	if req.Artifact == nil || len(req.Artifact.Bytes) == 0 {
 		return PartialReport{}, nil
 	}

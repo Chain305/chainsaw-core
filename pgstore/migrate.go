@@ -317,7 +317,7 @@ func (s *Store) migrateSchema() error {
 			PRIMARY KEY (ecosystem, package_name)
 		)`,
 		// attestations stores verified provenance and SBOM attestations
-		// produced by internal/provenance and internal/sbom. Like
+		// produced by core/provenance and core/sbom. Like
 		// intelligence_reports it is universal (a fact about a package
 		// coordinate, not about a tenant) — the primary key does not
 		// include org_id. Multiple attestation_types can coexist per

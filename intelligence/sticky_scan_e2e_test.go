@@ -96,8 +96,18 @@ func TestScan_PersistedReportAndEvaluationSeeTheSameStickyFacts(t *testing.T) {
 	prior.Observation.CollectedAt = now.Add(-48 * time.Hour)
 	prior.Observation.FreshUntil = now.Add(-24 * time.Hour)
 	prior.SupplyChain = SupplyChainSection{
-		MalwareStatus:       "clean",
-		PublisherChanged:    boolp(true),
+		MalwareStatus:    "clean",
+		PublisherChanged: boolp(true),
+		// The publisher names are NOT decoration. Since a8d99f5a the
+		// sticky carry revives a TRUE only together with the evidence
+		// that justifies it, and ProjectToRiskInput refuses to fire
+		// sc.publisher_changed on a bare bool — 30 of 66 flagged prod
+		// rows had been minted in exactly that evidence-less shape.
+		// A prior row without these is therefore a row whose publisher
+		// fact is DESIGNED to be dropped, and seeding one here asserted
+		// the opposite of what the code guarantees.
+		PublisherAdded:      []string{"p871-new-maintainer"},
+		PublisherRemoved:    []string{"p871-old-maintainer"},
 		VersionAnomaly:      boolp(true),
 		VersionAnomalyFlags: []string{"semver_regression"},
 		RepoLinkStatus:      "archived",
@@ -157,10 +167,15 @@ func TestScan_PersistedReportAndEvaluationSeeTheSameStickyFacts(t *testing.T) {
 		}
 	}
 
-	// The report column kept the facts — this half never broke, and if it
-	// fails the test below would be vacuous.
+	// The report column kept the facts, and if it fails the test below
+	// would be vacuous.
 	if !deref(stored.SupplyChain.PublisherChanged) {
 		t.Fatal("stored report lost publisherChanged; the merge itself regressed")
+	}
+	if len(stored.SupplyChain.PublisherAdded) == 0 && len(stored.SupplyChain.PublisherRemoved) == 0 {
+		t.Fatal("publisherChanged was revived without its evidence — the projection " +
+			"refuses to fire on a bare bool, so this row would claim a publisher " +
+			"change the verdict beside it cannot see")
 	}
 	if !deref(stored.SupplyChain.VersionAnomaly) {
 		t.Fatal("stored report lost versionAnomaly; the merge itself regressed")

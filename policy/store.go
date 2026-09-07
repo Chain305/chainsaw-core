@@ -99,7 +99,7 @@ const (
 	// matches by Identifier (and Scope) ALONE — it deliberately does
 	// not require Conditions.IsVulnerable to fire, which is the bug
 	// that let malware-feed blocks ignore active exceptions. See the
-	// matchesPolicy short-circuit in internal/policy/evaluator.go.
+	// matchesPolicy short-circuit in core/policy/evaluator.go.
 	KindException Kind = "exception"
 )
 
@@ -500,10 +500,25 @@ type Policy struct {
 	// actor. Kind defaults to KindEnforcement (empty); KindRouting
 	// flips the rule into routing-only mode (see internal/policy/routing.go).
 	// Routing carries the rule body when Kind == KindRouting.
-	CreatedBy  string       `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
-	ApproverID string       `json:"approverId,omitempty" yaml:"approverId,omitempty"`
-	Kind       Kind         `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Routing    *RoutingRule `json:"routing,omitempty" yaml:"routing,omitempty"`
+	CreatedBy  string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
+	ApproverID string `json:"approverId,omitempty" yaml:"approverId,omitempty"`
+
+	// CreatedByPrincipal records WHICH credential made the request, as
+	// distinct from CreatedBy, which records the human it belongs to.
+	//
+	// For an API-key request identity.UserID is the key's OWNER, so a CI
+	// pipeline's exception has always been attributed to whoever minted
+	// the key — and the separation-of-duties check then blocked that
+	// person from approving it. In a single-admin org that is a deadlock:
+	// the only person who can approve is the one the system believes made
+	// the request.
+	//
+	// Empty means "written before this field existed". The SoD check falls
+	// back to CreatedBy for those rows, so existing exceptions keep their
+	// current behaviour rather than being silently re-interpreted.
+	CreatedByPrincipal string       `json:"createdByPrincipal,omitempty" yaml:"createdByPrincipal,omitempty"`
+	Kind               Kind         `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Routing            *RoutingRule `json:"routing,omitempty" yaml:"routing,omitempty"`
 
 	// ExpiresAt is an optional per-row expiry override for
 	// KindException policies. When non-nil it WINS over the org-level
@@ -623,7 +638,7 @@ func (s *Store) List() ([]Policy, error) {
 		return nil, errors.New("policy store unavailable")
 	}
 	orgID := tenancy.NormalizeOrgID(s.orgID)
-	rows, err := s.sql.DB().Query(`SELECT id, name, description, precedence, mode, status, created_at, updated_at, identifier, conditions, policy_scope, decision, cve, note, created_by, approver_id, kind, routing, expires_at, grace_days
+	rows, err := s.sql.DB().Query(`SELECT id, name, description, precedence, mode, status, created_at, updated_at, identifier, conditions, policy_scope, decision, cve, note, created_by, created_by_principal, approver_id, kind, routing, expires_at, grace_days
 		FROM policies WHERE org_id=? ORDER BY precedence ASC, created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
@@ -650,7 +665,7 @@ func (s *Store) Get(id string) (Policy, error) {
 		return Policy{}, ErrPolicyNotFound
 	}
 	orgID := tenancy.NormalizeOrgID(s.orgID)
-	row := s.sql.DB().QueryRow(`SELECT id, name, description, precedence, mode, status, created_at, updated_at, identifier, conditions, policy_scope, decision, cve, note, created_by, approver_id, kind, routing, expires_at, grace_days
+	row := s.sql.DB().QueryRow(`SELECT id, name, description, precedence, mode, status, created_at, updated_at, identifier, conditions, policy_scope, decision, cve, note, created_by, created_by_principal, approver_id, kind, routing, expires_at, grace_days
 		FROM policies WHERE org_id=? AND id=?`, orgID, id)
 	return scanPolicy(row)
 }
@@ -717,12 +732,12 @@ func (s *Store) Create(policy Policy) (Policy, error) {
 		routingJSON = string(b)
 	}
 
-	_, err = s.sql.DB().Exec(`INSERT INTO policies(id, org_id, name, description, precedence, mode, status, created_at, updated_at, identifier, conditions, policy_scope, parameter_hash, decision, cve, note, created_by, approver_id, kind, routing, expires_at, grace_days)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = s.sql.DB().Exec(`INSERT INTO policies(id, org_id, name, description, precedence, mode, status, created_at, updated_at, identifier, conditions, policy_scope, parameter_hash, decision, cve, note, created_by, created_by_principal, approver_id, kind, routing, expires_at, grace_days)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		policy.ID, orgID, policy.Name, policy.Description, policy.Precedence, string(policy.Mode), string(policy.Status),
 		policy.CreatedAt, policy.UpdatedAt, string(identifierJSON), string(conditionsJSON), string(scopeJSON), parameterHash,
 		policy.Decision, policy.CVE, policy.Note,
-		nullableString(policy.CreatedBy), nullableString(policy.ApproverID), string(policy.Kind), nullableString(routingJSON),
+		nullableString(policy.CreatedBy), nullableString(policy.CreatedByPrincipal), nullableString(policy.ApproverID), string(policy.Kind), nullableString(routingJSON),
 		nullableTime(policy.ExpiresAt), nullableInt(policy.GraceDays))
 	if err != nil {
 		return Policy{}, policyConflictError(err)
@@ -829,10 +844,10 @@ func (s *Store) Update(id string, policy Policy) (Policy, error) {
 		routingJSON = string(b)
 	}
 
-	res, err := s.sql.DB().Exec(`UPDATE policies SET name=?, description=?, precedence=?, mode=?, status=?, updated_at=?, identifier=?, conditions=?, policy_scope=?, parameter_hash=?, decision=?, cve=?, note=?, created_by=?, approver_id=?, kind=?, routing=?, expires_at=?, grace_days=? WHERE org_id=? AND id=?`,
+	res, err := s.sql.DB().Exec(`UPDATE policies SET name=?, description=?, precedence=?, mode=?, status=?, updated_at=?, identifier=?, conditions=?, policy_scope=?, parameter_hash=?, decision=?, cve=?, note=?, created_by=?, created_by_principal=?, approver_id=?, kind=?, routing=?, expires_at=?, grace_days=? WHERE org_id=? AND id=?`,
 		policy.Name, policy.Description, policy.Precedence, string(policy.Mode), string(policy.Status), now, string(identifierJSON), string(conditionsJSON), string(scopeJSON), parameterHash,
 		policy.Decision, policy.CVE, policy.Note,
-		nullableString(policy.CreatedBy), nullableString(policy.ApproverID), string(policy.Kind), nullableString(routingJSON),
+		nullableString(policy.CreatedBy), nullableString(policy.CreatedByPrincipal), nullableString(policy.ApproverID), string(policy.Kind), nullableString(routingJSON),
 		nullableTime(policy.ExpiresAt), nullableInt(policy.GraceDays),
 		orgID, id)
 	if err != nil {
@@ -967,6 +982,7 @@ func scanPolicy(row policyScanner) (Policy, error) {
 		identifierJSON, conditionsJSON, scopeJSON sql.NullString
 		decision, cve, note                       sql.NullString
 		createdBy, approverID, kindStr            sql.NullString
+		createdByPrincipal                        sql.NullString
 		routingJSON                               sql.NullString
 		expiresAt                                 sql.NullTime
 		graceDays                                 sql.NullInt64
@@ -974,7 +990,7 @@ func scanPolicy(row policyScanner) (Policy, error) {
 	if err := row.Scan(&policy.ID, &name, &description, &policy.Precedence, &policy.Mode, &policy.Status,
 		&policy.CreatedAt, &policy.UpdatedAt, &identifierJSON, &conditionsJSON, &scopeJSON,
 		&decision, &cve, &note,
-		&createdBy, &approverID, &kindStr, &routingJSON, &expiresAt, &graceDays); err != nil {
+		&createdBy, &createdByPrincipal, &approverID, &kindStr, &routingJSON, &expiresAt, &graceDays); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Policy{}, ErrPolicyNotFound
 		}
@@ -1013,6 +1029,9 @@ func scanPolicy(row policyScanner) (Policy, error) {
 	}
 	if createdBy.Valid {
 		policy.CreatedBy = createdBy.String
+	}
+	if createdByPrincipal.Valid {
+		policy.CreatedByPrincipal = createdByPrincipal.String
 	}
 	if approverID.Valid {
 		policy.ApproverID = approverID.String

@@ -83,6 +83,17 @@ func TestBuildVEXEmitsOnlySchemaEnumMembers(t *testing.T) {
 			if a.Justification != "" && !cdxImpactAnalysisJustification[a.Justification] {
 				t.Errorf("decision=%s note=%q: justification %q is not a CycloneDX impactAnalysisJustification member", decision, note, a.Justification)
 			}
+			// Enum membership alone is not enough. In CycloneDX 1.6
+			// `justification` is only valid alongside `not_affected`, so a
+			// schema-enum-member justification sitting next to
+			// `exploitable` is still an invalid document — and that is
+			// precisely the shape someone re-adds when they "reconcile"
+			// the package doc by restoring code_not_present. Enum
+			// membership passes it; this does not.
+			if a.Justification != "" && a.State != "not_affected" {
+				t.Errorf("decision=%s note=%q: justification %q emitted alongside state %q; justification is only valid with not_affected",
+					decision, note, a.Justification, a.State)
+			}
 			for _, r := range a.Response {
 				if !cdxImpactAnalysisResponse[r] {
 					t.Errorf("decision=%s note=%q: response %q is not a CycloneDX impactAnalysisResponse member", decision, note, r)

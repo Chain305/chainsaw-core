@@ -231,12 +231,22 @@ func runAuditView(cmd *cobra.Command, _ []string) error {
 			e.Actor,
 			e.Action,
 			e.Resource,
+			auditCellOrDash(e.Client, g),
 			auditCellOrDash(e.Decision, g),
 			auditCellOrDash(e.Status, g),
 			auditCellOrDash(e.Severity, g),
+			auditCellOrDash(e.RequestingIP, g),
 		}
 	}
-	PrintTable([]string{"TIMESTAMP", "ACTOR", "ACTION", "RESOURCE", "DECISION", "STATUS", "SEVERITY"}, rows)
+	// CLIENT and IP were parsed off the wire and written to the CSV export
+	// but never rendered here, so `chainsaw audit view` could not answer
+	// "from where" at all — the IP half of the per-transaction audit
+	// requirement was invisible on the one surface an operator actually
+	// reads. IP goes LAST because an IPv6 address runs to 45 characters and
+	// PrintTable never pads the final column, so a long value costs nothing
+	// to the columns before it. (The CSV's separate "requesting_ip last"
+	// rule is about positional awk/cut consumers and does not apply here.)
+	PrintTable([]string{"TIMESTAMP", "ACTOR", "ACTION", "RESOURCE", "CLIENT", "DECISION", "STATUS", "SEVERITY", "IP"}, rows)
 	return nil
 }
 

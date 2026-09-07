@@ -29,16 +29,59 @@ func TestValidatePolicy_AcceptsCooldownOnlyPolicy(t *testing.T) {
 	}
 }
 
-// T3 — the proxy matrix must report cooldown support for exactly the same
-// ecosystems as package age. Both read provenance release-date metadata (cooldown
-// the per-version date, package-age the per-package date), so their support is
-// identical across every ecosystem.
-func TestProxyMatrix_CooldownMirrorsPackageAge(t *testing.T) {
+// T3 (was TestProxyMatrix_CooldownMirrorsPackageAge) — the two publish-age
+// columns must NOT move together.
+//
+// The old assertion was `Support(eco, Cooldown) == Support(eco, PackageAge)`
+// for every ecosystem, justified as "both read release-date metadata". That
+// was defect N1 written down as an invariant: they read DIFFERENT dates, and
+// they are equal only because the proxy was aliasing one into the other.
+// Cooldown keys on VersionReleaseDate, which every per-format fetcher
+// hydrates and which the hot path backfills from the artifact's
+// Last-Modified header. PackageAge keys on PackageReleaseDate, a genuine
+// package-creation date that only three registries expose.
+//
+// This replacement is strictly tighter than the equality it removes: it pins
+// each column's exact shape and the direction of the relation, so
+// re-collapsing them fails here rather than passing.
+func TestProxyMatrix_CooldownAndPackageAgeSupportDiverge(t *testing.T) {
+	// The three formats formatSuppliesCreationDate covers
+	// (internal/server/package_metadata.go); yarn and bun fold into npm.
+	creationDateEcos := map[Ecosystem]bool{EcoNPM: true, EcoPyPI: true, EcoComposer: true}
+
 	for _, eco := range AllEcosystems() {
 		age := Support(eco, ConditionPackageAge)
 		cool := Support(eco, ConditionCooldown)
-		if age != cool {
-			t.Errorf("ecosystem %s: cooldown support %s != package-age support %s", eco, cool, age)
+
+		switch {
+		case eco == EcoAPT:
+			// apt has no arm in either half of the release-date switch.
+			if age != SupportNone || cool != SupportNone {
+				t.Errorf("apt: want both None, got packageAge=%s cooldown=%s", age, cool)
+			}
+			continue
+		case creationDateEcos[eco]:
+			if age != SupportFull {
+				t.Errorf("%s: packageAge=%s, want full — this registry DOES expose a "+
+					"package-creation date", eco, age)
+			}
+		default:
+			if age != SupportPartial {
+				t.Errorf("%s: packageAge=%s, want partial. Full would mean a creation-date "+
+					"source appeared (add it to formatSuppliesCreationDate and to "+
+					"creationDateEcos above); None is never correct here — IsUnsupported "+
+					"is `== SupportNone` and makes detectUnsupported discard the WHOLE "+
+					"policy, the P8-16/P8-17 fail-open", eco, age)
+			}
+		}
+
+		if cool != SupportFull {
+			t.Errorf("%s: cooldown=%s, want full — VersionReleaseDate is hydrated on "+
+				"every non-apt ecosystem", eco, cool)
+		}
+		if age == SupportFull && cool != SupportFull {
+			t.Errorf("%s: packageAge (%s) outranks cooldown (%s); cooldown's date source "+
+				"is a superset, so this is impossible", eco, age, cool)
 		}
 	}
 }

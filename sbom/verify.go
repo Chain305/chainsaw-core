@@ -94,7 +94,7 @@ func VerifySignedSBOM(ctx context.Context, bundleJSON []byte, bom *CycloneDXBOM,
 // need to lift the in-toto Statement back out of the signed payload. The
 // full sigstore-go bundle type does the same parsing internally; we
 // duplicate the small piece here to avoid a hard dependency from
-// internal/sbom on sigstore-go's bundle package.
+// core/sbom on sigstore-go's bundle package.
 type dsseEnvelopeShape struct {
 	DSSE struct {
 		Payload     string `json:"payload"`

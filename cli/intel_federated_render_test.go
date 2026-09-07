@@ -26,7 +26,7 @@ func TestFederatedNotFoundRendersNotEvaluated(t *testing.T) {
 	renderEvaluation(&buf, sampleEvaluation(),
 		"not evaluated: the coordinate was not found in repo1.maven.org, and this "+
 			"ecosystem is served by more than one registry — it may exist in a "+
-			"private mirror or another repository")
+			"private mirror or another repository", nil)
 	out := buf.String()
 
 	if !strings.Contains(out, "NOT EVALUATED") {
@@ -48,7 +48,7 @@ func TestFederatedNotFoundRendersNotEvaluated(t *testing.T) {
 // above.
 func TestFederatedFoundKeepsItsGrade(t *testing.T) {
 	var buf bytes.Buffer
-	renderEvaluation(&buf, sampleEvaluation(), "")
+	renderEvaluation(&buf, sampleEvaluation(), "", nil)
 	out := buf.String()
 
 	if !strings.Contains(out, "ALLOW") {
@@ -147,7 +147,7 @@ func unknownEvaluation() *v1Evaluation {
 // times as a successful block in a client-facing QA document.
 func TestUnknownVerdictIsNotRenderedAsGradeF(t *testing.T) {
 	var buf bytes.Buffer
-	renderEvaluation(&buf, unknownEvaluation(), "")
+	renderEvaluation(&buf, unknownEvaluation(), "", nil)
 	out := buf.String()
 
 	if !strings.Contains(out, "NOT EVALUATED") {
@@ -195,7 +195,7 @@ func TestUnknownVerdictIsNotRenderedAsGradeF(t *testing.T) {
 // this, "render everything as not evaluated" passes the test above.
 func TestScoredVerdictKeepsItsGrade(t *testing.T) {
 	var buf bytes.Buffer
-	renderEvaluation(&buf, sampleEvaluation(), "")
+	renderEvaluation(&buf, sampleEvaluation(), "", nil)
 	out := buf.String()
 
 	if !strings.Contains(out, "96") || !strings.Contains(out, "(A)") {
@@ -210,7 +210,7 @@ func TestScoredVerdictKeepsItsGrade(t *testing.T) {
 // the same silence about what actually happened.
 func TestFederatedAbsenceAlsoSaysNotRefused(t *testing.T) {
 	var buf bytes.Buffer
-	renderEvaluation(&buf, sampleEvaluation(), "not evaluated: not found in repo1.maven.org")
+	renderEvaluation(&buf, sampleEvaluation(), "not evaluated: not found in repo1.maven.org", nil)
 	out := buf.String()
 
 	if !strings.Contains(out, "NOT refused") || !strings.Contains(out, "PERMITTED") {

@@ -1,7 +1,7 @@
 // Package attestation persists verified provenance and SBOM attestations
 // to the shared `attestations` table in pgstore. It is the storage layer
-// that sits beneath both internal/provenance (which produces SLSA / GPG /
-// x509 / sumdb attestations during package verification) and internal/sbom
+// that sits beneath both core/provenance (which produces SLSA / GPG /
+// x509 / sumdb attestations during package verification) and core/sbom
 // (which produces signed CycloneDX SBOM attestations on export).
 //
 // Attestation rows are facts about a package coordinate, not about a

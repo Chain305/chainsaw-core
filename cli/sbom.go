@@ -119,7 +119,7 @@ func init() {
 	rootCmd.AddCommand(sbomCmd)
 }
 
-// sbom vex — see internal/sbom/vex.go for the mapping rules.
+// sbom vex — see core/sbom/vex.go for the mapping rules.
 //
 // Subtree shape: `chainsaw sbom vex export [--org] [-o vex.json]`. Kept
 // separate from `sbom export` because VEX speaks vulnerabilities, not
@@ -150,7 +150,9 @@ The exception's note rides along in analysis.detail verbatim. It is not
 parsed into a justification: only you can assert reachability, and
 Chainsaw will not make that claim on your behalf.
 
-Denied and expired exceptions are excluded.`,
+Denied and expired exceptions are excluded, as are exceptions still
+awaiting approval — an unapproved exception grants nothing at enforcement
+time, so it must not be published as a compliance statement.`,
 	RunE: runSBOMVexExport,
 }
 
@@ -205,7 +207,12 @@ func runSBOMVexExport(cmd *cobra.Command, _ []string) error {
 // Note, so we forward them straight through. Empty Decision falls back to
 // "allow" so historical rows (written before the columns existed and now
 // surfaced as NULL → "") still produce the same VEX output as before this
-// change — see internal/sbom/vex.go::analyzeException for the mapping rules.
+// change — see core/sbom/vex.go::analyzeException for the mapping rules.
+//
+// Status is forwarded VERBATIM, including the empty string. BuildVEX
+// deny-lists the not-in-effect lifecycle values; normalising or defaulting
+// it here would put a second, divergent copy of that judgement in the
+// adapter. See sbom.ExceptionStatusNotInEffect.
 func exceptionItemsToVEXInput(items []exceptionItem) []sbom.Exception {
 	out := make([]sbom.Exception, 0, len(items))
 	for _, e := range items {
@@ -222,6 +229,7 @@ func exceptionItemsToVEXInput(items []exceptionItem) []sbom.Exception {
 			Version:    e.Version,
 			CVE:        e.CVE,
 			Note:       e.Note,
+			Status:     e.Status,
 			CreatedAt:  e.CreatedAt,
 			ExpiresAt:  e.ExpiresAt,
 		})
@@ -478,7 +486,7 @@ func writeDiffText(w interface{ Write(p []byte) (int, error) }, r sbom.DiffResul
 }
 
 // ecosystemLabel pulls the PURL ecosystem prefix for the text formatter.
-// Mirrors the logic in internal/sbom but avoids exporting it; the diff
+// Mirrors the logic in core/sbom but avoids exporting it; the diff
 // rendering is the only consumer that needs it on the CLI side.
 func ecosystemLabel(purl string) string {
 	if !strings.HasPrefix(purl, "pkg:") {

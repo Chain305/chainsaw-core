@@ -39,20 +39,20 @@ cannot produce a maintainer signal.
 |---|---:|---:|---:|
 | npm | 43 | 4 | 6 |
 | PyPI | 45 | 4 | 4 |
-| Maven | 20 | 15 | 18 |
-| Cargo | 36 | 2 | 15 |
+| Maven | 19 | 16 | 18 |
+| Cargo | 35 | 3 | 15 |
 | Composer | 33 | 4 | 16 |
-| RubyGems | 37 | 4 | 12 |
-| NuGet | 24 | 11 | 18 |
-| Go | 29 | 1 | 23 |
-| Hugging Face | 21 | 2 | 30 |
-| CocoaPods | 26 | 2 | 25 |
-| Swift | 21 | 8 | 24 |
-| Pub (Dart) | 19 | 11 | 23 |
-| Docker / OCI | 16 | 1 | 36 |
+| RubyGems | 36 | 5 | 12 |
+| NuGet | 23 | 12 | 18 |
+| Go | 28 | 2 | 23 |
+| Hugging Face | 20 | 3 | 30 |
+| CocoaPods | 25 | 3 | 25 |
+| Swift | 20 | 9 | 24 |
+| Pub (Dart) | 18 | 12 | 23 |
+| Docker / OCI | 15 | 2 | 36 |
 | APT | 12 | 1 | 40 |
-| Yum | 14 | 1 | 38 |
-| DNF | 14 | 1 | 38 |
+| Yum | 13 | 2 | 38 |
+| DNF | 13 | 2 | 38 |
 
 **Partial** means the condition is wired but the underlying signal is
 incomplete in practice — Swift licence-to-SPDX mapping, for example, or

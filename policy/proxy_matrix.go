@@ -45,12 +45,39 @@ const (
 	ConditionMalwareIndex ConditionType = "MalwareIndex"
 	ConditionEPSS         ConditionType = "EPSS"
 	ConditionCVE          ConditionType = "CVE"
-	ConditionPackageAge   ConditionType = "PackageAge"
+	// ConditionPackageAge — the packageAge gate. It reads the per-PACKAGE
+	// creation date (EvaluationContext.PackageReleaseDate), and only THREE
+	// ecosystems can supply one: npm (packument `time.created`), pip (the
+	// earliest `upload_time` in the PyPI JSON) and composer (the earliest
+	// `time` in the p2 listing) — the set pinned by
+	// formatSuppliesCreationDate in internal/server/package_metadata.go,
+	// with yarn and bun folding into npm via EcosystemForFormat. Those
+	// three are SupportFull.
+	//
+	// Every other row is SupportPartial: the column stays nil, the
+	// condition never matches, and the F5 emitter reports it as
+	// `publish_date_unavailable` rather than deciding silently. They read
+	// Full until defect N1 was closed, because
+	// interceptPolicyViolation re-populated the column from the artifact's
+	// Last-Modified header — so the cells were accurate about a wrong
+	// behaviour, and lowering them had to wait for the code change.
+	//
+	// SupportPartial, NEVER SupportNone. IsUnsupported is `== SupportNone`
+	// and makes detectUnsupported `continue` past the WHOLE policy, not
+	// past this one condition — which would skip legacy exceptions
+	// (Conditions.IsVulnerable=true) on those repos and make
+	// internal/formats/matrix.go 400 a POST /api/policies for the pair.
+	// That direction has been rejected twice, as P8-16 and P8-17.
+	// SupportPartial is documentary and verdict-neutral.
+	ConditionPackageAge ConditionType = "PackageAge"
 	// ConditionCooldown — the cooldownDays publish-age quarantine. It
 	// reads the per-VERSION release date (EvaluationContext.VersionReleaseDate),
-	// the same provenance-metadata dependency as ConditionPackageAge (which
-	// reads the per-PACKAGE date). Support is therefore identical to
-	// ConditionPackageAge for every ecosystem.
+	// which every per-format fetcher hydrates and which the proxy hot path
+	// additionally backfills from the artifact's Last-Modified header. It
+	// is therefore SupportFull everywhere ConditionPackageAge is merely
+	// Partial; the two agree only on apt, where the release-date switch has
+	// no arm at all. Do not re-collapse the two columns — that they moved
+	// as one was the symptom of N1, not a rule.
 	ConditionCooldown                   ConditionType = "Cooldown"
 	ConditionLicense                    ConditionType = "License"
 	ConditionHasProvenance              ConditionType = "HasProvenance"
@@ -478,8 +505,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull,
 		ConditionTyposquat:                  SupportFull,
@@ -598,11 +625,11 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportPartial, // emerging Dart feed; override-only today
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull, // fetchPubReleaseDate
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
-		ConditionLicense:                    SupportFull, // fetchPubLicense
-		ConditionHasProvenance:              SupportNone, // no pub provenance standard
-		ConditionTyposquat:                  SupportFull, // enrolled corpus (pubTopSeed)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionLicense:                    SupportFull,    // fetchPubLicense
+		ConditionHasProvenance:              SupportNone,    // no pub provenance standard
+		ConditionTyposquat:                  SupportFull,    // enrolled corpus (pubTopSeed)
 		ConditionCVSS:                       SupportFull,
 		ConditionReservedNamespaces:         SupportFull,
 		ConditionHasInstallScript:           SupportNone, // no lifecycle-script concept
@@ -661,8 +688,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportNone, // no standard
 		ConditionTyposquat:                  SupportFull,
@@ -809,8 +836,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull,
 		ConditionTyposquat:                  SupportFull,
@@ -879,8 +906,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull,
 		ConditionTyposquat:                  SupportFull,
@@ -944,8 +971,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull,
 		ConditionTyposquat:                  SupportFull, // PR 4: enrolled via curated seed list
@@ -1007,8 +1034,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull,
 		ConditionTyposquat:                  SupportFull,
@@ -1067,8 +1094,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportNone, // no standard
 		ConditionTyposquat:                  SupportFull, // PR 4: enrolled via curated seed list
@@ -1130,8 +1157,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull, // via GHSA bridge
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportPartial,
 		ConditionHasProvenance:              SupportPartial, // configurable
 		ConditionTyposquat:                  SupportFull,
@@ -1190,8 +1217,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportFull,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull,
 		ConditionTyposquat:                  SupportFull,
@@ -1311,8 +1338,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportPartial,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull, // repomd.xml → primary.xml → .rpm
 		ConditionTyposquat:                  SupportNone, // low-risk
@@ -1369,8 +1396,8 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionMalwareIndex:               SupportPartial,
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
-		ConditionPackageAge:                 SupportFull,
-		ConditionCooldown:                   SupportFull, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionPackageAge:                 SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                   SupportFull,    // same metadata dep as PackageAge (per-version vs per-package release date)
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull, // repomd.xml → primary.xml → .rpm
 		ConditionTyposquat:                  SupportNone, // low-risk
