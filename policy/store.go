@@ -695,6 +695,9 @@ func (s *Store) Create(policy Policy) (Policy, error) {
 	}
 	now := time.Now().UTC()
 	policy.ID = id
+	if err := assertNotReservedID(policy.ID); err != nil {
+		return Policy{}, err
+	}
 	policy.Name = strings.TrimSpace(policy.Name)
 	policy.Description = strings.TrimSpace(policy.Description)
 	policy.CreatedAt = now
@@ -808,6 +811,9 @@ func (s *Store) Update(id string, policy Policy) (Policy, error) {
 
 	now := time.Now().UTC()
 	policy.ID = id
+	if err := assertNotReservedID(policy.ID); err != nil {
+		return Policy{}, err
+	}
 	policy.Name = strings.TrimSpace(policy.Name)
 	policy.Description = strings.TrimSpace(policy.Description)
 	policy.UpdatedAt = now
@@ -1056,6 +1062,42 @@ func scanPolicy(row policyScanner) (Policy, error) {
 	}
 
 	return policy, nil
+}
+
+// ReservedFindingPolicyIDPrefix namespaces the synthetic policy ids that
+// verdict recall stamps on the findings it mints (`recall:malware`,
+// `recall:cve`, …). Those ids are not policies — nothing evaluates them —
+// but they occupy the same column, and `findings` dedups open rows on
+// (org_id, policy_id, package_name, package_version) via the partial
+// unique index uq_findings_dedup_window. A stored policy sharing one
+// would merge a real enforcement finding into a recall row; the index
+// keeps the FIRST row, so the survivor would carry the wrong reason and
+// the wrong severity.
+//
+// HONEST SCOPE, because the first version of this guard was theatre:
+// **no reachable path today lets a caller choose a policy id.** Create
+// overwrites whatever the body sent with a generated `pol-<unixnano>-<hex>`
+// (see newID below), Update takes the id from the URL path and cannot
+// insert, and the only caller-supplied ids are the compile-time
+// constants in system_policies.go. So this cannot fire now.
+//
+// It is kept, and moved onto the EFFECTIVE id, because the earlier
+// placement — inside validatePolicy, which runs against the request
+// body before Create reassigns — checked a value that was then thrown
+// away. That is the "guard that cannot fail on the real bug" shape:
+// green forever, protecting nothing. Checking what is actually about to
+// be stored means a future import, restore or migration path that does
+// honour a caller id gets caught by it.
+const ReservedFindingPolicyIDPrefix = "recall:"
+
+// assertNotReservedID refuses to store a policy in the recall namespace.
+// Called AFTER the id is assigned, so it sees the value that will hit
+// the column.
+func assertNotReservedID(id string) error {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), ReservedFindingPolicyIDPrefix) {
+		return fmt.Errorf("policy id %q uses the reserved %q prefix: that namespace belongs to verdict-recall findings and a collision would merge a real finding into a recall row", id, ReservedFindingPolicyIDPrefix)
+	}
+	return nil
 }
 
 func validatePolicy(policy Policy) error {

@@ -1547,6 +1547,41 @@ func hasTransitiveSignal(ts risk.TransitiveSeverity) bool {
 // restrictive. Used to pick the worse of (tree-evaluator verdict,
 // second-pass verdict) when the second pass fires a transitive
 // critical / malware signal that the tree-decay rollup couldn't surface.
+// The tail `return 0` puts VerdictUnknown at the same rank as
+// VerdictAllow, which core/risk/evaluation.go:24-42 forbids in general.
+// It is deliberate HERE, and the reason is reachability rather than
+// tolerance. Do not "fix" it without reading this and
+// TestVerdictRankUnknownFoldIsUnreachable, which pins the argument.
+//
+// The single call site (line ~489) compares two evaluations that are
+// both EvaluatePackage over the SAME Input:
+//
+//   - rootEval   = te.ByKey[rootKey], produced by EvaluateTree ->
+//     EvaluatePackage(inputs[rootKey], opts)   (core/risk/tree.go:127)
+//   - secondEval = EvaluatePackage(rootInput, ...) where rootInput is
+//     inputs[rootKey] plus six Transitive*Count fields
+//
+// Nothing between them touches SignalsUnavailable, and that flag is the
+// ONLY route to VerdictUnknown: EvaluatePackage returns
+// UnavailableEvaluation solely under `if in.SignalsUnavailable`, and
+// resolveVerdict has no path that returns Unknown. So:
+//
+//   - SignalsUnavailable == false -> neither evaluation can be Unknown,
+//     and the dangerous case (a clean root that an unevaluable transitive
+//     pass should have pulled down) cannot arise.
+//   - SignalsUnavailable == true  -> BOTH take the same branch, so they
+//     are both Unknown, or both the instantBlock quarantine. Equal ranks
+//     do not satisfy the strict `>`, so no overlay happens either way.
+//
+// The asymmetric cases are also safe: root=Quarantine vs second=Unknown
+// keeps the root (0 > 4 is false), and root=Unknown vs second=Warn takes
+// the warn, which is strictly more informative than "we could not tell".
+//
+// core/intelligence/supplychain_alert.go's recallVerdictRank has a
+// `return -1` tail instead, and the two MUST NOT be merged. Verdict
+// recall compares verdicts from two PERSISTED reports, either of which
+// may genuinely be Unknown, so there the fold is reachable and wrong.
+// Same ladder, different reachability, different tail.
 func verdictRank(v risk.Verdict) int {
 	switch v {
 	case risk.VerdictAllow:
