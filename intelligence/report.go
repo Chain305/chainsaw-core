@@ -1250,11 +1250,35 @@ type ObservationSection struct {
 // a visible "stale" into an invisible "wrong". A full rescan is required and
 // the epoch is what forces it, coordinate by coordinate.
 //
-// DEPLOY NOTE: ship this behind CHAINSAW_INTELLIGENCE_MIN_SERVEABLE_EPOCH=13,
+// Epoch 15 (2026-09-13) — SIGNAL OVERRIDES APPLIED. The narrowest bump in this
+// list, and it is still required, because the thing that changed is the text
+// the reader acts on.
+//
+// maint.unpopular_package emits `severity_override` on the arm where the
+// download count could not be FETCHED. Nothing in the tree read that key, so
+// the signal was persisted as SevInfo carrying its registered title, "Very low
+// download count" — on lodash, which has tens of millions of weekly downloads.
+// A fetch failure was stored, and served, as a finding about adoption.
+// applySignalOverrides now honours the key, plus a title_override that retitles
+// that arm to "Download count unavailable".
+//
+// Why an epoch and not a backfill: store.go serves the persisted
+// risk_evaluation verbatim, and the title lives inside the stored FiredSignal.
+// Every already-scanned coordinate keeps the false title until the row is
+// re-derived, and recomputeStaleOnce only sweeps MATCHER-stale rows — so
+// without a bump the corpus never corrects itself. Unlike epochs 7, 8 and 14
+// this one COULD in principle be re-scored from stored facts; it is not worth
+// a second code path, and the full rescan has a bonus: it re-fetches the
+// download counts, so coordinates whose fetch failed may come back with a real
+// number instead of the unknown arm at all.
+//
+// DEPLOY NOTE: ship this behind CHAINSAW_INTELLIGENCE_MIN_SERVEABLE_EPOCH=14,
 // let the backlog drain, then remove the env and redeploy. Raising the floor
 // cold collapses transitive resolution — measured on the 5→8 bump, dependency
-// lookups served fell 92,046 → 11,744.
-const CurrentMatcherEpoch = 14
+// lookups served fell 92,046 → 11,744. The epoch-14 drain (2026-09-13) took
+// ~4,900 coordinates and about 95 minutes of sweep time at 1500 rows/20min
+// with failed=0 throughout, so the same pacing is the starting point here.
+const CurrentMatcherEpoch = 15
 
 // MinServeableEpoch is the floor a cached row must meet to be SERVED. It
 // normally equals CurrentMatcherEpoch and MUST be returned to that value

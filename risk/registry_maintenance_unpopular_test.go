@@ -68,8 +68,24 @@ func TestMaintUnpopularPackage_NilDownloads_Quiet(t *testing.T) {
 }
 
 // TestMaintUnpopularPackage_Sentinel_EmitsUnknownSeverity verifies that the
-// sentinel value (-1) causes the signal to fire with the SevUnknown metadata
-// embedded in the evidence map.
+// sentinel value (-1) reaches the reader as "we could not measure this".
+//
+// INVERTED 2026-09-13, deliberately, and the previous assertions are recorded
+// here so nobody "fixes" this back. It used to assert:
+//
+//	fs.Severity stays SevInfo, and fs.Evidence["severity_override"] == "unknown"
+//	"so the UI/API can render unknown"
+//
+// No UI and no API ever did. `severity_override` was written by this one
+// signal and read by nothing in the tree, so the contract this test pinned
+// was that the override is EMITTED — not that it has any effect. Meanwhile
+// the registered title, "Very low download count", shipped verbatim on the
+// arm where the count was never fetched: lodash, with tens of millions of
+// weekly downloads, was published as low-adoption because the fetch failed.
+//
+// The override is now applied in applySignalOverrides and the key is stripped
+// from evidence once consumed, so this test asserts the EFFECT instead of the
+// emission.
 func TestMaintUnpopularPackage_Sentinel_EmitsUnknownSeverity(t *testing.T) {
 	sentinel := unknownDownloadsSentinel
 	in := Input{Ecosystem: "npm", WeeklyDownloads: &sentinel}
@@ -81,19 +97,21 @@ func TestMaintUnpopularPackage_Sentinel_EmitsUnknownSeverity(t *testing.T) {
 	found := false
 	for _, cat := range eval.DirectScore.Categories {
 		for _, fs := range cat.FiredSignals {
-			if fs.ID == SignalMaintUnpopularPackage {
-				found = true
-				// The signal itself is registered as SevInfo, but the
-				// evidence map contains a severity_override key so the
-				// UI/API can render "unknown".
-				if fs.Evidence == nil {
-					t.Errorf("expected evidence map, got nil")
-					continue
-				}
-				if fs.Evidence["severity_override"] != string(SevUnknown) {
-					t.Errorf("expected severity_override=%q, got %v",
-						SevUnknown, fs.Evidence["severity_override"])
-				}
+			if fs.ID != SignalMaintUnpopularPackage {
+				continue
+			}
+			found = true
+			if fs.Severity != SevUnknown {
+				t.Errorf("severity = %q, want %q — the override must be applied, "+
+					"not merely emitted", fs.Severity, SevUnknown)
+			}
+			if fs.Title == "Very low download count" {
+				t.Error("an UNFETCHED download count still carries the low-count " +
+					"title; absence of evidence must not read as evidence")
+			}
+			if _, leaked := fs.Evidence["severity_override"]; leaked {
+				t.Error("severity_override leaked into rendered evidence — it is " +
+					"control data, and every evidence key is shown to the reader")
 			}
 		}
 	}

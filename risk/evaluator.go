@@ -262,11 +262,13 @@ func runNamedPrimitiveSignals(in Input, overrides map[string]int, ids ...string)
 				w = float64(ov)
 			}
 		}
+		sev, title := sig.Severity, sig.Title
+		sev, title, evidence = applySignalOverrides(sev, title, evidence)
 		out[id] = FiredSignal{
 			ID:       id,
 			Category: sig.Category,
-			Title:    sig.Title,
-			Severity: sig.Severity,
+			Title:    title,
+			Severity: sev,
 			Weight:   w,
 			Detail:   detail,
 			Evidence: evidence,
@@ -294,11 +296,13 @@ func runPrimitiveSignals(in Input, overrides map[string]int) map[string]FiredSig
 				w = float64(ov)
 			}
 		}
+		sev, title := sig.Severity, sig.Title
+		sev, title, evidence = applySignalOverrides(sev, title, evidence)
 		out[id] = FiredSignal{
 			ID:       id,
 			Category: sig.Category,
-			Title:    sig.Title,
-			Severity: sig.Severity,
+			Title:    title,
+			Severity: sev,
 			Weight:   w,
 			Detail:   detail,
 			Evidence: evidence,
@@ -306,6 +310,57 @@ func runPrimitiveSignals(in Input, overrides map[string]int) map[string]FiredSig
 	}
 	return out
 }
+
+// applySignalOverrides lets a Fires function report a severity or title that
+// depends on WHICH arm of the detector fired — something the static Signal
+// record cannot express.
+//
+// It exists because the convention was already being written and read by
+// nobody. `maint.unpopular_package` has emitted
+// `{"severity_override": "unknown"}` since it was written, and its
+// registration carries the comment "overridden to SevUnknown in the Fires
+// func" — while nothing anywhere applied it, so the signal shipped as
+// SevInfo.
+//
+// The TITLE matters more than the severity, and it is the part that was
+// actually wrong rather than merely unenforced. When the download count
+// cannot be fetched, that signal's detail correctly reads "Weekly download
+// count unavailable" while its registered title reads "Very low download
+// count" — so the page stated as fact the very thing it had failed to
+// measure. Reported on lodash, where a fetch failure was rendered as low
+// adoption for a package with tens of millions of weekly downloads.
+// Absence of evidence must not be presented as evidence.
+//
+// Both keys are REMOVED from the evidence map once applied: they are control
+// data for this function, not findings, and every remaining evidence key is
+// rendered to the reader.
+func applySignalOverrides(sev Severity, title string, evidence map[string]any) (Severity, string, map[string]any) {
+	if len(evidence) == 0 {
+		return sev, title, evidence
+	}
+	if v, ok := evidence[evidenceSeverityOverride].(string); ok && v != "" {
+		sev = Severity(v)
+		delete(evidence, evidenceSeverityOverride)
+	}
+	if v, ok := evidence[evidenceTitleOverride].(string); ok && v != "" {
+		title = v
+		delete(evidence, evidenceTitleOverride)
+	}
+	if len(evidence) == 0 {
+		// A map that held nothing but overrides is not evidence. Returning
+		// nil stops AlertCard offering an expandable disclosure with an
+		// empty body.
+		return sev, title, nil
+	}
+	return sev, title, evidence
+}
+
+// Evidence keys reserved as control data for applySignalOverrides. They are
+// consumed and stripped, never shown.
+const (
+	evidenceSeverityOverride = "severity_override"
+	evidenceTitleOverride    = "title_override"
+)
 
 // runCompoundRules walks CompoundRules and returns the map of fired
 // compound records keyed by ID. Compound rules have access to the set of

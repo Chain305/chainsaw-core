@@ -223,7 +223,7 @@ func init() {
 	register(Signal{
 		ID:       SignalMaintUnpopularPackage,
 		Category: CategoryMaintenance,
-		Severity: SevInfo, // overridden to SevUnknown in the Fires func when data is absent
+		Severity: SevInfo, // the unknown arm overrides this to SevUnknown via evidence; see applySignalOverrides
 		Weight:   0,
 		Title:    "Very low download count",
 		Description: "The package receives very few weekly downloads (npm <100/wk, PyPI <50/wk), " +
@@ -243,8 +243,17 @@ func init() {
 				if isOfflineForSignal() {
 					msg = "Weekly download data unavailable (offline mode)."
 				}
-				return true, msg,
-					map[string]any{"severity_override": string(SevUnknown)}
+				// title_override, not just the detail line. The registered
+				// title is "Very low download count"; on THIS arm we did
+				// not measure the count at all, and a page that renders
+				// the title beside a MAINTENANCE badge states as fact the
+				// thing the detail says we failed to fetch. Reported on
+				// lodash — tens of millions of weekly downloads, shown as
+				// low adoption because the fetch failed.
+				return true, msg, map[string]any{
+					"severity_override": string(SevUnknown),
+					"title_override":    "Download count unavailable",
+				}
 			}
 			eco := in.Ecosystem
 			switch {

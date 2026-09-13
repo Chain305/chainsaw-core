@@ -34,9 +34,15 @@ func TestUnpopularPackage_AirGap_DoesNotFire(t *testing.T) {
 
 // TestUnpopularPackage_FetchError_FiresSevUnknown locks in the
 // distinguishing behaviour: when the provider ran but couldn't reach the
-// upstream, it sets WeeklyDownloads = &-1 and the signal fires with a
-// severity_override of SevUnknown so the operator knows the package was
-// not classified, not that the package is popular.
+// upstream, it sets WeeklyDownloads = &-1 and the reader is told the package
+// was NOT CLASSIFIED — not that it is unpopular.
+//
+// INVERTED 2026-09-13. It used to assert the presence of an
+// `Evidence["severity_override"]` key, which nothing in the tree consumed,
+// so the property it locked in was "the override is emitted" rather than
+// "the reader is not misled". The effect is now asserted instead: severity
+// and title both reflect the unmeasured arm. Old assertion kept in this
+// comment so the emission-only form is not restored.
 func TestUnpopularPackage_FetchError_FiresSevUnknown(t *testing.T) {
 	sentinel := unknownDownloadsSentinel
 	in := Input{Ecosystem: "npm", WeeklyDownloads: &sentinel}
@@ -47,19 +53,22 @@ func TestUnpopularPackage_FetchError_FiresSevUnknown(t *testing.T) {
 	// And the firing must carry severity_override=unknown so the API/UI
 	// renders it correctly. Nested loop because the firing lives inside a
 	// category bucket on the Evaluation.
-	var sevOverride any
+	var sev Severity
+	var title string
 	for _, cat := range eval.DirectScore.Categories {
 		for _, fs := range cat.FiredSignals {
 			if fs.ID == SignalMaintUnpopularPackage {
-				if fs.Evidence != nil {
-					sevOverride = fs.Evidence["severity_override"]
-				}
+				sev, title = fs.Severity, fs.Title
 			}
 		}
 	}
-	if sevOverride != string(SevUnknown) {
-		t.Errorf("expected severity_override=%q on sentinel firing, got %v",
-			SevUnknown, sevOverride)
+	if sev != SevUnknown {
+		t.Errorf("expected severity %q on the sentinel firing, got %q — the "+
+			"override must take effect, not merely be emitted", SevUnknown, sev)
+	}
+	if title == "Very low download count" {
+		t.Errorf("sentinel firing kept the low-count title %q: a count we failed "+
+			"to fetch must not be published as a measured low count", title)
 	}
 }
 
