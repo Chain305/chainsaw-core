@@ -184,9 +184,17 @@ func (p *osvProvider) Supports(ecosystem string) bool {
 //  1. Index dormant (nil) — return PartialReport{} so this provider
 //     doesn't touch Vulns. The companion Trivy provider remains the
 //     source of truth in that case.
-//  2. Index loaded, package not covered — return PartialReport{} (do
+//
+//  2. Index loaded, ECOSYSTEM not covered — return PartialReport{} (do
 //     NOT stamp a clean Vulns section; "we don't have data" is
 //     distinct from "we scanned and found nothing").
+//
+//     2′. Index loaded, ecosystem covered, package absent from it —
+//     stamp a clean VulnSection. This is the universal-baseline case:
+//     having the ecosystem's corpus makes "no match" a real negative,
+//     which is what lets OSV be the org-independent vulnerability
+//     source the federated row needs.
+//
 //  3. Index loaded, package covered — return a non-nil VulnSection
 //     populated from the matching advisories, PLUS the ids of the
 //     advisories that were evaluated and did not match, in
@@ -201,18 +209,64 @@ func (p *osvProvider) Run(ctx context.Context, req Request, prior *Report) (Part
 	p.idxMu.RLock()
 	idx := p.idx
 	p.idxMu.RUnlock()
-	if idx == nil {
-		return PartialReport{}, nil
-	}
 	eco := req.Key.Ecosystem
 	pkg := req.Key.Package
 	ver := req.Key.Version
 
-	if !idx.HasPackage(eco, pkg) {
-		// Bundle doesn't cover this package at all — say nothing,
-		// leave Trivy to speak. Distinct from the "covered + clean"
-		// case below.
+	// Shapes 1 and 2 are ONE condition: "we hold no OSV corpus that could
+	// speak for this coordinate's ecosystem." A nil index, an EMPTY bundle,
+	// and a bundle that simply lacks this ecosystem are indistinguishable
+	// from the coordinate's point of view, and all three must reach the
+	// same warning.
+	//
+	// Merging them closes a fail-open that an earlier revision left open.
+	// Under federation `osv` is a producer of coverage.SourceCVE (see
+	// providerToSource), and a provider that merely RUNS earns a
+	// ProviderTiming and therefore an OK ledger entry. The earlier version
+	// warned only on `idx == nil`, so:
+	//
+	//   - an EMPTY bundle (dockerized/build.sh's write_empty_osv_bundle
+	//     fail-soft writes `[]` on any fetch failure) loads fine, leaves
+	//     idx non-nil, emitted no warning, and vouched "cve: OK" on zero
+	//     advisories. That fail-soft's own comment says "loader accepts,
+	//     runtime stays dormant" — true before osv became a coverage
+	//     producer, false after.
+	//   - a bundle missing one ecosystem did the same for that ecosystem.
+	//
+	// Scoped deliberately: only warn where OSV is the SOLE CVE source. For
+	// scanner-advised ecosystems (docker) the Trivy-backed cveProvider
+	// still writes the row, so an absent OSV corpus is not a coverage gap
+	// there and must not be reported as one — that would turn a working
+	// deployment into a hard block for every org on mode: closed.
+	if idx == nil || !idx.HasEcosystem(eco) {
+		if !ecosystemHasScannerAdvisorySource(eco) {
+			return PartialReport{Warnings: []Warning{{
+				Provider: "osv",
+				Code:     warnOSVBundleDormant,
+				Message:  "no osv advisory corpus for this ecosystem (bundle absent, empty, or lacking the ecosystem); no vulnerability data",
+			}}}, nil
+		}
 		return PartialReport{}, nil
+	}
+
+	if !idx.HasPackage(eco, pkg) {
+		// Shape 2′: we hold this ecosystem's corpus and this package
+		// matched none of it. That is positive evidence of absence —
+		// the same epistemic claim the Trivy path already stamps a
+		// ScannedAt from — so stamp a clean section and let
+		// VulnDataAvailable evaluate true.
+		//
+		// Safe against suppression by construction: mergeVulns is
+		// strictly additive (max on CVSS, OR on IsVulnerable, union on
+		// CVEs/CVEDetails/KEVEntries); its ONLY subtractive operation
+		// is the explicit ClearedCVEs veto, and we deliberately leave
+		// ClearedCVEs empty here. A clean stamp therefore cannot
+		// retract a Trivy finding.
+		scannedAt := idx.LoadedAt()
+		return PartialReport{Vulns: &VulnSection{
+			ScannedAt:       &scannedAt,
+			ScannerDBDigest: "osv-bundle",
+		}}, nil
 	}
 
 	hits, cleared, undecided := idx.LookupEx(eco, pkg, ver)

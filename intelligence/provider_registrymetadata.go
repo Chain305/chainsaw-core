@@ -485,7 +485,7 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 	// this is almost certainly a misconfigured registry.
 	limited := &io.LimitedReader{R: resp.Body, N: 8 << 20}
 	if err := decode(limited); err != nil {
-		return &Warning{Provider: "registrymetadata", Code: "decode", Message: err.Error(), At: p.now()}, false, resp.StatusCode, err
+		return &Warning{Provider: "registrymetadata", Code: WarnRegistryDecode, Message: err.Error(), At: p.now()}, false, resp.StatusCode, err
 	}
 	return nil, false, resp.StatusCode, nil
 }
@@ -561,10 +561,14 @@ func (h *npmHuman) UnmarshalJSON(b []byte) error {
 }
 
 type npmVersionMeta struct {
-	License  any `json:"license"`
-	Licenses []struct {
-		Type string `json:"type"`
-	} `json:"licenses"`
+	License any `json:"license"`
+	// `any`, like its Repository/Bugs siblings below, because npm's legacy
+	// manifest allowed BOTH [{"type":"MIT"}] and ["MIT"]. Typed as the
+	// object form, a single legacy version failed the WHOLE packument
+	// decode — rc has 19 such versions, so a package with ~30M weekly
+	// downloads returned no registry metadata at all and scored `allow`.
+	// See npmLicense for the type switch. (F-4, 2026-09-13.)
+	Licenses    any    `json:"licenses"`
 	Description string `json:"description"`
 	Homepage    string `json:"homepage"`
 	Repository  any    `json:"repository"`
@@ -574,7 +578,13 @@ type npmVersionMeta struct {
 		Shasum    string `json:"shasum"`
 		Integrity string `json:"integrity"`
 	} `json:"dist"`
-	Deprecated           string            `json:"deprecated"`
+	// `any`, not string. npm's manifest allows BOTH a deprecation MESSAGE
+	// ("no longer supported") and a bare boolean `true`. Typed as string, a
+	// single version using the boolean form failed the WHOLE packument
+	// decode — which is how react@19.3.0 scored `allow` on zero registry
+	// data until F-4's unavailability arm surfaced it. Same class as
+	// Licenses/Repository/Bugs; see npmDeprecation. (2026-09-13.)
+	Deprecated           any               `json:"deprecated"`
 	Maintainers          []npmHuman        `json:"maintainers"`
 	Author               *npmHuman         `json:"author"`
 	NpmUser              *npmHuman         `json:"_npmUser"`
@@ -718,8 +728,8 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 	if pack.DistTags != nil {
 		release.LatestVersion = pack.DistTags["latest"]
 	}
-	if hasEntry && entry.Deprecated != "" {
-		release.Deprecated = entry.Deprecated
+	if dep := npmDeprecation(entry.Deprecated); hasEntry && dep != "" {
+		release.Deprecated = dep
 	}
 
 	metadata := &MetadataSection{LicenseExpression: license}
@@ -862,9 +872,7 @@ func encodeNPMPackage(pkg string) string {
 	return url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1])
 }
 
-func npmLicense(lic any, legacy []struct {
-	Type string `json:"type"`
-}) string {
+func npmLicense(lic any, legacy any) string {
 	if s, ok := lic.(string); ok {
 		return strings.TrimSpace(s)
 	}
@@ -873,9 +881,48 @@ func npmLicense(lic any, legacy []struct {
 			return strings.TrimSpace(t)
 		}
 	}
-	for _, e := range legacy {
-		if e.Type != "" {
-			return strings.TrimSpace(e.Type)
+	// Legacy `licenses`. npm historically accepted an array of objects
+	// ([{"type":"MIT"}]), an array of bare strings (["MIT"]), and — rarely
+	// — a single string or object. Accept all of them: the point of the
+	// `any` is that an unexpected shape degrades to "no licence", never to
+	// a failed decode of the entire packument.
+	switch v := legacy.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		if t, _ := v["type"].(string); t != "" {
+			return strings.TrimSpace(t)
+		}
+	case []any:
+		for _, e := range v {
+			switch ev := e.(type) {
+			case string:
+				if ev != "" {
+					return strings.TrimSpace(ev)
+				}
+			case map[string]any:
+				if t, _ := ev["type"].(string); t != "" {
+					return strings.TrimSpace(t)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// npmDeprecation normalises npm's `deprecated` field, which is either a
+// human-readable reason string or a bare boolean.
+//
+// A boolean true carries no reason, so it yields a generic marker rather than
+// "" — the caller treats "" as "not deprecated", and dropping it would
+// silence sc.deprecated_by_maintainer for every package using the bool form.
+func npmDeprecation(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case bool:
+		if v {
+			return "deprecated by maintainer"
 		}
 	}
 	return ""
@@ -5465,7 +5512,7 @@ func (p *registryMetadataProvider) gitHubFetchOnce(ctx context.Context, endpoint
 	dec := json.NewDecoder(limited)
 	dec.UseNumber()
 	if err := dec.Decode(out); err != nil {
-		return &Warning{Provider: "registrymetadata", Code: "decode", Message: err.Error(), At: p.now()}
+		return &Warning{Provider: "registrymetadata", Code: WarnRegistryDecode, Message: err.Error(), At: p.now()}
 	}
 	return nil
 }

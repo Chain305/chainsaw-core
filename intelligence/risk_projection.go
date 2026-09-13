@@ -106,6 +106,34 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		return unavailableInput(r, reason)
 	}
 
+	// A registry document we could not PARSE is not a clean package.
+	//
+	// Found 2026-09-13 (F-4). `rc@1.2.9` scored `allow` while its siblings
+	// `coa@2.0.3` and `event-stream@3.3.6` — identically unpublished —
+	// correctly scored `unknown`. The difference was the warning code:
+	// version_not_found routed here, `decode` fell through to the full
+	// projection and scored a package whose registry document had never
+	// been read. The cause was one legacy npm manifest shape failing the
+	// whole packument decode (see npmLicense in
+	// provider_registrymetadata.go), so `rc` — ~30M weekly downloads —
+	// came back with a plausible grade and no data behind it.
+	//
+	// `decode` is deliberately NOT in coverage.unavailableCodes, classified
+	// there as "malformed upstream payload — our parse path, not an
+	// outage". That is correct about BLAME and irrelevant to the VERDICT:
+	// whoever's fault the parse failure is, we learned nothing about the
+	// package. This file's own header warns about exactly this shape —
+	// "a hallucinated version pin comes back with a plausible grade instead
+	// of an answer".
+	//
+	// Kept separate from the coverage-ledger question on purpose. Adding
+	// `decode` to unavailableCodes would make `mode: closed` orgs block on
+	// an unparseable document, which is a different decision with a
+	// different blast radius. This arm changes only the verdict.
+	if reason, ok := registryDecodeReason(r); ok {
+		return unavailableInput(r, reason)
+	}
+
 	// Same treatment for a version string that can never be matched at
 	// all — an unresolved manifest property ("${slf4jVersion}"), our own
 	// synthetic "metadata" marker for a maven-metadata.xml upload, or a
@@ -400,6 +428,34 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// additive.
 	projectActionsSection(r.Actions, &in)
 
+	// --- Transitive severity counts ---
+	// These are written onto the Input by evaluateTransitiveRisk during a
+	// scan, from a BFS over every descendant's cached row, and the result
+	// is persisted on the Report as Resolution.TransitiveSeverity. Reading
+	// them back here is what lets a READER re-score a stored report under
+	// their own weights without redoing that BFS — the tree walk is the
+	// one part of evaluation that is not re-derivable from the Report
+	// alone, so the counts have to come off the Report.
+	//
+	// No write-path behaviour change: on a scan, report.Risk is zero when
+	// the projection first runs (Risk is recomputed every scan and is
+	// deliberately not preserved by mergeReportPayload), so this folds in
+	// zeros exactly as before. It only carries data on the read path,
+	// where Resolution.TransitiveSeverity has been persisted.
+	// Report.Risk is a POINTER and is nil on every not-yet-scored report —
+	// which is precisely the write-path case this function runs in most
+	// often. TransitiveSeverity itself is a value type, so once Risk is
+	// non-nil an unevaluated tree folds in zeros.
+	if r.Risk != nil {
+		ts := r.Risk.Resolution.TransitiveSeverity
+		in.TransitiveCriticalCount = ts.CriticalCount
+		in.TransitiveHighCount = ts.HighCount
+		in.TransitiveMediumCount = ts.MediumCount
+		in.TransitiveLowCount = ts.LowCount
+		in.TransitiveMalwareCount = ts.MalwareCount
+		in.TransitiveBlockedCount = ts.BlockedCount
+	}
+
 	return in
 }
 
@@ -480,6 +536,25 @@ func withTyposquatNote(r *Report, reason string) string {
 // UnavailableEvaluation's summary sentence, so it stays a clause: no
 // leading capital, no trailing period, no em dash (the surrounding
 // sentence already owns one).
+// registryDecodeReason reports whether the registry-metadata provider failed
+// to PARSE the upstream document for this coordinate.
+//
+// Scoped to the registrymetadata provider deliberately. A `decode` warning
+// from some other provider means that provider's lane is blind, not that the
+// package's identity and release facts are unknown — those come from this
+// provider, and without them the projection is reading zero values, not
+// facts. Only this provider's decode failure invalidates the whole input.
+func registryDecodeReason(r *Report) (string, bool) {
+	for _, w := range r.Observation.Warnings {
+		if w.Provider == "registrymetadata" && w.Code == WarnRegistryDecode {
+			return "the registry returned a document we could not parse, so no " +
+				"facts about this version were obtained; this is a gap in our reader, " +
+				"not a statement about the package", true
+		}
+	}
+	return "", false
+}
+
 func versionNotFoundReason(r *Report) (string, bool) {
 	for _, w := range r.Observation.Warnings {
 		if w.Code == WarnVersionNotFound {

@@ -318,6 +318,11 @@ func TestOSVProvider_NoVetoWithoutEvaluation(t *testing.T) {
 		}
 	})
 	t.Run("package not covered", func(t *testing.T) {
+		// This arm asserted `out.Vulns != nil` as a PROXY for "no veto".
+		// Under shape 2′ a package absent from a covered ecosystem does
+		// stamp a clean section, so the proxy is wrong while the actual
+		// invariant — this function's name and the comment above — is
+		// unchanged and still holds. Assert the invariant directly.
 		idx, err := osv.Load(newOSVTestBundle(t))
 		if err != nil {
 			t.Fatalf("Load: %v", err)
@@ -329,8 +334,27 @@ func TestOSVProvider_NoVetoWithoutEvaluation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
+		if out.Vulns != nil && len(out.Vulns.ClearedCVEs) != 0 {
+			t.Fatalf("uncovered package must not veto: %+v", out.Vulns.ClearedCVEs)
+		}
+	})
+	t.Run("uncovered ecosystem stays fully silent", func(t *testing.T) {
+		// The other half of the shape-2 / shape-2′ split: no corpus for
+		// the ecosystem means nothing was evaluated, so Vulns stays nil
+		// rather than stamping a clean section we cannot justify.
+		idx, err := osv.Load(newOSVTestBundle(t))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		p := &osvProvider{idx: idx}
+		out, err := p.Run(context.Background(), Request{
+			Key: Key{Ecosystem: "cargo", Package: "serde", Version: "1.0.0"},
+		}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
 		if out.Vulns != nil {
-			t.Fatalf("uncovered package must not veto: %+v", out.Vulns)
+			t.Fatalf("uncovered ecosystem must leave Vulns nil: %+v", out.Vulns)
 		}
 	})
 }

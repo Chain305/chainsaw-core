@@ -113,7 +113,18 @@ func (p *installScriptsProvider) run(ctx context.Context, req Request, prior *Re
 		buildRsPrimitives []string
 	)
 
-	astEnabled := installscriptAstEnabled(ctx, req.OrgID)
+	// FEDERATION: deliberately NOT req.OrgID. This flag selects between the
+	// AST and regex detectors, and its output lands in report.Scan.* —
+	// FACTS about the package that get persisted on the coordinate-keyed
+	// row every org reads. Threading the scanning org's flag made those
+	// facts depend on who happened to scan first: org A with the flag on
+	// would persist AST-derived findings that org B (flag off) then read as
+	// if they were its own detector's output, and vice versa.
+	//
+	// Rolling the flag out therefore has to be a global decision about the
+	// shared corpus, not a per-tenant one. Evaluated with an empty org so
+	// every writer produces the same facts.
+	astEnabled := installscriptAstEnabled(ctx, "")
 	switch ecosystem {
 	case "npm", "yarn", "bun":
 		if len(files) == 0 {

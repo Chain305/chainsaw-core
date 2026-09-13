@@ -135,7 +135,26 @@ func (s *DefaultService) SetFlight(f xreplicaflight.Flight) {
 // Scan runs the tiered Scan pipeline with cache-first read, singleflight
 // coalescing, and partial-success merging. Never returns an error except
 // on context cancellation or empty Key.
+// Scan resolves a Report for req, from cache or by fanning out to the
+// providers, and returns the REQUESTING ORG'S view of it.
+//
+// The federated body is scanFederated; this wrapper applies the reader's
+// weight overrides and private CVE overlay. Splitting it this way is
+// deliberate: scanFederated has four separate return points (cache-fresh,
+// allow-stale, ephemeral, post-fanout) and wrapping covers all of them at
+// once, so a future return point cannot accidentally skip personalization.
 func (s *DefaultService) Scan(ctx context.Context, req Request) (*Report, error) {
+	rep, err := s.scanFederated(ctx, req)
+	if err != nil {
+		return rep, err
+	}
+	return s.personalize(ctx, req, rep), nil
+}
+
+// scanFederated produces the ORG-INDEPENDENT report that is persisted and
+// shared by every tenant. Nothing it writes may depend on req.OrgID — see
+// personalize.go for the model and the three contaminants that were removed.
+func (s *DefaultService) scanFederated(ctx context.Context, req Request) (*Report, error) {
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
@@ -287,11 +306,19 @@ var stickyPriorLookupTimeout = 3 * time.Second
 // a stale verdict is acceptable for its use. Every caller must therefore
 // check MatcherStale() itself; TestIntelligenceCacheReadsCheckMatcherEpoch
 // enforces that across both modules.
+// The stored row is federated (org-independent); the reader's own weight
+// overrides and private CVE rows are applied on the way out by
+// personalize. A caller passing an empty orgID — the public surface — gets
+// the federated row verbatim.
 func (s *DefaultService) Get(ctx context.Context, orgID string, key Key) (*Report, error) {
 	if s.store == nil {
 		return nil, ErrNotFound
 	}
-	return s.store.Get(ctx, orgID, key) // matcher-epoch-exempt: this IS the raw accessor; callers decide.
+	rep, err := s.store.Get(ctx, orgID, key) // matcher-epoch-exempt: this IS the raw accessor; callers decide.
+	if err != nil {
+		return rep, err
+	}
+	return s.personalize(ctx, Request{OrgID: orgID, Key: key}, rep), nil
 }
 
 // Search delegates to the store.
@@ -708,10 +735,20 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 
 	// Post-merge derived signals. Trust score is computed from the full
 	// merged Report, not a provider — that way it stays O(1) CPU work
-	// with no extra goroutines or cache pressure. We thread the request's
-	// real OrgID so the per-(org, signal) override resolver actually
-	// matches the operator's risk-tuning rows (Validator D.2).
-	ComputeTrustScoreForOrg(report, req.OrgID)
+	// with no extra goroutines or cache pressure.
+	//
+	// FEDERATION: this deliberately no longer threads req.OrgID. The row
+	// this produces is shared by every org and by the anonymous public
+	// surface — intelligence_reports has no org_id — so persisting a
+	// score computed under ONE tenant's private weight overrides made the
+	// stored verdict depend on who happened to scan first. The org's
+	// overrides are now applied at READ time in personalize(), which is
+	// strictly more correct: each reader gets their own weighting instead
+	// of the last writer's.
+	//
+	// ComputeTrustScoreForOrg is intentionally still exported and still
+	// used — personalize() is its new caller.
+	ComputeTrustScore(report)
 
 	// Transitive risk overlay: walks Report.Dependencies.Direct,
 	// looks up each dep's cached intelligence row, builds a one-level
@@ -719,13 +756,21 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	// Report.Risk.RolledUp + Resolution.TransitiveBlame. No-ops when
 	// the cache or risk evaluation aren't populated yet.
 	if s.store != nil {
-		evaluateTransitiveRisk(ctx, s.store, req.OrgID, report)
+		// FEDERATION: orgID dropped. This was already a no-op — the value
+		// reaches only Store.Get/ListVersions, both of which begin
+		// `_ = orgID` — but it is passed as "" now so no future reader
+		// believes the transitive tree is org-scoped. risk.EvaluateTree
+		// itself takes bare Options (no CategoryWeights, no
+		// SignalWeightOverrides), which is why the tree result is safe to
+		// persist on the shared row and is carried over unchanged by
+		// personalize() rather than recomputed per reader.
+		evaluateTransitiveRisk(ctx, s.store, "", report)
 		// The overlay above replaces report.Risk.Verdict and .Resolution
 		// wholesale from a bare-Options tree evaluation, which drops the
 		// upgrade promotion and the known-fix display fields established
-		// by ComputeTrustScoreForOrg. Restore them under the same gates,
-		// now judged against the post-transitive evaluation.
-		ReapplyKnownFixAfterTransitive(report, req.OrgID)
+		// by the trust-score pass. Restore them under the same gates, now
+		// judged against the post-transitive evaluation.
+		ReapplyKnownFixAfterTransitive(report, "")
 	}
 
 	// Async transitive enqueue: fire detached Scans for each direct

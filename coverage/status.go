@@ -68,6 +68,14 @@ var unavailableCodes = map[string]bool{
 	"timeline_fetch_failed":            true,
 	"repolink_probe_error":             true,
 	"transitive_dep_not_cached":        true,
+	// osv_bundle_dormant: the osv provider ran with no advisory index
+	// loaded and the ecosystem has no scanner advisory source, so no
+	// producer supplied vulnerability data for the coordinate. Registered
+	// here for the same reason as transitive_dep_superseded below: `osv`
+	// maps to SourceCVE, a provider that runs earns an OK entry, and an
+	// unregistered code falls through to StatusError, which never blocks.
+	// Leaving it out would let a missing bundle vouch for CVE coverage.
+	"osv_bundle_dormant": true,
 	// transitive_dep_superseded: the dependency IS cached, but the row was
 	// produced by a retired matcher generation, so the transitive walk
 	// skipped it exactly as it skips an absent one. Classified with its

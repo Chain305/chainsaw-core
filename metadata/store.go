@@ -1122,6 +1122,76 @@ func (s *Store) GetVulnerabilityMetadata(repository, packageName, version string
 	return meta, nil
 }
 
+// GetVulnerabilityMetadataAnyRepo retrieves this org's vulnerability
+// metadata for a coordinate WITHOUT requiring the proxy repository name,
+// returning the most recently scanned row when several repos carry one.
+//
+// It exists for the federated read path. GetVulnerabilityMetadata needs the
+// full PK including `repository`, but the federated overlay
+// (intelligence.personalize) runs on Service.Get too, and Get is addressed
+// by (orgID, Key) alone — there is no RepoName to supply. Without this the
+// overlay would silently miss on every Get-path surface (admin UI, BOM
+// events, lockfile scan) and those callers would lose their org's private
+// Trivy findings.
+//
+// Ignoring `repository` is sound rather than merely convenient: the row
+// answers "does this org know of vulnerabilities in this package version",
+// and that fact does not change with which proxy repo the artifact was
+// pulled through. Still scoped by org_id, so it is not a tenancy widening.
+func (s *Store) GetVulnerabilityMetadataAnyRepo(packageName, version string) (VulnerabilityMetadata, error) {
+	if s == nil || s.sql == nil {
+		return VulnerabilityMetadata{}, ErrUnavailable
+	}
+	orgID := tenancy.NormalizeOrgID(s.orgID)
+
+	var (
+		meta                      VulnerabilityMetadata
+		isVulnerable              int
+		cvssScore, epssScore      sql.NullFloat64
+		cvesJSON, scannerDBDigest sql.NullString
+		cveDetailsJSON            sql.NullString
+		scannedAt                 sql.NullTime
+	)
+
+	row := s.sql.DB().QueryRow(`SELECT repository, package, version, is_vulnerable, cvss_score, epss_score,
+		cves, cve_details, scanner_db_digest, scanned_at, created_at, updated_at
+		FROM vulnerability_metadata WHERE org_id=? AND package=? AND version=?
+		ORDER BY scanned_at IS NULL, scanned_at DESC LIMIT 1`,
+		orgID, packageName, version)
+
+	err := row.Scan(&meta.Repository, &meta.Package, &meta.Version, &isVulnerable, &cvssScore, &epssScore,
+		&cvesJSON, &cveDetailsJSON, &scannerDBDigest, &scannedAt, &meta.CreatedAt, &meta.UpdatedAt)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return VulnerabilityMetadata{}, ErrNotFound
+	}
+	if err != nil {
+		return VulnerabilityMetadata{}, err
+	}
+
+	meta.IsVulnerable = isVulnerable == 1
+	if cvssScore.Valid {
+		meta.CVSSScore = cvssScore.Float64
+	}
+	if epssScore.Valid {
+		meta.EPSSScore = epssScore.Float64
+	}
+	if cvesJSON.Valid && cvesJSON.String != "" {
+		_ = json.Unmarshal([]byte(cvesJSON.String), &meta.CVEs)
+	}
+	if cveDetailsJSON.Valid && cveDetailsJSON.String != "" {
+		_ = json.Unmarshal([]byte(cveDetailsJSON.String), &meta.CVEDetails)
+	}
+	if scannerDBDigest.Valid {
+		meta.ScannerDBDigest = scannerDBDigest.String
+	}
+	if scannedAt.Valid {
+		meta.ScannedAt = scannedAt.Time
+	}
+
+	return meta, nil
+}
+
 // SetVulnerabilityMetadata stores or updates vulnerability metadata.
 func (s *Store) SetVulnerabilityMetadata(meta VulnerabilityMetadata) error {
 	if s == nil || s.sql == nil {

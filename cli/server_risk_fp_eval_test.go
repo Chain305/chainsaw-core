@@ -102,6 +102,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -110,7 +111,9 @@ import (
 	"time"
 
 	"github.com/chain305/chainsaw-core/intelligence"
+	"github.com/chain305/chainsaw-core/provenance"
 	"github.com/chain305/chainsaw-core/risk"
+	"github.com/chain305/chainsaw-core/typosquat"
 )
 
 // serverRiskRow is deliberately the shape core/intelligence/flipcount_prod_test.go
@@ -921,7 +924,103 @@ func TestBuildServerRiskCorpus(t *testing.T) {
 		t.Fatal("coords file is empty")
 	}
 
-	svc := intelligence.Bootstrap(intelligence.BootstrapConfig{})
+	// Optional malware index, loaded from a local ossf/malicious-packages
+	// checkout. ADDITIVE: unset (the false-positive corpus's own usage) leaves
+	// MalwareIndex nil and this function behaves exactly as before.
+	//
+	// It exists because BootstrapConfig{} documents "Nil disables the malware
+	// provider", so sc.known_malicious CANNOT FIRE in this build. The recall
+	// harness that shares this scanner would otherwise report 0% catch on
+	// known malware and present it as a measurement — the precise failure this
+	// file's own OBSERVABILITY section warns about ("a zero from an instrument
+	// that cannot see is not a measurement").
+	cfg := intelligence.BootstrapConfig{}
+
+	// Optional FULL provider wiring, for the signal-coverage half of the
+	// instrument. ADDITIVE: unset (the false-positive corpus's own usage)
+	// leaves every dependency nil and this behaves exactly as before.
+	//
+	// WHY IT EXISTS. BootstrapConfig{} with one field set means
+	// registry_providers.go returns a NIL provider for typosquat,
+	// provenance, KEV, cve and repo-liveness. Those signals then cannot
+	// fire, and a coverage report that counts them as "did not fire"
+	// is measuring the harness, not the engine — the same failure this
+	// file's OBSERVABILITY section documents for maint.single_maintainer
+	// and that CHAINSAW_SERVER_FP_MALWARE_DIR fixed for the malware lane.
+	//
+	// core/supplychain is in the PUBLIC core module, so core/cli may
+	// import it; this is the same call cmd/chainsaw-proxy makes.
+	if os.Getenv("CHAINSAW_SERVER_FP_WIRE_PROVIDERS") != "" {
+		// Build the typosquat detector from the SHIPPED SEED LISTS, not
+		// from supplychain.Bootstrap's popular-package fetch.
+		//
+		// The fetch route was tried first and is the wrong dependency for a
+		// measuring instrument: it pulls npm's /-/v1/search live, which
+		// returned HTTP 429 on every keyword here and left the detector
+		// with no index. typosquat.Detector.Check returns CLEAN for an
+		// ecosystem whose tree never loaded, so that path silently zeroes
+		// every sc.typosquat_* signal and reports it as "did not fire" —
+		// an instrument that cannot see, reporting a measurement.
+		//
+		// core/cli/seeds/*_popular.txt already ships for the offline guard's
+		// corpus, so the index is deterministic, network-free, and identical
+		// run to run. HasIndex below is the proof it loaded.
+		det := typosquat.NewDetector(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		for _, sd := range []struct{ eco, file string }{
+			{"npm", "seeds/npm_popular.txt"},
+			{"pypi", "seeds/pypi_popular.txt"},
+		} {
+			names, err := readSeedNames(sd.file)
+			if err != nil {
+				t.Fatalf("read %s: %v", sd.file, err)
+			}
+			pkgs := make([]typosquat.PopularPackage, 0, len(names))
+			for i, n := range names {
+				pkgs = append(pkgs, typosquat.PopularPackage{Name: n, Rank: i + 1})
+			}
+			det.LoadEcosystem(sd.eco, pkgs)
+			if !det.HasIndex(sd.eco) {
+				t.Fatalf("typosquat index for %s did not load from %s — "+
+					"sc.typosquat_* would read clean on every package", sd.eco, sd.file)
+			}
+			t.Logf("typosquat index loaded: %s=%d packages", sd.eco, len(pkgs))
+		}
+		cfg.TyposquatDetector = det
+
+		// Provenance: 3 signals (sc.provenance_verified,
+		// sc.signature_verified, sc.slsa_level_bonus) and no new data
+		// required — the checker reads what registrymetadata already
+		// fetched. Cheapest coverage available.
+		cfg.ProvenanceChecker = provenance.NewChecker(
+			slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	}
+
+	// The embedded floor alone is a usable malware index and costs nothing:
+	// no 957MB OSSF checkout, no network. Without this the malware provider
+	// is nil whenever CHAINSAW_SERVER_FP_MALWARE_DIR is unset, and
+	// sc.known_malicious lands in COULD NOT FIRE on a corpus that contains
+	// the very coordinates the floor covers.
+	if os.Getenv("CHAINSAW_SERVER_FP_MALWARE_DIR") == "" &&
+		os.Getenv("CHAINSAW_SERVER_FP_WIRE_PROVIDERS") != "" {
+		idx, n := loadMalwareFloorOnly()
+		t.Logf("malware index: embedded floor only (%d advisories; set CHAINSAW_SERVER_FP_MALWARE_DIR for the full OSSF corpus)", n)
+		cfg.MalwareIndex = idx
+	}
+
+	if dir := os.Getenv("CHAINSAW_SERVER_FP_MALWARE_DIR"); dir != "" {
+		idx, n, err := loadMalwareIndexFromDir(dir)
+		if err != nil {
+			t.Fatalf("CHAINSAW_SERVER_FP_MALWARE_DIR=%s: %v", dir, err)
+		}
+		if n == 0 {
+			t.Fatalf("CHAINSAW_SERVER_FP_MALWARE_DIR=%s parsed 0 advisories — "+
+				"an empty index is indistinguishable from a dormant one downstream", dir)
+		}
+		t.Logf("malware index loaded: %d advisories from %s", n, dir)
+		cfg.MalwareIndex = idx
+	}
+
+	svc := intelligence.Bootstrap(cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	defer cancel()
 

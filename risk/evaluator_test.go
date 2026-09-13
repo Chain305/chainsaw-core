@@ -410,6 +410,31 @@ func TestMaxImpactCalibration_PerTier(t *testing.T) {
 				IsVulnerable: true, MaxCVSS: 9.8, CVEs: []string{"CVE-2024-8888"},
 			},
 		},
+		// --- Medium tier — the 50-59 band. ---
+		{
+			// Added 2026-09-13 with the signal's ceiling. Required by
+			// docs/architecture/package-intelligence.md: "add a row to
+			// TestMaxImpactCalibration_PerTier whenever a tiered signal is
+			// introduced."
+			//
+			// This is THE regression gate for that ceiling, and the two
+			// sibling guards are not substitutes:
+			//   - TestEveryCeilingedSignalHasALoneFireFixture checks a
+			//     fixture EXISTS. Delete the ceiling and it goes green,
+			//     because the signal stops being ceilinged and drops out
+			//     of the iteration entirely.
+			//   - TestCeilingedSignalRebutsItsOwnBand does go red, but its
+			//     message was misleading until requiredRankForCeiling
+			//     learned about an absent ceiling.
+			// Delete `MaxImpact: maxImpactWarnTop` from registry_wave1.go
+			// and this row reports overall=92 outside [50, 59].
+			name:     "medium/sc.deprecated_by_maintainer",
+			minScore: 50, maxScore: 59,
+			in: Input{
+				Ecosystem: "npm", Package: "request", Version: "2.88.2", LicenseSPDX: "Apache-2.0",
+				DeprecatedByMaintainer: true, DeprecationReason: "no longer maintained",
+			},
+		},
 		// --- High tier — strong attack-pattern evidence. ---
 		{
 			name:     "high/sc.typosquat_high",

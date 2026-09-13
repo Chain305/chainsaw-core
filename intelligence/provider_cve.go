@@ -89,11 +89,57 @@ func (p *cveProvider) Run(ctx context.Context, req Request, prior *Report) (Part
 	if p.store == nil {
 		return PartialReport{}, nil
 	}
+	// FEDERATION GATE. vulnerability_metadata is org-scoped; the row this
+	// provider feeds is not. Writing one tenant's private Trivy findings
+	// onto the shared coordinate row is the L-02 suppression defect:
+	// mergeReportPayload PRESERVES a populated VulnSection, so whichever
+	// org scanned first pinned its CVE view for all 37 orgs and for the
+	// public surface.
+	//
+	// So this provider no longer runs on the write path except where it is
+	// the only vulnerability source there is. For scanner-advised
+	// ecosystems (docker) OSV has no corpus, and its clean row is a real
+	// negative the product depends on — those keep the Trivy write path,
+	// and their residual contamination is an accepted, documented cost.
+	// Everywhere else OSV is the federated source and each reader's own
+	// Trivy rows are overlaid at read time by personalize().
+	//
+	// Gated BEFORE the store read, so this also saves a PK query per scan
+	// on the hot path.
+	if !ecosystemHasScannerAdvisorySource(req.Key.Ecosystem) {
+		return PartialReport{}, nil
+	}
+	return p.lookup(req)
+}
+
+// lookup is the raw org-scoped vulnerability_metadata read, WITHOUT the
+// write-path federation gate above.
+//
+// It is split out because the read path needs exactly this and must not
+// inherit the gate: personalize() overlays a reader's private Trivy CVEs
+// for precisely the ecosystems the gate excludes from persistence. Same
+// query, same projection, one implementation — the gate is a statement
+// about what may be PERSISTED, not about what the owning org may see.
+func (p *cveProvider) lookup(req Request) (PartialReport, error) {
+	if p == nil || p.store == nil {
+		return PartialReport{}, nil
+	}
 	orgStore := p.store.ForOrg(req.OrgID)
 	if orgStore == nil {
 		return PartialReport{}, nil
 	}
-	row, err := orgStore.GetVulnerabilityMetadata(req.RepoName, req.Key.Package, req.Key.Version)
+	// Service.Get is addressed by (orgID, Key) with no RepoName, so the
+	// federated read path cannot supply the full PK. Fall back to the
+	// repo-agnostic lookup there — same org scope, most recent row.
+	var (
+		row metadata.VulnerabilityMetadata
+		err error
+	)
+	if req.RepoName == "" {
+		row, err = orgStore.GetVulnerabilityMetadataAnyRepo(req.Key.Package, req.Key.Version)
+	} else {
+		row, err = orgStore.GetVulnerabilityMetadata(req.RepoName, req.Key.Package, req.Key.Version)
+	}
 	if err != nil {
 		if errors.Is(err, metadata.ErrNotFound) {
 			// No row yet — that's "not scanned", surface nothing.

@@ -14,8 +14,29 @@ import (
 // the real providers' Name() values and pins the values against the v1
 // allowlist.
 var providerToSource = map[string]coverage.Source{
-	"malware":          coverage.SourceMalware,
-	"cve":              coverage.SourceCVE,
+	"malware": coverage.SourceMalware,
+	"cve":     coverage.SourceCVE,
+	// osv is the SECOND producer of SourceCVE, and it is load-bearing.
+	// Under federation the Trivy-backed `cve` provider no longer runs for
+	// most ecosystems (it is gated to those with a scanner advisory
+	// source), so `osv` is what keeps SourceCVE present in the ledger.
+	// Without this entry LedgerFromReport yields no CVE entry at all,
+	// Gate reads absent as Unavailable, and every org on `mode: closed`
+	// hard-blocks every npm/pypi pull.
+	//
+	// Two producers mapping to one Source is safe HERE because
+	// LedgerFromReport writes OK from ProviderTimings first and then lets
+	// the Warnings loop overwrite: a producer that ran and failed always
+	// beats a sibling that ran clean, so `osv` being healthy cannot mask a
+	// failing `cve`. (When both warn, last-in-slice wins rather than
+	// worst-status — acceptable, since both are already non-OK and Gate
+	// blocks either way.)
+	//
+	// What this does NOT protect against is a DORMANT osv index, which
+	// runs, emits no warning, and would therefore vouch cve: OK on no data
+	// at all. That is why provider_osv.go must warn when the index is nil
+	// and the code must be registered in coverage.unavailableCodes.
+	"osv":              coverage.SourceCVE,
 	"typosquat":        coverage.SourceTyposquat,
 	"provenance":       coverage.SourceProvenance,
 	"registrymetadata": coverage.SourceRegistryMetadata,

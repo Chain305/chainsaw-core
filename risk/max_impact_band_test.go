@@ -106,6 +106,12 @@ func loneFireFixtures() map[string]Input {
 		SignalSCRepoArchived: set(func(in *Input) {
 			in.RepoLinkStatus = "archived"
 		}),
+		// Added with the signal's MaxImpact on 2026-09-13. Its peer
+		// SignalSCRepoArchived sits directly above: same category, same
+		// severity, same ceiling — the two should read together.
+		SignalSCDeprecatedByMaintainer: set(func(in *Input) {
+			in.DeprecatedByMaintainer = true
+		}),
 		SignalSCRepoMissing: set(func(in *Input) {
 			in.RepoLinkStatus = "missing"
 		}),
@@ -158,6 +164,16 @@ func verdictRank(v Verdict) int {
 // the tighter band while the score lands in the looser one.
 func requiredRankForCeiling(maxImpact int) (int, string) {
 	switch {
+	// A signal with NO ceiling declared (MaxImpact zero-value) must not be
+	// routed into the quarantine arm below. It used to be, and the
+	// resulting failure message was actively misleading: removing a
+	// ceiling produced "declares MaxImpact 0 ... the ceiling claims
+	// blocking-grade (quarantine)", i.e. it demanded quarantine for a
+	// signal that declares no ceiling at all, sending the reader to fix
+	// the wrong thing. An absent ceiling is "unconstrained", the same as
+	// a ceiling above the warn band.
+	case maxImpact <= 0:
+		return 0, "unconstrained (no ceiling declared)"
 	case maxImpact <= ThresholdQuarantine:
 		return 2, "blocking-grade (quarantine / upgrade_available / replace)"
 	case maxImpact <= ThresholdWarn:

@@ -308,9 +308,16 @@ func TestStickyIsAppliedBeforeTheEvaluation(t *testing.T) {
 		t.Fatal("runFanout no longer applies the sticky facts before evaluating — " +
 			"if this was renamed, update the guard; do not delete it")
 	}
-	eval := regexp.MustCompile(`ComputeTrustScoreForOrg\(report, req\.OrgID\)`).FindStringIndex(src)
+	// Federation (2026-09-13) renamed this call site: the write path now
+	// scores under DEFAULT weights via ComputeTrustScore(report), and the
+	// org-weighted ComputeTrustScoreForOrg moved to the read path in
+	// personalize.go. The ORDER invariant this guard protects is unchanged —
+	// the sticky carry-forward must still run before whatever scores the
+	// report — so the anchor is updated, not the guard removed.
+	eval := regexp.MustCompile(`ComputeTrustScore\(report\)`).FindStringIndex(src)
 	if eval == nil {
-		t.Fatal("ComputeTrustScoreForOrg call site not found in scanner.go")
+		t.Fatal("the write-path scoring call site was not found in scanner.go — " +
+			"if it was renamed again, update this anchor; do not delete the guard")
 	}
 	if apply[0] > eval[0] {
 		t.Error("the sticky carry-forward runs AFTER the risk evaluation. " +

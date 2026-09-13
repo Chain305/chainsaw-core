@@ -115,13 +115,17 @@ func TestScanCallsReapplyKnownFixAfterTransitive(t *testing.T) {
 	}
 	text := string(src)
 
-	overlay := strings.Index(text, "evaluateTransitiveRisk(ctx, s.store, req.OrgID, report)")
+	// Federation (2026-09-13): the orgID argument is now "" — the transitive
+	// tree is org-independent (risk.EvaluateTree takes bare Options) and the
+	// value only ever reached Store.Get/ListVersions, which ignore it. The
+	// WIRING invariant this guard exists for is unchanged.
+	overlay := strings.Index(text, `evaluateTransitiveRisk(ctx, s.store, "", report)`)
 	if overlay < 0 {
 		t.Fatal("evaluateTransitiveRisk call not found — if it moved or was " +
 			"renamed, re-verify that the promotion and known-fix display fields " +
 			"still survive whatever replaced it, then update this guard")
 	}
-	reapply := strings.Index(text, "ReapplyKnownFixAfterTransitive(report, req.OrgID)")
+	reapply := strings.Index(text, `ReapplyKnownFixAfterTransitive(report, "")`)
 	if reapply < 0 {
 		t.Fatal("Scan does not call ReapplyKnownFixAfterTransitive. " +
 			"evaluateTransitiveRisk replaces report.Risk.Verdict and .Resolution " +

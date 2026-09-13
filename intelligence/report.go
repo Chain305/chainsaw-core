@@ -1231,7 +1231,30 @@ type ObservationSection struct {
 //	    needed on deploy — this is the strengthening direction, so the
 //	    backlog is rows that will start warning, and the drain should be
 //	    watched rather than assumed.
-const CurrentMatcherEpoch = 13
+//
+// Epoch 14 (2026-09-13) — FEDERATION. Bumped in the same change as the
+// federated intelligence row, per the discipline above: it alters the
+// verdict for an UNCHANGED coordinate in two ways at once.
+//
+//  1. osvProvider now stamps a clean VulnSection whenever it holds the
+//     ecosystem's corpus (shape 2′), so VulnDataAvailable flips TRUE for the
+//     large population of clean packages that previously had no ScannedAt.
+//     That re-admits the Vulnerability category to the rollup and every such
+//     score renormalises.
+//  2. The persisted row no longer carries any org-derived value — the
+//     Trivy-backed cveProvider is gated off the write path for every
+//     ecosystem OSV covers, and the score is computed under DEFAULT weights.
+//
+// A stored-data recompute cannot produce (1): pre-change rows are missing a
+// FACT the new code emits, so re-stamping from what is stored would convert
+// a visible "stale" into an invisible "wrong". A full rescan is required and
+// the epoch is what forces it, coordinate by coordinate.
+//
+// DEPLOY NOTE: ship this behind CHAINSAW_INTELLIGENCE_MIN_SERVEABLE_EPOCH=13,
+// let the backlog drain, then remove the env and redeploy. Raising the floor
+// cold collapses transitive resolution — measured on the 5→8 bump, dependency
+// lookups served fell 92,046 → 11,744.
+const CurrentMatcherEpoch = 14
 
 // MinServeableEpoch is the floor a cached row must meet to be SERVED. It
 // normally equals CurrentMatcherEpoch and MUST be returned to that value
@@ -1365,6 +1388,29 @@ const (
 	// is a third state, and it stays visible instead of collapsing into
 	// either verdict.
 	WarnVulnRangeUndecidable = "vuln_range_undecidable"
+
+	// warnOSVBundleDormant is emitted when the osv provider ran with no
+	// advisory index loaded AND the ecosystem has no scanner advisory
+	// source to fall back on — i.e. we have no vulnerability data for
+	// this coordinate from any producer.
+	//
+	// It MUST stay registered in coverage.unavailableCodes. `osv` is a
+	// producer of coverage.SourceCVE, and a provider that merely runs
+	// earns an OK ledger entry; without this warning a dormant bundle
+	// silently vouches for CVE coverage that does not exist. An
+	// unregistered code falls through to StatusError, which never
+	// blocks — the exact trap documented for transitive_dep_superseded.
+	warnOSVBundleDormant = "osv_bundle_dormant"
+
+	// WarnRegistryDecode is emitted when the registry-metadata provider
+	// fetched a document for the coordinate but could not PARSE it.
+	//
+	// It is an UNAVAILABILITY code, not a quality complaint: whatever the
+	// cause — a manifest shape our reader does not accept, a truncated
+	// response — no facts about the version were obtained, so the
+	// projection must route it through unavailableInput rather than score
+	// zero values as if they were observations. See registryDecodeReason.
+	WarnRegistryDecode = "decode"
 
 	// WarnVersionNotFound is emitted when a registry answered with a
 	// package document that enumerated its published versions and the

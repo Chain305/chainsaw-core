@@ -51,6 +51,14 @@ var unavailabilityCodes = map[string]string{
 	// all: a federated registry's 404 left the coordinate fully scored
 	// off metadata that was never retrieved.
 	"WarnRegistryNotFound": "federatedRegistryAbsenceReason",
+	// F-4 (2026-09-13): a document we fetched but could not PARSE. It
+	// scored `allow` — rc@1.2.9 and react@19.3.0 both came back with a
+	// plausible grade and no registry data behind them — because `decode`
+	// fell past every arm. Registered here so the same guard that pins the
+	// other six also pins this one: helper called, code consulted, and the
+	// call routed through unavailableInput so the P8-44 malware carry
+	// still fires for a floor-listed package whose packument will not read.
+	"WarnRegistryDecode": "registryDecodeReason",
 }
 
 func packageSources(t *testing.T) map[string]string {
@@ -157,12 +165,17 @@ func TestScannerStampsAdvisoryCoverageBeforeScoring(t *testing.T) {
 		t.Fatal("scanner.go no longer calls markNoAdvisoryCoverage — the seven " +
 			"ecosystems with no advisory source are back to flooring at ALLOW (P8-05)")
 	}
-	scoreAt := strings.Index(string(src), "ComputeTrustScoreForOrg(report,")
+	// Federation (2026-09-13): the write path scores under default weights
+	// via ComputeTrustScore(report); ComputeTrustScoreForOrg moved to the
+	// read path (personalize.go). The ORDER invariant is untouched — the
+	// stamp must precede whatever runs the projection and the evaluator.
+	scoreAt := strings.Index(string(src), "ComputeTrustScore(report)")
 	if scoreAt < 0 {
-		t.Fatal("scanner.go no longer calls ComputeTrustScoreForOrg — update this guard")
+		t.Fatal("scanner.go no longer calls ComputeTrustScore — update this anchor, " +
+			"do not delete the guard")
 	}
 	if markAt > scoreAt {
-		t.Fatal("markNoAdvisoryCoverage runs AFTER ComputeTrustScoreForOrg — the " +
+		t.Fatal("markNoAdvisoryCoverage runs AFTER the scoring call — the " +
 			"warning is persisted but the verdict was already computed without it")
 	}
 }

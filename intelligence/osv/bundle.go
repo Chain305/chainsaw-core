@@ -132,6 +132,14 @@ type Index struct {
 	// versions are affected. The provider filters by version at lookup
 	// time so a single bundle pass populates the map.
 	byPackage map[string][]Advisory
+	// ecosystems is the set of canonical ecosystems this LOADED bundle
+	// actually carries advisories for. Deliberately derived from the
+	// parsed records, never from a static support list: a trimmed or
+	// half-built bundle satisfies a static list vacuously, which is
+	// exactly the P0-C failure (cocoapods was routed as "supported"
+	// while its bucket was never verified, and 61 production rows were
+	// graded ALLOW 97-100 on advisory data that did not exist).
+	ecosystems map[string]struct{}
 	// loadedAt records when the bundle was read off disk. Useful for
 	// observability — operators can see how stale the in-memory copy is.
 	loadedAt time.Time
@@ -192,9 +200,10 @@ func Load(r io.Reader) (*Index, error) {
 	}
 
 	idx := &Index{
-		byPackage: make(map[string][]Advisory, len(advisories)),
-		loadedAt:  time.Now().UTC(),
-		total:     len(advisories),
+		byPackage:  make(map[string][]Advisory, len(advisories)),
+		ecosystems: make(map[string]struct{}, 8),
+		loadedAt:   time.Now().UTC(),
+		total:      len(advisories),
 	}
 	for _, a := range advisories {
 		key := canonicalKey(a.Ecosystem, a.Package)
@@ -202,6 +211,10 @@ func Load(r io.Reader) (*Index, error) {
 			continue
 		}
 		idx.byPackage[key] = append(idx.byPackage[key], a)
+		// Same fold canonicalKey used, and only for records that were
+		// actually keyed — so the set can never claim an ecosystem the
+		// bundle does not really carry.
+		idx.ecosystems[CanonicalEcosystem(a.Ecosystem)] = struct{}{}
 	}
 	return idx, nil
 }
@@ -280,6 +293,28 @@ func (i *Index) HasPackage(ecosystem, pkg string) bool {
 		return false
 	}
 	_, ok := i.byPackage[key]
+	return ok
+}
+
+// HasEcosystem reports whether this LOADED bundle carries at least one
+// advisory for the given ecosystem. It is the guard that makes a clean
+// stamp honest: HasPackage answering false means either "we searched
+// this ecosystem's corpus and this package matched nothing" (positive
+// evidence of absence, safe to stamp) or "we have no corpus for this
+// ecosystem at all" (no evidence, must stay silent). Only this method
+// can tell those apart.
+//
+// Deliberately NOT backed by a static support list — see the field
+// comment on Index.ecosystems for why that check would be vacuous.
+func (i *Index) HasEcosystem(ecosystem string) bool {
+	if i == nil {
+		return false
+	}
+	eco := CanonicalEcosystem(ecosystem)
+	if eco == "" {
+		return false
+	}
+	_, ok := i.ecosystems[eco]
 	return ok
 }
 

@@ -34,6 +34,38 @@ const (
 	HealthyCadenceMinVersions = 5                        // AND >=5 historical versions
 )
 
+// REFUSED, 2026-09-13: the signals in this file deliberately do NOT carry a
+// MaxImpact ceiling, so none of them can on its own produce an adverse
+// verdict. That is the intended behaviour, not an oversight, and not the F-2
+// gap that was fixed elsewhere.
+//
+// The labelled-corpus eval (docs/labelled-corpus-eval-2026-09-13.md, F-2)
+// found 0 of 9 "suspicious" rows scoring adverse. The fix was to ceiling
+// sc.deprecated_by_maintainer in registry_wave1.go — a first-party MAINTAINER
+// DECLARATION we are merely repeating. It was NOT to ceiling anything here,
+// and the distinction is the whole point:
+//
+//   - "npm says this version is deprecated" is a fact the registry publishes
+//     and that `npm install` already prints. Repeating it cannot be wrong.
+//   - "no release since 2013" is OUR INFERENCE that absence means neglect,
+//     and it is wrong constantly. A finished, stable, correct library stops
+//     getting releases because it is DONE. pypi distribute (2013), pypi nose
+//     (2015) and rubygems rails-observers (2017) sit in the corpus labelled
+//     "suspicious" and this engine scores them `allow` — which is the right
+//     answer.
+//
+// There is also arithmetic behind it: CategoryMaintenance carries weight 0.15
+// (category.go), so driving maintenance from 100 to 0 costs at most 15 points,
+// while the warn band starts 40 points down (thresholdWarn = 60). Every signal
+// in this file firing at once still cannot reach warn. Ceilings, not weights,
+// are the only lever here — which is exactly why reaching for one must be a
+// deliberate decision about evidence, not a reflex about severity.
+//
+// Before ceilinging anything in this file, re-run the labelled-corpus eval and
+// show the false-positive rate on the benign set. It was 0/40 when this was
+// written, and that number is what makes the public package-intelligence
+// surface publishable at all.
+
 func init() {
 	register(Signal{
 		ID:          SignalMaintAbandonedRepo,

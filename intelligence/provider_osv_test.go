@@ -103,8 +103,28 @@ func TestOSVProvider_DormantWhenBundleMissing(t *testing.T) {
 	if partial.Vulns != nil {
 		t.Fatalf("dormant provider must not populate Vulns, got %+v", partial.Vulns)
 	}
-	if len(partial.Warnings) != 0 {
-		t.Fatalf("dormant provider must not emit warnings, got %+v", partial.Warnings)
+	// WAS: `len(partial.Warnings) != 0` — "dormant provider must not emit
+	// warnings". That was correct while osv was not a coverage producer.
+	// Now that providerToSource maps osv → SourceCVE, silence here means a
+	// dormant bundle earns an OK ledger entry off its ProviderTiming and
+	// vouches for CVE coverage it does not have. The warning is what makes
+	// the fail-closed gate see the gap.
+	if len(partial.Warnings) != 1 || partial.Warnings[0].Code != warnOSVBundleDormant {
+		t.Fatalf("dormant provider on a non-scanner-advised ecosystem must emit exactly one %q warning, got %+v",
+			warnOSVBundleDormant, partial.Warnings)
+	}
+
+	// Scoping guard: docker HAS a scanner advisory source, so a dormant
+	// OSV bundle is not a coverage gap there and must stay silent —
+	// otherwise a working Trivy deployment hard-blocks on mode: closed.
+	dockerPartial, err := p.Run(context.Background(), Request{
+		Key: Key{Ecosystem: "docker", Package: "library/nginx", Version: "1.27"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run(docker) err: %v", err)
+	}
+	if len(dockerPartial.Warnings) != 0 {
+		t.Fatalf("dormant provider must stay silent for scanner-advised ecosystems, got %+v", dockerPartial.Warnings)
 	}
 }
 
@@ -194,10 +214,17 @@ func TestOSVProvider_Run_NonNilEmptyForCoveredCleanVersion(t *testing.T) {
 	}
 }
 
-func TestOSVProvider_Run_UncoveredPackageReturnsEmptyPartial(t *testing.T) {
-	// Package not in the bundle at all — provider stays silent so the
-	// Trivy companion remains authoritative. Distinct from the
-	// "covered + clean" case above.
+func TestOSVProvider_Run_UncoveredEcosystemVsUncoveredPackage(t *testing.T) {
+	// The shape-2 / shape-2′ split, and the whole basis for OSV being
+	// the federated vulnerability source.
+	//
+	// WAS (pre-federation): this test asserted that ANY package absent
+	// from the bundle left Vulns nil — "package not in the bundle at
+	// all — provider stays silent so the Trivy companion remains
+	// authoritative". That conflated two different epistemic states.
+	// Absence of a package from an ecosystem corpus we HOLD is a real
+	// negative; absence of the whole corpus is not. Only the latter
+	// warrants silence. See the plan's Phase 1 S1.
 	restore := withStubbedBundle(t, []osv.Advisory{
 		{
 			Ecosystem:          "PyPI",
@@ -210,14 +237,40 @@ func TestOSVProvider_Run_UncoveredPackageReturnsEmptyPartial(t *testing.T) {
 	t.Cleanup(restore)
 
 	p := newOSVProvider(slog.Default())
-	partial, err := p.Run(context.Background(), Request{
+
+	// Ecosystem present (PyPI advisories loaded), package absent from it
+	// → positive evidence of absence → stamp a clean section.
+	clean, err := p.Run(context.Background(), Request{
 		Key: Key{Ecosystem: "pypi", Package: "totally-unknown-pkg", Version: "1.0.0"},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
-	if partial.Vulns != nil {
-		t.Fatalf("uncovered package must leave Vulns nil, got %+v", partial.Vulns)
+	if clean.Vulns == nil {
+		t.Fatal("covered ecosystem + absent package must stamp a clean VulnSection (shape 2′)")
+	}
+	if clean.Vulns.IsVulnerable || len(clean.Vulns.CVEs) != 0 {
+		t.Fatalf("clean stamp must carry no CVEs, got %+v", clean.Vulns)
+	}
+	if clean.Vulns.ScannedAt == nil {
+		t.Fatal("clean stamp must carry ScannedAt or VulnDataAvailable stays false")
+	}
+	// The suppression guard: a clean stamp must never veto. mergeVulns
+	// is additive except for ClearedCVEs, so this must stay empty.
+	if len(clean.Vulns.ClearedCVEs) != 0 {
+		t.Fatalf("clean stamp must not veto anything, got ClearedCVEs=%v", clean.Vulns.ClearedCVEs)
+	}
+
+	// Ecosystem absent entirely (no npm advisories in this bundle) →
+	// we have evaluated nothing, so we say nothing.
+	silent, err := p.Run(context.Background(), Request{
+		Key: Key{Ecosystem: "npm", Package: "express", Version: "4.19.2"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+	if silent.Vulns != nil {
+		t.Fatalf("uncovered ECOSYSTEM must leave Vulns nil, got %+v", silent.Vulns)
 	}
 }
 
@@ -246,42 +299,48 @@ func TestOSVProvider_Run_EcosystemAliasResolves(t *testing.T) {
 	}
 }
 
-// TestOSVProvider_CannotServeAsUniversalVulnBaseline pins the fact that
-// blocks the L-02 tenancy remedy sketched in
+// TestOSVProviderIsTheUniversalVulnBaseline — INVERTED 2026-09-13.
+//
+// This test was `TestOSVProvider_CannotServeAsUniversalVulnBaseline`. It
+// pinned the blocker on the L-02 remedy in
 // docs/qa-remediation/L-02-REDIAGNOSIS.md ("keep the universal row's
 // INPUTS universal — OSV only — and move the org's Trivy contribution to
-// a per-org overlay").
+// a per-org overlay"), and its doc block said: if this ever fails because
+// osvProvider learned to stamp a clean section, do NOT just update the
+// assertions — re-open the L-02 design instead.
 //
-// That design rests on the premise that osvProvider always stamps
-// ScannedAt, so VulnDataAvailable (risk_projection.go:168, literally
-// `r.Vulnerabilities.ScannedAt != nil`) stays true on a cache hit and the
-// opt-in core/coverage fail-closed gate is unaffected. The premise is
-// false, and it is false for the COMMON case rather than an edge:
+// The L-02 design WAS re-opened, by owner ruling: intelligence is central
+// and federated, org-specific values move to read time. So this records
+// the argument rather than silently flipping the assertions.
 //
-//   - osv.Index.byPackage is built solely from the advisory records in the
-//     bundle (osv/bundle.go Load). A package with no advisory is simply
-//     absent from the map, so HasPackage returns false and Run returns an
-//     empty PartialReport by its own documented shape 2 — deliberately, to
-//     keep "we have no data" distinct from "we scanned and found nothing".
-//   - Clean packages are the overwhelming majority of coordinates. Today
-//     they get ScannedAt from the Trivy-backed cveProvider, which stamps a
-//     row whenever vulnerability_metadata has one INCLUDING the
-//     scanned-and-clean row. An OSV-only baseline drops that stamp.
-//   - OSV covers strictly fewer ecosystems than the CVE provider, so some
-//     ecosystems lose the stamp for every coordinate, clean or not.
+// WHAT IT USED TO ASSERT, and why each objection is now answered:
 //
-// Net effect of an OSV-only persisted row: VulnDataAvailable flips false
-// for most cache hits, the Vulnerability category is dropped from the risk
-// rollup (evaluator.go dataAvailable), and every score renormalises. That
-// is the same class of blast radius that got the earlier "strip the vuln
-// section" remedy rejected.
+//  1. "Clean packages lose ScannedAt, so VulnDataAvailable
+//     (risk_projection.go, literally `r.Vulnerabilities.ScannedAt != nil`)
+//     flips false for most cache hits, the Vulnerability category drops
+//     out of the rollup, and every score renormalises."
+//     → ANSWERED. That was a consequence of shape 2 conflating "no corpus
+//     for this ecosystem" with "corpus searched, package absent". Shape 2′
+//     splits them: a package absent from an ecosystem corpus we HOLD now
+//     stamps a clean section, so clean packages keep ScannedAt. The old
+//     premise ("osvProvider never stamps for clean packages") was true of
+//     the old code and is false of the new.
 //
-// If this test ever fails because osvProvider learned to stamp a clean
-// section for uncovered packages, do NOT just update the assertions — that
-// change would make the coverage gate claim vuln coverage the product does
-// not have, which is worse than the bug it is trying to fix. Re-open the
-// L-02 design instead.
-func TestOSVProvider_CannotServeAsUniversalVulnBaseline(t *testing.T) {
+//  2. "OSV covers strictly fewer ecosystems than the CVE provider, so some
+//     ecosystems lose the stamp unconditionally."
+//     → STILL TRUE, and still asserted below. Handled outside this file:
+//     six of the seven (cocoapods, swift, huggingface, apt, yum, dnf)
+//     already route to VerdictUnknown via markNoAdvisoryCoverage, and
+//     docker keeps the Trivy write path via
+//     ecosystemHasScannerAdvisorySource. Docker's residual contamination
+//     is an accepted, documented cost.
+//
+// The safety argument for the stamp: mergeVulns is strictly additive —
+// max on CVSS, OR on IsVulnerable, union on CVEs/CVEDetails/KEVEntries —
+// and its ONLY subtractive operation is the explicit ClearedCVEs veto,
+// which shape 2′ leaves empty. A clean stamp therefore cannot retract a
+// Trivy finding. That is asserted directly below.
+func TestOSVProviderIsTheUniversalVulnBaseline(t *testing.T) {
 	restore := withStubbedBundle(t, []osv.Advisory{
 		{
 			Ecosystem:          "npm",
@@ -296,16 +355,28 @@ func TestOSVProvider_CannotServeAsUniversalVulnBaseline(t *testing.T) {
 	p := newOSVProvider(slog.Default())
 
 	// A package with no advisory in the bundle — i.e. a clean package.
-	// The bundle is loaded and the ecosystem is covered; only the package
-	// is absent. Run must stay silent, leaving ScannedAt unstamped.
+	// The bundle is loaded and the ecosystem IS covered; only the package
+	// is absent. That is a real negative, so Run must stamp.
+	//
+	// WAS: `if clean.Vulns != nil { t.Fatalf("clean package must produce
+	// no VulnSection (shape 2)") }`. See the doc block above before
+	// "fixing" this back.
 	clean, err := p.Run(context.Background(), Request{
 		Key: Key{Ecosystem: "npm", Package: "left-pad", Version: "1.3.0"},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run(clean) err: %v", err)
 	}
-	if clean.Vulns != nil {
-		t.Fatalf("clean package must produce no VulnSection (shape 2); got %+v", clean.Vulns)
+	if clean.Vulns == nil || clean.Vulns.ScannedAt == nil {
+		t.Fatalf("clean package in a covered ecosystem must stamp ScannedAt (shape 2′); got %+v", clean.Vulns)
+	}
+	if clean.Vulns.IsVulnerable || len(clean.Vulns.CVEs) != 0 {
+		t.Fatalf("clean stamp must carry no CVEs; got %+v", clean.Vulns)
+	}
+	// The load-bearing safety property: a clean stamp must never veto a
+	// Trivy finding. mergeVulns' only subtractive path is ClearedCVEs.
+	if len(clean.Vulns.ClearedCVEs) != 0 {
+		t.Fatalf("clean stamp must not veto; got ClearedCVEs=%v", clean.Vulns.ClearedCVEs)
 	}
 
 	// The advisory-carrying package does get a stamp — this is the half of
@@ -329,5 +400,72 @@ func TestOSVProvider_CannotServeAsUniversalVulnBaseline(t *testing.T) {
 		if p.Supports(eco) {
 			t.Fatalf("test premise stale: osvProvider now covers %q — recheck the L-02 baseline analysis", eco)
 		}
+	}
+}
+
+// TestOSVProviderWarnsOnEmptyBundle closes the fail-open an earlier revision
+// left open, and it is NOT the same case as the dormant-index test above.
+//
+// dockerized/build.sh's write_empty_osv_bundle (a fail-soft on every fetch
+// failure path) writes `[]`. That bundle LOADS: the index is non-nil, so a
+// dormancy check written as `idx == nil` does not fire, no warning is emitted,
+// and the provider still earns a ProviderTiming — which under federation maps
+// to coverage.SourceCVE and stamps `cve: OK` on ZERO advisories.
+//
+// The fail-soft's own comment says "loader accepts, runtime stays dormant".
+// That was true while osv was not a coverage producer and false afterwards.
+//
+// MUST FAIL IF: Run's guard is narrowed back to `idx == nil` alone.
+func TestOSVProviderWarnsOnEmptyBundle(t *testing.T) {
+	restore := withStubbedBundle(t, []osv.Advisory{})
+	t.Cleanup(restore)
+
+	p := newOSVProvider(slog.Default())
+	if !p.IndexLoaded() {
+		t.Fatal("an empty bundle must still LOAD — that is the whole hazard; " +
+			"if it no longer loads this test is asserting the wrong thing")
+	}
+
+	out, err := p.Run(context.Background(), Request{
+		Key: Key{Ecosystem: "npm", Package: "express", Version: "4.19.2"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.Vulns != nil {
+		t.Fatalf("an empty bundle must not stamp a clean section, got %+v", out.Vulns)
+	}
+	if len(out.Warnings) != 1 || out.Warnings[0].Code != warnOSVBundleDormant {
+		t.Fatalf("an empty bundle must warn %q so the coverage ledger sees the gap; got %+v",
+			warnOSVBundleDormant, out.Warnings)
+	}
+}
+
+// TestOSVProviderWarnsOnEcosystemMissingFromBundle is the third face of the
+// same condition: the bundle is loaded and non-empty, but carries no corpus
+// for THIS ecosystem. Indistinguishable from absent, from the coordinate's
+// point of view, and must reach the same warning.
+func TestOSVProviderWarnsOnEcosystemMissingFromBundle(t *testing.T) {
+	restore := withStubbedBundle(t, []osv.Advisory{{
+		Ecosystem:          "npm",
+		Package:            "lodash",
+		VulnerableVersions: []string{"4.17.20"},
+		AdvisoryID:         "GHSA-35jh-r3h4-6jhm",
+	}})
+	t.Cleanup(restore)
+
+	p := newOSVProvider(slog.Default())
+	out, err := p.Run(context.Background(), Request{
+		Key: Key{Ecosystem: "cargo", Package: "serde", Version: "1.0.0"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.Vulns != nil {
+		t.Fatalf("an ecosystem absent from the bundle must not stamp, got %+v", out.Vulns)
+	}
+	if len(out.Warnings) != 1 || out.Warnings[0].Code != warnOSVBundleDormant {
+		t.Fatalf("ecosystem absent from bundle must warn %q; got %+v",
+			warnOSVBundleDormant, out.Warnings)
 	}
 }
