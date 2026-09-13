@@ -8,7 +8,9 @@ package osv
 // DB has had a runtime OCI updater for this exact reason (see
 // internal/trivydb/updater.go); this package mirrors that pattern for
 // OSV by re-pulling the upstream all.zip dumps every
-// CHAINSAW_OSV_REFRESH_INTERVAL (default disabled — opt-in).
+// CHAINSAW_OSV_REFRESH_INTERVAL. That interval defaults to
+// DefaultRefreshInterval, i.e. the loop is ON unless explicitly
+// killed — see the gating table below.
 //
 // Pipeline per tick:
 //   1. For each supported ecosystem, GET
@@ -27,8 +29,25 @@ package osv
 // bundle / index keeps serving. The error is logged at WARN and the
 // next tick retries.
 //
-// Off-by-default: NewRefresher returns a nil-but-valid receiver when
-// CHAINSAW_OSV_REFRESH_INTERVAL is unset / <= 0 / CHAINSAW_OFFLINE=1.
+// ON BY DEFAULT. This comment previously claimed the opposite
+// ("off-by-default, opt-in"), and that drift cost a deploy on
+// 2026-09-13: prod has no CHAINSAW_OSV_REFRESH_INTERVAL set anywhere,
+// which reads as "refresher dormant" against the old comment, so an
+// image-baked bundle fix was shipped and looked correct. It was not —
+// the refresher runs on DefaultRefreshInterval and overwrote the baked
+// bundle 70 seconds after pod start.
+//
+// The actual gating, from NewRefresher below:
+//   - CHAINSAW_OFFLINE truthy            → nil (dormant)
+//   - CHAINSAW_OSV_REFRESH_INTERVAL in
+//     {0, 0s, off, disabled, false, no}  → nil (explicit kill-switch)
+//   - a positive duration / integer      → that cadence
+//   - UNSET OR BLANK                     → DefaultRefreshInterval
+//
+// So anything baked into the image at /system/osv-bundle.json.gz is a
+// SEED, not the served artifact. A fix to the bundle contents must land
+// in flattenRecord here, not only in dockerized/build.sh.
+//
 // Start on the nil receiver is a no-op, so the boot path can call it
 // unconditionally.
 
@@ -458,11 +477,20 @@ func readZipRecord(f *zip.File) (osvRecord, error) {
 // the shape the Python flattener walks in build.sh; unknown fields are
 // dropped on decode.
 type osvRecord struct {
-	ID        string          `json:"id"`
-	Aliases   []string        `json:"aliases"`
-	Summary   string          `json:"summary"`
-	Published string          `json:"published"`
-	Modified  string          `json:"modified"`
+	ID        string   `json:"id"`
+	Aliases   []string `json:"aliases"`
+	Summary   string   `json:"summary"`
+	Published string   `json:"published"`
+	Modified  string   `json:"modified"`
+	// Withdrawn is set by upstream when an advisory is retracted (bad
+	// data, duplicate, disputed). The record STAYS in all.zip forever —
+	// it is not deleted — so a flattener that ignores this field keeps
+	// matching a vulnerability that upstream has said does not exist.
+	// Found live in prod 2026-09-13: nokogiri@1.19.4 scored warn/40 on
+	// three withdrawn GHSAs. build.sh's Python flattener filters these;
+	// this path did not, and this path is the one production actually
+	// runs (the refresher overwrites the image-baked bundle at boot).
+	Withdrawn string          `json:"withdrawn"`
 	Severity  []SeverityEntry `json:"severity"`
 	Affected  []osvAffected   `json:"affected"`
 }
@@ -494,6 +522,12 @@ type osvRangeIn struct {
 // exactly so the bundles produced by both paths are interchangeable.
 func flattenRecord(rec osvRecord) []Advisory {
 	if rec.ID == "" {
+		return nil
+	}
+	// Withdrawn advisories are retracted upstream but never removed from
+	// all.zip. Drop them here so they cannot produce a match. Mirrors
+	// `if rec.get("withdrawn"): continue` in dockerized/build.sh.
+	if strings.TrimSpace(rec.Withdrawn) != "" {
 		return nil
 	}
 	score, label := SeveritySummary(rec.Severity)
