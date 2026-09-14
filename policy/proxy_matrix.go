@@ -786,7 +786,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseExceptionPresent:    SupportFull,
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
-		ConditionDeprecatedByMaintainer:     SupportNone,
+		ConditionDeprecatedByMaintainer:     SupportFull, // p2 `abandoned` (package-level; expandComposerMinified carries it to every version)
 		// P8-39 rail finding (same class as P8-58/P8-59, found by
 		// TestSupportMatrixMatchesProviderCoverage rather than by hand):
 		// shrinkwrapProvider is ecosystem-generic. ecosystemLockfiles
@@ -927,7 +927,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseExceptionPresent:    SupportFull,
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
-		ConditionDeprecatedByMaintainer:     SupportNone,
+		ConditionDeprecatedByMaintainer:     SupportFull, // registration5-gz-semver2 catalogEntry.deprecation (per-version)
 		ConditionShrinkwrapPresent:          SupportNone,
 		ConditionManifestConfusion:          SupportNone,
 		// Wave 2: NuGet .csproj / packages.config parsing deferred.

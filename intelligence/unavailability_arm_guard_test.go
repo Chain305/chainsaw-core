@@ -59,6 +59,14 @@ var unavailabilityCodes = map[string]string{
 	// call routed through unavailableInput so the P8-44 malware carry
 	// still fires for a floor-listed package whose packument will not read.
 	"WarnRegistryDecode": "registryDecodeReason",
+	// The cancelled-fetch twin of WarnRegistryDecode (2026-09-14). Found when
+	// two identical corpus scans disagreed on pypi/urllib3@2.7.0: the run whose
+	// fetch was cancelled scored it allow/97 with lic.missing +
+	// license.unidentified — "Package does not declare a license", about a
+	// package that is MIT. lic.missing keys on `LicenseSPDX == ""` and cannot
+	// tell "declares none" from "never fetched", so any arm that scores an
+	// unpopulated metadata section publishes a false licence claim.
+	"WarnRegistryCancelled": "registryCancelledReason",
 }
 
 func packageSources(t *testing.T) map[string]string {

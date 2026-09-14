@@ -40,6 +40,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/html/charset"
+
 	"github.com/chain305/chainsaw-core/httpclient"
 	"golang.org/x/mod/modfile"
 )
@@ -59,42 +61,52 @@ type registryEndpoints struct {
 	rubygems          string
 	nuget             string
 	nugetRegistration string
-	composer          string
-	goproxy           string
-	cocoapods         string
-	cocoapodsCDN      string
-	pub               string
-	huggingface       string
-	docker            string
-	depsdev           string
-	github            string
-	gitlab            string
-	bitbucket         string
-	codeberg          string
+	// nugetRegistrationV2 is the SemVer-2 registration resource. It is a
+	// separate endpoint rather than a replacement for nugetRegistration because
+	// it is the only place NuGet publishes `deprecation`: registration5-semver1
+	// strips the field entirely (verified 2026-09-14 against
+	// windowsazure.storage and microsoft.bcl, both deprecated in the gallery and
+	// both showing no deprecation key on semver1). Switching the existing
+	// constant would also move the version-timeline fetch onto a different
+	// resource for no reason, so the deprecation lookup gets its own.
+	nugetRegistrationV2 string
+	composer            string
+	goproxy             string
+	cocoapods           string
+	cocoapodsCDN        string
+	pub                 string
+	huggingface         string
+	docker              string
+	depsdev             string
+	github              string
+	gitlab              string
+	bitbucket           string
+	codeberg            string
 }
 
 func defaultRegistryEndpoints() registryEndpoints {
 	return registryEndpoints{
-		npm:               "https://registry.npmjs.org",
-		pypi:              "https://pypi.org",
-		maven:             "https://repo1.maven.org/maven2",
-		mavenGoogle:       "https://maven.google.com",
-		cargo:             "https://crates.io",
-		rubygems:          "https://rubygems.org",
-		nuget:             "https://api.nuget.org/v3-flatcontainer",
-		nugetRegistration: "https://api.nuget.org/v3/registration5-semver1",
-		composer:          "https://repo.packagist.org",
-		goproxy:           "https://proxy.golang.org",
-		cocoapods:         "https://trunk.cocoapods.org",
-		cocoapodsCDN:      "https://cdn.cocoapods.org",
-		pub:               "https://pub.dev",
-		huggingface:       "https://huggingface.co",
-		docker:            "https://hub.docker.com",
-		depsdev:           "https://api.deps.dev",
-		github:            "https://api.github.com",
-		gitlab:            "https://gitlab.com",
-		bitbucket:         "https://api.bitbucket.org",
-		codeberg:          "https://codeberg.org",
+		npm:                 "https://registry.npmjs.org",
+		pypi:                "https://pypi.org",
+		maven:               "https://repo1.maven.org/maven2",
+		mavenGoogle:         "https://maven.google.com",
+		cargo:               "https://crates.io",
+		rubygems:            "https://rubygems.org",
+		nuget:               "https://api.nuget.org/v3-flatcontainer",
+		nugetRegistration:   "https://api.nuget.org/v3/registration5-semver1",
+		nugetRegistrationV2: "https://api.nuget.org/v3/registration5-gz-semver2",
+		composer:            "https://repo.packagist.org",
+		goproxy:             "https://proxy.golang.org",
+		cocoapods:           "https://trunk.cocoapods.org",
+		cocoapodsCDN:        "https://cdn.cocoapods.org",
+		pub:                 "https://pub.dev",
+		huggingface:         "https://huggingface.co",
+		docker:              "https://hub.docker.com",
+		depsdev:             "https://api.deps.dev",
+		github:              "https://api.github.com",
+		gitlab:              "https://gitlab.com",
+		bitbucket:           "https://api.bitbucket.org",
+		codeberg:            "https://codeberg.org",
 	}
 }
 
@@ -323,7 +335,29 @@ func (p *registryMetadataProvider) fetchJSON(ctx context.Context, endpoint strin
 // NuGet nuspecs.
 func (p *registryMetadataProvider) fetchXML(ctx context.Context, endpoint string, out any) (*Warning, error) {
 	return p.fetchDecoded(ctx, endpoint, "application/xml", func(body io.Reader) error {
-		return xml.NewDecoder(body).Decode(out)
+		dec := xml.NewDecoder(body)
+		// Go's encoding/xml REFUSES any document whose declaration names a
+		// non-UTF-8 encoding unless CharsetReader is set — it does not fall
+		// back, it errors with:
+		//
+		//   xml: encoding "ISO-8859-1" declared but Decoder.CharsetReader is nil
+		//
+		// Maven Central serves plenty of those. `org.apache.commons:commons-parent`
+		// is ISO-8859-1, and it is the parent of EVERY Apache Commons artifact,
+		// so the decode failure landed in inheritMavenLicense's parent walk as
+		// an unreadable parent — which that function treats, correctly for its
+		// own purposes, as silence. The visible result was commons-text 1.9
+		// scoring lic.missing (-15) AND license.unidentified (-15): a -30
+		// licence penalty and the claim "Package does not declare a license"
+		// on an Apache-2.0 artifact. Measured 2026-09-14: 4 of 12 popular
+		// Apache Maven artifacts (commons-text, commons-collections4,
+		// commons-math3, commons-pool2) came back with no licence at all.
+		//
+		// charset.NewReaderLabel is the canonical decoder-side fix and handles
+		// every label the WHATWG encoding registry names, so this is not a
+		// special case for Latin-1.
+		dec.CharsetReader = charset.NewReaderLabel
+		return dec.Decode(out)
 	})
 }
 
@@ -370,7 +404,7 @@ func (p *registryMetadataProvider) fetchDecoded(ctx context.Context, endpoint, a
 		// Bail immediately if the operator-set deadline is already
 		// blown — don't burn another retry budget.
 		if err := ctx.Err(); err != nil {
-			return &Warning{Provider: "registrymetadata", Code: "context_cancelled", Message: err.Error(), At: p.now()}, nil
+			return &Warning{Provider: "registrymetadata", Code: WarnRegistryCancelled, Message: err.Error(), At: p.now()}, nil
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, perAttempt)
@@ -405,7 +439,7 @@ func (p *registryMetadataProvider) fetchDecoded(ctx context.Context, endpoint, a
 		case <-t.C:
 		case <-ctx.Done():
 			t.Stop()
-			return &Warning{Provider: "registrymetadata", Code: "context_cancelled", Message: ctx.Err().Error(), At: p.now()}, nil
+			return &Warning{Provider: "registrymetadata", Code: WarnRegistryCancelled, Message: ctx.Err().Error(), At: p.now()}, nil
 		}
 	}
 
@@ -2933,6 +2967,20 @@ func (p *registryMetadataProvider) runNuGet(ctx context.Context, pkg, ver string
 		yanked := true
 		pr.Release.Yanked = &yanked
 	}
+	// Gallery deprecation. Neither the .nuspec (package content) nor the
+	// SemVer-1 registration read above carries it, so this is a separate
+	// best-effort lookup — the same shape runPub uses for pub.dev's /options.
+	// A miss adds no warning: it is not a fact about the package.
+	//
+	// Routed onto Release.Deprecated, which risk_projection.go folds into
+	// DeprecatedByMaintainer. A registry-native withdrawal is a maintenance
+	// fact, never a malware verdict.
+	if dep := p.fetchNuGetDeprecation(ctx, pkg, ver); dep != "" {
+		if pr.Release == nil {
+			pr.Release = &ReleaseSection{}
+		}
+		pr.Release.Deprecated = dep
+	}
 	enrichRepoStars(ctx, p, &pr)
 	return pr, nil
 }
@@ -2947,6 +2995,100 @@ func (p *registryMetadataProvider) runNuGet(ctx context.Context, pkg, ver string
 // default), which is why the map only contains entries for the
 // unlisted-positive case — the caller never sees a false-positive from
 // a payload that simply omitted the field.
+// fetchNuGetDeprecation returns the gallery deprecation for ONE version, or ""
+// when there is none, when the lookup fails, or when the resource is not
+// configured.
+//
+// Best-effort by design, exactly like fetchPubOptions: a miss is not an error
+// about the package, so it adds no warning and never fails the scan. NuGet
+// deprecation is gallery state rather than package content, so it appears in
+// neither the .nuspec nor the SemVer-1 registration this provider already
+// reads — registration5-semver1 strips the field outright. It is PER-VERSION
+// (each catalogEntry carries its own), which is stricter than Packagist's
+// package-level `abandoned`, so this matches the requested version exactly and
+// does not generalise across the version history.
+//
+// The index pages are sometimes inlined and sometimes remote `@id` references;
+// both shapes are handled, with the remote walk bounded so a package with a
+// long history cannot turn one lookup into dozens of requests.
+func (p *registryMetadataProvider) fetchNuGetDeprecation(ctx context.Context, pkg, version string) string {
+	base := strings.TrimSpace(p.endpoints.nugetRegistrationV2)
+	if base == "" || version == "" {
+		return ""
+	}
+	type leaf struct {
+		CatalogEntry struct {
+			Version     string `json:"version"`
+			Deprecation *struct {
+				Message          string   `json:"message"`
+				Reasons          []string `json:"reasons"`
+				AlternatePackage *struct {
+					ID string `json:"id"`
+				} `json:"alternatePackage"`
+			} `json:"deprecation"`
+		} `json:"catalogEntry"`
+	}
+	type page struct {
+		ID    string `json:"@id"`
+		Items []leaf `json:"items"`
+	}
+	var idx struct {
+		Items []page `json:"items"`
+	}
+	lower := strings.ToLower(pkg)
+	endpoint := fmt.Sprintf("%s/%s/index.json", base, url.PathEscape(lower))
+	if warn, err := p.fetchJSON(ctx, endpoint, "application/json", &idx); err != nil || warn != nil {
+		return ""
+	}
+
+	want := strings.ToLower(strings.TrimSpace(version))
+	match := func(items []leaf) (string, bool) {
+		for _, l := range items {
+			ce := l.CatalogEntry
+			if !strings.EqualFold(strings.TrimSpace(ce.Version), want) {
+				continue
+			}
+			if ce.Deprecation == nil {
+				return "", true // this version exists and is NOT deprecated
+			}
+			reason := "deprecated"
+			if rs := strings.Join(ce.Deprecation.Reasons, ", "); rs != "" {
+				reason = "deprecated: " + rs
+			}
+			if ap := ce.Deprecation.AlternatePackage; ap != nil {
+				if id := strings.TrimSpace(ap.ID); id != "" {
+					reason += "; replaced by " + id
+				}
+			}
+			return reason, true
+		}
+		return "", false
+	}
+
+	const maxRemotePages = 8
+	remote := 0
+	for _, pg := range idx.Items {
+		if len(pg.Items) > 0 {
+			if got, found := match(pg.Items); found {
+				return got
+			}
+			continue
+		}
+		if pg.ID == "" || remote >= maxRemotePages {
+			continue
+		}
+		remote++
+		var sub page
+		if warn, err := p.fetchJSON(ctx, pg.ID, "application/json", &sub); err != nil || warn != nil {
+			continue
+		}
+		if got, found := match(sub.Items); found {
+			return got
+		}
+	}
+	return ""
+}
+
 func (p *registryMetadataProvider) fetchNuGetTimeline(ctx context.Context, pkg string) ([]VersionRelease, string, map[string]bool, *Warning) {
 	lower := strings.ToLower(pkg)
 	endpoint := fmt.Sprintf("%s/%s/index.json", p.endpoints.nugetRegistration, url.PathEscape(lower))
@@ -3030,6 +3172,13 @@ type composerVersionEntry struct {
 	Require    map[string]string `json:"require"`
 	RequireDev map[string]string `json:"require-dev"`
 	Suggest    map[string]string `json:"suggest"`
+	// Abandoned is Packagist's maintainer-withdrawal flag. Two wire shapes,
+	// hence `any`: bare `true`, or a REPLACEMENT PACKAGE NAME string
+	// ("symfony/mailer"). It rides the NEWEST p2 entry only, and
+	// expandComposerMinified carries it forward onto every older entry — which
+	// is the correct semantics, because Packagist abandons a PACKAGE, not a
+	// version. Same shape as the pub precedent in runPub.
+	Abandoned any `json:"abandoned"`
 }
 
 // composerUnsetSentinel is how the `composer/2.0` minified metadata format
@@ -3199,6 +3348,29 @@ func (p *registryMetadataProvider) runComposer(ctx context.Context, pkg, ver str
 	release := &ReleaseSection{}
 	if t, ok := parseTime(match.Time); ok {
 		release.PublishedAt = &t
+	}
+	// Packagist's maintainer withdrawal. Routed onto Release.Deprecated —
+	// which risk_projection.go:351 folds into DeprecatedByMaintainer — exactly
+	// as runPub routes pub.dev's `isDiscontinued`. A registry-native withdrawal
+	// is a maintenance fact, never a malware verdict.
+	//
+	// NOT put through npmDeprecation despite the shapes matching. npm's string
+	// is a REASON; Packagist's is a REPLACEMENT PACKAGE NAME, and
+	// registry_wave1.go:57 renders the field as "Maintainer deprecation: <x>",
+	// so a bare "symfony/mailer" there would read as the maintainer's stated
+	// reason for deprecating. The pub precedent's phrasing avoids that and is
+	// reused verbatim in shape.
+	switch v := match.Abandoned.(type) {
+	case bool:
+		if v {
+			release.Deprecated = "abandoned"
+		}
+	case string:
+		if rb := strings.TrimSpace(v); rb != "" {
+			release.Deprecated = "abandoned: replaced by " + rb
+		} else {
+			release.Deprecated = "abandoned"
+		}
 	}
 
 	urls := &URLSection{
@@ -5443,7 +5615,7 @@ func (p *registryMetadataProvider) doGitHubFetch(ctx context.Context, endpoint s
 	var lastWarn *Warning
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return &Warning{Provider: "registrymetadata", Code: "context_cancelled", Message: err.Error(), At: p.now()}
+			return &Warning{Provider: "registrymetadata", Code: WarnRegistryCancelled, Message: err.Error(), At: p.now()}
 		}
 		w := p.gitHubFetchOnce(ctx, endpoint, token, out)
 		if w == nil {
@@ -5467,7 +5639,7 @@ func (p *registryMetadataProvider) doGitHubFetch(ctx context.Context, endpoint s
 				case <-t.C:
 				case <-ctx.Done():
 					t.Stop()
-					return &Warning{Provider: "registrymetadata", Code: "context_cancelled", Message: ctx.Err().Error(), At: p.now()}
+					return &Warning{Provider: "registrymetadata", Code: WarnRegistryCancelled, Message: ctx.Err().Error(), At: p.now()}
 				}
 				continue
 			}

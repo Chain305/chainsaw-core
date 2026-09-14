@@ -544,3 +544,44 @@ func TestProjectToRiskInput_RepoActivityPropagates(t *testing.T) {
 		t.Errorf("FirstPublishedAt got %v want %v", in.FirstPublishedAt, first)
 	}
 }
+
+// TestCancelledRegistryFetchIsNotEvaluated pins the licence-claim-from-nothing
+// case.
+//
+// lic.missing fires on `LicenseSPDX == ""` and cannot tell "declares no
+// licence" from "we never fetched it". So any path that scores a report whose
+// metadata section was never populated will publish a false licence claim.
+//
+// Observed, not theorised: two identical scans of the labelled corpus disagreed
+// on pypi/urllib3@2.7.0. The run whose registry fetch was cancelled scored it
+// allow/97 with lic.missing + license.unidentified — "Package does not declare
+// a license", about urllib3, which is MIT. The clean run scored allow/100 with
+// lic.spdx_present. A cancelled fetch must reach the SignalsUnavailable
+// short-circuit, exactly as an unparseable document already does.
+func TestCancelledRegistryFetchIsNotEvaluated(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code string
+	}{
+		{"cancelled", WarnRegistryCancelled},
+		{"undecodable", WarnRegistryDecode},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Report{}
+			r.Identity = IdentitySection{Ecosystem: "pypi", Package: "urllib3", Version: "2.7.0"}
+			r.Observation.Warnings = []Warning{
+				{Provider: "registrymetadata", Code: tc.code, Message: "boom"},
+			}
+
+			in := ProjectToRiskInput(r)
+			if !in.SignalsUnavailable {
+				t.Fatalf("SignalsUnavailable = false after a %q warning. The metadata "+
+					"section is empty, so lic.missing will fire and claim the package "+
+					"declares no licence — a fact we never established.", tc.code)
+			}
+			if in.UnavailableReason == "" {
+				t.Error("no UnavailableReason recorded")
+			}
+		})
+	}
+}

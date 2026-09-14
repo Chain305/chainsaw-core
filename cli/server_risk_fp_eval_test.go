@@ -111,6 +111,7 @@ import (
 	"time"
 
 	"github.com/chain305/chainsaw-core/intelligence"
+	"github.com/chain305/chainsaw-core/kev"
 	"github.com/chain305/chainsaw-core/provenance"
 	"github.com/chain305/chainsaw-core/risk"
 	"github.com/chain305/chainsaw-core/typosquat"
@@ -993,6 +994,44 @@ func TestBuildServerRiskCorpus(t *testing.T) {
 		// fetched. Cheapest coverage available.
 		cfg.ProvenanceChecker = provenance.NewChecker(
 			slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+		// KEV: the last of the three nil dependencies this block's own
+		// comment names, and the only one that gates a NotTunable ceiling
+		// signal (vuln.kev). Added 2026-09-14 with the corpus's first
+		// KEV-listed rows — log4j-core 2.14.1, struts2-core 2.5.12,
+		// tomcat-embed-core 9.0.30, pillow 9.0.0, golang.org/x/net v0.7.0
+		// all carry a CVE in the CISA catalogue. Without this the signal
+		// lands in COULD NOT FIRE and the comparison reports a Socket win
+		// that is really a dormant index.
+		//
+		// Mirrors cmd/chainsaw-proxy/init_server.go:554-576: prefer a
+		// pre-fetched file, fall back to the live catalogue.
+		kevIdx := kev.New()
+		kevIdx.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		if path := os.Getenv("CHAINSAW_KEV_FEED_PATH"); path != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("CHAINSAW_KEV_FEED_PATH=%s: %v", path, err)
+			}
+			if err := kevIdx.LoadFromJSON(data); err != nil {
+				t.Fatalf("CHAINSAW_KEV_FEED_PATH=%s: parse: %v", path, err)
+			}
+		} else {
+			loadCtx, cancelKEV := context.WithTimeout(context.Background(), 60*time.Second)
+			if err := kevIdx.Load(loadCtx); err != nil {
+				t.Fatalf("kev: load failed: %v (set CHAINSAW_KEV_FEED_PATH to a local catalogue)", err)
+			}
+			cancelKEV()
+		}
+		// An empty catalogue loads cleanly and is indistinguishable from a
+		// dormant one downstream — the same trap loadMalwareIndexFromDir
+		// guards against below.
+		if n := len(kevIdx.All()); n == 0 {
+			t.Fatal("kev index parsed 0 entries — refusing to run: vuln.kev would read as 'did not fire'")
+		} else {
+			t.Logf("kev index loaded: %d entries", n)
+		}
+		cfg.KEVIndex = kevIdx
 	}
 
 	// The embedded floor alone is a usable malware index and costs nothing:

@@ -133,6 +133,9 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	if reason, ok := registryDecodeReason(r); ok {
 		return unavailableInput(r, reason)
 	}
+	if reason, ok := registryCancelledReason(r); ok {
+		return unavailableInput(r, reason)
+	}
 
 	// Same treatment for a version string that can never be matched at
 	// all — an unresolved manifest property ("${slf4jVersion}"), our own
@@ -550,6 +553,41 @@ func registryDecodeReason(r *Report) (string, bool) {
 			return "the registry returned a document we could not parse, so no " +
 				"facts about this version were obtained; this is a gap in our reader, " +
 				"not a statement about the package", true
+		}
+	}
+	return "", false
+}
+
+// registryCancelledReason is the sibling of registryDecodeReason: the same
+// epistemic state — no facts about this version were obtained — reached by a
+// cancelled fetch rather than an unparseable document.
+//
+// It is a separate helper rather than a second case inside registryDecodeReason
+// because TestEveryUnavailabilityCodeHasAProjectionArm scans the source for the
+// literal `w.Code == <CODE>` and for a `<helper>(r)` call in
+// ProjectToRiskInput. Folding both codes into one helper as a switch passes the
+// behavioural tests and silently defeats that guard, which is precisely the
+// failure shape the guard exists to catch.
+//
+// WHY IT MATTERS. lic.missing fires on `LicenseSPDX == ""` and cannot tell
+// "declares no licence" from "never fetched", so scoring a report whose
+// metadata section was never populated publishes a false licence claim.
+// Observed: two identical scans of the labelled corpus disagreed on
+// pypi/urllib3@2.7.0. The run whose fetch was cancelled scored it allow/97 with
+// lic.missing + license.unidentified — "Package does not declare a license",
+// about urllib3, which is MIT. The clean run scored allow/100 with
+// lic.spdx_present.
+//
+// DELIBERATELY NARROW. The sibling codes this provider emits — transport,
+// http_5xx, http_403, timeout — arguably share the "we learned nothing" status,
+// but each carries its own blast radius and none has a live repro here.
+// Widening is a separate decision needing its own evidence, not a tidy-up.
+func registryCancelledReason(r *Report) (string, bool) {
+	for _, w := range r.Observation.Warnings {
+		if w.Provider == "registrymetadata" && w.Code == WarnRegistryCancelled {
+			return "the registry fetch was cancelled before any facts about this " +
+				"version were obtained; this is an outage on our side, not a " +
+				"statement about the package", true
 		}
 	}
 	return "", false

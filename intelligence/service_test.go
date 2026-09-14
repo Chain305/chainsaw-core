@@ -309,3 +309,67 @@ func (p providerFunc) Supports(_ string) bool { return true }
 func (p providerFunc) Run(ctx context.Context, req Request, r *Report) (PartialReport, error) {
 	return p.run(ctx, req, r)
 }
+
+// TestScan_ShortCircuitKeepsSiblingResults pins the random-drop bug.
+//
+// When a provider returns a decisive Block the fan-out cancels its siblings
+// (partialIsBlocking -> fanoutCancel). Stopping their WORK is deliberate.
+// Throwing away work they had ALREADY FINISHED was not.
+//
+// The phase-1 send used to be:
+//
+//	select {
+//	case ch <- msg:
+//	case <-fanoutCtx.Done():
+//	}
+//
+// `ch` is buffered to len(eligible) with one send per worker, so the send can
+// never block and the select protected nothing. What it did do: once a sibling
+// tripped fanoutCancel, BOTH cases were permanently ready, and Go chooses
+// uniformly at random among ready cases — so a finished provider's result was
+// discarded roughly half the time, leaving no timing and no warning.
+//
+// Two identical scans of the 174-row labelled corpus disagreed about whether
+// the `osv` provider appeared, on 26 rows, and 26 of 26 were malicious against
+// a 28%% base rate. The short-circuit only fires when malware lands first, so
+// the coin flip could only ever discard data on the rows where a complete
+// report matters most.
+//
+// This test runs the race many times because a flaky drop passes a single run
+// half the time — which is exactly how it survived.
+func TestScan_ShortCircuitKeepsSiblingResults(t *testing.T) {
+	for i := 0; i < 40; i++ {
+		blocker := &fakeProvider{
+			name:    "fake-blocker",
+			signal:  SignalMalware,
+			partial: PartialReport{SupplyChain: &SupplyChainSection{MalwareStatus: "malicious"}},
+		}
+		sibling := &fakeProvider{
+			name:    "fake-sibling",
+			signal:  SignalTyposquat,
+			partial: PartialReport{SupplyChain: &SupplyChainSection{TyposquatStatus: "suspected"}},
+		}
+		svc := New(Config{Providers: []Provider{blocker, sibling}})
+		report, err := svc.Scan(context.Background(), Request{
+			Key:   Key{Ecosystem: "npm", Package: "evil", Version: "1.0.0"},
+			OrgID: "org-default",
+		})
+		if err != nil {
+			t.Fatalf("iteration %d: scan: %v", i, err)
+		}
+		seen := map[string]bool{}
+		for _, pt := range report.Observation.ProviderTimings {
+			seen[pt.Provider] = true
+		}
+		if !seen["fake-sibling"] {
+			t.Fatalf("iteration %d: the sibling provider finished but its result was "+
+				"discarded — no ProviderTiming. A report missing a provider is "+
+				"indistinguishable from one where that provider found nothing.\n"+
+				"  timings=%+v\n  warnings=%+v",
+				i, report.Observation.ProviderTimings, report.Observation.Warnings)
+		}
+		if report.SupplyChain.TyposquatStatus != "suspected" {
+			t.Fatalf("iteration %d: sibling partial was not merged: %+v", i, report.SupplyChain)
+		}
+	}
+}

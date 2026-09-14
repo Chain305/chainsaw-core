@@ -78,6 +78,13 @@ func labelKey(eco, pkg, ver string) string {
 
 // readLabelledSeed parses corpus-seed.tsv.
 //
+// LABELS. Four, not three: `vulnerable` was added 2026-09-14 for the socket.dev
+// comparison and means "a published advisory affects this exact version, and no
+// advisory calls it malicious". It is deliberately NOT folded into `suspicious`:
+// that label measures INFERENCE from registry facts, this one measures ADVISORY
+// MATCHING, and merging them would have buried the 10 protestware/deprecation
+// rows under 67 CVE rows and invalidated the published suspicious-tier figure.
+//
 // It parses with explicit field indexing rather than a tab-splitting reader
 // loop for a specific reason: the shell's `IFS=$'\t' read` collapses
 // consecutive tabs (tab is an IFS whitespace character), which silently
@@ -107,7 +114,7 @@ func readLabelledSeed(path string) (map[string]labelledRow, error) {
 		}
 		label := strings.TrimSpace(f[4])
 		switch label {
-		case "malicious", "suspicious", "benign":
+		case "malicious", "suspicious", "vulnerable", "benign":
 		default:
 			return nil, fmt.Errorf("line %d: bad label %q (row shifted?): %q", ln, label, line)
 		}
@@ -275,7 +282,7 @@ func TestLabelledCorpusRecall(t *testing.T) {
 	t.Log("")
 	t.Log("CONFUSION MATRIX  (adverse = quarantine|replace|warn|upgrade_available)")
 	t.Logf("  %-11s %8s %8s %9s %8s", "label", "adverse", "allow", "unscored", "total")
-	for _, l := range []string{"malicious", "suspicious", "benign"} {
+	for _, l := range []string{"malicious", "suspicious", "vulnerable", "benign"} {
 		c := matrix[l]
 		if c == nil {
 			c = &cell{}
@@ -353,15 +360,16 @@ func TestLabelledCorpusRecall(t *testing.T) {
 	t.Log("")
 	t.Log("PER-SIGNAL FIRES BY LABEL  (a signal that fires equally on both")
 	t.Log("discriminates nothing, however severe it looks)")
-	t.Logf("  %-42s %6s %6s %6s", "signal", "mal", "susp", "benign")
+	t.Logf("  %-42s %6s %6s %6s %6s", "signal", "mal", "susp", "vuln", "benign")
 	var sigs []string
 	for s := range seenSignals {
 		sigs = append(sigs, s)
 	}
 	sort.Strings(sigs)
 	for _, s := range sigs {
-		t.Logf("  %-42s %6d %6d %6d", s,
-			firedByLabel["malicious"][s], firedByLabel["suspicious"][s], firedByLabel["benign"][s])
+		t.Logf("  %-42s %6d %6d %6d %6d", s,
+			firedByLabel["malicious"][s], firedByLabel["suspicious"][s],
+			firedByLabel["vulnerable"][s], firedByLabel["benign"][s])
 	}
 
 	// ─── signal coverage: the uncomfortable number ───────────────────────────
@@ -376,7 +384,8 @@ func TestLabelledCorpusRecall(t *testing.T) {
 			if providerRan(providersRan, prov) {
 				why = "ran but never produced (dormant/unavailable on every row)"
 			}
-			couldNotFire = append(couldNotFire, fmt.Sprintf("%s (provider %q %s)", sg.ID, prov, why))
+			couldNotFire = append(couldNotFire,
+				fmt.Sprintf("%s (provider %s %s)", sg.ID, strings.Join(prov, "/"), why))
 			continue
 		}
 		didNotFire = append(didNotFire, sg.ID)
@@ -506,7 +515,6 @@ func loadMalwareIndexFromDir(dir string) (*malware.Index, int, error) {
 	return idx, len(entries), nil
 }
 
-
 // signalProducer maps a signal ID to the ONE provider whose absence makes
 // that signal unable to fire, or ("", false) when no single provider gates it.
 //
@@ -520,46 +528,65 @@ func loadMalwareIndexFromDir(dir string) (*malware.Index, int, error) {
 // Keyed on the ID PREFIX because that is how core/risk/registry_*.go already
 // partitions the signal space, so a new signal in an existing family is
 // classified correctly without touching this map.
-func signalProducer(signalID string) (string, bool) {
+// signalProducer maps a signal to the provider(s) that can make it fire.
+//
+// ANY-OF, and the slice is not cosmetic. `ai.*` was mapped to the single name
+// "aiartifact", which is the REGISTRATION name in premium/register.go, not a
+// provider's Name(). The three providers behind those signals return
+// "pickle_scan", "model_card" and "agent_tool"
+// (premium/provider_aiartifact.go:34,249,334), so providerRan(set,
+// "aiartifact") could never be true and all nine ai.* signals were
+// PERMANENTLY EXCUSED — including in a build that does link premium. That is
+// the exact inverse of the F-1 failure: F-1 blamed the engine for a blind
+// lane, this excused a lane that really did run. Both are the map being wrong
+// rather than the engine being wrong, which is why the map is now pinned by
+// TestSignalProducerNamesAreRealProviders.
+func signalProducer(signalID string) ([]string, bool) {
 	switch {
 	case strings.HasPrefix(signalID, "vuln."):
 		// Both the Trivy-backed `cve` provider and `osv` write VulnSection,
 		// so neither alone gates these. Report the one that is the federated
 		// source; if it never ran, no vulnerability signal could fire.
-		return "osv", true
+		return []string{"osv"}, true
 	case strings.HasPrefix(signalID, "sc.typosquat"):
-		return "typosquat", true
+		return []string{"typosquat"}, true
 	case signalID == "sc.known_malicious", strings.HasPrefix(signalID, "sc.transitive_malware"):
-		return "malware", true
+		return []string{"malware"}, true
 	case signalID == "sc.provenance_verified", signalID == "sc.signature_verified", signalID == "sc.slsa_level_bonus":
-		return "provenance", true
+		return []string{"provenance"}, true
 	case signalID == "sc.repo_archived", signalID == "sc.repo_missing", signalID == "sc.repo_ownership_mismatch":
-		return "repolink", true
+		return []string{"repolink"}, true
 	case strings.HasPrefix(signalID, "cap."):
-		return "capability", true
+		return []string{"capability"}, true
 	case strings.HasPrefix(signalID, "ai."):
-		return "aiartifact", true
+		return []string{"pickle_scan", "model_card", "agent_tool"}, true
 	case signalID == "sc.hidden_unicode":
-		return "hiddenunicode", true
+		return []string{"hiddenunicode"}, true
 	case signalID == "sc.install_script_fetches_remote", signalID == "sc.install_script_only":
-		return "installscripts", true
+		return []string{"installscripts"}, true
 	case signalID == "sc.manifest_confusion":
-		return "manifestconfusion", true
+		return []string{"manifestconfusion"}, true
 	case signalID == "sc.shrinkwrap_present":
-		return "shrinkwrap", true
+		return []string{"shrinkwrap"}, true
 	case strings.HasPrefix(signalID, "qual.checksum"):
-		return "checksum", true
+		return []string{"checksum"}, true
 	default:
 		// Unmapped => treated as DID NOT FIRE. See the doc comment: the
 		// conservative direction is to blame ourselves, not the instrument.
-		return "", false
+		return nil, false
 	}
 }
 
-// providerRan reports whether a provider appears in any scanned row.
-func providerRan(set map[string]struct{}, provider string) bool {
-	_, ok := set[provider]
-	return ok
+// providerRan reports whether ANY of the named providers appears in a scanned
+// row. Any-of, because a signal family can be fed by several providers and one
+// of them running is enough for the signal to have had its chance.
+func providerRan(set map[string]struct{}, providers []string) bool {
+	for _, p := range providers {
+		if _, ok := set[p]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // readSeedNames reads a one-name-per-line popular-package seed list, using
@@ -614,4 +641,76 @@ func loadMalwareFloorOnly() (*malware.Index, int) {
 	floor := malware.Floor()
 	idx.Load(floor)
 	return idx, len(floor)
+}
+
+// TestSignalProducerNamesAreRealProviders pins the map against the defect it
+// just had: every name in signalProducer must be a value some provider's
+// Name() method actually returns.
+//
+// It cannot verify that by reflection — the premium providers live in the root
+// module and core/cli, being chainsaw-core, cannot import them — so it checks
+// against a curated list carrying the file:line each name was read from. That
+// is weaker than reflection and still catches the failure that occurred: the
+// map said "aiartifact", which is the REGISTRATION name in
+// premium/register.go:126,130,134, while the providers return "pickle_scan",
+// "model_card" and "agent_tool". A name no provider returns can never match a
+// ProviderTiming, so every signal mapped to it is permanently excused rather
+// than graded — silently, and in every build including one that links premium.
+//
+// When a provider is renamed, this test fails and the citation says where to
+// look. Add the new name here in the same commit.
+func TestSignalProducerNamesAreRealProviders(t *testing.T) {
+	// value -> where its Name() method is declared
+	known := map[string]string{
+		// core module
+		"osv":               "core/intelligence/provider_osv.go (Name() = \"osv\")",
+		"typosquat":         "core/intelligence/provider_typosquat.go",
+		"malware":           "core/intelligence/provider_malware.go",
+		"provenance":        "core/intelligence/provider_provenance.go",
+		"repolink":          "core/intelligence/provider_repolink.go",
+		"hiddenunicode":     "core/intelligence/provider_hiddenunicode.go",
+		"installscripts":    "core/intelligence/provider_installscripts.go",
+		"manifestconfusion": "core/intelligence/provider_manifestconfusion.go",
+		"shrinkwrap":        "core/intelligence/provider_shrinkwrap.go",
+		"checksum":          "core/intelligence/provider_checksum.go",
+		"registrymetadata":  "core/intelligence/provider_registrymetadata.go",
+		// premium (root module) — names read from the source, not importable here
+		"capability":  "internal/intelligence/premium/provider_capability.go:43",
+		"pickle_scan": "internal/intelligence/premium/provider_aiartifact.go:34",
+		"model_card":  "internal/intelligence/premium/provider_aiartifact.go:249",
+		"agent_tool":  "internal/intelligence/premium/provider_aiartifact.go:334",
+		"maintenance": "internal/intelligence/premium/provider_maintenance.go:49",
+	}
+	// The registration names, which are NOT Name() values. Mapping a signal to
+	// one of these is the bug this test exists to prevent.
+	forbidden := map[string]string{
+		"aiartifact": "registration name in premium/register.go:126,130,134 — the " +
+			"providers return pickle_scan / model_card / agent_tool",
+	}
+
+	seen := map[string]bool{}
+	for _, sg := range risk.AllSignals() {
+		provs, ok := signalProducer(sg.ID)
+		if !ok {
+			continue
+		}
+		if len(provs) == 0 {
+			t.Errorf("signal %q maps to an empty provider list", sg.ID)
+			continue
+		}
+		for _, p := range provs {
+			seen[p] = true
+			if why, bad := forbidden[p]; bad {
+				t.Errorf("signal %q maps to %q, which is not a provider Name(): %s", sg.ID, p, why)
+				continue
+			}
+			if _, ok := known[p]; !ok {
+				t.Errorf("signal %q maps to provider %q, which is not in this test's "+
+					"known list. Either it is a typo — in which case the signal is "+
+					"permanently excused from grading — or a provider was added and "+
+					"this list needs the new name plus its file:line.", sg.ID, p)
+			}
+		}
+	}
+	t.Logf("signalProducer references %d distinct provider names, all accounted for", len(seen))
 }

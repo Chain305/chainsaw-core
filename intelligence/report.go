@@ -1402,6 +1402,12 @@ const (
 	WarnFeatureDisabled = "feature_disabled"
 	WarnRateLimited     = "rate_limited"
 	WarnUnsupported     = "ecosystem_unsupported"
+	// WarnRegistryCancelled is emitted by provider_registrymetadata.go when the
+	// registry fetch was cancelled. Same epistemic state as WarnRegistryDecode:
+	// no facts about the version were obtained, so the coordinate must reach the
+	// SignalsUnavailable short-circuit rather than be scored off an empty
+	// metadata section.
+	WarnRegistryCancelled = "context_cancelled"
 
 	// WarnVulnRangeUndecidable is emitted when an advisory's version
 	// range could not be ordered against the queried version under that

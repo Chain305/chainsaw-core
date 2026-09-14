@@ -558,10 +558,29 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			// Send first, THEN trip the short-circuit. If the order is
 			// reversed, a fast-cancellation race could close the send
 			// branch before the Block-bearing partial reaches the merge.
-			select {
-			case ch <- msg:
-			case <-fanoutCtx.Done():
-			}
+			// UNCONDITIONAL SEND. `ch` is buffered to len(eligible) and each
+			// worker sends exactly once, so this can never block and needs no
+			// escape hatch.
+			//
+			// It used to be `select { case ch <- msg: case <-fanoutCtx.Done(): }`,
+			// which looks defensive and is not: once a sibling trips
+			// fanoutCancel, BOTH cases are permanently ready, and Go chooses
+			// uniformly at random among ready cases. A provider that had already
+			// finished its work therefore had its result thrown away about half
+			// the time — no timing, no warning, nothing to distinguish it from a
+			// provider that ran and found nothing.
+			//
+			// Measured over two identical scans of the 174-row labelled corpus:
+			// the `osv` result was present on one run and absent on the other for
+			// 26 rows, and 26 of 26 were malicious against a 28% base rate. The
+			// short-circuit only fires when malware lands first, so the coin flip
+			// could only ever discard data on the rows where a complete report
+			// matters most — the CVE list of a known-malicious package.
+			//
+			// The latency optimisation is untouched: fanoutCancel still stops
+			// sibling WORK through the provider context. This only stops it
+			// discarding work that was already done.
+			ch <- msg
 			if runErr == nil && partialIsBlocking(out) {
 				fanoutCancel()
 			}
@@ -603,6 +622,7 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			})
 		}
 	}
+
 	// Post-merge tiers (Tier 3, 4, ...). Each tier runs to completion
 	// and merges before the next tier starts — that ordering is what
 	// lets a Tier-N provider see Tier-(N-1) output. Within a tier the
@@ -637,10 +657,11 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 					out, runErr = p.Run(providerCtx, req, report)
 				}()
 				msg := partialMsg{name: p.Name(), partial: out, elapsed: time.Since(start), err: runErr}
-				select {
-				case chN <- msg:
-				case <-ctx.Done():
-				}
+				// Unconditional for the same reason as the phase-1 send above:
+				// chN is buffered to len(tierProviders) with one send per
+				// worker, so it cannot block, and a select against a cancelled
+				// context would discard completed work at random.
+				chN <- msg
 			}(p)
 		}
 		wgN.Wait()

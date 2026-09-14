@@ -25,25 +25,26 @@ func newStubProvider(t *testing.T, mux *http.ServeMux) (*registryMetadataProvide
 	t.Cleanup(srv.Close)
 	p := newRegistryMetadataProvider()
 	p.endpoints = registryEndpoints{
-		npm:               srv.URL,
-		pypi:              srv.URL,
-		maven:             srv.URL,
-		cargo:             srv.URL,
-		rubygems:          srv.URL,
-		nuget:             srv.URL,
-		nugetRegistration: srv.URL,
-		composer:          srv.URL,
-		goproxy:           srv.URL,
-		cocoapods:         srv.URL,
-		cocoapodsCDN:      srv.URL,
-		pub:               srv.URL,
-		huggingface:       srv.URL,
-		docker:            srv.URL,
-		depsdev:           srv.URL,
-		github:            srv.URL,
-		gitlab:            srv.URL,
-		bitbucket:         srv.URL,
-		codeberg:          srv.URL,
+		npm:                 srv.URL,
+		pypi:                srv.URL,
+		maven:               srv.URL,
+		cargo:               srv.URL,
+		rubygems:            srv.URL,
+		nuget:               srv.URL,
+		nugetRegistration:   srv.URL,
+		nugetRegistrationV2: srv.URL,
+		composer:            srv.URL,
+		goproxy:             srv.URL,
+		cocoapods:           srv.URL,
+		cocoapodsCDN:        srv.URL,
+		pub:                 srv.URL,
+		huggingface:         srv.URL,
+		docker:              srv.URL,
+		depsdev:             srv.URL,
+		github:              srv.URL,
+		gitlab:              srv.URL,
+		bitbucket:           srv.URL,
+		codeberg:            srv.URL,
 	}
 	return p, srv
 }
@@ -2178,6 +2179,192 @@ func TestPubLicenseFromTags(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := pubLicenseFromTags(tc.tags); got != tc.want {
 				t.Fatalf("pubLicenseFromTags(%v) = %q, want %q", tc.tags, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMavenParentLicenceCrossesNonUTF8Parent pins the ISO-8859-1 defect.
+//
+// Go's encoding/xml REFUSES a document whose declaration names a non-UTF-8
+// encoding unless Decoder.CharsetReader is set — it errors rather than falling
+// back. Maven Central serves plenty of those; org.apache.commons:commons-parent
+// is ISO-8859-1 and is the parent of every Apache Commons artifact. The decode
+// failure surfaced inside inheritMavenLicense's parent walk as an unreadable
+// parent, which that function treats as silence, so commons-text 1.9 scored
+// lic.missing (-15) AND license.unidentified (-15) — a -30 licence penalty and
+// the claim "Package does not declare a license" on an Apache-2.0 artifact.
+//
+// The shape matters and is why this test is not a copy of the depth-1 case:
+// the licence is TWO hops up, and the intermediate POM is the non-UTF-8 one.
+// A depth-1 fixture passes with or without the fix (guava resolved correctly
+// throughout), so only a depth-2 fixture whose middle document is ISO-8859-1
+// can catch a regression here.
+func TestMavenParentLicenceCrossesNonUTF8Parent(t *testing.T) {
+	mux := http.NewServeMux()
+
+	// child: no <licenses>, parent -> mid
+	mux.HandleFunc("/org/example/child/1.0/child-1.0.pom", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<project><modelVersion>4.0.0</modelVersion>
+  <parent><groupId>org.example</groupId><artifactId>mid</artifactId><version>2</version></parent>
+  <groupId>org.example</groupId><artifactId>child</artifactId><version>1.0</version>
+</project>`)
+	})
+
+	// mid: ISO-8859-1 AND no <licenses> — the document that used to kill the walk.
+	// Body is written as raw Latin-1 bytes (0xE9 = "é") so the declaration is
+	// truthful; a UTF-8 body with a Latin-1 declaration would test nothing.
+	mux.HandleFunc("/org/example/mid/2/mid-2.pom", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		body := []byte(`<?xml version="1.0" encoding="ISO-8859-1"?>
+<project><modelVersion>4.0.0</modelVersion>
+  <parent><groupId>org.example</groupId><artifactId>root</artifactId><version>3</version></parent>
+  <groupId>org.example</groupId><artifactId>mid</artifactId><version>2</version>
+  <description>caf` + "\xe9" + `</description>
+</project>`)
+		_, _ = w.Write(body)
+	})
+
+	// root: declares the licence
+	mux.HandleFunc("/org/example/root/3/root-3.pom", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<project><modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId><artifactId>root</artifactId><version>3</version>
+  <licenses><license><name>Apache License, Version 2.0</name></license></licenses>
+</project>`)
+	})
+
+	p, _ := newStubProvider(t, mux)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pr, err := p.runMaven(ctx, "org.example:child", "1.0")
+	if err != nil {
+		t.Fatalf("runMaven: %v", err)
+	}
+	if pr.Metadata == nil {
+		t.Fatal("no metadata section")
+	}
+	if got := pr.Metadata.LicenseExpression; got != "Apache License, Version 2.0" {
+		t.Errorf("licence through a non-UTF-8 intermediate parent = %q, want %q\n"+
+			"An empty result here means the XML decoder rejected the ISO-8859-1 "+
+			"parent again; lic.missing and license.unidentified will both fire on "+
+			"a licensed artifact.", got, "Apache License, Version 2.0")
+	}
+}
+
+// TestComposerAbandonedBecomesDeprecated pins Packagist's maintainer
+// withdrawal.
+//
+// `abandoned` rides the NEWEST p2 entry only and expandComposerMinified carries
+// it forward, which is the correct semantics: Packagist abandons a PACKAGE, not
+// a version. So the older entry must inherit it — that is the half a
+// newest-version-only fixture would not catch.
+//
+// The value has two wire shapes: bare `true`, or a REPLACEMENT PACKAGE NAME.
+// The string is deliberately NOT run through npmDeprecation: npm's string is a
+// reason, Packagist's is a successor, and registry_wave1.go renders the field
+// as "Maintainer deprecation: <x>" — so a bare "symfony/mailer" there would
+// read as the maintainer's stated reason for deprecating.
+func TestComposerAbandonedBecomesDeprecated(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/p2/vendor/pkg.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"minified":"composer/2.0","packages":{"vendor/pkg":[
+		  {"name":"vendor/pkg","version":"v2.0.0","time":"2021-10-18T00:00:00+00:00",
+		   "license":["MIT"],"abandoned":"successor/pkg"},
+		  {"version":"v1.0.0","time":"2018-01-01T00:00:00+00:00"}
+		]}}`)
+	})
+	mux.HandleFunc("/p2/vendor/healthy.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"minified":"composer/2.0","packages":{"vendor/healthy":[
+		  {"name":"vendor/healthy","version":"v1.2.3","time":"2024-01-01T00:00:00+00:00","license":["MIT"]}
+		]}}`)
+	})
+	mux.HandleFunc("/p2/vendor/boolpkg.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"minified":"composer/2.0","packages":{"vendor/boolpkg":[
+		  {"name":"vendor/boolpkg","version":"v1.0.0","time":"2019-01-01T00:00:00+00:00","abandoned":true}
+		]}}`)
+	})
+
+	p, _ := newStubProvider(t, mux)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, tc := range []struct{ name, pkg, ver, want string }{
+		{"newest entry carries it", "vendor/pkg", "v2.0.0", "abandoned: replaced by successor/pkg"},
+		{"older entry inherits it", "vendor/pkg", "v1.0.0", "abandoned: replaced by successor/pkg"},
+		{"bare true", "vendor/boolpkg", "v1.0.0", "abandoned"},
+		{"healthy package stays empty", "vendor/healthy", "v1.2.3", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr, err := p.runComposer(ctx, tc.pkg, tc.ver)
+			if err != nil {
+				t.Fatalf("runComposer: %v", err)
+			}
+			got := ""
+			if pr.Release != nil {
+				got = pr.Release.Deprecated
+			}
+			if got != tc.want {
+				t.Errorf("Release.Deprecated = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNuGetDeprecationBecomesDeprecated pins the gallery deprecation lookup.
+//
+// NuGet deprecation is gallery state, not package content: it is in neither the
+// .nuspec nor the SemVer-1 registration this provider already reads —
+// registration5-semver1 strips the field outright (verified against
+// windowsazure.storage and microsoft.bcl, both deprecated in the gallery). It
+// is also PER-VERSION, unlike Packagist's package-level flag, so a deprecated
+// version and a healthy one on the same package must come back differently.
+func TestNuGetDeprecationBecomesDeprecated(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/somepkg/index.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"items":[{"items":[
+		  {"catalogEntry":{"version":"1.0.0","published":"2015-02-25T00:00:00Z",
+		    "deprecation":{"message":"obsolete","reasons":["Legacy"],
+		                   "alternatePackage":{"id":"New.Pkg"}}}},
+		  {"catalogEntry":{"version":"2.0.0","published":"2024-02-25T00:00:00Z"}}
+		]}]}`)
+	})
+	mux.HandleFunc("/somepkg/1.0.0/somepkg.nuspec", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><package><metadata><id>somepkg</id><version>1.0.0</version></metadata></package>`)
+	})
+	mux.HandleFunc("/somepkg/2.0.0/somepkg.nuspec", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><package><metadata><id>somepkg</id><version>2.0.0</version></metadata></package>`)
+	})
+
+	p, _ := newStubProvider(t, mux)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, tc := range []struct{ name, ver, want string }{
+		{"deprecated version", "1.0.0", "deprecated: Legacy; replaced by New.Pkg"},
+		{"healthy version of the same package", "2.0.0", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr, err := p.runNuGet(ctx, "somepkg", tc.ver)
+			if err != nil {
+				t.Fatalf("runNuGet: %v", err)
+			}
+			got := ""
+			if pr.Release != nil {
+				got = pr.Release.Deprecated
+			}
+			if got != tc.want {
+				t.Errorf("Release.Deprecated = %q, want %q", got, tc.want)
 			}
 		})
 	}
