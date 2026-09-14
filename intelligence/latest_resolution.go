@@ -47,6 +47,7 @@ package intelligence
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
 
@@ -119,19 +120,70 @@ func ResolvableLatestSentinel(ecosystem, version string) bool {
 // here so there is exactly one implementation and a fix to either
 // surface reaches both.
 func ResolveLatestVersion(ctx context.Context, ecosystem, name string) string {
+	v, _ := ResolveLatestVersionEx(ctx, ecosystem, name)
+	return v
+}
+
+// ErrRegistryNotFound is returned when a registry answers 404 for a
+// coordinate — the one response that means "this package does not exist"
+// rather than "we could not find out".
+var ErrRegistryNotFound = errors.New("intelligence: package not found in registry")
+
+// LatestState is the THREE-state answer to "does this package exist and
+// what is its latest version". Two states is the trap: collapsing "we
+// could not check" into "it does not exist" publishes a claim about
+// somebody's package that the evidence does not support, which is
+// precisely how the withdrawn F-1 and F-3 findings were manufactured in
+// docs/socket-comparison-2026-09-14.md.
+type LatestState int
+
+const (
+	// LatestUnknown — no resolver for this ecosystem, the registry was
+	// unreachable, or the lookup timed out. Callers MUST NOT render this
+	// as "not found"; the honest UI is "we could not check".
+	LatestUnknown LatestState = iota
+	// LatestFound — the registry answered and named a version.
+	LatestFound
+	// LatestNotFound — the registry answered 404. The package genuinely
+	// does not exist under that name.
+	LatestNotFound
+)
+
+// ResolveLatestVersionEx is ResolveLatestVersion with the state the plain
+// form throws away. One registry call, same resolvers, so a fix to either
+// surface reaches both.
+//
+// A registry that answers 200 but names no version is LatestFound with an
+// empty version — it exists, we just cannot pin a release. That is still
+// not LatestNotFound.
+func ResolveLatestVersionEx(ctx context.Context, ecosystem, name string) (string, LatestState) {
 	resolveCtx, cancel := context.WithTimeout(ctx, autoDepResolveTimeout)
 	defer cancel()
+
+	var (
+		v   string
+		err error
+	)
 	switch normalizeEcosystemKey(ecosystem) {
 	case "npm", "yarn", "bun":
-		return resolveNpmLatest(resolveCtx, name)
+		v, err = resolveNpmLatest(resolveCtx, name)
 	case "pypi", "pip":
-		return resolvePyPILatest(resolveCtx, name)
+		v, err = resolvePyPILatest(resolveCtx, name)
 	case "cargo":
-		return resolveCargoLatest(resolveCtx, name)
+		v, err = resolveCargoLatest(resolveCtx, name)
 	case "rubygems":
-		return resolveRubyGemsLatest(resolveCtx, name)
+		v, err = resolveRubyGemsLatest(resolveCtx, name)
+	default:
+		// No resolver. Not an error, and emphatically not "not found".
+		return "", LatestUnknown
 	}
-	return ""
+	switch {
+	case errors.Is(err, ErrRegistryNotFound):
+		return "", LatestNotFound
+	case err != nil:
+		return "", LatestUnknown
+	}
+	return strings.TrimSpace(v), LatestFound
 }
 
 // ResolveLatestKey returns key with Version replaced by the concrete

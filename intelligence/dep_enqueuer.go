@@ -311,18 +311,18 @@ var latestRegistryBases = struct {
 	rubygems: "https://rubygems.org",
 }
 
-func resolveNpmLatest(ctx context.Context, name string) string {
+func resolveNpmLatest(ctx context.Context, name string) (string, error) {
 	endpoint := latestRegistryBases.npm + "/" + encodeNPMPackage(name)
 	var pack struct {
 		DistTags map[string]string `json:"dist-tags"`
 	}
 	if err := autoDepGetJSON(ctx, endpoint, &pack); err != nil {
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(pack.DistTags["latest"])
+	return strings.TrimSpace(pack.DistTags["latest"]), nil
 }
 
-func resolvePyPILatest(ctx context.Context, name string) string {
+func resolvePyPILatest(ctx context.Context, name string) (string, error) {
 	endpoint := latestRegistryBases.pypi + "/pypi/" + url.PathEscape(name) + "/json"
 	var pack struct {
 		Info struct {
@@ -330,12 +330,12 @@ func resolvePyPILatest(ctx context.Context, name string) string {
 		} `json:"info"`
 	}
 	if err := autoDepGetJSON(ctx, endpoint, &pack); err != nil {
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(pack.Info.Version)
+	return strings.TrimSpace(pack.Info.Version), nil
 }
 
-func resolveCargoLatest(ctx context.Context, name string) string {
+func resolveCargoLatest(ctx context.Context, name string) (string, error) {
 	endpoint := latestRegistryBases.cargo + "/api/v1/crates/" + url.PathEscape(name)
 	var pack struct {
 		Crate struct {
@@ -345,25 +345,25 @@ func resolveCargoLatest(ctx context.Context, name string) string {
 		} `json:"crate"`
 	}
 	if err := autoDepGetJSON(ctx, endpoint, &pack); err != nil {
-		return ""
+		return "", err
 	}
 	for _, candidate := range []string{pack.Crate.MaxStableVersion, pack.Crate.NewestVersion, pack.Crate.MaxVersion} {
 		if v := strings.TrimSpace(candidate); v != "" {
-			return v
+			return v, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
-func resolveRubyGemsLatest(ctx context.Context, name string) string {
+func resolveRubyGemsLatest(ctx context.Context, name string) (string, error) {
 	endpoint := latestRegistryBases.rubygems + "/api/v1/gems/" + url.PathEscape(name) + ".json"
 	var pack struct {
 		Version string `json:"version"`
 	}
 	if err := autoDepGetJSON(ctx, endpoint, &pack); err != nil {
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(pack.Version)
+	return strings.TrimSpace(pack.Version), nil
 }
 
 // autoDepGetJSON is a tight HTTP+JSON fetcher local to the enqueuer so
@@ -382,7 +382,13 @@ func autoDepGetJSON(ctx context.Context, endpoint string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("not found")
+		// Sentinel, not a formatted string. A 404 from a registry is the
+		// one answer that means "this package does not exist" rather than
+		// "we could not find out", and a caller that cannot tell those
+		// apart will eventually publish the first while meaning the
+		// second. That conflation is what produced the withdrawn F-1 and
+		// F-3 in the socket.dev comparison.
+		return ErrRegistryNotFound
 	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("http %d", resp.StatusCode)
