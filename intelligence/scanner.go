@@ -279,8 +279,13 @@ func (s *DefaultService) scanFederated(ctx context.Context, req Request) (*Repor
 	// Fresh fan-out path: warm direct deps in the background so the next
 	// Scan of this parent has full transitive coverage. Skips when there
 	// are no direct deps; honours CHAINSAW_CACHE_WARM_DISABLED.
+	// Depth-aware: a warm-scheduled Scan carries its own WarmDepth, and
+	// warmDirectDepsAtDepth refuses to schedule past maxWarmDepth. Passing
+	// the depth through HERE is what makes the recursion terminate -- this
+	// call site is the recursion, and before 2026-09-14 it had no base case
+	// (docs/plan_scan_backpressure.md).
 	if len(report.Dependencies.Direct) > 0 {
-		go WarmDirectDeps(s.bg, report, s)
+		go warmDirectDepsAtDepth(s.bg, report, s, req.Options.WarmDepth)
 	}
 	return report, nil
 }

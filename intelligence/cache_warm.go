@@ -17,12 +17,40 @@ package intelligence
 // warm range constraints (^1.2.3, >=2.0) because we'd be guessing which
 // version to pre-populate, and we do NOT recurse beyond one level — the
 // next Scan of the parent triggers the next layer naturally.
+//
+// THAT LAST CLAUSE WAS A COMMENT, NOT CODE, UNTIL 2026-09-14.
+//
+// A warm target is a full Scan, and scanner.go schedules WarmDirectDeps
+// at the end of every fresh fan-out — so each warmed dependency warmed
+// its own dependencies, and so on down the tree. Nothing bounded it:
+// there was no depth parameter, and cacheWarmConcurrency is a per-CALL
+// semaphore, which makes the process-wide ceiling 4^depth rather than 4.
+// Recursion stopped only where a dependency was a cache HIT, so the blast
+// radius was proportional to cache coldness — invisible in steady state,
+// unbounded on a cold cache.
+//
+// Fifty on-demand scans issued ~8s apart drove the writable pool to
+// exhaustion and shed 503s onto the unauthenticated public read path,
+// which performs no writes at all. It did not recover at zero load,
+// because the recursion was still expanding. See
+// docs/plan_scan_backpressure.md.
+//
+// Two bounds now hold, and both are enforced by tests:
+//
+//  1. maxWarmDepth — the documented one level, carried on
+//     Options.WarmDepth and checked before anything is scheduled.
+//  2. globalWarmBudget — a PROCESS-WIDE ceiling on concurrent warm
+//     Scans, acquired non-blockingly. Warming is best-effort by design
+//     (the next Scan of the parent warms the layer anyway), so the
+//     correct behaviour under pressure is to skip, never to queue up
+//     goroutines or block a caller.
 
 import (
 	"context"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // cacheWarmConcurrency caps how many concurrent background warm Scans
@@ -31,6 +59,40 @@ import (
 // upstream proxy or saturating the singleflight group with one parent's
 // fan-out.
 const cacheWarmConcurrency = 4
+
+// maxWarmDepth is how many cache-warm hops from a caller-originated Scan
+// the warmer will go. 1 == "warm my direct dependencies, and stop" — the
+// bound this file has always documented. Raising it re-opens an
+// exponential fan-out: see the header.
+const maxWarmDepth = 1
+
+// globalCacheWarmConcurrency is the PROCESS-WIDE ceiling on concurrent
+// cache-warm Scans, across every parent.
+//
+// cacheWarmConcurrency alone is not a ceiling: its semaphore is
+// constructed inside each WarmDirectDeps call, so N concurrent parents
+// give 4N concurrent warm scans and a recursive warm gave 4^depth. This
+// is the one number that bounds what a burst of scan requests can cost,
+// and it must stay comfortably under the database pool
+// (CHAINSAW_DB_MAX_OPEN_CONNS, 60 in production) because a scan in its
+// fan-out holds a pooled connection for the duration
+// (core/xreplicaflight/pg.go).
+const globalCacheWarmConcurrency = 16
+
+// globalWarmBudget is the semaphore behind globalCacheWarmConcurrency.
+// Package-level: one budget for the process, deliberately NOT per
+// service or per call.
+var globalWarmBudget = make(chan struct{}, globalCacheWarmConcurrency)
+
+// warmSkippedBudget counts warm scans declined because the global budget
+// was full. Exported through WarmSkippedForBudget so the absence of
+// warming under load is observable rather than silent — the incident
+// above left no trace in production logs at all.
+var warmSkippedBudget atomic.Uint64
+
+// WarmSkippedForBudget returns the cumulative number of cache-warm scans
+// skipped because globalCacheWarmConcurrency was saturated.
+func WarmSkippedForBudget() uint64 { return warmSkippedBudget.Load() }
 
 // cacheWarmEnvDisabled is the kill-switch env var. Set to "1" to skip
 // the warm-up pass entirely (recovery valve if a freshly-deployed pod
@@ -61,7 +123,21 @@ var inFlightWarms sync.Map
 //   - Concurrency-capped at cacheWarmConcurrency via a semaphore.
 //   - Errors from inner Scans are logged at DEBUG and discarded.
 func WarmDirectDeps(ctx context.Context, parent *Report, svc *DefaultService) {
+	warmDirectDepsAtDepth(ctx, parent, svc, 0)
+}
+
+// warmDirectDepsAtDepth is WarmDirectDeps with the parent's cache-warm
+// depth. parentDepth is Options.WarmDepth of the Scan that produced
+// `parent`; the children it schedules run at parentDepth+1.
+func warmDirectDepsAtDepth(ctx context.Context, parent *Report, svc *DefaultService, parentDepth int) {
 	if svc == nil || parent == nil {
+		return
+	}
+	childDepth := parentDepth + 1
+	if childDepth > maxWarmDepth {
+		// The recursion stops here. This is the bound the file header
+		// describes; before it existed, this branch was the missing
+		// base case of an unbounded tree walk.
 		return
 	}
 	if os.Getenv(cacheWarmEnvDisabled) == "1" {
@@ -121,10 +197,23 @@ func WarmDirectDeps(ctx context.Context, parent *Report, svc *DefaultService) {
 			// Another goroutine is already warming this exact key.
 			continue
 		}
+		// Process-wide budget FIRST, and non-blocking: if the machine is
+		// already warming as much as it should, drop this target rather
+		// than parking a goroutine on it. Order matters — acquiring the
+		// per-call semaphore first would let N parents each park a
+		// goroutine waiting for a global budget that is already full.
+		select {
+		case globalWarmBudget <- struct{}{}:
+		default:
+			warmSkippedBudget.Add(1)
+			inFlightWarms.Delete(dedupKey)
+			continue
+		}
 		sem <- struct{}{}
 		go func(eco, name, version, key string) {
 			defer func() {
 				<-sem
+				<-globalWarmBudget
 				inFlightWarms.Delete(key)
 				// Recover from any panic in Scan so the warm-up goroutine
 				// can never crash the process.
@@ -139,6 +228,7 @@ func WarmDirectDeps(ctx context.Context, parent *Report, svc *DefaultService) {
 				Options: Options{
 					RefreshReason: "cache_warm",
 					AllowStale:    false,
+					WarmDepth:     childDepth,
 				},
 			}
 			if _, err := svc.Scan(bg, req); err != nil && svc.logger != nil {

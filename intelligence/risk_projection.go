@@ -416,6 +416,12 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// ran but found nothing because Analyze returned an empty report).
 	projectCapabilityReport(r.Scan.CapabilityReport, &in)
 
+	// --- codesmell -> capability fallback ---
+	// Runs AFTER projectCapabilityReport so the premium scanner's richer
+	// output (which carries file/line evidence) always wins; this only
+	// ever turns a false into a true.
+	projectCodeSmellCapabilities(&r.Scan, &in)
+
 	// --- Gap 4a: git/http URL dependencies ---
 	// Classify each dependency's version string across all four manifest
 	// buckets. npm-only: skip for ecosystems with no DependenciesSection.
@@ -1053,6 +1059,74 @@ func projectCapabilityReport(rep *capability.Report, in *risk.Input) {
 	if ev, ok := rep.Capabilities[capability.CapDynamicEval]; ok {
 		in.CapDynamicEval = true
 		in.CapDynamicEvalEvidence = mapEvidence(ev)
+	}
+}
+
+// projectCodeSmellCapabilities lights the cap.* signals from the
+// CODESMELL scanners when the premium capability provider has not run.
+//
+// WHY THIS EXISTS. The cap.* signals were wired to exactly one producer:
+// internal/intelligence/premium/provider_capability.go, which is premium,
+// npm-only (core/capability/scanner.go:29-32 lists pip/rubygems/cargo as
+// TODO) and gated OFF by default behind CHAINSAW_CAPABILITY_SCAN. So in a
+// default deployment they never fired at all.
+//
+// Meanwhile core/codesmell computes the same capability facts, for every
+// ecosystem, with no env gate -- and wrote them ONLY onto
+// ArtifactScanSection, where they reached policy ConditionTypes and
+// nothing else. Of the nine codesmell axes only three (EnvVarAccess,
+// NetworkAccess, MinifiedCode) reached risk.Input at all, and the first
+// two solely to feed the CompoundSCEnvNetInstall rule. The rest were
+// computed, stored, and read by no signal.
+//
+// That is the whole reason the artifact bucket in
+// docs/socket-comparison-2026-09-14-rev2.md read 0 Chainsaw-only concepts:
+// not a missing detector, an unconsumed one.
+//
+// EVERY SIGNAL FED HERE IS WEIGHT 0. That is a hard constraint, not an
+// oversight, and TestCodeSmellCapabilityFallbackCannotMoveAVerdict pins
+// it. core/policy/proxy_matrix.go:166-180 keeps these axes out of
+// standalone policy gates because their measured false-positive rate on
+// legitimate top-100 packages is 60-85%; surfacing them as scored
+// penalties would spend the 0/39 benign false-positive rate that
+// docs/f2-suspicious-tier-decision-2026-09-13.md identifies as the number
+// actually protecting the public surface. These are OBSERVATIONS. The
+// compound rules are where they become a verdict.
+//
+// TWO DELIBERATE OMISSIONS.
+//
+// UsesEval is NOT mapped onto cap.dynamic_eval, even though that is the
+// semantically matching signal, because cap.dynamic_eval carries
+// Weight -3 / SevLow -- calibrated for the npm-only premium scanner, not
+// for codesmell's regex detector which fires on roughly half the corpus.
+// Feeding it would silently apply an unmeasured penalty to a large
+// fraction of all packages. It needs the labelled-corpus eval first
+// (reproduction in docs/f2-suspicious-tier-decision-2026-09-13.md); if
+// the benign false-positive rate holds at 0/39 it can be mapped, or given
+// its own weight-0 signal.
+//
+// FilesystemAccess maps to CapFilesystemRead and NOT CapFilesystemWrite.
+// codesmell has a single combined filesystem axis, and read is the weaker
+// claim; asserting Write from a detector that cannot distinguish them
+// would be the signal making a claim its evidence does not support.
+func projectCodeSmellCapabilities(s *ArtifactScanSection, in *risk.Input) {
+	if s == nil || in == nil || !s.Performed {
+		return
+	}
+	if s.NetworkAccess {
+		in.CapNetwork = true
+	}
+	if s.ShellAccess {
+		in.CapShell = true
+	}
+	if s.FilesystemAccess {
+		in.CapFilesystemRead = true
+	}
+	if s.EnvVarAccess {
+		in.CapEnvAccess = true
+	}
+	if s.NativeBinaryPresent {
+		in.CapNativeCode = true
 	}
 }
 

@@ -239,6 +239,24 @@ type Options struct {
 	// have Observation.Partial=true so consumers can poll for the
 	// fully-populated row.
 	MaxTier int
+
+	// WarmDepth is this Scan's distance, in cache-warm hops, from the
+	// scan a caller actually asked for. 0 is caller-originated; a Scan
+	// scheduled by WarmDirectDeps from a depth-0 parent is depth 1.
+	//
+	// It exists because warming is RECURSIVE and was previously
+	// unbounded. A warm target is a full Scan, and Scan schedules
+	// WarmDirectDeps again at the end of every fresh fan-out, so on a
+	// cold cache the warmer walked the entire transitive dependency
+	// tree -- with no depth limit, and with a per-CALL concurrency
+	// semaphore that is not a process ceiling. Fifty on-demand scans
+	// were enough to exhaust the database pool and shed 503s onto the
+	// unauthenticated public read path (docs/plan_scan_backpressure.md).
+	//
+	// Callers do not set this. WarmDirectDeps sets it on the requests
+	// it schedules, and refuses to schedule past maxWarmDepth -- which
+	// is the one level cache_warm.go has always documented.
+	WarmDepth int
 }
 
 // DefaultMaxStaleness is the 24h cache TTL per the plan.
