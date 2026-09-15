@@ -100,6 +100,8 @@ package cli
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -891,6 +893,18 @@ func readServerRiskCorpus(path string) ([]serverRiskRow, error) {
 // server's metadata-only shape, not a limitation of the harness.
 //
 // Gated on CHAINSAW_SERVER_FP_BUILD so it never runs in a normal `go test`.
+// corpusArtifactsEnabled gates the artifact fetch in the corpus builder.
+//
+// Two flags, both required, on purpose: CHAINSAW_CORPUS_ARTIFACTS says
+// "this eval wants bytes", and CHAINSAW_GUARD_DEEP is the pre-existing
+// consent for the guard's deep lane to touch the network at all
+// (deepFetchEnabled reads it). Reusing that second flag means the corpus
+// builder cannot become a quieter way to opt a machine into egress than
+// the guard already offers.
+func corpusArtifactsEnabled() bool {
+	return strings.TrimSpace(os.Getenv("CHAINSAW_CORPUS_ARTIFACTS")) == "1" && deepFetchEnabled()
+}
+
 func TestBuildServerRiskCorpus(t *testing.T) {
 	if os.Getenv("CHAINSAW_SERVER_FP_BUILD") == "" {
 		t.Skip("corpus builder; run via scripts/detection-eval/build-server-risk-corpus.sh")
@@ -1060,7 +1074,26 @@ func TestBuildServerRiskCorpus(t *testing.T) {
 	}
 
 	svc := intelligence.Bootstrap(cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
+	// The scan budget is overridable because this harness now also runs
+	// generated corpora an order of magnitude larger than the 179-row seed
+	// it was written for. Results are collected in memory and written only
+	// after every goroutine returns, so blowing the deadline does not
+	// produce a short corpus -- it produces NO corpus, and throws away the
+	// whole run's upstream traffic. Give a big corpus room rather than
+	// discovering the ceiling at minute 55.
+	scanBudget := 55 * time.Minute
+	if raw := os.Getenv("CHAINSAW_SERVER_FP_TIMEOUT"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			t.Fatalf("CHAINSAW_SERVER_FP_TIMEOUT=%q: %v", raw, err)
+		}
+		if d <= 0 {
+			t.Fatalf("CHAINSAW_SERVER_FP_TIMEOUT=%q must be positive", raw)
+		}
+		scanBudget = d
+	}
+	t.Logf("scan budget: %s for %d coordinates", scanBudget, len(coords))
+	ctx, cancel := context.WithTimeout(context.Background(), scanBudget)
 	defer cancel()
 
 	type result struct {
@@ -1076,9 +1109,43 @@ func TestBuildServerRiskCorpus(t *testing.T) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			rep, err := svc.Scan(ctx, intelligence.Request{
+			// ARTIFACT BYTES, opt-in.
+			//
+			// Without these the scan runs METADATA-ONLY: scanner.go skips
+			// every NeedsArtifact() provider and the whole Tier-2 byte
+			// lane — codesmell, capability, installscripts, iocscan,
+			// pysource, hiddenunicode — never executes. The 2026-09-15
+			// run proved it: PROVIDERS THAT RAN listed six, none of them
+			// artifact-bound.
+			//
+			// That matters beyond coverage. A corpus scanned without
+			// bytes reports the artifact lane as SILENT, and silence is
+			// indistinguishable from "we looked and found nothing" unless
+			// someone reads the provider list. Reporting that as a
+			// product result is how the withdrawn F-1 was manufactured in
+			// the socket.dev comparison — an unobservable lane graded as
+			// a measured one.
+			//
+			// Opt-in because it is real network egress across every
+			// coordinate, and npm/cargo only because that is what
+			// fetchArtifactBytes derives a URL for. Ecosystems it cannot
+			// fetch stay metadata-only and must be reported as
+			// UNOBSERVABLE, never as clean.
+			req := intelligence.Request{
 				Key: intelligence.Key{Ecosystem: c.Eco, Package: c.Pkg, Version: c.Ver},
-			})
+			}
+			if corpusArtifactsEnabled() {
+				if raw, res := fetchArtifactBytes(packageSpec{
+					Ecosystem: c.Eco, Name: c.Pkg, Version: c.Ver,
+				}); res == acquireOK && len(raw) > 0 {
+					sum := sha256.Sum256(raw)
+					req.Artifact = &intelligence.ArtifactHandle{
+						Bytes:  raw,
+						SHA256: hex.EncodeToString(sum[:]),
+					}
+				}
+			}
+			rep, err := svc.Scan(ctx, req)
 			if err != nil || rep == nil {
 				results[i] = result{err: fmt.Sprintf("%s %s@%s: scan failed: %v", c.Eco, c.Pkg, c.Ver, err)}
 				return

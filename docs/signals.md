@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **77 risk signals**. Each is scored, not merely
+Chainsaw registers **76 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -25,10 +25,10 @@ a configured server.
 |---|---:|
 | Supply chain | 49 |
 | Vulnerability | 7 |
-| Licence | 9 |
+| Licence | 8 |
 | Maintenance | 6 |
 | Quality | 6 |
-| **Total** | **77** |
+| **Total** | **76** |
 
 
 ## Supply chain (49)
@@ -97,13 +97,12 @@ a configured server.
 | `vuln.fix_available` | info | 5.00 | Fix available |
 | `vuln.kev` | critical | -60.00 | Known-exploited vulnerability |
 
-## Licence (9)
+## Licence (8)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
 | `lic.changed_from_previous_version` | medium | -15.00 | License changed from previous version |
 | `lic.missing` | medium | -15.00 | No license declared |
-| `lic.policy_blocked` | high | -30.00 | License blocked by policy |
 | `lic.spdx_present` | info | 5.00 | SPDX license declared |
 | `license.ambiguous_classifier` | low | -10.00 | Ambiguous license expression |
 | `license.copyleft` | medium | -10.00 | Copyleft license |

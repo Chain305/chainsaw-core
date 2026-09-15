@@ -1,8 +1,29 @@
 package risk
 
 const (
-	SignalLicMissing         = "lic.missing"
-	SignalLicPolicyBlocked   = "lic.policy_blocked"
+	SignalLicMissing = "lic.missing"
+	// lic.policy_blocked is DEREGISTERED — deliberately, and the constant is
+	// gone with it rather than left as a tempting re-registration.
+	//
+	// It was registered at SevHigh / weight -30 and could never fire:
+	// ProjectToRiskInput assigns Input.LicensePolicyBlocked a literal
+	// `false` on every scan. So `GET /api/v1/intel/signals` advertised
+	// licence blocking as an available risk signal, and an operator
+	// building policy on it would have waited forever for a signal the
+	// engine cannot emit.
+	//
+	// It could not be wired either: there is no licence allow/deny config
+	// anywhere in the product to wire it TO. The sibling artefact tells the
+	// same story — errcodes CHW-2003 ("not on the allowed list for this
+	// repository") is registered and raised by nothing. Two descriptions of
+	// a feature that was never built.
+	//
+	// The capability is NOT lost. Blocking on licence is real and supported
+	// through the policy DSL's ConditionLicenseCopyleft / NonPermissive /
+	// ExceptionPresent / AmbiguousClassifier / Unidentified, none of which
+	// is context-only. This signal was a parallel path that never got
+	// built, and a signal that cannot fire is worse than no signal: it
+	// reads as coverage.
 	SignalLicChangedFromPrev = "lic.changed_from_previous_version"
 	SignalLicSPDXPresent     = "lic.spdx_present"
 
@@ -36,22 +57,6 @@ func init() {
 	// responsible for setting LicensePolicyBlocked based on its org's
 	// allow/deny list. Deferred per-org weight overrides are v2 work;
 	// this signal just fires on the pre-computed bool.
-	register(Signal{
-		ID:          SignalLicPolicyBlocked,
-		Category:    CategoryLicense,
-		Severity:    SevHigh,
-		Weight:      -30,
-		Title:       "License blocked by policy",
-		Description: "Declared license is on the org's block list (e.g., strong-copyleft for a commercial use-case).",
-		Fires: func(in Input) (bool, string, map[string]any) {
-			if !in.LicensePolicyBlocked {
-				return false, "", nil
-			}
-			return true, "License is blocked by policy.",
-				map[string]any{"license": in.LicenseSPDX}
-		},
-	})
-
 	register(Signal{
 		ID:          SignalLicChangedFromPrev,
 		Category:    CategoryLicense,

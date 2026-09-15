@@ -168,7 +168,6 @@ type Input struct {
 
 	// --- License ---
 	LicenseSPDX            string
-	LicensePolicyBlocked   bool // upstream policy flagged the license
 	LicenseChangedFromPrev bool
 	// LicenseTags is the Classify() output over LicenseSPDX. Populated by
 	// the risk projection so both the risk engine and policy evaluator

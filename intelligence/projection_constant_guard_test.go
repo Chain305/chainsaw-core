@@ -4,11 +4,12 @@ package intelligence
 // that one cannot see.
 //
 // TestEveryInputFieldHasAConsumer asks "does any signal READ this field?".
-// Both dead signals below pass it easily: lic.policy_blocked reads
-// Input.LicensePolicyBlocked, so the field has a consumer. What neither
-// that guard nor any unit test noticed is the other end -- the PROJECTION
-// assigns it a literal `false` on every scan, so the reader can never be
-// true and the signal can never fire.
+// The dead signal below passes it easily: it READS its Input field, so the
+// field has a consumer. What neither that guard nor any unit test noticed
+// is the other end -- the PROJECTION assigns a literal `false` on every
+// scan, so the reader can never be true and the signal can never fire.
+// (lic.policy_blocked was the second such signal and has since been
+// deregistered outright; there was no config to wire it to.)
 //
 // The result is worse than a missing signal, because it is a LIE THAT
 // SHIPS: `GET /api/v1/intel/signals` advertises "License blocked by
@@ -37,11 +38,6 @@ import (
 // never fire. Shrinking this map is always an improvement. Growing it
 // requires writing down why a field is computed at all.
 var projectedConstantFields = map[string]string{
-	"LicensePolicyBlocked": "lic.policy_blocked (SevHigh, -30) can never fire. " +
-		"Needs a licence-policy provider, and there is no org allow/deny-list config " +
-		"anywhere. License policy is already enforceable through the policy DSL's " +
-		"ConditionLicense* conditions, so this is a redundant parallel path -- either " +
-		"wire it or deregister the signal.",
 	"LicenseChangedFromPrev": "lic.changed_from_previous_version (SevMedium, -15) can " +
 		"never fire. Needs the PREVIOUS version's licence, which requires cross-version " +
 		"comparison -- nothing fetches version N-1 today (DiffReports iterates CVEs only; " +

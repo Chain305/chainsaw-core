@@ -201,7 +201,6 @@ var socketConceptMap = map[string]conceptMapping{
 	"license.ambiguous_classifier":      {Socket: []string{"ambiguousClassifier"}, Bucket: bucketMetadata, Grade: gradeExact},
 	"license.unidentified":              {Socket: []string{"unidentifiedLicense", "explicitlyUnlicensedItem"}, Bucket: bucketMetadata, Grade: gradePartia},
 	"lic.changed_from_previous_version": {Socket: nil, Grade: gradeNone, Note: "no licence-change alert in the 98-type taxonomy"},
-	"lic.policy_blocked":                {Socket: nil, Grade: gradeNoneSt, Note: "workflow state, not a detection (Socket's own `policy` alert is the same kind of thing)"},
 	"lic.spdx_present":                  {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
 
 	// ── quality ─────────────────────────────────────────────────────────

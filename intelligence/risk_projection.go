@@ -341,10 +341,12 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		// --- License ---
 		LicenseSPDX: r.Metadata.LicenseExpression,
 		LicenseTags: risk.Classify(r.Metadata.LicenseExpression),
-		// TODO(risk-engine-v2): LicensePolicyBlocked /
-		// LicenseChangedFromPrev require a license-policy provider
-		// (or a meta-diff extension). Default false for now.
-		LicensePolicyBlocked:   false,
+		// TODO(risk-engine-v2): LicenseChangedFromPrev requires the
+		// previous version's licence, i.e. cross-version comparison,
+		// which nothing does yet. Default false for now.
+		// (LicensePolicyBlocked was removed with its signal — there was
+		// no licence allow/deny config to wire it to, and the policy
+		// DSL's ConditionLicense* already covers the capability.)
 		LicenseChangedFromPrev: false,
 
 		// --- Socket-gap Wave 1 ---
