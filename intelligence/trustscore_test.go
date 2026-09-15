@@ -185,12 +185,15 @@ func TestComputeTrustScore_OrgWeightsResolverChangesScore(t *testing.T) {
 			// participates in the rollup and the per-org weight override
 			// has visible effect on the result.
 			//
-			// The CVE sits in the medium tier deliberately. risk's
-			// vuln.cvss_critical / vuln.cvss_high declare a MaxImpact
-			// ceiling, and a ceiling pins overall to a fixed value
-			// regardless of category weight — a ceilinged fixture would
-			// mask the override seam this test exists to prove.
-			Vulnerabilities: VulnSection{IsVulnerable: true, CVSSScore: 6.0, ScannedAt: &scannedAt},
+			// The fixture fires vuln.epss_high deliberately. A MaxImpact
+			// ceiling pins overall to a fixed value regardless of category
+			// weight, so a ceilinged fixture would mask the override seam
+			// this test exists to prove — and vuln.epss_high is now the
+			// most severe vulnerability signal without one. It used to be
+			// vuln.cvss_medium, which gained maxImpactWarnTop in V-4
+			// (docs/plan_vuln_severity_gate.md). CVSSScore stays 0 so no
+			// cvss tier joins the fired set.
+			Vulnerabilities: VulnSection{IsVulnerable: true, EPSSScore: 0.9, ScannedAt: &scannedAt},
 		}
 	}
 

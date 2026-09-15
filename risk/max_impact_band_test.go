@@ -65,6 +65,11 @@ func loneFireFixtures() map[string]Input {
 		SignalVulnKEV:          withVuln(9.5, true),
 		SignalVulnCVSSCritical: withVuln(9.8, false),
 		SignalVulnCVSSHigh:     withVuln(7.5, false),
+		SignalVulnCVSSMedium:   withVuln(5.5, false),
+		// V-1: the severity-independent floor. MaxCVSS stays 0 — that is
+		// the whole firing condition, and it is also what keeps every
+		// vuln.cvss_* tier silent so this fires alone.
+		SignalVulnKnownVuln: withVuln(0, false),
 
 		// --- AI artifact ---------------------------------------------------
 		SignalAIDangerousPickle: set(func(in *Input) {

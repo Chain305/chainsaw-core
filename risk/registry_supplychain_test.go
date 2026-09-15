@@ -1,6 +1,9 @@
 package risk
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSCURLDepSignalsRegistered(t *testing.T) {
 	cases := []struct {
@@ -420,5 +423,85 @@ func TestSCReservedNamespaceScoresLikeItsPeers(t *testing.T) {
 	}
 	if reserved > 50 {
 		t.Errorf("reserved-namespace fired alone scores %d — the High tier is documented as 30-50", reserved)
+	}
+}
+
+// TestSCHiddenUnicodeKindSplit pins the kind split from
+// docs/artifact-lane-observability-2026-09-15.md. Before it, the signal fired
+// on a hit COUNT alone, so npm/webpack@5.110.3's 9 benign zero-width hits in a
+// minified bundle scored the same as 9 bidi overrides in a credential helper
+// and moved a real verdict to warn.
+func TestSCHiddenUnicodeKindSplit(t *testing.T) {
+	sig := Registry[SignalSCHiddenUnicode]
+	if sig.ID == "" {
+		t.Fatalf("%s not registered", SignalSCHiddenUnicode)
+	}
+	// The split must not quietly turn the whole signal informational: a bidi
+	// override still has to carry its original weight.
+	if sig.Weight != -20 {
+		t.Errorf("weight = %v, want -20 — the kind split must not neuter the signal", sig.Weight)
+	}
+
+	cases := []struct {
+		name string
+		in   Input
+		want bool
+	}{
+		{
+			name: "webpack shape: 9 zero-width hits in a minified bundle",
+			in:   Input{HasHiddenUnicode: true, HiddenUnicodeHits: 9, HiddenUnicodeKinds: []string{"zero_width"}},
+			want: false,
+		},
+		{
+			name: "one bidi override — Trojan Source",
+			in:   Input{HasHiddenUnicode: true, HiddenUnicodeHits: 1, HiddenUnicodeKinds: []string{"bidi_override"}},
+			want: true,
+		},
+		{
+			name: "one tag character",
+			in:   Input{HasHiddenUnicode: true, HiddenUnicodeHits: 1, HiddenUnicodeKinds: []string{"tag"}},
+			want: true,
+		},
+		{
+			name: "bidi hidden among benign zero-width is not diluted",
+			in:   Input{HasHiddenUnicode: true, HiddenUnicodeHits: 10, HiddenUnicodeKinds: []string{"bidi_override", "zero_width"}},
+			want: true,
+		},
+		{
+			name: "zero-width at payload volume still fires",
+			in:   Input{HasHiddenUnicode: true, HiddenUnicodeHits: 64, HiddenUnicodeKinds: []string{"zero_width"}},
+			want: true,
+		},
+		{
+			name: "kinds never observed stays armed, not silently clean",
+			in:   Input{HasHiddenUnicode: true, HiddenUnicodeHits: 1},
+			want: true,
+		},
+		{
+			name: "nothing found",
+			in:   Input{},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		fired, reason, _ := sig.Fires(tc.in)
+		if fired != tc.want {
+			t.Errorf("%s: fired = %v, want %v", tc.name, fired, tc.want)
+		}
+		if fired && reason == "" {
+			t.Errorf("%s: fired with an empty reason", tc.name)
+		}
+	}
+
+	// The reason must name Trojan Source when a bidi override is what fired —
+	// otherwise the operator cannot tell the two findings apart in the UI.
+	_, bidiReason, details := sig.Fires(Input{
+		HasHiddenUnicode: true, HiddenUnicodeHits: 1, HiddenUnicodeKinds: []string{"bidi_override"},
+	})
+	if !strings.Contains(bidiReason, "bidirectional-override") {
+		t.Errorf("bidi reason = %q, want it to name the bidirectional override", bidiReason)
+	}
+	if details == nil || details["hiddenUnicodeKinds"] == nil {
+		t.Errorf("bidi details = %v, want the observed kinds attached", details)
 	}
 }

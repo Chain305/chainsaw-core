@@ -182,8 +182,17 @@ var socketConceptMap = map[string]conceptMapping{
 	"vuln.cvss_medium":   {Socket: []string{"mediumCVE"}, Bucket: bucketAdvisory, Grade: gradeExact},
 	"vuln.cvss_low":      {Socket: []string{"mildCVE"}, Bucket: bucketAdvisory, Grade: gradeExact},
 	"vuln.kev":           {Socket: nil, Grade: gradeNone, Note: "CISA KEV cross-reference; no Socket equivalent in the taxonomy"},
-	"vuln.epss_high":     {Socket: nil, Grade: gradeNone},
-	"vuln.fix_available": {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
+	// Deliberately unmapped. Socket's four CVE alerts (criticalCVE, cve,
+	// mediumCVE, mildCVE) are ALL severity-bearing, and this signal exists
+	// precisely for the case where no severity is available — 81% of OSV
+	// advisories, 96.8% on npm. Mapping it onto any of those tiers would
+	// claim an agreement that cannot exist and would inflate the advisory
+	// bucket with a pairing neither side can satisfy.
+	// `potentialVulnerability` is not it either: that is severity 1 in
+	// Socket's supplyChainRisk category, not a confirmed advisory.
+	"vuln.known_vulnerable": {Socket: nil, Grade: gradeNone, Note: "confirmed advisory of UNKNOWN severity; every Socket CVE alert requires a severity tier"},
+	"vuln.epss_high":        {Socket: nil, Grade: gradeNone},
+	"vuln.fix_available":    {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
 
 	// ── maintenance ─────────────────────────────────────────────────────
 	"maint.unpopular_package": {Socket: []string{"unpopularPackage"}, Bucket: bucketMetadata, Grade: gradeExact},

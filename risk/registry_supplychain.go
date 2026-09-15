@@ -1,6 +1,10 @@
 package risk
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/chain305/chainsaw-core/hiddenunicode"
+)
 
 // Supply-chain-category signal IDs. This is the category with the highest
 // weight in CategoryWeights because these signals indicate active attack
@@ -281,6 +285,15 @@ func init() {
 	// the ceiling sitting exactly on thresholdWarn, could not produce so
 	// much as a warning — `60 < 60` is false, band 2 is skipped and the
 	// verdict is ALLOW. See P8-02.
+	//
+	// Kind-split (docs/artifact-lane-observability-2026-09-15.md): the hit
+	// COUNT alone graded nine zero-width joiners in a minified bundle the
+	// same as nine bidi overrides in a credential helper, and turning the
+	// artifact lane on cost the 0% benign false-positive rate on exactly
+	// that confusion (npm/webpack@5.110.3 → warn on 9 zero-width hits).
+	// hiddenunicode.Adverse now carries the per-kind bar; the signal keeps
+	// one ID, one weight and one ceiling, because a bidi override that
+	// clears the bar is exactly as serious as it was before.
 	register(Signal{
 		ID:          SignalSCHiddenUnicode,
 		Category:    CategorySupplyChain,
@@ -293,7 +306,23 @@ func init() {
 			if !in.HasHiddenUnicode {
 				return false, "", nil
 			}
-			return true, "Source contains invisible/bidi Unicode code points.", nil
+			if !hiddenunicode.Adverse(in.HiddenUnicodeHits, in.HiddenUnicodeKinds) {
+				return false, "", nil
+			}
+			reason := "Source contains invisible/bidi Unicode code points."
+			for _, k := range in.HiddenUnicodeKinds {
+				if k == hiddenunicode.KindBidiOverride {
+					reason = "Source contains bidirectional-override Unicode — code can render differently from how it compiles (Trojan Source)."
+					break
+				}
+			}
+			if len(in.HiddenUnicodeKinds) == 0 {
+				return true, reason, nil
+			}
+			return true, reason, map[string]any{
+				"hiddenUnicodeKinds": append([]string(nil), in.HiddenUnicodeKinds...),
+				"hiddenUnicodeHits":  in.HiddenUnicodeHits,
+			}
 		},
 	})
 

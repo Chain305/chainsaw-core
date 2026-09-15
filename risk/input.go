@@ -83,7 +83,19 @@ type Input struct {
 	// CompoundSCEnvNetInstall block carrier.
 	NetworkAccess bool
 
+	// HasHiddenUnicode is the kind-blind "the scanner found something" bit.
+	// It is NOT on its own enough to move a verdict — see
+	// HiddenUnicodeKinds.
 	HasHiddenUnicode bool
+	// HiddenUnicodeHits is the surviving hit count (post benign-context
+	// suppression) and HiddenUnicodeKinds the union of kinds observed.
+	// SignalSCHiddenUnicode gates on these via hiddenunicode.Adverse so a
+	// bidi override fires on one hit while benign zero-width in a minified
+	// bundle does not. An EMPTY HiddenUnicodeKinds means the kind was never
+	// observed, not that it was benign: that path keeps the pre-split
+	// behaviour and stays armed.
+	HiddenUnicodeHits  int
+	HiddenUnicodeKinds []string
 
 	HasProvenance    bool
 	ProvenanceStatus string // "verified" rewards

@@ -191,3 +191,80 @@ func containsKind(kinds []string, want string) bool {
 	}
 	return false
 }
+
+// TestScanKindHits proves the per-kind split the Kinds union loses: a file
+// mixing many zero-width runes with a single bidi override must report both
+// counts separately, not one total.
+func TestScanKindHits(t *testing.T) {
+	body := []byte("a\xe2\x80\x8bb\xe2\x80\x8bc\xe2\x80\x8bd\xe2\x80\xaee\n")
+	res := Scan(map[string][]byte{"mix.js": body})
+	if res.Hits != 4 {
+		t.Fatalf("Hits = %d, want 4 (%+v)", res.Hits, res.PerFile)
+	}
+	if got := res.KindHits[KindZeroWidth]; got != 3 {
+		t.Errorf("KindHits[zero_width] = %d, want 3", got)
+	}
+	if got := res.KindHits[KindBidiOverride]; got != 1 {
+		t.Errorf("KindHits[bidi_override] = %d, want 1", got)
+	}
+	var sum int
+	for _, n := range res.KindHits {
+		sum += n
+	}
+	if sum != res.Hits {
+		t.Errorf("KindHits sums to %d, want Hits=%d", sum, res.Hits)
+	}
+	// A clean scan must leave KindHits nil, not an empty map — "nothing
+	// found" and "kind unknown" stay distinguishable downstream.
+	clean := Scan(map[string][]byte{"clean.js": []byte("// nothing\n")})
+	if clean.KindHits != nil {
+		t.Errorf("clean scan KindHits = %v, want nil", clean.KindHits)
+	}
+}
+
+// TestAdverseKindSplit is the guard for the false positive in
+// docs/artifact-lane-observability-2026-09-15.md: npm/webpack@5.110.3 carried
+// 9 surviving zero-width hits and moved to warn, while a single bidi override
+// (Trojan Source) must still fire.
+func TestAdverseKindSplit(t *testing.T) {
+	cases := []struct {
+		name  string
+		hits  int
+		kinds []string
+		want  bool
+	}{
+		{"webpack: 9 zero-width only", 9, []string{KindZeroWidth}, false},
+		{"one zero-width", 1, []string{KindZeroWidth}, false},
+		{"zero-width at the bar", defaultZeroWidthThreshold, []string{KindZeroWidth}, true},
+		{"zero-width one below the bar", defaultZeroWidthThreshold - 1, []string{KindZeroWidth}, false},
+		{"one bidi override", 1, []string{KindBidiOverride}, true},
+		{"one tag character", 1, []string{KindTag}, true},
+		{"bidi mixed into benign zero-width", 10, []string{KindBidiOverride, KindZeroWidth}, true},
+		// Kind unobserved (a pre-split persisted row, or a caller that only
+		// carries a bit) stays armed — "we did not look" must never read as
+		// "we looked and it was benign".
+		{"kinds unobserved, hits present", 1, nil, true},
+		{"kinds unobserved, no count either", 0, nil, true},
+		{"empty kinds slice is also unobserved", 0, []string{}, true},
+	}
+	for _, tc := range cases {
+		if got := Adverse(tc.hits, tc.kinds); got != tc.want {
+			t.Errorf("%s: Adverse(%d, %v) = %v, want %v", tc.name, tc.hits, tc.kinds, got, tc.want)
+		}
+	}
+}
+
+// TestZeroWidthThresholdEnvOverride keeps the bar operator-tunable; an
+// operator who wants the pre-split behaviour back sets it to 1.
+func TestZeroWidthThresholdEnvOverride(t *testing.T) {
+	if got := ZeroWidthThreshold(); got != defaultZeroWidthThreshold {
+		t.Fatalf("default ZeroWidthThreshold = %d, want %d", got, defaultZeroWidthThreshold)
+	}
+	t.Setenv("CHAINSAW_HIDDEN_UNICODE_ZEROWIDTH_THRESHOLD", "2")
+	if got := ZeroWidthThreshold(); got != 2 {
+		t.Fatalf("overridden ZeroWidthThreshold = %d, want 2", got)
+	}
+	if !Adverse(2, []string{KindZeroWidth}) {
+		t.Errorf("with the bar at 2, two zero-width hits must be adverse")
+	}
+}

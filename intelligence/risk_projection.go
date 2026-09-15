@@ -269,6 +269,12 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		// the hidden-unicode axis alone.
 		HasHiddenUnicode: r.Scan.HiddenUnicodeHits >= hiddenunicode.Threshold() &&
 			r.Scan.HiddenUnicodeHits > 0,
+		// Carry the count and kind union through so the signal can apply
+		// the per-kind bar (hiddenunicode.Adverse): a bidi override fires
+		// on one hit, benign zero-width in a minified bundle does not.
+		// Kinds absent = kind never observed, which Adverse keeps armed.
+		HiddenUnicodeHits:  r.Scan.HiddenUnicodeHits,
+		HiddenUnicodeKinds: append([]string(nil), r.Scan.HiddenUnicodeKinds...),
 
 		// Provenance: either the normalized Verified bool OR the legacy
 		// Status=="verified" string. Providers populate whichever field

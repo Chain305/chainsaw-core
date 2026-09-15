@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **76 risk signals**. Each is scored, not merely
+Chainsaw registers **77 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -24,11 +24,11 @@ a configured server.
 | Category | Signals |
 |---|---:|
 | Supply chain | 49 |
-| Vulnerability | 7 |
+| Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 6 |
 | Quality | 6 |
-| **Total** | **76** |
+| **Total** | **77** |
 
 
 ## Supply chain (49)
@@ -85,7 +85,7 @@ a configured server.
 | `sc.typosquat_low` | low | -8.00 | Name similarity to popular package (low confidence) |
 | `sc.typosquat_medium` | medium | -20.00 | Possible typosquat (medium confidence) |
 
-## Vulnerability (7)
+## Vulnerability (8)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -96,6 +96,7 @@ a configured server.
 | `vuln.epss_high` | high | -15.00 | High exploit probability (EPSS) |
 | `vuln.fix_available` | info | 5.00 | Fix available |
 | `vuln.kev` | critical | -60.00 | Known-exploited vulnerability |
+| `vuln.known_vulnerable` | medium | -10.00 | Known-vulnerable version (severity unscored) |
 
 ## Licence (8)
 

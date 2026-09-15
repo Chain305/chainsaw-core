@@ -8,7 +8,7 @@ what Chainsaw does at a glance.
 | [cli.md](cli.md) | Every command, which ones are local, global flags, exit codes |
 | [configuration.md](configuration.md) | Environment variables, where state lives on disk, the fail-closed coverage gate, first-run prompts |
 | [ecosystems.md](ecosystems.md) | The three surfaces and their different reach; per-ecosystem policy-condition coverage; every manifest and lockfile format |
-| [signals.md](signals.md) | All 76 risk signals with severity and weight; counts drift-tested against the registry |
+| [signals.md](signals.md) | All 77 risk signals with severity and weight; counts drift-tested against the registry |
 | [policy.md](policy.md) | Rego policy, the five enforcement surfaces, registry proxy, Kubernetes admission, air-gapped signed bundles |
 | [measurement.md](measurement.md) | Measured false-block and detection rates, their caveats, and how to reproduce them |
 

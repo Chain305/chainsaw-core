@@ -51,6 +51,14 @@ type Result struct {
 	// Kinds is the deduplicated, alphabetically sorted set of kinds observed.
 	// Empty when Hits == 0.
 	Kinds []string
+	// KindHits is the per-kind hit count, keyed by the Kind* constants. Sum
+	// of its values equals Hits. nil when Hits == 0.
+	//
+	// Kinds alone loses the split that matters: nine zero-width joiners in a
+	// minified bundle and nine bidi overrides in a credential helper are not
+	// the same finding, and a total-only count grades them identically. See
+	// Adverse.
+	KindHits map[string]int
 	// PerFile maps scanned filenames to their individual hit lists. Only
 	// populated for files that had at least one hit; skipped files (binary,
 	// extension-outside-allowlist, over the size budget) are absent.
@@ -209,7 +217,7 @@ func scanWithLimits(files map[string][]byte, lim limits) Result {
 	}
 	sort.Strings(paths)
 
-	kindsSeen := make(map[string]struct{})
+	kindHits := make(map[string]int)
 	var inspected int
 	var totalBytes int64
 
@@ -247,13 +255,14 @@ func scanWithLimits(files map[string][]byte, lim limits) Result {
 		result.Hits += len(hits)
 		result.PerFile[path] = hits
 		for _, h := range hits {
-			kindsSeen[h.Kind] = struct{}{}
+			kindHits[h.Kind]++
 		}
 	}
 
-	if len(kindsSeen) > 0 {
-		result.Kinds = make([]string, 0, len(kindsSeen))
-		for k := range kindsSeen {
+	if len(kindHits) > 0 {
+		result.KindHits = kindHits
+		result.Kinds = make([]string, 0, len(kindHits))
+		for k := range kindHits {
 			result.Kinds = append(result.Kinds, k)
 		}
 		sort.Strings(result.Kinds)
@@ -290,6 +299,66 @@ func scanBytes(data []byte) []Hit {
 // Threshold returns the configured minimum hit count (int, ≥1) above which
 // the hasHiddenUnicode signal fires. Orchestrator callers compare their
 // Result.Hits against this to decide whether to set the boolean.
+//
+// Kind-blind by design: this is the "we found something" gate, and several
+// callers (the policy simulator, the repo pipeline) only ever have a
+// persisted hit COUNT with no kind breakdown. Whether a finding should move
+// a VERDICT is the separate, kind-aware question Adverse answers.
 func Threshold() int {
 	return parseEnvInt("CHAINSAW_HIDDEN_UNICODE_THRESHOLD", 1)
+}
+
+// defaultZeroWidthThreshold is the number of surviving zero-width hits a
+// package needs before zero-width ALONE moves a verdict.
+//
+// Derivation, not a fudge factor: GlassWorm-style steganography encodes one
+// ASCII character as roughly 8 zero-width runes, so below ~4 characters of
+// smuggled payload there is nothing to smuggle. Minified bundles, emoji ZWJ
+// sequences and i18n fixtures sit far below that — npm/webpack@5.110.3, the
+// measured false positive in docs/artifact-lane-observability-2026-09-15.md,
+// carries 9. Anything that clears 32 is carrying data, not typography.
+//
+// This bar applies only AFTER the provider's benign-context suppression
+// (comments, catalog string values, identifier charsets) has already run.
+const defaultZeroWidthThreshold = 32
+
+// ZeroWidthThreshold returns the zero-width-only verdict bar, overridable via
+// CHAINSAW_HIDDEN_UNICODE_ZEROWIDTH_THRESHOLD.
+func ZeroWidthThreshold() int {
+	return parseEnvInt("CHAINSAW_HIDDEN_UNICODE_ZEROWIDTH_THRESHOLD", defaultZeroWidthThreshold)
+}
+
+// Adverse reports whether an EXISTING hidden-unicode finding should move a
+// verdict, given the total surviving hit count and the union of kinds
+// observed. It does not answer "is there a finding" — the caller's own gate
+// (Threshold, or a persisted hasHiddenUnicode bit) already did that, and
+// several callers reach here with a bit set but no count to hand.
+//
+// The split exists because the two families are not the same finding:
+//
+//   - bidi_override (U+202A–202E, U+2066–2069) is the Trojan Source attack —
+//     text that renders differently from how it compiles. It has near-zero
+//     legitimate use in package code, so ONE is enough.
+//   - tag (U+E0000–E007F) is likewise a concealment vector with no benign use
+//     once emoji flag sequences are filtered out. ONE is enough.
+//   - zero_width is usually benign — minified bundles, emoji ZWJ, i18n
+//     fixtures — so it must clear ZeroWidthThreshold on its own.
+//
+// THREE-STATE, deliberately: an empty `kinds` means the kind was never
+// observed (a persisted row from before the split, a caller that carries only
+// a count), NOT "observed and benign". Those callers keep their pre-split
+// behaviour and stay armed; only a caller that actually knows the kinds gets
+// the narrower bar. Silently reading "unknown" as "clean" would trade a false
+// positive for a blind spot.
+func Adverse(hits int, kinds []string) bool {
+	if len(kinds) == 0 {
+		return true
+	}
+	for _, k := range kinds {
+		if k != KindZeroWidth {
+			// A bidi override or tag character is present: one is enough.
+			return true
+		}
+	}
+	return hits >= ZeroWidthThreshold()
 }

@@ -15,19 +15,22 @@ func TestEvaluatePackage_CategoryWeightsOverride(t *testing.T) {
 	// weight. Under default weights vuln=0.30; under the override
 	// vuln=0.50 which should pull the overall lower.
 	//
-	// The CVE sits in the medium tier deliberately. vuln.cvss_medium is
-	// the most severe vulnerability signal with no MaxImpact ceiling, and
-	// a ceiling pins overall to a fixed value regardless of category
-	// weight — that is the documented MaxImpact contract, so a ceilinged
-	// fixture would exercise applyMaxImpactCeiling rather than the
-	// weight-override seam this test exists to lock in.
+	// The fixture fires vuln.epss_high deliberately: a ceiling pins overall
+	// to a fixed value regardless of category weight — that is the
+	// documented MaxImpact contract — so a ceilinged fixture would exercise
+	// applyMaxImpactCeiling rather than the weight-override seam this test
+	// exists to lock in. vuln.epss_high (-15) is now the most severe
+	// vulnerability signal with no ceiling; vuln.cvss_medium, which this
+	// fixture used to use, gained maxImpactWarnTop in V-4
+	// (docs/plan_vuln_severity_gate.md) and stopped being weight-sensitive.
+	// MaxCVSS stays 0 so no cvss tier joins the fired set.
 	in := Input{
 		Ecosystem:         "npm",
 		Package:           "acme",
 		Version:           "1.0.0",
 		LicenseSPDX:       "MIT",
 		IsVulnerable:      true,
-		MaxCVSS:           6.0,
+		EPSSScore:         0.9,
 		VulnDataAvailable: true, // we scanned and found a CVE
 	}
 
