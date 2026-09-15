@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -228,5 +230,73 @@ func TestEcosystemOrderIsAppendOnly(t *testing.T) {
 		if ecosystems[i] != e {
 			t.Fatalf("ecosystems[%d] = %q, want %q — reordering reshuffles every sample drawn with an older build", i, ecosystems[i], e)
 		}
+	}
+}
+
+// TestGroundTruthIsSpreadsheetSafeAndStillValidates is one test because the
+// two halves are only correct together.
+//
+// ground-truth.csv is an answer key an analyst opens in a spreadsheet, and
+// every coordinate in it was named by whoever published the package. Excel
+// evaluates a cell starting `= + - @` TAB or CR, so the rows go out through
+// csvsafe.Row -- the guard in internal/server/csv_writer_guard_test.go caught
+// this file writing them raw.
+//
+// Escaping alone would have broken the corpus. Scoped npm names start with
+// `@` and are escaped like any other formula-shaped value, while corpus.tsv
+// is a TSV and is not escaped; validate cross-checks one against the other,
+// so a write-side-only fix reports every scoped package as "ground-truth row
+// absent from corpus.tsv" -- a corpus defect that is really an escaping
+// artefact. The read-back has to strip, and this test fails if either half
+// is removed.
+func TestGroundTruthIsSpreadsheetSafeAndStillValidates(t *testing.T) {
+	dir := t.TempDir()
+	rows := []Row{
+		{
+			Coord:   Coord{Eco: "npm", Name: "@babel/core", Version: "7.24.0"},
+			Stratum: "B1", Truth: "presumed_benign", Confidence: "B",
+			Label: "benign", Provenance: "test",
+		},
+		{
+			// The attack the package exists for, as a package name.
+			Coord:   Coord{Eco: "npm", Name: "=cmd|'/c calc'!A1", Version: "1.0.0"},
+			Stratum: "B1", Truth: "presumed_benign", Confidence: "B",
+			Label: "benign", Provenance: "test",
+		},
+		{
+			Coord:   Coord{Eco: "pypi", Name: "requests", Version: "2.32.3"},
+			Stratum: "B1", Truth: "presumed_benign", Confidence: "B",
+			Label: "benign", Provenance: "test",
+		},
+	}
+	if err := emit(dir, rows, nil, nil, Manifest{
+		Seed:       "test",
+		OSSFCommit: "0000000000000000000000000000000000000000",
+	}); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+
+	gt, err := os.ReadFile(filepath.Join(dir, "ground-truth.csv"))
+	if err != nil {
+		t.Fatalf("read ground-truth.csv: %v", err)
+	}
+	for _, want := range []string{`,'@babel/core,`, `,'=cmd|'/c calc'!A1,`} {
+		if !strings.Contains(string(gt), want) {
+			t.Errorf("ground-truth.csv does not carry the escaped form %s.\n"+
+				"A formula-shaped package name reached the answer key unescaped; "+
+				"the spreadsheet an analyst opens evaluates it.\ngot:\n%s", want, gt)
+		}
+	}
+	// requests is ordinary and must be untouched -- escaping everything
+	// would be the other failure, and csvsafe is explicit that ordinary
+	// data survives byte-identical.
+	if strings.Contains(string(gt), "'requests") {
+		t.Error("an ordinary package name was escaped; csvsafe fires on the dangerous prefix set only")
+	}
+
+	if code := cmdValidate([]string{dir}); code != 0 {
+		t.Fatalf("validate rejected a corpus it had just written (exit %d).\n"+
+			"The likely cause is the read-back: ground-truth.csv is escaped and "+
+			"corpus.tsv is not, so the cross-check needs unescapeCell.", code)
 	}
 }

@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/chain305/chainsaw-core/csvsafe"
 )
 
 // Manifest is source-manifest.json: everything needed to argue about how this
@@ -119,9 +121,9 @@ func emit(dir string, rows []Row, excl []Exclusion, ev []Evidence, man Manifest)
 	_ = gw.Write([]string{"id", "ecosystem", "package", "version", "stratum", "truth",
 		"confidence", "pair_id", "licenses", "behaviors", "provenance", "notes"})
 	for i, r := range rows {
-		_ = gw.Write([]string{ids[i], r.Eco, r.Name, r.Version, r.Stratum, r.Truth,
+		_ = gw.Write(csvsafe.Row([]string{ids[i], r.Eco, r.Name, r.Version, r.Stratum, r.Truth,
 			r.Confidence, r.PairID, strings.Join(r.Licenses, "|"),
-			behaviorString(r.Behaviors), r.Provenance, r.Notes})
+			behaviorString(r.Behaviors), r.Provenance, r.Notes}))
 	}
 	gw.Flush()
 	gt.Close()
@@ -135,7 +137,7 @@ func emit(dir string, rows []Row, excl []Exclusion, ev []Evidence, man Manifest)
 	ew := csv.NewWriter(ex)
 	_ = ew.Write([]string{"ecosystem", "package", "version", "stratum", "reason"})
 	for _, e := range excl {
-		_ = ew.Write([]string{e.Eco, e.Name, e.Version, e.Stratum, e.Reason})
+		_ = ew.Write(csvsafe.Row([]string{e.Eco, e.Name, e.Version, e.Stratum, e.Reason}))
 	}
 	ew.Flush()
 	ex.Close()
@@ -374,7 +376,9 @@ func cmdValidate(args []string) int {
 			fail = append(fail, "ground-truth.csv: short row")
 			continue
 		}
-		id, eco, name, ver, stratum, truth, conf, pair := r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]
+		id, eco, name, ver, stratum, truth, conf, pair := unescapeCell(r[0]), unescapeCell(r[1]),
+			unescapeCell(r[2]), unescapeCell(r[3]), unescapeCell(r[4]), unescapeCell(r[5]),
+			unescapeCell(r[6]), unescapeCell(r[7])
 		check(!ids[id], "duplicate id "+id)
 		ids[id] = true
 		check(seen[eco+"\x00"+name+"\x00"+ver], "ground-truth row absent from corpus.tsv: "+id)
@@ -450,3 +454,14 @@ func cmdValidate(args []string) int {
 	fmt.Println("\nOK")
 	return 0
 }
+
+// unescapeCell inverts csvsafe.Field for the read-back in validate.
+//
+// ground-truth.csv is written through csvsafe.Row, so any cell whose value
+// begins `= + - @` TAB or CR carries a leading apostrophe. Scoped npm names
+// are the common case, not the exotic one: `@babel/core` is escaped like any
+// other formula-shaped value, and validate cross-checks the coordinate
+// columns against corpus.tsv, which is a TSV and is NOT escaped. Comparing
+// the two without stripping would fail every scoped package in the corpus
+// while reporting it as a corpus defect.
+func unescapeCell(v string) string { return strings.TrimPrefix(v, "'") }

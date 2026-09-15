@@ -493,6 +493,17 @@ type osvRecord struct {
 	Withdrawn string          `json:"withdrawn"`
 	Severity  []SeverityEntry `json:"severity"`
 	Affected  []osvAffected   `json:"affected"`
+
+	// DatabaseSpecific carries the publisher's own severity LABEL. GitHub
+	// populates it for advisories it has reviewed, including ones whose only
+	// vector is CVSS:4.0 — which SeveritySummary skips. Without this field
+	// those advisories flatten with score 0 and no vulnerability signal can
+	// fire on them. See SeverityFromLabel.
+	DatabaseSpecific osvDatabaseSpecific `json:"database_specific"`
+}
+
+type osvDatabaseSpecific struct {
+	Severity string `json:"severity"`
 }
 
 type osvAffected struct {
@@ -531,6 +542,13 @@ func flattenRecord(rec osvRecord) []Advisory {
 		return nil
 	}
 	score, label := SeveritySummary(rec.Severity)
+	// FALL BACK TO THE PUBLISHER'S LABEL when no vector parsed. This is what
+	// recovers CVSS:4.0-only advisories (skipped by SeveritySummary) and
+	// label-only ones. Only ever a fallback: a parsed vector is strictly
+	// better evidence than a band, so it always wins.
+	if score == 0 {
+		score, label = SeverityFromLabel(rec.DatabaseSpecific.Severity)
+	}
 	var out []Advisory
 	for _, aff := range rec.Affected {
 		eco := strings.TrimSpace(aff.Package.Ecosystem)
