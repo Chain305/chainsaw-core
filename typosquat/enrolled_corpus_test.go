@@ -344,7 +344,7 @@ func TestNoCallerBuildsAnEmptyGitHubActionsDetector(t *testing.T) {
 		}
 		if e.IsDir() {
 			switch e.Name() {
-			case ".git", "node_modules", "vendor", "dist", ".claude":
+			case ".git", "node_modules", "vendor", "dist", ".claude", ".kangentic":
 				return fs.SkipDir
 			}
 			return nil
