@@ -108,6 +108,32 @@ func init() {
 		Title:       "Install script reads env vars and makes network calls",
 		Description: "All three of (env-var read, network primitive, install-time lifecycle script) are present. The active-exfil fingerprint of credential-stealing malware in the install path.",
 		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
+			// npm-gated as of 2026-09-16, on measurement. This rule shipped
+			// ecosystem-blind and INVERTS on PyPI:
+			//
+			//	         malware   held-out benign
+			//	npm       9.6%      0.0%  (0 of 219)
+			//	PyPI      2.4%     16.4%  (36 of 220)
+			//
+			// At -45 -- the heaviest supply-chain compound weight -- it was
+			// firing on 36 popular PyPI packages including tqdm, websockets,
+			// jupyterlab-server and papermill, against 6 malware samples. It
+			// fired on more benign packages than malicious ones.
+			//
+			// Reachable in production: pypi is in
+			// supportedInstallScriptEcosystems and sc.install_script_only has
+			// no ecosystem gate, so any PyPI scan with artifact bytes could
+			// trip this.
+			//
+			// The cause is the same structural asymmetry as
+			// sc.npm_install_net_shell: 65.3% of benign PyPI packages ship a
+			// setup.py against 10.9% on npm, so "has an install script" is
+			// near-universal there and carries almost no information.
+			// Gating costs 2.4% PyPI malware recall and removes a 16.4%
+			// false-positive rate on popular packages.
+			if !isNPMEcosystem(in.Ecosystem) {
+				return false, "", nil
+			}
 			if !in.EnvVarAccess || !in.NetworkAccess {
 				return false, "", nil
 			}

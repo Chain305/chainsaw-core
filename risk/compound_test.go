@@ -186,3 +186,37 @@ func TestNPMInstallNetShellIsEcosystemGated(t *testing.T) {
 		}
 	}
 }
+
+// TestEnvNetInstallIsNPMGated pins a production false-positive fix.
+//
+// CompoundSCEnvNetInstall shipped ecosystem-blind at -45, the heaviest
+// supply-chain compound weight, and measurement showed it INVERTED on PyPI:
+// 2.4% of malware against 16.4% of held-out popular packages (36 of 220,
+// including tqdm, websockets and jupyterlab-server). It fired on more benign
+// packages than malicious ones.
+func TestEnvNetInstallIsNPMGated(t *testing.T) {
+	var rule *CompoundRule
+	for i := range CompoundRules {
+		if CompoundRules[i].ID == CompoundSCEnvNetInstall {
+			rule = &CompoundRules[i]
+		}
+	}
+	if rule == nil {
+		t.Fatal("sc.env_net_install is not registered")
+	}
+	in := func(eco string) Input {
+		return Input{Ecosystem: eco, EnvVarAccess: true, NetworkAccess: true, HasInstallScript: true}
+	}
+	fired := map[string]FiredSignal{SignalSCInstallScriptOnly: {}}
+	if ok, _, _ := rule.Fires(in("npm"), fired); !ok {
+		t.Error("rule must still fire on npm, where it measures 9.6% malware / 0.0% benign")
+	}
+	for _, eco := range []string{"pypi", "pip", "rubygems", "cargo", "composer", "nuget"} {
+		if ok, _, _ := rule.Fires(in(eco), fired); ok {
+			t.Errorf("rule fired for %q at weight -45.\n"+
+				"On PyPI it fires on 16.4%% of popular packages and 2.4%% of malware — "+
+				"more benign than malicious. pypi is in supportedInstallScriptEcosystems "+
+				"and sc.install_script_only is ungated, so this was reachable in production.", eco)
+		}
+	}
+}
