@@ -505,3 +505,39 @@ func TestSCHiddenUnicodeKindSplit(t *testing.T) {
 		t.Errorf("bidi details = %v, want the observed kinds attached", details)
 	}
 }
+
+// TestInstallScriptEvalEncodedIsWiredEndToEnd guards a signal that spent its
+// whole life computed and discarded.
+//
+// core/installscripts set Kind = KindEvalEncoded from the day it was written;
+// no projection read it, risk.Input had no field for it, and no signal fired
+// on it. It was found by measuring retained malware artifacts, not by reading
+// the code — 20.4% of PyPI malware carries it and 0 of 337 benign packages do.
+//
+// The failure mode this guards is silent: delete the projection line and
+// everything still compiles, every other test still passes, and the signal
+// simply never fires again.
+func TestInstallScriptEvalEncodedIsWiredEndToEnd(t *testing.T) {
+	sig, ok := Registry[SignalSCInstallScriptEvalEnc]
+	if !ok {
+		t.Fatal("sc.install_script_eval_encoded is not registered")
+	}
+	if sig.Weight >= 0 {
+		t.Errorf("Weight = %v; a behaviour with 0/337 benign fires should carry weight", sig.Weight)
+	}
+	if sig.Severity != SevHigh {
+		t.Errorf("Severity = %v, want SevHigh", sig.Severity)
+	}
+	if fired, _, _ := sig.Fires(Input{InstallScriptEvalEncoded: true}); !fired {
+		t.Error("signal did not fire on its own input")
+	}
+	// It must NOT ride the other install-script inputs: those are separate
+	// observations with separate weights, and collapsing them would
+	// double-count a package that trips both.
+	if fired, _, _ := sig.Fires(Input{HasInstallScript: true}); fired {
+		t.Error("fired on HasInstallScript alone — it must read only InstallScriptEvalEncoded")
+	}
+	if fired, _, _ := sig.Fires(Input{InstallScriptFetchesRemote: true}); fired {
+		t.Error("fired on InstallScriptFetchesRemote — that is a different signal")
+	}
+}

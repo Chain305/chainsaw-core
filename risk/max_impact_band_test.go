@@ -102,6 +102,9 @@ func loneFireFixtures() map[string]Input {
 		SignalSCInstallScriptNetwork: set(func(in *Input) {
 			in.InstallScriptFetchesRemote = true
 		}),
+		SignalSCInstallScriptEvalEnc: set(func(in *Input) {
+			in.InstallScriptEvalEncoded = true
+		}),
 		SignalSCHiddenUnicode: set(func(in *Input) {
 			in.HasHiddenUnicode = true
 		}),

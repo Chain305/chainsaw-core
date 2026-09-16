@@ -252,6 +252,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 
 		HasInstallScript:           r.Scan.HasInstallScript,
 		InstallScriptFetchesRemote: r.Scan.InstallScriptFetches,
+		InstallScriptEvalEncoded:   r.Scan.InstallScriptKind == "eval_encoded",
 
 		// Pain 9 (Agent D): env-var read and network-call axes are
 		// projected into risk.Input so the new compound rule

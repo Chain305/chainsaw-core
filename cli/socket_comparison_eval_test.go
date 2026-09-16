@@ -176,9 +176,10 @@ var socketConceptMap = map[string]conceptMapping{
 	// The weight-0 sibling fed by the codesmell regex detector. Mapped to
 	// the same Socket concepts: it is the same observation, reached with
 	// weaker evidence, and the harness grades the CONCEPT not the weight.
-	"cap.dynamic_eval_observed": {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.filesystem_read":       {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert"},
-	"cap.filesystem_write":      {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia},
+	"cap.dynamic_eval_observed":      {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"sc.install_script_eval_encoded": {Socket: []string{"installScripts", "obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.filesystem_read":            {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert"},
+	"cap.filesystem_write":           {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia},
 
 	// ── vulnerability ───────────────────────────────────────────────────
 	"vuln.cvss_critical": {Socket: []string{"criticalCVE"}, Bucket: bucketAdvisory, Grade: gradeExact},

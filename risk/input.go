@@ -67,6 +67,14 @@ type Input struct {
 	HasInstallScript           bool
 	InstallScriptFetchesRemote bool
 
+	// InstallScriptEvalEncoded reports that the install script's body
+	// carries obfuscation/encoded-eval markers. core/installscripts has
+	// computed this as KindEvalEncoded since it was written and NOTHING
+	// consumed it — no projection, no signal, no Input field. Measured on
+	// retained artifacts 2026-09-16: 20.4% of PyPI malware, 0.0% of 337
+	// benign packages. See registry_supplychain.go.
+	InstallScriptEvalEncoded bool
+
 	// EnvVarAccess is true when the artifact scanner observed reads of
 	// process environment variables (process.env, os.environ, %ENV, ...).
 	// On its own this is a context-only signal — most legitimate code

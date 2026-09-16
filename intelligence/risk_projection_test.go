@@ -618,3 +618,21 @@ func TestCodeSmellEvalDoesNotFeedThePreciseSignal(t *testing.T) {
 		t.Error("an artifact scan that did not run must not assert any eval capability")
 	}
 }
+
+// TestInstallScriptEvalEncodedProjection is the half a registry test cannot
+// cover: the Kind string must actually reach risk.Input. Deleting the
+// projection line compiles fine and silently disables the signal.
+func TestInstallScriptEvalEncodedProjection(t *testing.T) {
+	r := &Report{Scan: ArtifactScanSection{Performed: true, InstallScriptKind: "eval_encoded"}}
+	if got := ProjectToRiskInput(r); !got.InstallScriptEvalEncoded {
+		t.Fatal("InstallScriptKind=\"eval_encoded\" did not reach risk.Input.\n" +
+			"core/installscripts has computed this Kind since it was written and " +
+			"nothing consumed it; this projection is the whole fix.")
+	}
+	for _, kind := range []string{"", "none", "present", "fetches_remote"} {
+		r := &Report{Scan: ArtifactScanSection{Performed: true, InstallScriptKind: kind}}
+		if ProjectToRiskInput(r).InstallScriptEvalEncoded {
+			t.Errorf("kind %q must not set InstallScriptEvalEncoded", kind)
+		}
+	}
+}

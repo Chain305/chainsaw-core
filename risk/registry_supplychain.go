@@ -20,6 +20,7 @@ const (
 	// claim: see the registration below and P8-70.
 	SignalSCPOMDeveloperListChanged = "sc.pom_developer_list_changed"
 	SignalSCInstallScriptNetwork    = "sc.install_script_fetches_remote"
+	SignalSCInstallScriptEvalEnc    = "sc.install_script_eval_encoded"
 	SignalSCInstallScriptOnly       = "sc.install_script_only"
 	SignalSCHiddenUnicode           = "sc.hidden_unicode"
 	SignalSCRepoOwnershipMismatch   = "sc.repo_ownership_mismatch"
@@ -256,6 +257,46 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Install-time lifecycle script fetches remote content.", nil
+		},
+	})
+
+	// sc.install_script_eval_encoded — an install script whose body carries
+	// obfuscation / encoded-eval markers.
+	//
+	// core/installscripts has computed this as KindEvalEncoded since it was
+	// written, and NOTHING consumed it: no projection, no Input field, no
+	// signal. It is the same shape as UsesEval — detected, then discarded —
+	// and it was found by measuring, not by reading.
+	//
+	// MEASURED on retained malware artifacts, 2026-09-16
+	// (docs/correlation-layer-measured-2026-09-16.md):
+	//
+	//	PyPI malware  20.4%   (51 of 250)
+	//	npm  malware   0.0%   (the npm AST detector does not set it)
+	//	BENIGN         0.0%   (0 of 337: 193 npm + 144 PyPI)
+	//
+	// Zero benign fires is what earns the weight, and it is why this sits
+	// at its sibling's -25/SevHigh rather than starting at 0: an install
+	// script that evals an encoded blob at install time is not a capability
+	// observation, it is a behaviour with no benign reading.
+	//
+	// The evidence base is 337 benign packages from one corpus. That is
+	// enough to ship a signal and NOT enough to be complacent: if a benign
+	// build tool that packs its installer trips this, the weight is what
+	// should be revisited first.
+	register(Signal{
+		ID:          SignalSCInstallScriptEvalEnc,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -25,
+		MaxImpact:   40,
+		Title:       "Install script evaluates encoded content",
+		Description: "The package's install-time script contains obfuscation or encoded-eval markers — a payload decoded and executed during install, which is the delivery step of most install-time malware.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if !in.InstallScriptEvalEncoded {
+				return false, "", nil
+			}
+			return true, "Install script decodes and evaluates encoded content.", nil
 		},
 	})
 
