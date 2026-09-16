@@ -273,17 +273,27 @@ func init() {
 	//
 	//	PyPI malware  20.4%   (51 of 250)
 	//	npm  malware   0.0%   (the npm AST detector does not set it)
-	//	BENIGN         0.0%   (0 of 337: 193 npm + 144 PyPI)
+	//	BENIGN         0.0%   (0 of 776)
 	//
-	// Zero benign fires is what earns the weight, and it is why this sits
-	// at its sibling's -25/SevHigh rather than starting at 0: an install
-	// script that evals an encoded blob at install time is not a capability
-	// observation, it is a behaviour with no benign reading.
+	// The benign base is 776 packages across two independent populations:
+	// 337 corpus-v1 randoms (193 npm + 144 PyPI) and 439 HELD-OUT
+	// download-ranked popular packages (219 npm + 220 PyPI) that played no
+	// part in choosing this signal.
 	//
-	// The evidence base is 337 benign packages from one corpus. That is
-	// enough to ship a signal and NOT enough to be complacent: if a benign
-	// build tool that packs its installer trips this, the weight is what
-	// should be revisited first.
+	// The held-out set earned its keep immediately. On the first run it
+	// produced one false positive -- pycrypto 2.6.1, a top-3000 PyPI
+	// package -- and the cause was hexEscapeRE matching a SINGLE `\xNN`.
+	// pycrypto's setup.py carries `\x00\x11\x22\x33`, a four-byte test
+	// vector. The detector now requires a run of 8 (see detect.go); recall
+	// held at exactly 20.4% and the false positive went to zero.
+	//
+	// Zero benign fires across both populations is what earns -25/SevHigh:
+	// an install script that decodes and evals a blob at install time is
+	// not a capability observation, it is the delivery step.
+	//
+	// If a legitimate packer ever trips this, the WEIGHT is the thing to
+	// revisit first -- and check the detector before the weight, because
+	// that is what went wrong the first time.
 	register(Signal{
 		ID:          SignalSCInstallScriptEvalEnc,
 		Category:    CategorySupplyChain,

@@ -79,7 +79,20 @@ var fetchesRemoteRE = regexp.MustCompile(
 var (
 	evalBufferFromRE = regexp.MustCompile(`eval\s*\(\s*Buffer\.from\b`)
 	atobRE           = regexp.MustCompile(`\batob\s*\(`)
-	hexEscapeRE      = regexp.MustCompile(`\\x[0-9a-fA-F]{2}`)
+	// hexEscapeRE requires a RUN of hex escapes, not a single one.
+	//
+	// It was `\\x[0-9a-fA-F]{2}` — one escape anywhere in an install script
+	// promoted it to KindEvalEncoded. `\\x41` appears in ordinary string
+	// handling, and the cost was measured: pycrypto 2.6.1 (a top-3000 PyPI
+	// package) trips it on `\\x00\\x11\\x22\\x33`, a four-byte test vector in
+	// its setup.py. That is not encoded eval by any reading.
+	//
+	// 8 consecutive escapes is 8 bytes of inline binary, which is what a
+	// packed payload looks like and what no test vector needs. Measured
+	// against the retained-artifact corpora (2026-09-16): the only PyPI
+	// malware setup.py carrying hex escapes has a run of 16; the benign
+	// false positive has runs of exactly 4.
+	hexEscapeRE = regexp.MustCompile(`(?:\\x[0-9a-fA-F]{2}){8,}`)
 	// Long runs of base64-looking chars. We use 200+ contiguous chars
 	// drawn from the base64 alphabet; a malformed match is preferable
 	// to a false negative.
