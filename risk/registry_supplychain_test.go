@@ -541,3 +541,67 @@ func TestInstallScriptEvalEncodedIsWiredEndToEnd(t *testing.T) {
 		t.Error("fired on InstallScriptFetchesRemote — that is a different signal")
 	}
 }
+
+// TestInstallScriptOnlySplit pins both halves and, more importantly, the
+// reason the base signal must keep firing everywhere.
+//
+// sc.install_script_only was -5 and ungated. Measured, it is ANTI-correlated
+// on PyPI: 77.3% of held-out popular packages against 47.6% of malware. The
+// obvious fix — npm-gate it — is unsafe, because compound.go looks the signal
+// up by ID in CompoundSCTakeoverSignature (SevCritical) and
+// CompoundSCEnvNetInstall. Starving the primitive would silently narrow those
+// rules for every non-npm ecosystem.
+//
+// So: base signal fires everywhere at weight 0, weight moves to an npm-scoped
+// sibling. This test fails if either half is collapsed back.
+func TestInstallScriptOnlySplit(t *testing.T) {
+	base, ok := Registry[SignalSCInstallScriptOnly]
+	if !ok {
+		t.Fatal("sc.install_script_only must stay registered — compound.go looks it up by ID")
+	}
+	npm, ok := Registry[SignalSCInstallScriptOnlyNPM]
+	if !ok {
+		t.Fatal("sc.install_script_only_npm is not registered")
+	}
+	if base.Weight != 0 {
+		t.Errorf("base signal Weight = %v, want 0.\n"+
+			"It fires on 77.3%% of popular PyPI packages; weight there is a uniform "+
+			"bias against the ecosystem, not a signal.", base.Weight)
+	}
+	if npm.Weight >= 0 {
+		t.Errorf("npm sibling Weight = %v; it must carry the weight (3.22x on npm)", npm.Weight)
+	}
+
+	in := func(eco string) Input {
+		return Input{Ecosystem: eco, HasInstallScript: true}
+	}
+	// The base observation must survive on EVERY ecosystem — this is the
+	// property that keeps the compounds wired.
+	for _, eco := range []string{"npm", "pypi", "rubygems", "cargo", "composer", "nuget", ""} {
+		if fired, _, _ := base.Fires(in(eco)); !fired {
+			t.Errorf("base signal did not fire for %q.\n"+
+				"compound.go resolves fired[SignalSCInstallScriptOnly] for ALL ecosystems; "+
+				"silencing it here silently narrows a SevCritical compound.", eco)
+		}
+	}
+	// The weighted sibling must be npm-only.
+	for _, eco := range []string{"npm", "yarn", "bun"} {
+		if fired, _, _ := npm.Fires(in(eco)); !fired {
+			t.Errorf("npm sibling did not fire for %q", eco)
+		}
+	}
+	for _, eco := range []string{"pypi", "rubygems", "cargo", "composer", "nuget", ""} {
+		if fired, _, _ := npm.Fires(in(eco)); fired {
+			t.Errorf("npm sibling fired for %q at weight -5; that is the PyPI bias this split removes", eco)
+		}
+	}
+	// Neither half fires when the script fetches remote — that is a
+	// different, heavier signal and double-counting it would inflate both.
+	remote := Input{Ecosystem: "npm", HasInstallScript: true, InstallScriptFetchesRemote: true}
+	if fired, _, _ := base.Fires(remote); fired {
+		t.Error("base fired on a remote-fetching install script; sc.install_script_fetches_remote owns that")
+	}
+	if fired, _, _ := npm.Fires(remote); fired {
+		t.Error("npm sibling fired on a remote-fetching install script")
+	}
+}

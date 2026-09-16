@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **79 risk signals**. Each is scored, not merely
+Chainsaw registers **80 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,15 +23,15 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 51 |
+| Supply chain | 52 |
 | Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 6 |
 | Quality | 6 |
-| **Total** | **79** |
+| **Total** | **80** |
 
 
-## Supply chain (51)
+## Supply chain (52)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -61,7 +61,8 @@ a configured server.
 | `sc.http_url_dependency` | low | -8.00 | HTTP(S) tarball URL dependency |
 | `sc.install_script_fetches_remote` | high | -25.00 | Install script makes network calls |
 | `sc.install_script_eval_encoded` | high | -25.00 | Install script evaluates encoded content |
-| `sc.install_script_only` | low | -5.00 | Install lifecycle script present |
+| `sc.install_script_only` | info | 0.00 | Install lifecycle script present |
+| `sc.install_script_only_npm` | low | -5.00 | npm install lifecycle script present |
 | `sc.known_malicious` | critical | -1000.00 | Known-malicious package |
 | `sc.maintainer_account_somewhat_young` | low | -5.00 | Maintainer account under 6 months |
 | `sc.maintainer_account_very_young` | high | -25.00 | Maintainer account very young (<30 days) |

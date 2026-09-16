@@ -144,6 +144,7 @@ var socketConceptMap = map[string]conceptMapping{
 	"sc.non_existent_author":               {Socket: []string{"missingAuthor"}, Bucket: bucketMetadata, Grade: gradeExact},
 	"sc.install_script_fetches_remote":     {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is strictly narrower: theirs fires on scripts EXISTING"},
 	"sc.install_script_only":               {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia},
+	"sc.install_script_only_npm":           {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia},
 	"sc.hidden_unicode":                    {Socket: []string{"obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "different detector class; overlapping intent"},
 	"sc.repo_archived":                     {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
 	"sc.git_url_dependency":                {Socket: []string{"gitDependency", "gitHubDependency"}, Bucket: bucketMetadata, Grade: gradeExact},

@@ -22,6 +22,7 @@ const (
 	SignalSCInstallScriptNetwork    = "sc.install_script_fetches_remote"
 	SignalSCInstallScriptEvalEnc    = "sc.install_script_eval_encoded"
 	SignalSCInstallScriptOnly       = "sc.install_script_only"
+	SignalSCInstallScriptOnlyNPM    = "sc.install_script_only_npm"
 	SignalSCHiddenUnicode           = "sc.hidden_unicode"
 	SignalSCRepoOwnershipMismatch   = "sc.repo_ownership_mismatch"
 	SignalSCRepoArchived            = "sc.repo_archived"
@@ -310,20 +311,65 @@ func init() {
 		},
 	})
 
-	// Plain install script (no network). Low weight — many legitimate
-	// packages use postinstall for native builds — but it compounds with
-	// publisher-change (see compound.go).
+	// Plain install script (no network), split into an OBSERVATION and an
+	// npm-scoped VERDICT as of 2026-09-17.
+	//
+	// The comment here used to read "Low weight — many legitimate packages
+	// use postinstall for native builds". That suspicion was correct and was
+	// never measured. Measured on retained malware artifacts against
+	// held-out popular packages (docs/compound-rule-inversion-2026-09-16.md):
+	//
+	//	         malware   held-out benign   lift
+	//	npm       50.0%         15.5%        3.22x
+	//	PyPI      47.6%         77.3%        0.62x
+	//
+	// On PyPI it is ANTI-correlated: it fired on 77.3% of popular packages
+	// and 47.6% of malware, so having a setup.py made a package LESS likely
+	// to be malware in that data. A -5 applied to three quarters of an
+	// ecosystem is not a signal, it is a uniform bias.
+	//
+	// WHY THIS IS A SPLIT AND NOT A GATE. sc.install_script_only cannot
+	// simply be npm-gated: compound.go looks it up by ID
+	// (fired[SignalSCInstallScriptOnly]) in BOTH CompoundSCTakeoverSignature
+	// and CompoundSCEnvNetInstall, so starving the primitive would silently
+	// narrow a SevCritical rule for every non-npm ecosystem. compound.go has
+	// been bitten by exactly that and says so in its POM guard.
+	//
+	// So the base signal keeps firing everywhere at WEIGHT 0 — it remains a
+	// true, displayable observation and the compound lookup still resolves —
+	// and the weight moves to an npm-scoped sibling where it is earned.
 	register(Signal{
 		ID:       SignalSCInstallScriptOnly,
 		Category: CategorySupplyChain,
-		Severity: SevLow,
-		Weight:   -5,
+		Severity: SevInfo,
+		Weight:   0,
 		Title:    "Install lifecycle script present",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if !in.HasInstallScript || in.InstallScriptFetchesRemote {
 				return false, "", nil
 			}
 			return true, "Package has an install/postinstall script.", nil
+		},
+	})
+
+	// The weighted half. npm only, where install-script presence measures
+	// 3.22x (50.0% of malware against 15.5% of held-out popular packages).
+	// Weight -5 is carried over unchanged from the pre-split signal: this
+	// commit moves where the weight applies, and does not re-tune it.
+	register(Signal{
+		ID:       SignalSCInstallScriptOnlyNPM,
+		Category: CategorySupplyChain,
+		Severity: SevLow,
+		Weight:   -5,
+		Title:    "npm install lifecycle script present",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if !isNPMEcosystem(in.Ecosystem) {
+				return false, "", nil
+			}
+			if !in.HasInstallScript || in.InstallScriptFetchesRemote {
+				return false, "", nil
+			}
+			return true, "npm package has an install/postinstall script.", nil
 		},
 	})
 
