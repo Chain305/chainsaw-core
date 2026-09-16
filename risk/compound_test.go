@@ -134,3 +134,55 @@ func TestSignalWeightOverrides_AppliedToFiredSignal(t *testing.T) {
 		}
 	}
 }
+
+// TestNPMInstallNetShellIsEcosystemGated pins the gate, which is the entire
+// reason this rule exists in the form it does.
+//
+// The same conjunction measured 0 of 219 held-out benign false positives on
+// npm and 26 of 220 (11.8%) on PyPI, because 65.3% of benign PyPI packages
+// ship a setup.py and building a C extension legitimately shells out.
+// Removing the ecosystem check does not break a test unless this one exists.
+func TestNPMInstallNetShellIsEcosystemGated(t *testing.T) {
+	var rule *CompoundRule
+	for i := range CompoundRules {
+		if CompoundRules[i].ID == CompoundSCNetShellInstallNPM {
+			rule = &CompoundRules[i]
+		}
+	}
+	if rule == nil {
+		t.Fatal("sc.npm_install_net_shell is not registered")
+	}
+	trip := func(eco string) bool {
+		in := Input{
+			Ecosystem:        eco,
+			HasInstallScript: true,
+			NetworkAccess:    true,
+			CapShell:         true,
+		}
+		fired, _, _ := rule.Fires(in, map[string]FiredSignal{})
+		return fired
+	}
+	for _, eco := range []string{"npm", "yarn", "bun", "NPM"} {
+		if !trip(eco) {
+			t.Errorf("rule did not fire for ecosystem %q; the npm family must all trip it", eco)
+		}
+	}
+	for _, eco := range []string{"pypi", "pip", "cargo", "rubygems", "maven", "go", ""} {
+		if trip(eco) {
+			t.Errorf("rule fired for ecosystem %q.\n"+
+				"It is npm-gated on measurement: the same conjunction produced 26 false "+
+				"positives in 220 held-out popular PyPI packages (11.8%%) against 0 in 219 "+
+				"on npm. Ungated, this flags one PyPI package in eight.", eco)
+		}
+	}
+	// All three terms are required — any two must not fire.
+	for _, in := range []Input{
+		{Ecosystem: "npm", HasInstallScript: true, NetworkAccess: true},
+		{Ecosystem: "npm", HasInstallScript: true, CapShell: true},
+		{Ecosystem: "npm", NetworkAccess: true, CapShell: true},
+	} {
+		if fired, _, _ := rule.Fires(in, map[string]FiredSignal{}); fired {
+			t.Error("rule fired on only two of its three terms")
+		}
+	}
+}

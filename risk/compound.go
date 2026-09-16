@@ -1,5 +1,7 @@
 package risk
 
+import "strings"
+
 // CompoundRule fires when a combination of primitive signals is present
 // that is materially worse than the sum of its parts. The canonical
 // example — publisher-change AND new install script in the same version —
@@ -32,7 +34,8 @@ const (
 	// context-only (it has too high a false-positive rate to act as a
 	// block by itself); this compound is the intended block carrier
 	// when all three axes line up. Pain 9 (Agent D).
-	CompoundSCEnvNetInstall = "sc.env_net_install"
+	CompoundSCNetShellInstallNPM = "sc.npm_install_net_shell"
+	CompoundSCEnvNetInstall      = "sc.env_net_install"
 )
 
 func init() {
@@ -127,4 +130,62 @@ func init() {
 				}
 		},
 	})
+
+	// sc.npm_install_net_shell — npm ONLY, and the gate is the point.
+	//
+	// MEASURED on retained artifacts, 2026-09-16
+	// (docs/correlation-layer-measured-2026-09-16.md). The SAME conjunction,
+	// on the same day, with the same harness:
+	//
+	//	         marginal catches    held-out benign FP
+	//	npm      28 of 250 (11.2%)   0 of 219   (0.0%)
+	//	PyPI     19 of 250 ( 7.6%)   26 of 220 (11.8%)
+	//
+	// An install script that also reaches the network and spawns a shell is
+	// a strong signal on npm and NOISE on PyPI, because 65.3% of benign
+	// PyPI packages ship a setup.py at all (against 10.9% on npm) and
+	// building a C extension legitimately shells out. Ungated, this rule
+	// would false-positive on one PyPI package in eight.
+	//
+	// That asymmetry is why this carries an Ecosystem check and why the two
+	// compound rules above it — both ecosystem-blind — should be re-measured
+	// the same way. "Marginal" above means catches NOT already covered by
+	// sc.install_script_fetches_remote or sc.install_script_eval_encoded;
+	// the union on npm goes 13.2% -> 24.4%.
+	//
+	// Weight is deliberately below CompoundSCEnvNetInstall's -45: that rule
+	// requires env-var access on top, which is the exfiltration half. This
+	// one asserts capability co-occurrence in the install path and nothing
+	// about intent.
+	CompoundRules = append(CompoundRules, CompoundRule{
+		ID:          CompoundSCNetShellInstallNPM,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -30,
+		Title:       "npm install script with network and shell access",
+		Description: "The package runs an install-time script and its source both reaches the network and spawns a shell. Measured on npm as a 0%-false-positive combination; deliberately not applied to other ecosystems, where a build-time setup script shelling out is ordinary.",
+		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
+			if !isNPMEcosystem(in.Ecosystem) {
+				return false, "", nil
+			}
+			if !in.HasInstallScript || !in.NetworkAccess || !in.CapShell {
+				return false, "", nil
+			}
+			return true, "npm package runs an install script and its source uses both network and shell primitives.",
+				map[string]any{
+					"hasInstallScript": true,
+					"networkAccess":    true,
+					"shellAccess":      true,
+				}
+		},
+	})
+}
+
+// isNPMEcosystem covers the npm family as the registry and the CLI spell it.
+func isNPMEcosystem(eco string) bool {
+	switch strings.ToLower(strings.TrimSpace(eco)) {
+	case "npm", "yarn", "bun":
+		return true
+	}
+	return false
 }
