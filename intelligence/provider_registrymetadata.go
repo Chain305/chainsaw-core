@@ -649,7 +649,7 @@ type npmVersionMeta struct {
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 }
 
-// npmTimeMap is npm's packument `time` object.
+// npmTime is npm's packument `time` object.
 //
 // It is NOT uniformly string-valued, and that is the whole reason this type
 // exists. Alongside the per-version ISO timestamps, an UNPUBLISHED package
@@ -679,9 +679,20 @@ type npmVersionMeta struct {
 // addition cannot blind the reader the same way again. `unpublished` is the
 // exception: its inner `time` is lifted to the key "unpublished" so the fact
 // survives as a parseable timestamp instead of being dropped.
-type npmTimeMap map[string]string
+type npmTime struct {
+	// Stamps holds the string-valued entries: per-version publish times
+	// plus "created"/"modified", and "unpublished" lifted to the inner
+	// timestamp so the fact survives as something parseTime accepts.
+	Stamps map[string]string
+	// UnpublishedVersions is time.unpublished.versions -- the versions npm
+	// records as withdrawn. Kept because it is what makes npmWithdrawn a
+	// per-version claim instead of a per-package one.
+	UnpublishedVersions []string
+	// Present distinguishes "no time object" from "an empty one".
+	Present bool
+}
 
-// npmUnpublishedKey is where the unpublished timestamp lands in npmTimeMap.
+// npmUnpublishedKey is where the unpublished timestamp lands in npmTime.Stamps.
 // It cannot collide with a version: npm versions are semver and "unpublished"
 // is not.
 const npmUnpublishedKey = "unpublished"
@@ -693,30 +704,73 @@ const npmUnpublishedKey = "unpublished"
 // within a year.
 const registryMaxBodyBytes = 32 << 20
 
-func (m *npmTimeMap) UnmarshalJSON(b []byte) error {
+func (t *npmTime) UnmarshalJSON(b []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
-	out := make(npmTimeMap, len(raw))
+	out := npmTime{Stamps: make(map[string]string, len(raw)), Present: true}
 	for k, v := range raw {
 		var s string
 		if err := json.Unmarshal(v, &s); err == nil {
-			out[k] = s
+			out.Stamps[k] = s
 			continue
 		}
 		if k != npmUnpublishedKey {
 			continue // unknown shape; skip the key, keep the document
 		}
 		var unpub struct {
-			Time string `json:"time"`
+			Time     string   `json:"time"`
+			Versions []string `json:"versions"`
 		}
-		if err := json.Unmarshal(v, &unpub); err == nil && unpub.Time != "" {
-			out[npmUnpublishedKey] = unpub.Time
+		if err := json.Unmarshal(v, &unpub); err == nil {
+			if unpub.Time != "" {
+				out.Stamps[npmUnpublishedKey] = unpub.Time
+			}
+			out.UnpublishedVersions = unpub.Versions
 		}
 	}
-	*m = out
+	*t = out
 	return nil
+}
+
+// npmWithdrawn reports whether THIS coordinate was withdrawn from npm.
+//
+// Deliberately strict, and the strictness is measured rather than cautious.
+// Across the 76 tombstone coordinates in corpus v1 (2026-09-16, refetched
+// from registry.npmjs.org):
+//
+//	76/76  the package has NO live versions left at all
+//	71/76  the scanned version is named in time.unpublished.versions
+//	 0/76  a SIBLING version was withdrawn while the scanned one stayed live
+//
+// That last row is the case worth refusing to guess on, and it did not occur
+// once. Both accepted conditions are therefore unambiguous statements about
+// this coordinate:
+//
+//   - the version is named in the unpublished list, or
+//   - the whole package is gone (no live versions), which includes this one.
+//
+// A package with some versions unpublished and this one still published
+// returns false. Flagging a live version because a sibling was withdrawn is
+// a weaker and different claim, and nothing measured supports it.
+func npmWithdrawn(ver string, unpublishedVersions []string, liveVersions int) bool {
+	for _, v := range unpublishedVersions {
+		if v == ver {
+			return true
+		}
+	}
+	return liveVersions == 0
+}
+
+// appendUniqueString appends s to xs unless already present.
+func appendUniqueString(xs []string, s string) []string {
+	for _, x := range xs {
+		if x == s {
+			return xs
+		}
+	}
+	return append(xs, s)
 }
 
 func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) (PartialReport, error) {
@@ -729,7 +783,7 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 		Repository  any                       `json:"repository"`
 		Bugs        any                       `json:"bugs"`
 		DistTags    map[string]string         `json:"dist-tags"`
-		Time        npmTimeMap                `json:"time"`
+		Time        npmTime                   `json:"time"`
 		Versions    map[string]npmVersionMeta `json:"versions"`
 		Maintainers []npmHuman                `json:"maintainers"`
 		Author      *npmHuman                 `json:"author"`
@@ -839,14 +893,14 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 	}
 
 	release := &ReleaseSection{}
-	if pack.Time != nil {
-		if t, ok := parseTime(pack.Time[ver]); ok {
+	if pack.Time.Present {
+		if t, ok := parseTime(pack.Time.Stamps[ver]); ok {
 			release.PublishedAt = &t
 		}
-		if t, ok := parseTime(pack.Time["created"]); ok {
+		if t, ok := parseTime(pack.Time.Stamps["created"]); ok {
 			release.CreatedAt = &t
 		}
-		if t, ok := parseTime(pack.Time["modified"]); ok {
+		if t, ok := parseTime(pack.Time.Stamps["modified"]); ok {
 			release.ModifiedAt = &t
 		}
 	}
@@ -875,7 +929,7 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 	}
 
 	// Extract the full version timeline from the packument. Every key in
-	// `pack.Versions` is a published version; `pack.Time[ver]` is the
+	// `pack.Versions` is a published version; `pack.Time.Stamps[ver]` is the
 	// matching publish date. This bypasses the proxy-driven sparse store
 	// (which only knows about versions chainsaw has actually fingered)
 	// and is the only way to get an accurate VersionCount + prior
@@ -889,8 +943,8 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 		timeline := make([]VersionRelease, 0, len(pack.Versions))
 		for v := range pack.Versions {
 			rel := VersionRelease{Version: v}
-			if pack.Time != nil {
-				if t, ok := parseTime(pack.Time[v]); ok {
+			if pack.Time.Present {
+				if t, ok := parseTime(pack.Time.Stamps[v]); ok {
 					rel.PublishedAt = t
 				}
 			}
@@ -930,6 +984,29 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 	// stars on prod even though `repository.url` resolves cleanly to
 	// github.com/lodash/lodash because of this gap.
 	enrichRepoStars(ctx, p, &pr)
+
+	// Registry-native withdrawal. npm's unpublish is the strongest
+	// supply-chain fact the registry publishes about a coordinate -- the
+	// coa@2.0.3 / event-stream@3.3.6 shape risk_projection.go cites by name
+	// -- and until 2026-09-16 the reader discarded the whole packument for
+	// carrying it (see npmTime).
+	//
+	// It rides VersionAnomaly, NOT IsKnownMalicious and NOT
+	// DeprecatedByMaintainer. Malicious is a verdict the registry did not
+	// make; packages are unpublished for mundane reasons too. Deprecated is
+	// the wrong direction -- "stop using this" is weaker than "this is gone"
+	// -- and Release.Yanked already routes there (risk_projection.go), so
+	// reusing it would both understate the fact and load a signal whose
+	// calibration is the open question in the corpus-v1 adjudication.
+	if pack.Time.Present && npmWithdrawn(ver, pack.Time.UnpublishedVersions, len(pack.Versions)) {
+		anomaly := true
+		if pr.SupplyChain == nil {
+			pr.SupplyChain = &SupplyChainSection{}
+		}
+		pr.SupplyChain.VersionAnomaly = &anomaly
+		pr.SupplyChain.VersionAnomalyFlags = appendUniqueString(
+			pr.SupplyChain.VersionAnomalyFlags, FlagRegistryWithdrawn)
+	}
 	return pr, nil
 }
 

@@ -1449,6 +1449,21 @@ const (
 	// upstream coverage misses on @solana/web3.js.
 	WarnRegistryBodyTooLarge = "body_too_large"
 
+	// FlagRegistryWithdrawn is the VersionAnomalyFlags entry for a
+	// registry-native "this coordinate was withdrawn" fact: an npm unpublish, a
+	// pub.dev retraction, a discontinued package.
+	//
+	// It lives in core because core now produces it (runNPM) as well as
+	// consuming it. internal/supplychain/metadiff aliases this constant rather
+	// than redeclaring the literal -- root may import core, never the reverse,
+	// so there is exactly one definition and the open-core boundary holds.
+	//
+	// Withdrawal rides VersionAnomaly, NEVER IsKnownMalicious. It is
+	// malicious-ADJACENT: packages are unpublished for mundane reasons too, and
+	// minting a malware verdict off a registry state change would be a verdict
+	// the registry did not make.
+	FlagRegistryWithdrawn = "registry_withdrawn"
+
 	// WarnVersionNotFound is emitted when a registry answered with a
 	// package document that enumerated its published versions and the
 	// requested version was NOT among them. It is positive evidence of
