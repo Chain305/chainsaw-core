@@ -1442,6 +1442,13 @@ const (
 	// zero values as if they were observations. See registryDecodeReason.
 	WarnRegistryDecode = "decode"
 
+	// WarnRegistryBodyTooLarge means the response exceeded our own read
+	// ceiling and was truncated before parsing. It is deliberately NOT
+	// WarnRegistryDecode: truncation is our limit, a decode error is their
+	// document, and collapsing the two made an 8 MiB cap read as eleven
+	// upstream coverage misses on @solana/web3.js.
+	WarnRegistryBodyTooLarge = "body_too_large"
+
 	// WarnVersionNotFound is emitted when a registry answered with a
 	// package document that enumerated its published versions and the
 	// requested version was NOT among them. It is positive evidence of

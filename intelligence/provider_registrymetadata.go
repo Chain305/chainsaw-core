@@ -514,12 +514,33 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 		return &Warning{Provider: "registrymetadata", Code: fmt.Sprintf("http_%d", resp.StatusCode), Message: endpoint, At: p.now()}, false, resp.StatusCode, nil
 	}
 
-	// Cap the body read at 8 MiB — the largest public packument is npm's
-	// facebook/react at roughly 3 MiB and growing slowly. Anything over
-	// this is almost certainly a misconfigured registry.
-	limited := &io.LimitedReader{R: resp.Body, N: 8 << 20}
+	// Cap the body read. The previous 8 MiB ceiling carried the rationale
+	// "the largest public packument is npm's facebook/react at roughly
+	// 3 MiB and growing slowly; anything over this is almost certainly a
+	// misconfigured registry." That is measurably false:
+	// registry.npmjs.org serves @solana/web3.js at 11.4 MB, and it is an
+	// ordinary popular package, not a misconfiguration.
+	//
+	// Two things were wrong, and the second was worse than the first. The
+	// cap truncated a legitimate body, and io.LimitedReader signals that
+	// by returning io.EOF mid-document — which json.Decode reports as a
+	// parse error indistinguishable from a genuinely malformed payload.
+	// So we attributed OUR ceiling to THEIR document: eleven versions of
+	// @solana/web3.js came back `unknown` with "the registry returned a
+	// document we could not parse", and the corpus study filed them as
+	// upstream coverage misses.
+	//
+	// Exhausting the limit is therefore reported as its own code. It is a
+	// DID-NOT-COMPLETE, not a verdict about the registry.
+	limited := &io.LimitedReader{R: resp.Body, N: registryMaxBodyBytes}
 	if err := decode(limited); err != nil {
-		return &Warning{Provider: "registrymetadata", Code: WarnRegistryDecode, Message: err.Error(), At: p.now()}, false, resp.StatusCode, err
+		code, msg := WarnRegistryDecode, err.Error()
+		if limited.N <= 0 {
+			code = WarnRegistryBodyTooLarge
+			msg = fmt.Sprintf("response exceeded the %d-byte read ceiling and was truncated before parsing; "+
+				"this is our limit, not a malformed upstream document (%v)", registryMaxBodyBytes, err)
+		}
+		return &Warning{Provider: "registrymetadata", Code: code, Message: msg, At: p.now()}, false, resp.StatusCode, err
 	}
 	return nil, false, resp.StatusCode, nil
 }
@@ -628,6 +649,76 @@ type npmVersionMeta struct {
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 }
 
+// npmTimeMap is npm's packument `time` object.
+//
+// It is NOT uniformly string-valued, and that is the whole reason this type
+// exists. Alongside the per-version ISO timestamps, an UNPUBLISHED package
+// carries:
+//
+//	"time": {"created": "...", "modified": "...",
+//	         "unpublished": {"time": "...", "versions": ["0.0.1"]}}
+//
+// `unpublished` is an OBJECT. Declared as map[string]string, encoding/json
+// rejects the ENTIRE packument with "cannot unmarshal object into Go struct
+// field .time of type string", runNPM returns a decode warning, and every
+// fact about the package is discarded — name, maintainers, repository,
+// dist-tags, the lot. The verdict comes back `unknown` with the message
+// "the registry returned a document we could not parse".
+//
+// Measured on the 1,885-coordinate corpus: 98 rows across 77 distinct npm
+// packages, 5.2% of the corpus. npm was the only affected ecosystem.
+//
+// The failure inverts the signal it destroys. `time.unpublished` is the
+// strongest supply-chain fact npm publishes about a coordinate — it is the
+// `coa@2.0.3` / `event-stream@3.3.6` shape this codebase already cites by
+// name (risk_projection.go) — and the reader threw away the whole document
+// BECAUSE that marker was present. The more interesting the package, the
+// less we learned about it.
+//
+// Non-string values are skipped rather than erroring, so a future npm schema
+// addition cannot blind the reader the same way again. `unpublished` is the
+// exception: its inner `time` is lifted to the key "unpublished" so the fact
+// survives as a parseable timestamp instead of being dropped.
+type npmTimeMap map[string]string
+
+// npmUnpublishedKey is where the unpublished timestamp lands in npmTimeMap.
+// It cannot collide with a version: npm versions are semver and "unpublished"
+// is not.
+const npmUnpublishedKey = "unpublished"
+
+// registryMaxBodyBytes bounds a single registry response. 32 MiB against a
+// largest-observed 11.4 MB (@solana/web3.js) leaves real headroom; the point
+// of the bound is to stop an unbounded allocation, not to predict npm's
+// growth curve — the previous ceiling was set by predicting it and was wrong
+// within a year.
+const registryMaxBodyBytes = 32 << 20
+
+func (m *npmTimeMap) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	out := make(npmTimeMap, len(raw))
+	for k, v := range raw {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			out[k] = s
+			continue
+		}
+		if k != npmUnpublishedKey {
+			continue // unknown shape; skip the key, keep the document
+		}
+		var unpub struct {
+			Time string `json:"time"`
+		}
+		if err := json.Unmarshal(v, &unpub); err == nil && unpub.Time != "" {
+			out[npmUnpublishedKey] = unpub.Time
+		}
+	}
+	*m = out
+	return nil
+}
+
 func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) (PartialReport, error) {
 	endpoint := fmt.Sprintf("%s/%s", p.endpoints.npm, encodeNPMPackage(pkg))
 	var pack struct {
@@ -638,7 +729,7 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 		Repository  any                       `json:"repository"`
 		Bugs        any                       `json:"bugs"`
 		DistTags    map[string]string         `json:"dist-tags"`
-		Time        map[string]string         `json:"time"`
+		Time        npmTimeMap                `json:"time"`
 		Versions    map[string]npmVersionMeta `json:"versions"`
 		Maintainers []npmHuman                `json:"maintainers"`
 		Author      *npmHuman                 `json:"author"`
