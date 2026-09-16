@@ -1136,6 +1136,13 @@ func projectCodeSmellCapabilities(s *ArtifactScanSection, in *risk.Input) {
 	if s.NativeBinaryPresent {
 		in.CapNativeCode = true
 	}
+	// UsesEval goes to the weight-0 OBSERVED signal, never to
+	// cap.dynamic_eval (-3). See SignalCapDynamicEvalObs for the split and
+	// for the measurement that retired the "fires on half the corpus"
+	// objection.
+	if s.UsesEval {
+		in.CapDynamicEvalObserved = true
+	}
 }
 
 // projectURLDeps classifies each dependency version string in the

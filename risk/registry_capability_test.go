@@ -144,3 +144,47 @@ func TestCapEvidenceNilWhenNoEvidence(t *testing.T) {
 		t.Errorf("expected nil evidence for empty evidence slice, got %v", evidence)
 	}
 }
+
+// TestDynamicEvalObservedIsWeightZeroAndSeparate pins the split between the
+// AST-backed signal and the regex-backed one.
+//
+// The whole reason codesmell's UsesEval stayed unmapped for months is that
+// cap.dynamic_eval carries Weight -3, calibrated for the npm AST scanner.
+// Routing a regex hit into it would apply that penalty to evidence that does
+// not support it. If someone ever "simplifies" these into one signal, this
+// test is what says no.
+func TestDynamicEvalObservedIsWeightZeroAndSeparate(t *testing.T) {
+	o, okObs := Registry[SignalCapDynamicEvalObs]
+	p, okPrecise := Registry[SignalCapDynamicEval]
+	if !okObs || !okPrecise {
+		t.Fatal("both cap.dynamic_eval and cap.dynamic_eval_observed must be registered")
+	}
+	obs, precise := &o, &p
+	if obs.ID == precise.ID {
+		t.Fatal("the two eval signals collapsed into one")
+	}
+	if obs.Weight != 0 {
+		t.Errorf("cap.dynamic_eval_observed Weight = %v, want 0.\n"+
+			"It is fed by a regex detector across eight languages. Giving it "+
+			"weight prices a token match like a resolved call site.", obs.Weight)
+	}
+	if obs.Severity != SevInfo {
+		t.Errorf("cap.dynamic_eval_observed Severity = %v, want SevInfo", obs.Severity)
+	}
+	if precise.Weight >= 0 {
+		t.Errorf("cap.dynamic_eval Weight = %v; the AST-backed signal is the one "+
+			"that carries weight, and this test exists because the two must not swap", precise.Weight)
+	}
+
+	// The observed signal must fire ONLY on its own input, never on the
+	// precise one -- otherwise the split is cosmetic.
+	if fired, _, _ := obs.Fires(Input{CapDynamicEval: true}); fired {
+		t.Error("cap.dynamic_eval_observed fired on CapDynamicEval; it must read only CapDynamicEvalObserved")
+	}
+	if fired, _, _ := obs.Fires(Input{CapDynamicEvalObserved: true}); !fired {
+		t.Error("cap.dynamic_eval_observed did not fire on its own input")
+	}
+	if fired, _, _ := precise.Fires(Input{CapDynamicEvalObserved: true}); fired {
+		t.Error("cap.dynamic_eval fired on the WEAK input; that is the -3 penalty this split exists to prevent")
+	}
+}

@@ -341,6 +341,14 @@ type Input struct {
 	CapDynamicEval         bool
 	CapDynamicEvalEvidence []CapEvidenceEntry
 
+	// CapDynamicEvalObserved is the WEAKER sibling of CapDynamicEval, set
+	// by the codesmell regex detector rather than the npm AST scanner.
+	// They are separate fields on purpose: cap.dynamic_eval carries
+	// Weight -3 calibrated for a precise, npm-only scanner, and feeding a
+	// regex hit into it would apply that penalty to evidence that does not
+	// support it. See projectCodeSmellCapabilities.
+	CapDynamicEvalObserved bool
+
 	// --- Transitive severity counts ---
 	// Populated by evaluateTransitiveRisk in internal/intelligence after
 	// the dep-tree walker resolves descendants. They drive the

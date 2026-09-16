@@ -3,6 +3,8 @@ package intelligence
 import (
 	"testing"
 	"time"
+
+	"github.com/chain305/chainsaw-core/risk"
 )
 
 func TestProjectToRiskInput_NilReport(t *testing.T) {
@@ -583,5 +585,36 @@ func TestCancelledRegistryFetchIsNotEvaluated(t *testing.T) {
 				t.Error("no UnavailableReason recorded")
 			}
 		})
+	}
+}
+
+// TestCodeSmellEvalDoesNotFeedThePreciseSignal is the guard that actually
+// covers the hazard.
+//
+// A registry-level test asserting cap.dynamic_eval_observed is weight 0 does
+// NOT catch the dangerous change, which is one character in the projection:
+// `in.CapDynamicEvalObserved = true` becoming `in.CapDynamicEval = true`.
+// That routes a regex hit into the -3 AST-backed signal and silently prices
+// a token match like a resolved call site. Verified by mutation: with only
+// the registry test present, that edit passed the entire suite.
+func TestCodeSmellEvalDoesNotFeedThePreciseSignal(t *testing.T) {
+	var in risk.Input
+	projectCodeSmellCapabilities(&ArtifactScanSection{Performed: true, UsesEval: true}, &in)
+
+	if !in.CapDynamicEvalObserved {
+		t.Error("codesmell UsesEval must set CapDynamicEvalObserved (the weight-0 signal)")
+	}
+	if in.CapDynamicEval {
+		t.Fatal("codesmell UsesEval set CapDynamicEval, the -3 AST-backed signal.\n" +
+			"codesmell is a regex detector across eight languages; it matches a token, " +
+			"not a resolved call site. This is the exact miscalibration that kept " +
+			"UsesEval unmapped for months -- do not route it here.")
+	}
+
+	// And the reverse: an unperformed scan must set neither.
+	var none risk.Input
+	projectCodeSmellCapabilities(&ArtifactScanSection{Performed: false, UsesEval: true}, &none)
+	if none.CapDynamicEvalObserved || none.CapDynamicEval {
+		t.Error("an artifact scan that did not run must not assert any eval capability")
 	}
 }

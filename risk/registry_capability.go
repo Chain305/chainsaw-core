@@ -19,6 +19,7 @@ const (
 	SignalCapEnvAccess       = "cap.env_access"
 	SignalCapNativeCode      = "cap.native_code"
 	SignalCapDynamicEval     = "cap.dynamic_eval"
+	SignalCapDynamicEvalObs  = "cap.dynamic_eval_observed"
 )
 
 func init() {
@@ -133,6 +134,43 @@ func init() {
 			}
 			return true, "Package source uses eval() or dynamic code construction.",
 				capEvidence(in.CapDynamicEvalEvidence)
+		},
+	})
+
+	// cap.dynamic_eval_observed is cap.dynamic_eval's weaker sibling, and
+	// the split is the whole point.
+	//
+	// cap.dynamic_eval above carries Weight -3, calibrated for the npm AST
+	// scanner (core/capability), which resolves real call sites. codesmell
+	// is a regex detector across eight languages; it sees a token, not a
+	// call. Feeding its hits into a -3 signal would apply a penalty the
+	// evidence does not support, which is why risk_projection deliberately
+	// left UsesEval unmapped and why it stayed unmapped for months.
+	//
+	// The stated reason for leaving it unmapped was that codesmell's
+	// detector "fires on roughly half the corpus". MEASURED on corpus v1
+	// (2026-09-16, 580 artifact-scanned coordinates): it fires on 20 of
+	// them, 3.4%, with the BEST adverse/benign lift of any codesmell axis
+	// (8% of adverse vs 2% of benign). The fear was real; the number was
+	// not.
+	//
+	// It ships at Weight 0 / SevInfo anyway, matching its five siblings
+	// (cap.network, cap.shell, cap.filesystem_*, cap.env_access), because
+	// an observation earns a verdict by being priced against the corpus,
+	// not by being plausible. Weight is a separate decision from
+	// visibility, and this commit only buys visibility.
+	register(Signal{
+		ID:          SignalCapDynamicEvalObs,
+		Category:    CategorySupplyChain,
+		Severity:    SevInfo,
+		Weight:      0,
+		Title:       "Dynamic code evaluation observed in source",
+		Description: "A source scan matched eval()/exec()/Function() style dynamic evaluation. Weaker evidence than cap.dynamic_eval: this is a pattern match across eight languages, not a resolved call site.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if !in.CapDynamicEvalObserved {
+				return false, "", nil
+			}
+			return true, "Source scan matched dynamic code evaluation.", nil
 		},
 	})
 }

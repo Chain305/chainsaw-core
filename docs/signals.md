@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **77 risk signals**. Each is scored, not merely
+Chainsaw registers **78 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,15 +23,15 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 49 |
+| Supply chain | 50 |
 | Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 6 |
 | Quality | 6 |
-| **Total** | **77** |
+| **Total** | **78** |
 
 
-## Supply chain (49)
+## Supply chain (50)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -47,6 +47,7 @@ a configured server.
 | `ai.suspicious_pickle_opcode` | medium | -15.00 | Pickle imports uncommon for model weights |
 | `ai.unsafe_serialization_format` | low | -10.00 | Unsafe serialization format (pickle without safetensors) |
 | `cap.dynamic_eval` | low | -3.00 | Package uses dynamic code evaluation |
+| `cap.dynamic_eval_observed` | info | 0.00 | Dynamic code evaluation observed in source |
 | `cap.env_access` | info | 0.00 | Package reads environment variables |
 | `cap.filesystem_read` | info | 0.00 | Package can read from the filesystem |
 | `cap.filesystem_write` | info | 0.00 | Package can write to the filesystem |

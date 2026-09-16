@@ -168,13 +168,17 @@ var socketConceptMap = map[string]conceptMapping{
 	"sc.transitive_malware":                {Socket: nil, Grade: gradeNoneSt},
 
 	// ── capability (npm only, flag-gated) ────────────────────────────────
-	"cap.network":          {Socket: []string{"networkAccess"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.shell":            {Socket: []string{"shellAccess"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.env_access":       {Socket: []string{"envVars"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.native_code":      {Socket: []string{"hasNativeCode"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.dynamic_eval":     {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.filesystem_read":  {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert"},
-	"cap.filesystem_write": {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia},
+	"cap.network":      {Socket: []string{"networkAccess"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.shell":        {Socket: []string{"shellAccess"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.env_access":   {Socket: []string{"envVars"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.native_code":  {Socket: []string{"hasNativeCode"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.dynamic_eval": {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
+	// The weight-0 sibling fed by the codesmell regex detector. Mapped to
+	// the same Socket concepts: it is the same observation, reached with
+	// weaker evidence, and the harness grades the CONCEPT not the weight.
+	"cap.dynamic_eval_observed": {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.filesystem_read":       {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert"},
+	"cap.filesystem_write":      {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia},
 
 	// ── vulnerability ───────────────────────────────────────────────────
 	"vuln.cvss_critical": {Socket: []string{"criticalCVE"}, Bucket: bucketAdvisory, Grade: gradeExact},
