@@ -75,6 +75,32 @@ type Input struct {
 	// benign packages. See registry_supplychain.go.
 	InstallScriptEvalEncoded bool
 
+	// ---- cross-version diff ----
+	//
+	// These are set ONLY when a prior version's artifact scan actually ran.
+	// That guard is the whole safety property: if the previous row was a
+	// Tier-1-only scan, its Scan section is empty and EVERY axis would look
+	// like it "appeared". Absence of a prior observation is not evidence of
+	// a change — the same trap that produced four instrument errors on
+	// 2026-09-16.
+	//
+	// Measured (docs/cross-version-diff-measured-2026-09-17.md), 71 real
+	// takeover pairs vs 117 benign version bumps:
+	//
+	//	shell appeared  49.3% vs 0.9%   (57.7x)
+	//	fs    appeared  45.1% vs 1.7%   (26.4x)
+	//	env   appeared  36.6% vs 0.0%
+	//
+	// against 3.2-3.7x for the same axes measured as presence.
+	PriorScanAvailable bool
+	// PriorVersion is the version the comparison was made against, for
+	// evidence. Empty when PriorScanAvailable is false.
+	PriorVersion string
+
+	ShellAccessAppeared      bool
+	FilesystemAccessAppeared bool
+	EnvVarAccessAppeared     bool
+
 	// EnvVarAccess is true when the artifact scanner observed reads of
 	// process environment variables (process.env, os.environ, %ENV, ...).
 	// On its own this is a context-only signal — most legitimate code

@@ -750,6 +750,30 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 		if err == nil && prior != nil {
 			applyStickySupplyChain(report, prior)
 		}
+
+		// Cross-version diff facts. ONE extra indexed query on the same
+		// detached, short-budget context as the sticky read above.
+		//
+		// Worth the query: an axis APPEARING between versions measured
+		// 13-58x on 71 real takeover pairs, against 3.2-3.7x for the same
+		// axis being present on one version
+		// (docs/cross-version-diff-measured-2026-09-17.md). It reads facts
+		// we already store — no artifact, no second scan.
+		//
+		// Soft failure is deliberate and safe in one direction only: with no
+		// prior row the diff signals cannot fire, because projectVersionDiff
+		// requires BOTH scans to have run. A failed lookup therefore loses a
+		// detection and can never invent one.
+		//
+		// Skipped for Ephemeral for the same reason as the sticky read: that
+		// path must not touch the shared coordinate-keyed rows.
+		diffCtx, cancelDiff := context.WithTimeout(context.WithoutCancel(ctx), stickyPriorLookupTimeout)
+		priorScan, priorVer, derr := s.store.PriorVersionScan(diffCtx, req.Key)
+		cancelDiff()
+		if derr == nil && priorScan != nil {
+			report.priorScan = priorScan
+			report.priorVersion = priorVer
+		}
 	}
 
 	// P8-05: stamp the no-advisory-source marker BEFORE the trust score is

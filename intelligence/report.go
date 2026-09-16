@@ -30,6 +30,18 @@ type Key struct {
 // version. Every field a policy condition consumes is reachable from this
 // struct; callers do not need to go to the underlying signal modules.
 type Report struct {
+	// priorScan and priorVersion carry the previous version's artifact-scan
+	// facts for the cross-version diff. UNEXPORTED on purpose: they are
+	// scan-time scaffolding, never part of the persisted document, and
+	// making them fields of Report keeps ProjectToRiskInput's signature —
+	// and therefore every caller — unchanged.
+	//
+	// Set only by the scanner, from Store.PriorVersionScan. Nil means we
+	// hold no other version, which is NOT the same as "the prior version had
+	// none of these capabilities" — see projectVersionDiff.
+	priorScan    *ArtifactScanSection
+	priorVersion string
+
 	Identity        IdentitySection     `json:"identity"`
 	Release         ReleaseSection      `json:"release"`
 	URLs            URLSection          `json:"urls"`

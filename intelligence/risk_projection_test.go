@@ -636,3 +636,50 @@ func TestInstallScriptEvalEncodedProjection(t *testing.T) {
 		}
 	}
 }
+
+// TestProjectVersionDiffRequiresBothScans pins the safety property at the
+// projection, where it is actually enforced.
+//
+// A registry-level test can assert the signals check PriorScanAvailable; only
+// this one asserts the projection refuses to SET it when either scan did not
+// run. Deleting the `!prior.Performed` check compiles, passes every other
+// test, and turns a Tier-1 refresh into three fired supply-chain signals.
+func TestProjectVersionDiffRequiresBothScans(t *testing.T) {
+	cur := &ArtifactScanSection{Performed: true, ShellAccess: true, FilesystemAccess: true, EnvVarAccess: true}
+
+	// Prior scan never ran — the dangerous case.
+	var in risk.Input
+	projectVersionDiff(cur, &ArtifactScanSection{Performed: false}, "1.0.0", &in)
+	if in.PriorScanAvailable || in.ShellAccessAppeared || in.FilesystemAccessAppeared || in.EnvVarAccessAppeared {
+		t.Fatal("projected a diff against a prior version that was never scanned.\n" +
+			"An empty prior Scan section means nobody looked. Treating it as 'absent' " +
+			"makes every axis appear introduced and manufactures a 57x signal from a refresh.")
+	}
+
+	// Current scan did not run — nothing to compare either.
+	in = risk.Input{}
+	projectVersionDiff(&ArtifactScanSection{Performed: false}, &ArtifactScanSection{Performed: true}, "1.0.0", &in)
+	if in.PriorScanAvailable {
+		t.Error("projected a diff when the CURRENT scan did not run")
+	}
+
+	// Both ran, prior had none of the axes: all three appeared.
+	in = risk.Input{}
+	projectVersionDiff(cur, &ArtifactScanSection{Performed: true}, "1.0.0", &in)
+	if !in.PriorScanAvailable || !in.ShellAccessAppeared || !in.FilesystemAccessAppeared || !in.EnvVarAccessAppeared {
+		t.Error("a genuine appearance was not projected")
+	}
+	if in.PriorVersion != "1.0.0" {
+		t.Errorf("PriorVersion = %q, want the version compared against", in.PriorVersion)
+	}
+
+	// Both ran, prior already had them: nothing appeared.
+	in = risk.Input{}
+	projectVersionDiff(cur, cur, "1.0.0", &in)
+	if in.ShellAccessAppeared || in.FilesystemAccessAppeared || in.EnvVarAccessAppeared {
+		t.Error("an axis present in BOTH versions must not count as appearing")
+	}
+	if !in.PriorScanAvailable {
+		t.Error("PriorScanAvailable must still be true when both scans ran")
+	}
+}

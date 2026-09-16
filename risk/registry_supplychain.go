@@ -23,6 +23,9 @@ const (
 	SignalSCInstallScriptEvalEnc    = "sc.install_script_eval_encoded"
 	SignalSCInstallScriptOnly       = "sc.install_script_only"
 	SignalSCInstallScriptOnlyNPM    = "sc.install_script_only_npm"
+	SignalSCShellAppeared           = "sc.shell_access_appeared"
+	SignalSCFilesystemAppeared      = "sc.filesystem_access_appeared"
+	SignalSCEnvVarAppeared          = "sc.env_access_appeared"
 	SignalSCHiddenUnicode           = "sc.hidden_unicode"
 	SignalSCRepoOwnershipMismatch   = "sc.repo_ownership_mismatch"
 	SignalSCRepoArchived            = "sc.repo_archived"
@@ -822,4 +825,79 @@ func init() {
 				map[string]any{"count": in.TransitiveMalwareCount}
 		},
 	})
+
+	// ---- cross-version diff signals ----
+	//
+	// MEASURED 2026-09-17 on 71 real npm takeover pairs (a compromised
+	// library version against the version published immediately before it)
+	// vs 117 benign version bumps of download-ranked popular packages
+	// (docs/cross-version-diff-measured-2026-09-17.md):
+	//
+	//	                takeover   benign bump   lift
+	//	shell appeared    49.3%        0.9%      57.7x
+	//	fs    appeared    45.1%        1.7%      26.4x
+	//	env   appeared    36.6%        0.0%       inf
+	//
+	// The same axes measured as PRESENCE on one version are 3.2-3.7x. The
+	// same observation is 3.7x as a state and 57.7x as a change, which is
+	// why these carry weight where the cap.* presence signals carry none.
+	//
+	// EVERY ONE REQUIRES PriorScanAvailable. Both scans must have run: an
+	// empty prior Scan section means nobody looked, and scoring that as "the
+	// capability was introduced" would turn a Tier-1 refresh into a 57x
+	// signal. See projectVersionDiff.
+	//
+	// Weights are set below the install-script family deliberately. The
+	// benign baseline is 117 pairs of POPULAR packages' most recent bump; a
+	// major-version bump or a neglected package may look different, and
+	// nothing here has been measured outside npm.
+	register(Signal{
+		ID:          SignalSCShellAppeared,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -20,
+		MaxImpact:   40,
+		Title:       "Shell execution introduced in this version",
+		Description: "This version's source spawns a shell and the previous version we scanned did not. Measured at 49.3% of real takeovers against 0.9% of ordinary version bumps.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if !in.PriorScanAvailable || !in.ShellAccessAppeared {
+				return false, "", nil
+			}
+			return true, "Shell execution appeared in this version.",
+				map[string]any{"priorVersion": in.PriorVersion}
+		},
+	})
+
+	register(Signal{
+		ID:          SignalSCFilesystemAppeared,
+		Category:    CategorySupplyChain,
+		Severity:    SevLow,
+		Weight:      -10,
+		Title:       "Filesystem access introduced in this version",
+		Description: "This version's source reads or writes the filesystem and the previous version we scanned did not. 45.1% of takeovers against 1.7% of ordinary version bumps.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if !in.PriorScanAvailable || !in.FilesystemAccessAppeared {
+				return false, "", nil
+			}
+			return true, "Filesystem access appeared in this version.",
+				map[string]any{"priorVersion": in.PriorVersion}
+		},
+	})
+
+	register(Signal{
+		ID:          SignalSCEnvVarAppeared,
+		Category:    CategorySupplyChain,
+		Severity:    SevLow,
+		Weight:      -10,
+		Title:       "Environment-variable access introduced in this version",
+		Description: "This version's source reads process environment variables and the previous version we scanned did not. 36.6% of takeovers against 0.0% of ordinary version bumps.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if !in.PriorScanAvailable || !in.EnvVarAccessAppeared {
+				return false, "", nil
+			}
+			return true, "Environment-variable access appeared in this version.",
+				map[string]any{"priorVersion": in.PriorVersion}
+		},
+	})
+
 }

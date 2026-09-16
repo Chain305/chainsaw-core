@@ -605,3 +605,55 @@ func TestInstallScriptOnlySplit(t *testing.T) {
 		t.Error("npm sibling fired on a remote-fetching install script")
 	}
 }
+
+// TestVersionDiffSignalsRequireAPriorScan is the guard that keeps these
+// signals honest.
+//
+// They measure 13-58x because an axis APPEARING between versions is rare in
+// benign bumps. That only holds if the prior version was actually scanned. If
+// the previous row was a Tier-1-only refresh its Scan section is empty, every
+// axis looks introduced, and a 57x signal fires on a refresh.
+//
+// This is the absence-is-not-evidence failure this codebase hit four times on
+// 2026-09-16. Here it would not merely hide a capability — it would
+// manufacture one.
+func TestVersionDiffSignalsRequireAPriorScan(t *testing.T) {
+	cases := []struct {
+		id  string
+		set func(*Input)
+	}{
+		{SignalSCShellAppeared, func(in *Input) { in.ShellAccessAppeared = true }},
+		{SignalSCFilesystemAppeared, func(in *Input) { in.FilesystemAccessAppeared = true }},
+		{SignalSCEnvVarAppeared, func(in *Input) { in.EnvVarAccessAppeared = true }},
+	}
+	for _, c := range cases {
+		sig, ok := Registry[c.id]
+		if !ok {
+			t.Fatalf("%s is not registered", c.id)
+		}
+		// Without a prior scan: must NOT fire, even with the flag set.
+		var noPrior Input
+		c.set(&noPrior)
+		if fired, _, _ := sig.Fires(noPrior); fired {
+			t.Errorf("%s fired with PriorScanAvailable=false.\n"+
+				"An unscanned prior version means nobody looked; scoring that as "+
+				"'the capability was introduced' turns a Tier-1 refresh into a 57x signal.", c.id)
+		}
+		// With a prior scan: must fire, and must carry the prior version.
+		withPrior := Input{PriorScanAvailable: true, PriorVersion: "1.2.2"}
+		c.set(&withPrior)
+		fired, _, ev := sig.Fires(withPrior)
+		if !fired {
+			t.Errorf("%s did not fire with a prior scan available", c.id)
+			continue
+		}
+		if ev == nil || ev["priorVersion"] != "1.2.2" {
+			t.Errorf("%s must report which version it compared against, got %v", c.id, ev)
+		}
+		// And must not fire on an unrelated axis.
+		other := Input{PriorScanAvailable: true, PriorVersion: "1.2.2"}
+		if fired, _, _ := sig.Fires(other); fired {
+			t.Errorf("%s fired with no axis actually appearing", c.id)
+		}
+	}
+}

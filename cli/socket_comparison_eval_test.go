@@ -135,16 +135,23 @@ const (
 // (GitHub Actions, a different product surface with no corpus rows).
 var socketConceptMap = map[string]conceptMapping{
 	// ── supply chain ────────────────────────────────────────────────────
-	"sc.known_malicious":                   {Socket: []string{"malware", "gptMalware"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.typosquat_high":                    {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "3 Chainsaw tiers vs 2 Socket alerts; no tier correspondence exists — never compare tier to tier"},
-	"sc.typosquat_medium":                  {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia},
-	"sc.typosquat_low":                     {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia},
-	"sc.publisher_changed":                 {Socket: []string{"unstableOwnership"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
-	"sc.first_time_collaborator":           {Socket: []string{"newAuthor"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.non_existent_author":               {Socket: []string{"missingAuthor"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.install_script_fetches_remote":     {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is strictly narrower: theirs fires on scripts EXISTING"},
-	"sc.install_script_only":               {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia},
-	"sc.install_script_only_npm":           {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia},
+	"sc.known_malicious":               {Socket: []string{"malware", "gptMalware"}, Bucket: bucketMetadata, Grade: gradeExact},
+	"sc.typosquat_high":                {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "3 Chainsaw tiers vs 2 Socket alerts; no tier correspondence exists — never compare tier to tier"},
+	"sc.typosquat_medium":              {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia},
+	"sc.typosquat_low":                 {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia},
+	"sc.publisher_changed":             {Socket: []string{"unstableOwnership"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
+	"sc.first_time_collaborator":       {Socket: []string{"newAuthor"}, Bucket: bucketMetadata, Grade: gradeExact},
+	"sc.non_existent_author":           {Socket: []string{"missingAuthor"}, Bucket: bucketMetadata, Grade: gradeExact},
+	"sc.install_script_fetches_remote": {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is strictly narrower: theirs fires on scripts EXISTING"},
+	"sc.install_script_only":           {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia},
+	"sc.install_script_only_npm":       {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia},
+	// Cross-version diff signals. Socket has no per-version capability-diff
+	// alert, so these are ours-only by construction rather than a gap in
+	// their taxonomy — graded as such so the harness does not read them as
+	// a miss on their side.
+	"sc.shell_access_appeared":             {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert"},
+	"sc.filesystem_access_appeared":        {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert"},
+	"sc.env_access_appeared":               {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert"},
 	"sc.hidden_unicode":                    {Socket: []string{"obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "different detector class; overlapping intent"},
 	"sc.repo_archived":                     {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
 	"sc.git_url_dependency":                {Socket: []string{"gitDependency", "gitHubDependency"}, Bucket: bucketMetadata, Grade: gradeExact},

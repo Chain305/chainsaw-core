@@ -105,6 +105,11 @@ func loneFireFixtures() map[string]Input {
 		SignalSCInstallScriptEvalEnc: set(func(in *Input) {
 			in.InstallScriptEvalEncoded = true
 		}),
+		SignalSCShellAppeared: set(func(in *Input) {
+			in.PriorScanAvailable = true
+			in.PriorVersion = "0.9.0"
+			in.ShellAccessAppeared = true
+		}),
 		SignalSCHiddenUnicode: set(func(in *Input) {
 			in.HasHiddenUnicode = true
 		}),

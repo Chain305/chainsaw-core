@@ -430,6 +430,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// output (which carries file/line evidence) always wins; this only
 	// ever turns a false into a true.
 	projectCodeSmellCapabilities(&r.Scan, &in)
+	projectVersionDiff(&r.Scan, r.priorScan, r.priorVersion, &in)
 
 	// --- Gap 4a: git/http URL dependencies ---
 	// Classify each dependency's version string across all four manifest
@@ -1143,6 +1144,38 @@ func projectCodeSmellCapabilities(s *ArtifactScanSection, in *risk.Input) {
 	// objection.
 	if s.UsesEval {
 		in.CapDynamicEvalObserved = true
+	}
+}
+
+// projectVersionDiff sets the "appeared between versions" inputs from a prior
+// version's artifact scan.
+//
+// The guard is the point, not the diff. Both scans must have actually RUN:
+// an empty prior Scan section means nobody looked, and treating that as "the
+// axis was absent" would make every axis appear to have been introduced. That
+// is the absence-is-not-evidence failure this codebase hit four times on
+// 2026-09-16, and here it would manufacture a 57x signal out of a Tier-1
+// refresh.
+//
+// Only additions are recorded. A capability DISAPPEARING is not modelled:
+// removal is the benign direction and nothing measured supports scoring it.
+func projectVersionDiff(cur, prior *ArtifactScanSection, priorVersion string, in *risk.Input) {
+	if in == nil || cur == nil || prior == nil {
+		return
+	}
+	if !cur.Performed || !prior.Performed {
+		return
+	}
+	in.PriorScanAvailable = true
+	in.PriorVersion = priorVersion
+	if cur.ShellAccess && !prior.ShellAccess {
+		in.ShellAccessAppeared = true
+	}
+	if cur.FilesystemAccess && !prior.FilesystemAccess {
+		in.FilesystemAccessAppeared = true
+	}
+	if cur.EnvVarAccess && !prior.EnvVarAccess {
+		in.EnvVarAccessAppeared = true
 	}
 }
 
