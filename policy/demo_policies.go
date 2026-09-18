@@ -2,6 +2,7 @@ package policy
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -164,6 +165,28 @@ func SeedDemoPoliciesIfNeededTx(tx *sql.Tx, orgID string, logger *slog.Logger) (
 		return 0, fmt.Errorf("demo policies: allocate precedence: %w", err)
 	}
 	policies := DemoPolicies()
+
+	// Drop any demo rule whose signal an already-seeded policy covers.
+	//
+	// Demo rules exist to make the controls discoverable. On a deployment
+	// whose config file already seeds those controls (chain305.com does:
+	// configs/seed.yaml carries cooldownDays and publisherChanged, both in
+	// monitor since 2026-09-18), the demo copies teach nothing and a brand-new
+	// org opened its policy list to ELEVEN rules including two near-duplicate
+	// cooldown rules differing only in window. That list is itself friction for
+	// the hobbyist this seed is meant to serve.
+	//
+	// Keyed on what is in the DB rather than on the config, so it is right
+	// however the covering rule got there, and a self-hosted install with no
+	// config policies still receives the full demo set.
+	covered, err := coveredConditionTypesTx(tx, orgID)
+	if err != nil {
+		return 0, fmt.Errorf("demo policies: read existing conditions: %w", err)
+	}
+	policies = dropCoveredDemoPolicies(policies, covered)
+	if len(policies) == 0 {
+		return 0, nil
+	}
 	for i := range policies {
 		policies[i].Precedence = base + i
 	}
@@ -207,4 +230,67 @@ func nextPrecedenceTx(execer policyExecutor, orgID string) (int, error) {
 		return 0, nil
 	}
 	return int(maxVal.Int64) + 1, nil
+}
+
+// coveredConditionTypesTx returns the set of matrix condition columns already
+// referenced by a policy in this org.
+func coveredConditionTypesTx(execer policyExecutor, orgID string) (map[ConditionType]struct{}, error) {
+	covered := make(map[ConditionType]struct{}, 8)
+	if execer == nil {
+		return covered, nil
+	}
+	rows, err := execer.Query(`SELECT COALESCE(conditions, '') FROM policies WHERE org_id=?`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		var cond Conditions
+		if err := json.Unmarshal([]byte(raw), &cond); err != nil {
+			// A row we cannot parse is a row we cannot claim coverage from.
+			// Skipping it can only ever seed a demo rule we might have
+			// dropped, which is the harmless direction.
+			continue
+		}
+		for _, ct := range ConditionsUsedBy(cond) {
+			covered[ct] = struct{}{}
+		}
+	}
+	return covered, rows.Err()
+}
+
+// dropCoveredDemoPolicies removes demo policies whose every condition is
+// already covered. A demo rule with no conditions, or with even one uncovered
+// condition, is kept: partial overlap is not duplication.
+func dropCoveredDemoPolicies(policies []Policy, covered map[ConditionType]struct{}) []Policy {
+	if len(covered) == 0 {
+		return policies
+	}
+	out := policies[:0:0]
+	for _, p := range policies {
+		used := ConditionsUsedBy(p.Conditions)
+		if len(used) == 0 {
+			out = append(out, p)
+			continue
+		}
+		allCovered := true
+		for _, ct := range used {
+			if _, ok := covered[ct]; !ok {
+				allCovered = false
+				break
+			}
+		}
+		if !allCovered {
+			out = append(out, p)
+		}
+	}
+	return out
 }

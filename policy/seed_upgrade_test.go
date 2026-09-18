@@ -176,3 +176,66 @@ func TestSeedRefusesToRenameAnExistingRule(t *testing.T) {
 	t.Logf("confirmed: renaming a seeded rule violates the precedence constraint (%v) — "+
 		"this is why configs/seed.yaml carries a DO-NOT-RENAME banner", err)
 }
+
+// A brand-new org on a deployment whose config seeds cooldown and
+// publisher-change must NOT also receive the demo copies of those signals.
+// Before this, the policy list opened at eleven rules with two near-duplicate
+// cooldown rules differing only in window.
+func TestSeedDemoSkipsSignalsTheConfigAlreadyCovers(t *testing.T) {
+	db, orgID := seedUpgradeTestOrg(t)
+
+	// Stand in for configs/seed.yaml: cooldown + publisher-change, monitor.
+	yes := true
+	ten := 10
+	configPolicies := []Policy{
+		{Name: "Block brand-new versions (account-takeover / zero-hour)", Precedence: 140,
+			Mode: ModeMonitor, Status: StatusEnabled, Conditions: Conditions{CooldownDays: &ten}},
+		{Name: "Block publisher-changed versions", Precedence: 130,
+			Mode: ModeMonitor, Status: StatusEnabled, Conditions: Conditions{PublisherChanged: &yes}},
+	}
+	if n, err := seedInto(t, db, orgID, configPolicies); err != nil || n != 2 {
+		t.Fatalf("config seed: created=%d err=%v; want 2, nil", n, err)
+	}
+
+	tx, err := db.DB().Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	created, err := SeedDemoPoliciesIfNeededTx(tx, orgID, nil)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("seed demo policies: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Malware + typosquat survive; cooldown + publisher-change do not.
+	if created != 2 {
+		t.Errorf("demo seed created %d policies, want 2 (malware + typosquat only).\n"+
+			"4 means the covered-signal dedup did not run; 0 means it dropped too much "+
+			"and a new org has nothing that demonstrates a block.", created)
+	}
+
+	rows, err := db.DB().Query(`SELECT name FROM policies WHERE org_id=? ORDER BY name`, orgID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		names = append(names, n)
+	}
+	if len(names) != 4 {
+		t.Errorf("org has %d policies (%v), want 4", len(names), names)
+	}
+	for _, n := range names {
+		if strings.Contains(n, "Demo: Cooldown") || strings.Contains(n, "Demo: Flag publisher change") {
+			t.Errorf("redundant demo rule %q was seeded beside the config rule covering the same signal", n)
+		}
+	}
+}
