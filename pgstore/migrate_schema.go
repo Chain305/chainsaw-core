@@ -379,3 +379,68 @@ func (s *Store) ensureBillyProposalsSchema() error {
 	}
 	return nil
 }
+
+// ensureMonitoredTargetsSchema creates the monitored_targets table that backs
+// branch-scoped supply-chain monitoring for orgs with no proxy traffic
+// (docs/designs/branch-scoped-supply-chain-monitoring.md). One row per
+// (org_id, repo_label, branch): the declared package set, the trigger set the
+// customer subscribes to, and the tick bookkeeping the worker writes back.
+//
+// NOT SELF-REGISTERING. Like every ensure*Schema helper in this file, this
+// runs only because ensureEnhancedColumns (migrate_columns.go) calls it. A
+// helper added here and not wired there compiles, ships, and creates nothing.
+// TestMonitoredTargetsSchemaIsWiredIntoMigrate in migrate_schema_test.go fails
+// the build if that call site disappears.
+//
+// AuthZ: monitored_targets is the ONLY org attribution this feature has —
+// intelligence_reports has no org_id (migrate.go:1554). Every read MUST filter
+// by org_id in SQL, mirroring sbom.ListSnapshots. A cross-tenant read here is
+// critical severity, not merely a leak.
+//
+// `repo_label` is deliberately NOT named repo_url. THE VALUE IS NEVER FETCHED.
+// It is an opaque display label the customer types, stored and echoed back and
+// nothing else. A column called "url" reads to a future contributor as "fetch
+// me", and this repo already carries an unfixed provenance SSRF (P8-52,
+// docs/plan_qa_phase8_remediation.md). Adding an outbound request against this
+// value is crossing a security boundary — do not do it without a threat model.
+//
+// The octet_length CHECKs are load-bearing, not hygiene. UNIQUE (org_id,
+// repo_label, branch) is a btree index and Postgres caps a btree key at
+// ~2704 bytes; without the caps an over-long branch name fails at INSERT with
+// an opaque "index row size NNNN exceeds btree version 4 maximum" that names
+// neither the column nor the fix. 128 + 512 + 255 = 895 bytes worst case,
+// comfortably under. Same precedent as sbom_snapshots.trigger's CHECK: push
+// the constraint into the schema so a bad value fails loud and early.
+//
+// `triggers` defaults to every trigger EXCEPT cve. That is the product wedge
+// expressed as a default — a separately-priced detection product that alerts
+// mostly on CVEs competes with Dependabot at $0. The five values mirror the
+// intelligence.SupplyChainAlertTrigger constants
+// (core/intelligence/supplychain_alert.go:60-79), which are a wire contract.
+// Do not change this default.
+func (s *Store) ensureMonitoredTargetsSchema() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS monitored_targets (
+		target_id BIGSERIAL PRIMARY KEY,
+		org_id TEXT NOT NULL CHECK (octet_length(org_id) BETWEEN 1 AND 128),
+		repo_label TEXT NOT NULL CHECK (octet_length(repo_label) BETWEEN 1 AND 512),
+		branch TEXT NOT NULL CHECK (octet_length(branch) BETWEEN 1 AND 255),
+		package_set JSONB NOT NULL DEFAULT '[]',
+		triggers JSONB NOT NULL DEFAULT '["malware_appeared","typosquat_appeared","publisher_changed","install_script_appeared","verdict_degraded"]',
+		last_uploaded_at TIMESTAMPTZ,
+		last_scanned_at TIMESTAMPTZ,
+		consecutive_failures INTEGER NOT NULL DEFAULT 0,
+		archived_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (org_id, repo_label, branch)
+	)`); err != nil {
+		return fmt.Errorf("create monitored_targets: %w", err)
+	}
+	// The "who is due a tick" query: live targets, oldest scan first. NULLs
+	// FIRST is the default for ASC in Postgres and it is what we want — a
+	// target that has never been scanned is maximally due.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_monitored_targets_due ON monitored_targets(archived_at, last_scanned_at)`); err != nil {
+		return fmt.Errorf("create monitored_targets due index: %w", err)
+	}
+	return nil
+}

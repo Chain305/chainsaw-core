@@ -109,6 +109,24 @@ const (
 	// same role set; the shape lets the role matrix diverge later
 	// without a schema change.
 	PermFindingsSuppress = "findings:suppress"
+	// PermMonitoredTargetsManage gates CRUD on monitored_targets —
+	// declaring a (repo_label, branch) target, uploading its package set,
+	// and archiving it (branch-scoped supply-chain monitoring, see
+	// docs/designs/branch-scoped-supply-chain-monitoring.md).
+	//
+	// Deliberately NOT PermReposManage. That permission governs proxy /
+	// registry repositories — upstream mirrors and their credentials. A
+	// monitored target is a git branch the customer declares and we never
+	// fetch. Folding the two together would grant target CRUD to anyone who
+	// can manage a registry mirror and vice versa (threat S4 in the design's
+	// Section 3), and the two surfaces have no reason to move together.
+	//
+	// Read is gated by the same constant: the list endpoint returns the
+	// declared dependency surface of a private branch, which is the same
+	// data class as an SBOM. There is no read-only split today because
+	// nothing has asked for one; add PermMonitoredTargetsRead when a role
+	// genuinely needs to see targets without editing them.
+	PermMonitoredTargetsManage = "monitored-targets:manage"
 )
 
 var rolePermissions = map[string][]string{
@@ -147,6 +165,7 @@ var rolePermissions = map[string][]string{
 		PermFindingsRead,
 		PermFindingsManage,
 		PermFindingsSuppress,
+		PermMonitoredTargetsManage,
 	},
 	RoleOrgAdmin: {
 		PermOrgDelete,
@@ -183,6 +202,7 @@ var rolePermissions = map[string][]string{
 		PermFindingsRead,
 		PermFindingsManage,
 		PermFindingsSuppress,
+		PermMonitoredTargetsManage,
 	},
 	RoleOwner: {
 		PermOrgDelete,
@@ -219,6 +239,7 @@ var rolePermissions = map[string][]string{
 		PermFindingsRead,
 		PermFindingsManage,
 		PermFindingsSuppress,
+		PermMonitoredTargetsManage,
 	},
 	RoleManager: {
 		PermOrgMembersRead,
@@ -270,6 +291,7 @@ var rolePermissions = map[string][]string{
 		PermFindingsRead,
 		PermFindingsManage,
 		PermFindingsSuppress,
+		PermMonitoredTargetsManage,
 	},
 	RoleMember: {
 		PermOrgMembersRead,

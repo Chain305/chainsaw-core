@@ -63,6 +63,13 @@ func (s *Store) ensureEnhancedColumns() error {
 	if err := s.ensureBillyProposalsSchema(); err != nil {
 		return err
 	}
+	// Branch-scoped supply-chain monitoring (additive new table). THIS CALL
+	// IS THE ONLY THING THAT RUNS THE MIGRATION — ensure*Schema helpers are
+	// not self-registering. Removing this line leaves a green build that
+	// creates no table; TestMonitoredTargetsSchemaIsWiredIntoMigrate guards it.
+	if err := s.ensureMonitoredTargetsSchema(); err != nil {
+		return err
+	}
 	// Runs LAST, and must: it UPDATEs package_metadata columns that
 	// ensurePackageRegistryColumns adds above (migrate_packages.go:114-126),
 	// so ordering it before that call would fail on a pre-Phase-5 database.
