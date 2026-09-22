@@ -284,8 +284,50 @@ func artifactURLFor(eco, name, version string) (string, string) {
 		return fmt.Sprintf("https://crates.io/api/v1/crates/%s/%s/download", url.PathEscape(name), url.PathEscape(version)), "application/x-tar"
 	case "rubygems":
 		return fmt.Sprintf("https://rubygems.org/gems/%s-%s.gem", url.PathEscape(name), url.PathEscape(version)), "application/octet-stream"
+	case "go", "gomod":
+		// The module proxy is fully deterministic — module path, @v, version,
+		// .zip — so unlike PyPI above there is no registry lookup to cache
+		// first. That is the whole reason Go could be wired here and PyPI
+		// could not.
+		//
+		// Measured before this existed: artifactScan.performed was true on
+		// 4 of 6,139 Go reports in production, because artifactURLFor
+		// returned empty, the scanner saw a nil Artifact, and every
+		// NeedsArtifact provider emitted WarnNeedsArtifact instead of
+		// running. Go is the largest ecosystem in the corpus.
+		if !strings.HasPrefix(version, "v") {
+			// Not a module version. Building a URL from it is a guaranteed
+			// 404 that still costs an upstream fetch against a budget this
+			// product is already close to.
+			return "", ""
+		}
+		return fmt.Sprintf("https://proxy.golang.org/%s/@v/%s.zip",
+			escapeGoModulePath(name), escapeGoModulePath(version)), "application/zip"
 	}
 	return "", ""
+}
+
+// escapeGoModulePath applies the module proxy's case-encoding: every uppercase
+// letter becomes "!" followed by its lowercase form.
+//
+// Module paths are case-sensitive but many filesystems are not, so the proxy
+// cannot serve `.../Masterminds/...` and `.../masterminds/...` from the same
+// tree. Getting this wrong is not a subtle degradation — it is a 404 on every
+// module with a capitalised author or repo, which is a large share of real Go
+// dependencies. Deliberately NOT url.PathEscape: the separators in a module
+// path are real path separators and must survive.
+func escapeGoModulePath(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			b.WriteByte('!')
+			b.WriteRune(r + ('a' - 'A'))
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // -- per-ecosystem latest-version resolvers ---------------------------

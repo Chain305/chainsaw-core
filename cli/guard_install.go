@@ -1008,7 +1008,48 @@ func expandLockfile(bin string, args []string) []packageSpec {
 			}
 			i++
 		}
-		return specs
+		if len(specs) > 0 {
+			// An explicit -r is the user naming their source. It wins over
+			// any lockfile sitting in the same directory, or
+			// `pip install -r constraints.txt` would silently scan the
+			// Pipfile tree instead of the file that was asked for.
+			return specs
+		}
+		// T3 tail — no named package and no -r. Sweep the resolved tree, the
+		// same way `npm install` sweeps package-lock and `cargo build` sweeps
+		// Cargo.lock. Without this a developer in a Poetry or Pipenv project
+		// — which is most modern Python — got a guard that recognised the
+		// command, printed nothing and checked no packages.
+		//
+		// Precedence is FIXED rather than filesystem-order dependent, because
+		// two lockfiles in one directory must resolve the same way on every
+		// run; non-reproducible coverage is the same defect the npm path
+		// avoids by using coordinates instead of a map. Pipenv first (its
+		// presence is the strongest signal the project is pipenv-managed),
+		// then Poetry, then uv.
+		for _, src := range []struct {
+			file  string
+			parse func([]byte) (map[string]string, error)
+		}{
+			{"Pipfile.lock", parsePipfileLock},
+			{"poetry.lock", func(b []byte) (map[string]string, error) { return parsePoetryLock(b), nil }},
+			{"uv.lock", func(b []byte) (map[string]string, error) { return parseUVLock(b), nil }},
+		} {
+			data, err := os.ReadFile(src.file)
+			if err != nil {
+				continue
+			}
+			deps, perr := src.parse(data)
+			if perr != nil || len(deps) == 0 {
+				// A malformed lockfile is not a reason to fall through to
+				// the NEXT one: the project has declared which tool owns it,
+				// and scanning a stale sibling would report coverage of a
+				// tree nobody is installing.
+				return nil
+			}
+			return depsToSpecs("pypi", deps, nil)
+		}
+		return nil
 	}
 	return nil
 }
