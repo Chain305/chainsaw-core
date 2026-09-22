@@ -139,6 +139,34 @@ type Input struct {
 	// trustscore.SLSALevelBonus contribution under the attestation-first
 	// reframe).
 	SLSALevel int
+	// BuilderID is the OIDC subject of the build that produced this
+	// artifact — for keyless Sigstore signing, the GitHub Actions
+	// workflow reference, e.g.
+	// "https://github.com/acme/app/.github/workflows/release.yml@refs/heads/main".
+	//
+	// NOTHING SCORES OFF IT YET, DELIBERATELY. It is carried here
+	// because the 2026-08-04 cacheable/keyv campaign's single cleanest
+	// discriminator lives in this field and was unreadable: the
+	// malicious releases attested
+	// `release.yml@refs/tags/setup-files-v1` while the clean ones
+	// attested `release.yml@refs/heads/main`. We parse it, we persist
+	// it, and until now the risk engine could not see it at all — so an
+	// analyst could not even ask the question, let alone act on it.
+	//
+	// The negative signal that reads it (an attestation whose builder
+	// identity is anomalous for that package's own history) is GATED on
+	// measuring its false-positive rate against the clean corpus, per
+	// docs/plan_signal_repair.md S-3. Plenty of legitimate projects
+	// release from tags. Given this repo's history with FP rates, an
+	// unmeasured behavioural signal is how the guard incident happened.
+	//
+	// So: make the data readable first, ship the scoring second. This
+	// field blocks the claim, not the code.
+	//
+	// Empty when provenance is absent, unverified, or the format
+	// carries no builder identity (presence-only formats like APT/YUM
+	// gpg). Empty is "unknown", never "built by nobody".
+	BuilderID string
 	// SignatureVerified is the upstream-signature verdict (sigstore /
 	// PGP) projected from Provenance by provider_signature_verify. true
 	// awards a positive supply-chain bonus separate from the

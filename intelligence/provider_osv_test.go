@@ -49,7 +49,7 @@ func withStubbedBundle(t *testing.T, advs []osv.Advisory) func() {
 }
 
 func TestOSVProvider_ContractShape(t *testing.T) {
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 	if p.Name() != "osv" {
 		t.Errorf("Name = %q, want osv", p.Name())
 	}
@@ -90,7 +90,7 @@ func TestOSVProvider_DormantWhenBundleMissing(t *testing.T) {
 		}
 	})
 
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 	if p.IndexLoaded() {
 		t.Fatalf("missing bundle must leave IndexLoaded=false")
 	}
@@ -144,7 +144,7 @@ func TestOSVProvider_Run_PopulatesCVEsForKnownVulnerableVersion(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 	if !p.IndexLoaded() {
 		t.Fatalf("stubbed bundle should load")
 	}
@@ -196,7 +196,7 @@ func TestOSVProvider_Run_NonNilEmptyForCoveredCleanVersion(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 	partial, err := p.Run(context.Background(), Request{
 		Key: Key{Ecosystem: "pypi", Package: "idna", Version: "3.7"},
 	}, nil)
@@ -236,7 +236,7 @@ func TestOSVProvider_Run_UncoveredEcosystemVsUncoveredPackage(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 
 	// Ecosystem present (PyPI advisories loaded), package absent from it
 	// → positive evidence of absence → stamp a clean section.
@@ -287,7 +287,7 @@ func TestOSVProvider_Run_EcosystemAliasResolves(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 	partial, err := p.Run(context.Background(), Request{
 		Key: Key{Ecosystem: "pip", Package: "idna", Version: "3.15"},
 	}, nil)
@@ -352,7 +352,7 @@ func TestOSVProviderIsTheUniversalVulnBaseline(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 
 	// A package with no advisory in the bundle — i.e. a clean package.
 	// The bundle is loaded and the ecosystem IS covered; only the package
@@ -420,7 +420,7 @@ func TestOSVProviderWarnsOnEmptyBundle(t *testing.T) {
 	restore := withStubbedBundle(t, []osv.Advisory{})
 	t.Cleanup(restore)
 
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 	if !p.IndexLoaded() {
 		t.Fatal("an empty bundle must still LOAD — that is the whole hazard; " +
 			"if it no longer loads this test is asserting the wrong thing")
@@ -454,7 +454,7 @@ func TestOSVProviderWarnsOnEcosystemMissingFromBundle(t *testing.T) {
 	}})
 	t.Cleanup(restore)
 
-	p := newOSVProvider(slog.Default())
+	p := newOSVProvider(slog.Default(), nil)
 	out, err := p.Run(context.Background(), Request{
 		Key: Key{Ecosystem: "cargo", Package: "serde", Version: "1.0.0"},
 	}, nil)

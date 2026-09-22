@@ -90,7 +90,7 @@ func (p *shrinkwrapProvider) Run(ctx context.Context, req Request, prior *Report
 	// makes that true for the paths that return PartialReport{} — which are
 	// precisely the ones that say "nothing found". Verdict-neutral.
 	partial, err := p.run(ctx, req, prior)
-	return withArtifactTruncationWarning(partial, p.Name(), req.Artifact), err
+	return partial, err
 }
 
 func (p *shrinkwrapProvider) run(ctx context.Context, req Request, prior *Report) (PartialReport, error) {

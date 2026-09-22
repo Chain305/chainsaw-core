@@ -43,6 +43,7 @@ import (
 	"golang.org/x/net/html/charset"
 
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/upstreamhttp"
 	"golang.org/x/mod/modfile"
 )
 
@@ -129,10 +130,64 @@ func newRegistryMetadataProvider() *registryMetadataProvider {
 		// pooled transport with MaxIdleConnsPerHost=32 — fixing the audit
 		// finding F-7 where the bare &http.Client{} fell back to Go's
 		// DefaultTransport limit of 2 idle conns per host.
-		client:    httpclient.New(httpclient.WithTimeout(60 * time.Second)),
+		client:    registryMetadataHTTPClient(),
 		endpoints: defaultRegistryEndpoints(),
 		now:       func() time.Time { return time.Now().UTC() },
 	}
+}
+
+// registryMetadataHTTPClient is the shared, PER-HOST RATE LIMITED client
+// for the highest-volume upstream path in the product.
+//
+// This provider fetches npm / PyPI / Maven / crates.io / NuGet metadata
+// on every scan, and until now it used a bare httpclient with no rate
+// limit at all. The only throttle anywhere on this path was the
+// refresher's Concurrency semaphore (default 4), which is a CONCURRENCY
+// cap, not a rate limit: four goroutines in a tight loop will still
+// out-request any per-minute budget a registry publishes. That is
+// docs/plan_upstream_rate_limits.md item 5, and it is the half of the
+// problem the User-Agent work did not touch.
+//
+// Three deliberate choices:
+//
+//  1. MaxRetries(0). upstreamhttp's retry tower sleeps between attempts,
+//     and the scanner already wraps every provider in a short context —
+//     provider_downloads.go carries the scar: "retry sleeps inside
+//     upstreamhttp ate the entire budget before the first response could
+//     be read", so live fetches always returned -1. The rate limiter
+//     runs on the FIRST attempt (limiter.Wait is inside the attempt
+//     loop), so disabling retries keeps the throttle and drops the
+//     sleeps.
+//
+//  2. WithBaseClient, so the transport is byte-for-byte the one this
+//     provider used before. upstreamhttp's own default base adds
+//     WithSSRFGuard, which REFUSES REDIRECTS — registry metadata
+//     endpoints redirect routinely, so adopting that default here would
+//     have been an unrelated behaviour change smuggled in under a rate
+//     limiting commit. Whether this path should carry the SSRF guard is
+//     a real question and it needs its own decision, not this one.
+//
+//  3. One shared client, built once. A per-call client would give each
+//     fetch its own token bucket, which is the same as having none —
+//     the npmjs.org budget has to be one bucket.
+//
+// The per-host limits come from upstreamhttp.FromEnv(), so an operator
+// tunes them without a rebuild.
+var (
+	registryMetadataClientOnce sync.Once
+	registryMetadataClient     *http.Client
+)
+
+func registryMetadataHTTPClient() *http.Client {
+	registryMetadataClientOnce.Do(func() {
+		base := httpclient.New(httpclient.WithTimeout(60 * time.Second))
+		registryMetadataClient = upstreamhttp.New(
+			upstreamhttp.FromEnv(),
+			upstreamhttp.WithBaseClient(base),
+			upstreamhttp.WithMaxRetries(0),
+		).HTTPClient()
+	})
+	return registryMetadataClient
 }
 
 // registryTimeouts holds per-ecosystem per-attempt timeout budgets.
@@ -474,7 +529,7 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
-	req.Header.Set("User-Agent", "chainsaw-intelligence/1")
+	req.Header.Set("User-Agent", UserAgent("registry-metadata"))
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -5835,7 +5890,7 @@ func (p *registryMetadataProvider) gitHubFetchOnce(ctx context.Context, endpoint
 		return &Warning{Provider: "registrymetadata", Code: "request_build", Message: err.Error(), At: p.now()}
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "chainsaw-intelligence/1")
+	req.Header.Set("User-Agent", UserAgent("registry-metadata"))
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := p.client.Do(req)
 	if err != nil {

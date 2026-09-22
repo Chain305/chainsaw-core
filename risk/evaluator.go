@@ -200,18 +200,34 @@ func EvaluatePackage(in Input, opts Options) *Evaluation {
 }
 
 // instantBlockIDs are the signals whose presence ends the evaluation on
-// its own, in priority order. Both describe a fact about the BYTES —
-// "this package is known malware", "these bytes are not the bytes that
-// were published" — which is why neither needs, or can be improved by,
-// the rest of the fact set.
+// its own, in priority order. Each describes a fact that no other
+// evidence can improve on — "this package is known malware", "these
+// bytes are not the bytes that were published", "something in the
+// dependency closure is known malware" — which is why none of them
+// needs the rest of the fact set.
 //
-// The order matters only for which summary a package carrying both gets;
-// the verdict is identical.
-var instantBlockIDs = []string{SignalSCKnownMalicious, SignalQualChecksumMismatch}
+// The order matters only for which summary a package carrying several
+// gets; the verdict is identical. Direct beats transitive because it is
+// the more specific statement about the same coordinate.
+//
+// The membership rule is the -1000 sentinel weight. All three entries
+// here carry Weight: -1000 and NotTunable, and those are exactly the
+// three such signals in the registry — sc.transitive_malware
+// (registry_supplychain.go) was the one that carried the sentinel
+// without being listed, so a malicious descendant scored through the
+// additive path instead of ending the evaluation. vuln.kev is NotTunable
+// at -60 and is deliberately NOT a sentinel.
+//
+// Adding an id here without a matching instantBlockSummaries entry
+// short-circuits the evaluation with an EMPTY summary — a block nobody
+// can explain, which is the defect this list was extended to fix.
+// TestInstantBlockIDsAllHaveSummaries pins that.
+var instantBlockIDs = []string{SignalSCKnownMalicious, SignalQualChecksumMismatch, SignalSCTransitiveMalware}
 
 var instantBlockSummaries = map[string]string{
 	SignalSCKnownMalicious:     "Known-malicious package — do not install.",
 	SignalQualChecksumMismatch: "Artifact checksum mismatch — tampered or corrupted bytes.",
+	SignalSCTransitiveMalware:  "Known-malicious package in the dependency closure — do not install.",
 }
 
 // instantBlockEvaluation runs ONLY the instant-block signals against the
@@ -949,13 +965,40 @@ func absF(f float64) float64 {
 // composite they are shown and there is nothing on the page that says why.
 // The empty string means the ceiling did not bind and nothing needs saying.
 func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSignal) (int, string) {
-	// Compound rules indicate genuine multi-signal elevation; they bypass
-	// the per-signal ceiling so the additive deficit from a compound stays
-	// authoritative. The ceiling is for the lone-signal case where the
-	// category-weighted-rollup undersells severity.
-	if len(compound) > 0 {
-		return overall, ""
-	}
+	// THE COMPOUND BYPASS IS GONE, and the rationale it carried was wrong.
+	//
+	// This function used to open `if len(compound) > 0 { return overall, "" }`,
+	// justified as "compound rules indicate genuine multi-signal elevation;
+	// they bypass the per-signal ceiling so the additive deficit from a
+	// compound stays authoritative."
+	//
+	// The deficit was never at risk. This function only ever LOWERS a score
+	// — the `overall <= cap` guard below returns the rollup untouched
+	// whenever the additive deficit has already pushed it at or under the
+	// ceiling. So the ceiling can never override a worse compound-driven
+	// number, and the early return could only ever RAISE the result.
+	//
+	// The effect, measured across 14,948 prod reports (S-7,
+	// docs/designs/audit-score-inversion.md): 20 verdicts were computed
+	// with the ceiling deleted, and 5 of them are stored `allow` that
+	// would not be. More evidence of malice produced a better score.
+	// `undici@7.20.0` fired both install-script compounds AND
+	// vuln.cvss_high, carries a supply-chain subscore of 20/100, is stored
+	// `allow`, and was served 32 times in the window.
+	//
+	// All npm — compounds fire on npm only — so it is 20 of 3,518 there,
+	// and it is a verdict change in the STRICTER direction. That is the
+	// authorised direction for this repair and the reason it lands before
+	// S-2: repairing the attestation reward while the ceiling is still
+	// bypassable makes the two interact in the one ecosystem where both
+	// are live.
+	//
+	// Compounds contribute no ceiling of their own — CompoundRule has no
+	// MaxImpact field (core/risk/compound.go:14) — so the cap is still the
+	// minimum across fired primitives. `compound` stays in the signature
+	// because callers pass it and because a compound MaxImpact, if one is
+	// ever added, belongs in the same minimum.
+	_ = compound
 	cap := -1 // -1 = no cap
 	capID := ""
 	for id := range primitives {

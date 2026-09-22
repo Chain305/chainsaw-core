@@ -114,7 +114,6 @@ const (
 	settingRuntimeOffline               = "runtime.offline"
 	settingRuntimeAllowInsecureTLS      = "runtime.allow_insecure_tls"
 	settingRuntimeIntelBundlePath       = "runtime.intel_bundle_path"
-	settingRuntimeOfflineFailMode       = "runtime.offline_fail_mode"
 	settingRuntimeWebhookLegacyPerUser  = "runtime.webhook_legacy_peruser_routing"
 	settingRuntimeMalwareTestOverrides  = "runtime.malware_test_overrides"
 	settingProvenanceOffline            = "provenance.offline"
@@ -234,7 +233,6 @@ func applySettingsOverlay(cfg *Config, settings settingMap) {
 	settings.overlayBool(settingRuntimeOffline, &cfg.Runtime.Offline)
 	settings.overlayBool(settingRuntimeAllowInsecureTLS, &cfg.Runtime.AllowInsecureTLS)
 	settings.overlayString(settingRuntimeIntelBundlePath, &cfg.Runtime.IntelBundlePath)
-	settings.overlayString(settingRuntimeOfflineFailMode, &cfg.Runtime.OfflineFailMode)
 	settings.overlayBool(settingRuntimeWebhookLegacyPerUser, &cfg.Runtime.WebhookLegacyPerUserRouting)
 	settings.overlayString(settingRuntimeMalwareTestOverrides, &cfg.Runtime.MalwareTestOverrides)
 
@@ -516,9 +514,6 @@ func saveRuntimeSettings(set settingSetter, cfg *Config) error {
 		return err
 	}
 	if err := set(settingRuntimeIntelBundlePath, cfg.Runtime.IntelBundlePath); err != nil {
-		return err
-	}
-	if err := set(settingRuntimeOfflineFailMode, cfg.Runtime.OfflineFailMode); err != nil {
 		return err
 	}
 	if err := set(settingRuntimeWebhookLegacyPerUser, boolString(cfg.Runtime.WebhookLegacyPerUserRouting)); err != nil {

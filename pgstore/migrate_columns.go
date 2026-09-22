@@ -70,6 +70,13 @@ func (s *Store) ensureEnhancedColumns() error {
 	if err := s.ensureMonitoredTargetsSchema(); err != nil {
 		return err
 	}
+	// Append-only verdict transitions (additive new table). Same
+	// not-self-registering caveat as every helper above: removing this
+	// line leaves a green build that creates no table, and
+	// TestVerdictHistorySchemaIsWiredIntoMigrate guards it.
+	if err := s.ensureVerdictHistorySchema(); err != nil {
+		return err
+	}
 	// Runs LAST, and must: it UPDATEs package_metadata columns that
 	// ensurePackageRegistryColumns adds above (migrate_packages.go:114-126),
 	// so ordering it before that call would fail on a pre-Phase-5 database.

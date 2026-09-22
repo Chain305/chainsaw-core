@@ -60,6 +60,8 @@ import (
 	gem "github.com/aquasecurity/go-gem-version"
 	pep440 "github.com/aquasecurity/go-pep440-version"
 	mvn "github.com/masahiro331/go-mvn-version"
+
+	"github.com/chain305/chainsaw-core/typosquat"
 )
 
 // Advisory is the flat advisory record the bundle ships. Mirrors the
@@ -353,12 +355,34 @@ func canonicalKey(ecosystem, pkg string) string {
 		return ""
 	}
 	// Package names are case-sensitive in some ecosystems (Maven,
-	// crates.io) and case-insensitive in others (PyPI normalises to
-	// lower-case + collapsed separators). For lookup simplicity we
-	// preserve the caller's casing for ecosystems where it matters and
-	// downcase for PyPI/NuGet where the registry itself does.
+	// crates.io) and case-insensitive in others. Fold only where the
+	// registry itself does, and fold EXACTLY as it does:
+	//
+	//   pypi      PEP 503 — lowercase AND collapse runs of [-_.] to one
+	//             '-'. The comment here used to say that while the code
+	//             did only the lowercase half, so `zope.interface`,
+	//             `zope_interface` and `zope-interface` were three
+	//             distinct keys. A miss is not a neutral miss: HasPackage
+	//             returns false, and provider_osv then stamps a CLEAN
+	//             VulnSection with ScannerDBDigest "osv-bundle" — positive
+	//             evidence of absence for a package whose advisories are
+	//             sitting in this very index under another spelling.
+	//   nuget     case-insensitive only; no separator rule.
+	//   packagist lowercase vendor/package only; no separator rule.
+	//
+	// This function is the fold for BOTH the index build (Load) and the
+	// queries (LookupEx, HasPackage), so the two halves cannot drift —
+	// which is the trap the malware index hit when only the query side
+	// was normalised (core/malware/index.go:296 keeps that note).
+	//
+	// The bucketing matches core/intelligence/canonical.go:53,58, which
+	// cannot be imported from here: intelligence imports osv, so that
+	// direction is a cycle. typosquat is leaf-level and carries the
+	// tested PEP 503 implementation.
 	switch eco {
-	case "pypi", "nuget", "packagist":
+	case "pypi":
+		name = typosquat.NormalizePyPI(name)
+	case "nuget", "packagist":
 		name = strings.ToLower(name)
 	}
 	return eco + "\x00" + name

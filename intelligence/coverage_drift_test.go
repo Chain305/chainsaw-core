@@ -28,6 +28,12 @@ func TestEveryEmittedWarnCodeIsClassified(t *testing.T) {
 		"decode":              "malformed upstream payload — our parse path, not an outage",
 		"request_build":       "we built a bad request — our bug",
 		"parse_failed":        "the explicit our-bug code",
+		// The verdict WAS computed and stored; only its audit-trail row
+		// failed to write. That is a gap in the history, not in what we
+		// were able to inspect, so it must not count as a coverage
+		// outage -- doing so would let a bookkeeping failure degrade an
+		// org's coverage % and, under mode: closed, refuse installs.
+		"verdict_history_write_failed": "the verdict was computed and stored; only its history row failed",
 	}
 
 	entries, err := os.ReadDir(".")

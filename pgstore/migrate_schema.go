@@ -444,3 +444,73 @@ func (s *Store) ensureMonitoredTargetsSchema() error {
 	}
 	return nil
 }
+
+// ensureVerdictHistorySchema creates the append-only verdict_history table.
+//
+// WHY IT EXISTS. intelligence_reports upserts in place and keeps no
+// history. Its earliest row is 2026-09-13 against an enforcement log
+// going back to 2026-04-03 — the last mass rescan overwrote everything,
+// and there is no retention deleter. Three consequences, all measured:
+//
+//   - "Why was this allowed in March" is unanswerable. Not hard: there
+//     is no data to answer it from.
+//   - 14,948 is a floor, not a count.
+//   - engine_version reads 2.0 on every row including 188 scored under
+//     different rules, so you cannot tell which engine produced which
+//     verdict.
+//
+// One append-only row per TRANSITION closes all three, and it is the
+// same table that makes the recall subscription measurable.
+//
+// ONLY TRANSITIONS ARE WRITTEN. A rescan that changes nothing writes
+// nothing. Row count therefore tracks how much the world moved, not how
+// often we looked — which is what keeps an append-only table on a
+// hot upsert path affordable at all.
+//
+// NO org_id, and that is deliberate rather than an oversight inherited
+// from intelligence_reports: a verdict transition is a fact about a
+// COORDINATE. `authored_by_org` records who wrote it, which is the
+// L-02 measurement question ("whose write moved this verdict"), not an
+// ownership claim. Any org-scoped read must join through a table that
+// carries real attribution — monitored_targets, or the enforcement log.
+//
+// NOT SELF-REGISTERING. Like every ensure*Schema helper in this file it
+// runs only because ensureEnhancedColumns (migrate_columns.go) calls it.
+// TestVerdictHistorySchemaIsWiredIntoMigrate guards that call site.
+func (s *Store) ensureVerdictHistorySchema() error {
+	if s == nil || s.DB() == nil {
+		return nil
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS verdict_history (
+			history_id      BIGSERIAL PRIMARY KEY,
+			ecosystem       TEXT NOT NULL,
+			package_name    TEXT NOT NULL,
+			version         TEXT NOT NULL,
+			prior_verdict   TEXT,
+			next_verdict    TEXT NOT NULL,
+			prior_score     INTEGER,
+			next_score      INTEGER,
+			trigger         TEXT NOT NULL DEFAULT 'upsert',
+			engine_version  TEXT,
+			authored_by_org TEXT,
+			observed_at     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// The coordinate lookup: "show me this package's verdict over
+		// time", newest first. This is the index the "why was this
+		// allowed in March" question reads.
+		`CREATE INDEX IF NOT EXISTS idx_verdict_history_coordinate
+			ON verdict_history (ecosystem, package_name, version, observed_at DESC)`,
+		// The sweep index: retention prunes by age, and the
+		// measurability questions ("how many verdicts degraded last
+		// week") scan a time window.
+		`CREATE INDEX IF NOT EXISTS idx_verdict_history_observed
+			ON verdict_history (observed_at DESC)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.DB().Exec(stmt); err != nil {
+			return fmt.Errorf("pgstore: ensure verdict_history schema: %w", err)
+		}
+	}
+	return nil
+}

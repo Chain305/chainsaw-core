@@ -285,6 +285,10 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		ProvenanceStatus: r.Provenance.Status,
 		// SLSALevel feeds the per-level supply-chain bonus signal.
 		SLSALevel: r.Provenance.SLSALevel,
+		// Carried, not scored — see the note on risk.Input.BuilderID.
+		// The campaign discriminator was stored and unreadable; this is
+		// the line that makes it readable.
+		BuilderID: r.Provenance.BuilderID,
 		// SignatureVerified comes from the upstream sigstore/PGP probe.
 		// nil = not run (treat as false); &true = verified; &false =
 		// failed verification (no positive bonus, but no penalty either —

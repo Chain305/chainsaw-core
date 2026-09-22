@@ -59,6 +59,16 @@ type Config struct {
 	// Hard contract: even when enabled the feature is purely
 	// informational — never gates an install, never returns non-2xx on
 	// the proxy hot path. See internal/coverage/.
+	//
+	// DO NOT PUT THE COVERAGE GATE IN THIS BLOCK. plan_optional_fail_closed
+	// has an open question of `coverage_gate:` vs `coverage:` for the
+	// opt-in fail-closed knob, and the hard contract above settles it: the
+	// gate's whole purpose is to REFUSE INSTALLS. An operator who reads
+	// `coverage: { enabled: true }` today is correctly certain nothing can
+	// be refused because of it; adding `coverage: { mode: closed }` would
+	// make that reading wrong for the same block, which is how a safety
+	// contract gets broken by a key name. The gate goes in its own
+	// top-level `coverage_gate:` block.
 	Coverage CoverageConfig `yaml:"coverage"`
 	// RepositoryAnonymousAccess controls whether /repository/* endpoints allow requests
 	// without client credentials. When nil, anonymous access is enabled.

@@ -38,7 +38,6 @@ var settingsBackedFields = map[string]string{
 	"Runtime.Offline":                     settingRuntimeOffline,
 	"Runtime.AllowInsecureTLS":            settingRuntimeAllowInsecureTLS,
 	"Runtime.IntelBundlePath":             settingRuntimeIntelBundlePath,
-	"Runtime.OfflineFailMode":             settingRuntimeOfflineFailMode,
 	"Runtime.WebhookLegacyPerUserRouting": settingRuntimeWebhookLegacyPerUser,
 	"Runtime.MalwareTestOverrides":        settingRuntimeMalwareTestOverrides,
 

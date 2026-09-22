@@ -560,6 +560,31 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 				elapsed: time.Since(start),
 				err:     runErr,
 			}
+			// Truncation warning applied HERE, for EVERY provider, rather
+			// than inside each artifact-reading provider's Run.
+			//
+			// Three core providers wrapped their own returns and seven
+			// premium ones did not, so on an enterprise build a truncated
+			// artifact produced a silent clean result from
+			// provider_aiartifact, provider_codesmell and
+			// provider_wave4_artifact -- "we examined part of this package
+			// and found nothing" presented as "nothing is there". One
+			// wrap point cannot drift the way ten call sites did.
+			//
+			// It reuses msg.name rather than calling p.Name() again: a
+			// provider whose Name() panics is a case the scanner already
+			// handles (TestScan_SurvivesPostRunPanic), and adding a call
+			// would change how many times it is invoked.
+			//
+			// Gated on NeedsArtifact. The scanner hands the same Request
+			// to every provider, so an ungated wrap would tell the
+			// operator that `cve` "examined only part of this package" --
+			// a provider that never opened the archive. A warning that
+			// names the wrong provider is worse than no warning: it
+			// invites someone to go looking at the wrong component.
+			if p.NeedsArtifact() {
+				msg.partial = withArtifactTruncationWarning(msg.partial, msg.name, req.Artifact)
+			}
 			// Send first, THEN trip the short-circuit. If the order is
 			// reversed, a fast-cancellation race could close the send
 			// branch before the Block-bearing partial reaches the merge.
@@ -662,6 +687,11 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 					out, runErr = p.Run(providerCtx, req, report)
 				}()
 				msg := partialMsg{name: p.Name(), partial: out, elapsed: time.Since(start), err: runErr}
+				// Same single wrap point as the phase-1 send above, with
+				// the same NeedsArtifact gate.
+				if p.NeedsArtifact() {
+					msg.partial = withArtifactTruncationWarning(msg.partial, msg.name, req.Artifact)
+				}
 				// Unconditional for the same reason as the phase-1 send above:
 				// chN is buffered to len(tierProviders) with one send per
 				// worker, so it cannot block, and a select against a cancelled

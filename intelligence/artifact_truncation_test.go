@@ -55,82 +55,115 @@ func hasTruncationWarning(p PartialReport) bool {
 	return false
 }
 
-// TestProvidersReportPartialInspection is the core assertion, run across every
-// provider that reads the shared artifact map. Each of these returns an empty
-// or "performed, clean" PartialReport when it finds nothing — which, on a
-// truncated archive, is a claim it has no basis for.
+// TestProvidersReportPartialInspection is the core assertion, and it now
+// runs through the SCANNER rather than calling each provider directly.
+//
+// The warning used to be applied inside each artifact-reading provider's
+// Run. Five core providers did it and seven premium ones did not, so on
+// an enterprise build a truncated archive produced a silent clean result
+// from provider_aiartifact, provider_codesmell and
+// provider_wave4_artifact — "we examined part of this package and found
+// nothing" presented as "nothing is there" (qa_phase11 section 6b).
+//
+// A per-provider test could never have caught that: it asserts the
+// providers it lists, and the defect was the providers nobody listed.
+// Driving the scanner asserts the property for EVERY provider that
+// declares NeedsArtifact, including ones added later.
 func TestProvidersReportPartialInspection(t *testing.T) {
 	ctx := context.Background()
-
-	cases := []struct {
-		name string
-		run  func(h *ArtifactHandle) (PartialReport, error)
-	}{
-		{
-			name: "shrinkwrap",
-			run: func(h *ArtifactHandle) (PartialReport, error) {
-				return newShrinkwrapProvider().Run(ctx,
-					Request{Key: Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"}, Artifact: h}, nil)
-			},
-		},
-		{
-			name: "hiddenunicode",
-			run: func(h *ArtifactHandle) (PartialReport, error) {
-				return newHiddenUnicodeProvider().Run(ctx,
-					Request{Key: Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"}, Artifact: h}, nil)
-			},
-		},
-		{
-			name: "installscripts",
-			run: func(h *ArtifactHandle) (PartialReport, error) {
-				return newInstallScriptsProvider().Run(ctx,
-					Request{Key: Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"}, Artifact: h}, nil)
-			},
-		},
-		{
-			name: "manifestconfusion",
-			run: func(h *ArtifactHandle) (PartialReport, error) {
-				return newManifestConfusionProvider().Run(ctx, Request{
-					Key:                   Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"},
-					Artifact:              h,
-					RegistryMetadataBytes: []byte(`{"name":"x"}`),
-				}, nil)
-			},
-		},
-		{
-			name: "manifestconfusion-pypi",
-			run: func(h *ArtifactHandle) (PartialReport, error) {
-				return newPyPIManifestConfusionProvider().Run(ctx, Request{
-					Key:                   Key{Ecosystem: "pip", Package: "x", Version: "1.0.0"},
-					Artifact:              h,
-					RegistryMetadataBytes: []byte(`{"info":{"name":"x"}}`),
-				}, nil)
-			},
-		},
+	req := func(h *ArtifactHandle) Request {
+		return Request{
+			Key:                   Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"},
+			Artifact:              h,
+			RegistryMetadataBytes: []byte(`{"name":"x"}`),
+		}
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.run(truncatedHandle())
-			if err != nil {
-				t.Fatalf("Run: %v", err)
-			}
-			if !hasTruncationWarning(got) {
-				t.Fatalf("%s returned a clean absence over a TRUNCATED artifact map with no "+
-					"%s warning — 'could not look' is being reported as 'looked and found nothing' (N5). warnings=%+v",
-					tc.name, WarnArtifactTruncated, got.Warnings)
-			}
+	// A provider that reads the artifact and reports a clean absence —
+	// the exact shape the warning exists to qualify.
+	artifactReader := &fakeProvider{
+		name:     "artifact-reader",
+		signal:   SignalHiddenUnicode,
+		needsArt: true,
+		partial:  PartialReport{Scan: &ArtifactScanSection{Performed: true}},
+	}
+	// A provider that never opens the archive. It must NOT be warned
+	// about: a warning naming the wrong provider invites someone to go
+	// looking at the wrong component.
+	metadataOnly := &fakeProvider{
+		name:    "metadata-only",
+		signal:  SignalTyposquat,
+		partial: PartialReport{SupplyChain: &SupplyChainSection{TyposquatStatus: "clean"}},
+	}
 
-			// Control: an untruncated walk must stay silent, or the warning is
-			// noise and operators learn to ignore it.
-			clean, err := tc.run(cleanHandle())
-			if err != nil {
-				t.Fatalf("Run (clean): %v", err)
-			}
-			if hasTruncationWarning(clean) {
-				t.Errorf("%s emitted the truncation warning on a COMPLETE walk", tc.name)
-			}
-		})
+	svc := New(Config{Providers: []Provider{artifactReader, metadataOnly}})
+
+	rep, err := svc.Scan(ctx, req(truncatedHandle()))
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	var sawReader, sawMetadata bool
+	for _, w := range rep.Observation.Warnings {
+		if w.Code != WarnArtifactTruncated {
+			continue
+		}
+		switch w.Provider {
+		case "artifact-reader":
+			sawReader = true
+		case "metadata-only":
+			sawMetadata = true
+		}
+	}
+	if !sawReader {
+		t.Errorf("an artifact-reading provider returned a clean absence over a TRUNCATED map with no %s warning — "+
+			"'could not look' is being reported as 'looked and found nothing'. warnings=%+v",
+			WarnArtifactTruncated, rep.Observation.Warnings)
+	}
+	if sawMetadata {
+		t.Errorf("a provider that never reads the artifact was warned about truncation; "+
+			"the warning names the wrong component. warnings=%+v", rep.Observation.Warnings)
+	}
+
+	// Control: a complete walk must stay silent, or the warning is noise
+	// and operators learn to ignore it.
+	clean, err := svc.Scan(ctx, req(cleanHandle()))
+	if err != nil {
+		t.Fatalf("Scan (clean): %v", err)
+	}
+	for _, w := range clean.Observation.Warnings {
+		if w.Code == WarnArtifactTruncated {
+			t.Errorf("truncation warning emitted on a COMPLETE walk (provider %q)", w.Provider)
+		}
+	}
+}
+
+// TestTruncationWarningIsNotDoubleApplied — the wrap moved from the
+// providers to the scanner. A provider that also wraps its own return
+// would now emit the warning twice, which reads as two findings.
+func TestTruncationWarningIsNotDoubleApplied(t *testing.T) {
+	ctx := context.Background()
+	p := &fakeProvider{
+		name:     "double-check",
+		signal:   SignalHiddenUnicode,
+		needsArt: true,
+		partial:  PartialReport{Scan: &ArtifactScanSection{Performed: true}},
+	}
+	svc := New(Config{Providers: []Provider{p}})
+	rep, err := svc.Scan(ctx, Request{
+		Key:      Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"},
+		Artifact: truncatedHandle(),
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	var n int
+	for _, w := range rep.Observation.Warnings {
+		if w.Code == WarnArtifactTruncated && w.Provider == "double-check" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("truncation warning applied %d times, want exactly 1", n)
 	}
 }
 
@@ -164,8 +197,14 @@ func TestTruncationWarningIsVerdictNeutral(t *testing.T) {
 				"the fail-closed posture decision is deliberately deferred")
 		}
 	}
-	if len(trunc.Warnings) != len(base.Warnings)+1 {
-		t.Errorf("expected exactly one extra warning, got base=%d trunc=%d",
+	// The provider itself no longer appends the warning -- the scanner
+	// does, once, for every NeedsArtifact provider. So a DIRECT Run over
+	// a truncated handle must now produce exactly the same warnings as a
+	// clean one. That is the invariant that proves the wrap really moved
+	// rather than being duplicated.
+	if len(trunc.Warnings) != len(base.Warnings) {
+		t.Errorf("a direct provider Run changed its warning count on truncation (base=%d trunc=%d); "+
+			"the truncation warning belongs to the scanner now, and a provider adding its own would double it",
 			len(base.Warnings), len(trunc.Warnings))
 	}
 }
@@ -209,12 +248,18 @@ func TestSharedArtifactMapTruncatesForReal(t *testing.T) {
 			artifactmap.MaxFiles+10, artifactmap.MaxFiles)
 	}
 
-	// And end-to-end through a real provider, no priming anywhere.
-	got, err := newHiddenUnicodeProvider().Run(context.Background(),
-		Request{Key: Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"}, Artifact: h}, nil)
+	// And end-to-end through the SCANNER with a real provider, no
+	// priming anywhere. Through the scanner rather than a bare Run
+	// because that is where the warning is applied now -- once, for
+	// every provider declaring NeedsArtifact, instead of in each
+	// provider's own return where seven of them had forgotten it.
+	svc := New(Config{Providers: []Provider{newHiddenUnicodeProvider()}})
+	rep, err := svc.Scan(context.Background(),
+		Request{Key: Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"}, Artifact: h})
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("Scan: %v", err)
 	}
+	got := PartialReport{Warnings: rep.Observation.Warnings}
 	if !hasTruncationWarning(got) {
 		t.Fatalf("real truncated archive produced no %s warning; warnings=%+v",
 			WarnArtifactTruncated, got.Warnings)

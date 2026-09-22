@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -248,5 +249,72 @@ func TestVulnerabilityMetadataCVEDetailsOmitEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(b), "cveDetails") {
 		t.Fatalf("expected cveDetails to be omitted, got %s", string(b))
+	}
+}
+
+// TestPublishCountByPublishersCountsDistinctPackages is the S-5
+// regression: the one and only production firing of
+// sc.publish_velocity_anomaly was a FALSE POSITIVE produced by this
+// query counting rows.
+//
+// maven:org.apache.commons:commons-lang3:3.18.0 reported velocity 22 >
+// 20. Apache Commons did not push 22 releases in a day. WE ingested 22
+// versions of ONE package inside one window and COUNT(*) read our own
+// backfill as publishing activity.
+//
+// The signal is titled "Shai-Hulud worm signature". A worm's shape is
+// many DISTINCT PACKAGES from one maintainer -- the 2026-08-04 campaign
+// was ten packages in 43 minutes. Many versions of a single package is
+// the opposite shape: a normal release train, or our own re-scan.
+func TestPublishCountByPublishersCountsDistinctPackages(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	stamp := now.Format("20060102150405.000000000")
+	pub := "publisher-distinct-" + stamp
+
+	insert := func(pkg, version string) {
+		t.Helper()
+		if err := s.SetPackageMetadata(PackageMetadata{
+			Repository:   "maven",
+			Package:      pkg,
+			Version:      version,
+			PublisherSet: []string{pub},
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}); err != nil {
+			t.Fatalf("insert %s@%s: %v", pkg, version, err)
+		}
+	}
+
+	// The commons-lang3 shape: one package, many versions. This is a
+	// release train or a backfill, and it must not read as velocity.
+	one := "commons-lang3-" + stamp
+	for i := 0; i < 22; i++ {
+		insert(one, fmt.Sprintf("3.%d.0", i))
+	}
+
+	since := now.Add(-1 * time.Hour)
+	count, err := s.PublishCountByPublishers(context.Background(), []string{pub}, since)
+	if err != nil {
+		t.Fatalf("PublishCountByPublishers: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("22 versions of ONE package counted as %d publishes, want 1. "+
+			"Counting rows here is what produced the commons-lang3 false positive; "+
+			"the threshold is 20, so %d would fire the signal.", count, count)
+	}
+
+	// The worm shape: one maintainer, many distinct packages. THIS is
+	// what the signal is named for and it must still be visible.
+	for i := 0; i < 9; i++ {
+		insert(fmt.Sprintf("wormpkg-%d-%s", i, stamp), "1.0.0")
+	}
+	count, err = s.PublishCountByPublishers(context.Background(), []string{pub}, since)
+	if err != nil {
+		t.Fatalf("PublishCountByPublishers: %v", err)
+	}
+	if count != 10 {
+		t.Errorf("one maintainer across 10 distinct packages counted as %d, want 10 — "+
+			"this is the 2026-08-04 campaign's exact shape and the signal must be able to see it", count)
 	}
 }

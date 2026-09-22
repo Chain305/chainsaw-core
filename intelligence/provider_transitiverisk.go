@@ -480,17 +480,51 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 	report.Risk.Verdict = rootEval.Verdict
 	report.Risk.Resolution = rootEval.Resolution
 
-	// If the second evaluation produced a more conservative verdict
-	// (because a transitive critical / malware signal fired), let it
-	// win. Critical-class signals must drive the root's verdict even
-	// when the rolled-up category-decay numbers stayed above the
-	// threshold. Preserve TransitiveBlame from the tree pass — it
-	// carries the per-descendant attribution the UI renders.
-	if secondEval != nil && verdictRank(secondEval.Verdict) > verdictRank(rootEval.Verdict) {
-		preservedBlame := report.Risk.Resolution.TransitiveBlame
+	// If the second evaluation is at least as conservative as the first,
+	// let it win. Critical-class signals must drive the root's verdict
+	// even when the rolled-up category-decay numbers stayed above the
+	// threshold.
+	//
+	// The comparison is >=, not >, and that is the fix for a real defect:
+	// VerdictQuarantine ranks 4, the MAXIMUM, so under a strict > a root
+	// that was already at quarantine discarded the entire second
+	// evaluation — fired signals included. Four npm reports carried
+	// malwareCount=1 and quarantine and did not contain
+	// sc.transitive_malware anywhere, because of this line. The verdict
+	// was right and the reason was missing, which is the worse half to
+	// get wrong: a quarantine nobody can explain is a quarantine nobody
+	// can act on.
+	//
+	// Taking the second evaluation at an EQUAL verdict is safe because it
+	// ran on rootInput — the same facts as the first, plus the transitive
+	// counts. Its fired set is therefore a superset of the first's, never
+	// a different one, and the rank guard still forbids any downgrade.
+	//
+	// Two things the second pass legitimately does not know are carried
+	// over rather than blanked: TransitiveBlame (per-descendant
+	// attribution, produced by the tree pass and rendered by the UI), and
+	// the remediation fields, which an instant-block Resolution does not
+	// populate at all. Dropping a SafeVersion because a descendant is
+	// malicious would remove the one field that tells the operator what
+	// to do next.
+	if secondEval != nil && verdictRank(secondEval.Verdict) >= verdictRank(rootEval.Verdict) {
+		prior := report.Risk.Resolution
 		report.Risk.Verdict = secondEval.Verdict
 		report.Risk.Resolution = secondEval.Resolution
-		report.Risk.Resolution.TransitiveBlame = preservedBlame
+		report.Risk.Resolution.TransitiveBlame = prior.TransitiveBlame
+		if report.Risk.Resolution.SafeVersion == "" {
+			report.Risk.Resolution.SafeVersion = prior.SafeVersion
+			report.Risk.Resolution.SafeVersionCorroborated = prior.SafeVersionCorroborated
+		}
+		if report.Risk.Resolution.PatchAdvisory == "" {
+			report.Risk.Resolution.PatchAdvisory = prior.PatchAdvisory
+		}
+		if report.Risk.Resolution.Alternative == "" {
+			report.Risk.Resolution.Alternative = prior.Alternative
+		}
+		if len(report.Risk.Resolution.Rationale) == 0 {
+			report.Risk.Resolution.Rationale = prior.Rationale
+		}
 		// Push the worse-of-two onto RolledUp so the score consumers
 		// see the transitive penalty too.
 		if secondEval.DirectScore.Overall < report.Risk.RolledUp.Overall {

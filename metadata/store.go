@@ -884,12 +884,16 @@ func (s *Store) LatestPublisherSet(repository, packageName, excludeVersion strin
 	return set, nil
 }
 
-// PublishCountByPublishers counts distinct (package, version) rows in
-// package_metadata whose persisted publisher_set JSONB contains at least one
-// of the supplied normalized publisher identifiers AND whose updated_at is
-// at or after `since`. Used by the publishVelocityAnomaly condition: we only
-// fire if the same publisher (or any publisher from the incoming version's
-// set) has pushed more than the policy threshold in the last 24h.
+// PublishCountByPublishers counts DISTINCT PACKAGES in package_metadata
+// whose persisted publisher_set JSONB contains at least one of the supplied
+// normalized publisher identifiers AND whose updated_at is at or after
+// `since`. Used by the publishVelocityAnomaly condition: we only fire if the
+// same publisher (or any publisher from the incoming version's set) has
+// pushed more than the policy threshold in the last 24h.
+//
+// DISTINCT PACKAGES, not rows. It counted rows until 2026-09-22 and its one
+// and only production firing was a false positive caused by exactly that —
+// see the note at the query.
 //
 // The foundation migration created a GIN index on publisher_set so this
 // query is O(matched rows) rather than a full scan even on large tenants.
@@ -930,8 +934,29 @@ func (s *Store) PublishCountByPublishers(ctx context.Context, publishers []strin
 	}
 	args = append(args, since.UTC())
 
+	// COUNT(DISTINCT package), not COUNT(*), and that is the fix for a
+	// measured false positive (docs/plan_signal_repair.md S-5).
+	//
+	// sc.publish_velocity_anomaly has fired exactly once in 14,948
+	// production reports: on maven:org.apache.commons:commons-lang3:3.18.0
+	// at velocity 22 > 20. Apache Commons did not push 22 releases in a
+	// day. WE ingested 22 VERSIONS OF ONE PACKAGE inside one window, and
+	// COUNT(*) counted our own backfill as publishing activity.
+	//
+	// The signal is titled "Shai-Hulud worm signature", and a worm's
+	// shape is many DISTINCT PACKAGES from one maintainer — the
+	// 2026-08-04 campaign was ten packages in 43 minutes. Many versions
+	// of a single package is the opposite shape: a normal release train,
+	// or our own re-scan. Counting distinct packages measures the thing
+	// the signal is named for; counting rows measured our ingest rate.
+	//
+	// What this does NOT fix, and must not be mistaken for fixed: the
+	// row universe is still `package_metadata` scoped to one org — what
+	// this tenant has already persisted, not the registry firehose — so
+	// a burst is only visible if we happened to pull it, and never
+	// across tenants. That re-sourcing is the open half of S-5.
 	query := fmt.Sprintf(
-		`SELECT COUNT(*) FROM package_metadata
+		`SELECT COUNT(DISTINCT package) FROM package_metadata
 		 WHERE org_id=?
 		   AND publisher_set IS NOT NULL
 		   AND jsonb_exists_any(publisher_set, ARRAY[%s]::text[])

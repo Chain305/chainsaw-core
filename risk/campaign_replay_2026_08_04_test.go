@@ -122,13 +122,23 @@ func TestCacheableCampaignReplay(t *testing.T) {
 		},
 		{
 			// Tarball fetched and the two -25/MaxImpact-40 install-script
-			// detectors work as designed. STILL ALLOW: the campaign shipped
-			// verified provenance, so it banks sc.provenance_verified (+15)
-			// and sc.slsa_level_bonus, and the compound rules suppress the
-			// MaxImpact ceiling (see TestCompoundSuppressesMaxImpactCeiling).
+			// detectors work as designed.
+			//
+			// WAS ALLOW UNTIL S-7 (docs/plan_signal_repair.md). The campaign
+			// ships verified provenance, so it banks sc.provenance_verified
+			// (+15) and sc.slsa_level_bonus — and the two compound rules it
+			// trips used to DELETE the MaxImpact ceiling outright, so the
+			// most corroborated row in this table scored best. It is now
+			// warn at 40, pinned by sc.install_script_eval_encoded.
+			//
+			// This row is the whole point of the replay: a signed trojan,
+			// with the byte detectors working, scored allow pre-advisory.
+			// It no longer does. It is still not a quarantine — the reward
+			// signals are real and the behavioural layer has no negative
+			// counterpart to them yet, which is S-2 and S-3.
 			name: "C_bytes_strong_detectors",
 			in:   withDocumentedPayload(campaignBaseInput(), true),
-			want: VerdictAllow,
+			want: VerdictWarn,
 		},
 		{
 			// Control: the input the engine actually built on 2026-09-13,
@@ -187,19 +197,21 @@ func TestCacheableCampaignVelocityCannotFire(t *testing.T) {
 	}
 }
 
-// TestCompoundSuppressesMaxImpactCeiling pins the inversion found while
-// replaying this campaign: applyMaxImpactCeiling returns early when ANY
-// compound rule fired, so the per-signal MaxImpact ceilings are skipped
-// exactly when the engine has the MOST corroborating evidence.
+// TestCompoundDoesNotSuppressMaxImpactCeiling is the monotonicity gate
+// that replaced TestCompoundSuppressesMaxImpactCeiling (S-7).
 //
-// Both inputs below carry sc.install_script_fetches_remote (MaxImpact 40).
-// The one that ALSO trips two compound rules scores HIGHER and lands in a
-// better verdict band. More evidence of malice, better score.
+// The old test pinned the inversion as a fact: applyMaxImpactCeiling
+// returned early when ANY compound fired, so the per-signal ceilings were
+// skipped exactly when the engine held the MOST corroborating evidence,
+// and the same package scored HIGHER with two compound rules tripped than
+// without them. Its own doc comment said to delete it when the scores
+// converge. They have.
 //
-// If this test starts failing because the scores converge, the inversion
-// has been fixed — delete it and update §3 of
-// docs/designs/cacheable-campaign-signal-replay.md.
-func TestCompoundSuppressesMaxImpactCeiling(t *testing.T) {
+// What replaces it is the property, not the number: adding evidence of
+// malice must never improve the score. Stated as `with <= without`, so it
+// fails on any future change that re-opens a path where more signals
+// produce a better result — which a fixed expected value would not.
+func TestCompoundDoesNotSuppressMaxImpactCeiling(t *testing.T) {
 	opts := Options{Now: func() time.Time {
 		return time.Date(2026, 8, 4, 9, 35, 30, 0, time.UTC)
 	}}
@@ -216,20 +228,26 @@ func TestCompoundSuppressesMaxImpactCeiling(t *testing.T) {
 	evWith := EvaluatePackage(withCompound, opts)
 	evWithout := EvaluatePackage(noCompound, opts)
 
-	t.Logf("compound fired:     overall=%3d verdict=%-10s ceiling=%q",
+	t.Logf("compound fired:      overall=%3d verdict=%-10s ceiling=%q",
 		evWith.DirectScore.Overall, evWith.Verdict, evWith.DirectScore.CeilingSignal)
 	t.Logf("compound suppressed: overall=%3d verdict=%-10s ceiling=%q",
 		evWithout.DirectScore.Overall, evWithout.Verdict, evWithout.DirectScore.CeilingSignal)
 
-	if evWith.DirectScore.CeilingSignal != "" {
-		t.Errorf("expected the ceiling to be SKIPPED when a compound fires, "+
-			"got ceiling=%q", evWith.DirectScore.CeilingSignal)
+	if evWith.DirectScore.Overall > evWithout.DirectScore.Overall {
+		t.Errorf("INVERSION: with-compound scored %d, better than without-compound %d. "+
+			"Adding evidence of malice must never improve the score.",
+			evWith.DirectScore.Overall, evWithout.DirectScore.Overall)
+	}
+	// The ceiling must BIND on both sides now. An empty CeilingSignal on
+	// the compound side is the exact shape of the old bypass returning.
+	if evWith.DirectScore.CeilingSignal == "" {
+		t.Errorf("no ceiling bound with a compound fired — the bypass is back")
 	}
 	if evWithout.DirectScore.CeilingSignal == "" {
-		t.Errorf("expected a MaxImpact ceiling to bind with no compound fired")
+		t.Errorf("no ceiling bound with no compound fired")
 	}
-	if evWith.DirectScore.Overall <= evWithout.DirectScore.Overall {
-		t.Errorf("inversion gone: with-compound %d should exceed "+
-			"without-compound %d", evWith.DirectScore.Overall, evWithout.DirectScore.Overall)
+	if evWith.Verdict == VerdictAllow {
+		t.Errorf("verdict = allow on a row carrying two install-script primitives "+
+			"and two compound rules (overall=%d)", evWith.DirectScore.Overall)
 	}
 }

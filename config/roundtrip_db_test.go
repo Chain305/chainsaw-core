@@ -74,7 +74,6 @@ func TestYAMLOnlyBlocksSurviveBootRoundTrip(t *testing.T) {
 	yaml := `
 runtime:
   offline: true
-  offline_fail_mode: closed
   intel_bundle_path: /srv/chainsaw/intel-bundle.tar.gz
 provenance:
   offline: true
@@ -155,9 +154,11 @@ repositories:
 	if !got.IsOffline() {
 		t.Errorf("IsOffline() = false after round trip; the offline umbrella flag is not in effect")
 	}
-	if got.Runtime.OfflineFailMode != "closed" {
-		t.Errorf("runtime.offline_fail_mode = %q, want %q", got.Runtime.OfflineFailMode, "closed")
-	}
+	// runtime.offline_fail_mode was REMOVED -- it round-tripped
+	// perfectly and was read by nothing, so an operator setting
+	// "closed" got a value the engine never honoured. Enforcement is
+	// CHAINSAW_COVERAGE_MODE; the advisory declaration is
+	// intelligence.FailMode, which is kept.
 	if got.Runtime.IntelBundlePath != "/srv/chainsaw/intel-bundle.tar.gz" {
 		t.Errorf("runtime.intel_bundle_path = %q", got.Runtime.IntelBundlePath)
 	}

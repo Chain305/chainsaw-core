@@ -238,7 +238,7 @@ func (s *DefaultService) tryFetchArtifact(ctx context.Context, eco, name, versio
 	if err != nil {
 		return nil
 	}
-	req.Header.Set("User-Agent", "chainsaw-intelligence-deps/1")
+	req.Header.Set("User-Agent", UserAgent("deps"))
 	resp, err := autoDepHTTPClient.Do(req)
 	if err != nil {
 		return nil
@@ -375,7 +375,7 @@ func autoDepGetJSON(ctx context.Context, endpoint string, out any) error {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "chainsaw-intelligence-deps/1")
+	req.Header.Set("User-Agent", UserAgent("deps"))
 	resp, err := autoDepHTTPClient.Do(req)
 	if err != nil {
 		return err

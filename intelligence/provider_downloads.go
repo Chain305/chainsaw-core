@@ -156,7 +156,7 @@ func FetchNPMWeeklyDownloads(ctx context.Context, packageName string) int {
 		return unknownDownloads
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "chainsaw-intelligence/downloads")
+	req.Header.Set("User-Agent", UserAgent("downloads"))
 
 	resp, err := DownloadsDo(req)
 	if err != nil {
@@ -202,7 +202,7 @@ func FetchPyPIWeeklyDownloads(ctx context.Context, packageName string) int {
 		return unknownDownloads
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "chainsaw-intelligence/downloads")
+	req.Header.Set("User-Agent", UserAgent("downloads"))
 
 	resp, err := DownloadsDo(req)
 	if err != nil {

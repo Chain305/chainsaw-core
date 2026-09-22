@@ -34,7 +34,16 @@ import (
 	"time"
 
 	"github.com/chain305/chainsaw-core/intelligence/osv"
+	"github.com/chain305/chainsaw-core/metadata"
 )
+
+// epssReader is the one method this provider needs from the metadata
+// store. Narrow on purpose: an osv provider that could reach the whole
+// store would invite an org-scoped read into a federated, org-less row,
+// which is the exact mistake L-02 exists to prevent.
+type epssReader interface {
+	MaxEPSSForCVEs(cves []string) (float64, error)
+}
 
 // OSVBundleEnvVar lets operators override the bundle path. Defaults to
 // the in-image location the Dockerfile bakes to.
@@ -61,6 +70,22 @@ type osvProvider struct {
 	path   string
 	logger *slog.Logger
 	logOK  sync.Once
+
+	// epss reads cve_epss, which is keyed by CVE with NO org_id, so it
+	// is safe to fold into the federated row this provider produces.
+	//
+	// It is here because EPSS used to reach a Report only through
+	// cveProvider.Run, and the L-02 federation fix gated that on
+	// ecosystemHasScannerAdvisorySource — a set containing "docker"
+	// alone. osv replaced cve as the vulnerability source everywhere
+	// else and carried no EPSS at all, so a correct tenancy fix
+	// silently deleted a working signal: 245 scored rows in prod, 16
+	// over vuln.epss_high's 0.5 threshold, and zero of 14,948 stored
+	// reports carrying an epssScore.
+	//
+	// Nil is a valid state (no metadata store wired, or tests) and
+	// means "no EPSS", never "EPSS is zero".
+	epss epssReader
 
 	// onLoad fires the first time an index becomes live (either initial
 	// LoadFile in newOSVProvider or the first SwapIndex). Subsequent
@@ -106,7 +131,7 @@ func (p *osvProvider) fireOnLoad() {
 // a non-nil provider whose Run is a no-op — caller is responsible for
 // logging the dormancy state, which Bootstrap does via the provider's
 // IndexLoaded helper.
-func newOSVProvider(logger *slog.Logger) *osvProvider {
+func newOSVProvider(logger *slog.Logger, epss epssReader) *osvProvider {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -114,7 +139,14 @@ func newOSVProvider(logger *slog.Logger) *osvProvider {
 	if path == "" {
 		path = DefaultOSVBundlePath
 	}
-	p := &osvProvider{logger: logger, path: path}
+	// A typed-nil *metadata.Store in an interface is non-nil at the
+	// interface level and would make every lookup take the error path.
+	// Normalise it here so `p.epss == nil` is the single "no EPSS"
+	// condition Run has to reason about.
+	if st, ok := epss.(*metadata.Store); ok && st == nil {
+		epss = nil
+	}
+	p := &osvProvider{logger: logger, path: path, epss: epss}
 	if _, err := os.Stat(path); err == nil {
 		idx, loadErr := osv.LoadFile(path)
 		if loadErr != nil {
@@ -299,6 +331,7 @@ func (p *osvProvider) Run(ctx context.Context, req Request, prior *Report) (Part
 	}
 	vuln.IsVulnerable = len(vuln.CVEs) > 0
 	vuln.CVSSScore = maxCVSS
+	vuln.EPSSScore = p.maxEPSS(vuln.CVEs)
 
 	// Veto channel. The bundle is a version-range database, so for every
 	// advisory keyed to this package we reached an actual verdict for
@@ -401,3 +434,29 @@ func (p *osvProvider) SwapIndex(idx *osv.Index) {
 }
 
 var _ Provider = (*osvProvider)(nil)
+
+// maxEPSS folds the exploit-prediction score for the matched CVEs onto
+// the report, taking the highest — the same max-wins rule
+// vulnerability_metadata's package rollup uses and that mergeVulns
+// applies when two sources disagree.
+//
+// It never fails the scan. EPSS is an enrichment: a store outage should
+// cost the report its epssScore, not its CVEs. The `vuln.epss_high`
+// signal fires at > 0.5, so a returned 0 means the signal stays silent,
+// which is the correct behaviour for "we do not know" here — the
+// vulnerability itself is already carried by CVEs/CVSS independently.
+func (p *osvProvider) maxEPSS(cves []string) float64 {
+	if p == nil || p.epss == nil || len(cves) == 0 {
+		return 0
+	}
+	score, err := p.epss.MaxEPSSForCVEs(cves)
+	if err != nil {
+		// Debug, not warn: on a deployment with no EPSS refresher this
+		// would otherwise log on every single scan.
+		if p.logger != nil {
+			p.logger.Debug("osv: epss lookup failed", "err", err, "cves", len(cves))
+		}
+		return 0
+	}
+	return score
+}

@@ -53,9 +53,22 @@ func firedSet(ids ...string) map[string]FiredSignal {
 	return out
 }
 
-// TestCeilingBypassInvertsScore: the same primitive set scores WORSE (lower
-// overall, i.e. a stricter verdict) when the compound does NOT fire.
-func TestCeilingBypassInvertsScore(t *testing.T) {
+// TestCeilingBypassIsClosed was TestCeilingBypassInvertsScore, and the
+// rewrite is the point (S-7, docs/plan_signal_repair.md).
+//
+// The old version ASSERTED the bug. It required
+// `withCompound == rollup` — the uncapped number — and then required
+// `withCompound > without`, i.e. it went red the moment anyone fixed the
+// inversion and stayed green the entire time it was live. A
+// characterization test is a legitimate thing to write while auditing;
+// leaving one in place afterwards means the defect has a guard holding it
+// open. It was cited in the plan index as "the red test exists but
+// nothing gates the ceiling bypass" — it was neither red nor a gate.
+//
+// What it asserts now is the property the repair establishes: a compound
+// rule must not raise the score, and the primitive ceiling must still
+// bind when one fires.
+func TestCeilingBypassIsClosed(t *testing.T) {
 	prim := firedSet(SignalSCHiddenUnicode)
 	if Registry[SignalSCHiddenUnicode].MaxImpact != maxImpactWarnTop {
 		t.Fatalf("fixture assumes sc.hidden_unicode ceilings at %d, got %d",
@@ -63,25 +76,51 @@ func TestCeilingBypassInvertsScore(t *testing.T) {
 	}
 	const rollup = 73 // real value: npm|webpack|5.111.0, prod 2026-09-21
 
-	withCompound, _ := applyMaxImpactCeiling(rollup, prim,
+	withCompound, pinnedWith := applyMaxImpactCeiling(rollup, prim,
 		map[string]FiredSignal{CompoundSCEnvNetInstall: {ID: CompoundSCEnvNetInstall, Compound: true}})
-	without, pinned := applyMaxImpactCeiling(rollup, prim, nil)
+	without, pinnedWithout := applyMaxImpactCeiling(rollup, prim, nil)
 
-	if withCompound != rollup {
-		t.Fatalf("compound path: want the uncapped rollup %d, got %d", rollup, withCompound)
+	if withCompound > without {
+		t.Errorf("INVERSION: compound-present scored %d, better than compound-absent %d. "+
+			"More evidence of malice must never produce a better score.", withCompound, without)
 	}
-	if without != maxImpactWarnTop || pinned != SignalSCHiddenUnicode {
-		t.Fatalf("no-compound path: want %d pinned by %s, got %d/%q",
-			maxImpactWarnTop, SignalSCHiddenUnicode, without, pinned)
+	if withCompound != maxImpactWarnTop || pinnedWith != SignalSCHiddenUnicode {
+		t.Errorf("compound path: want %d pinned by %s, got %d/%q — the ceiling must bind "+
+			"through a compound, not be deleted by it",
+			maxImpactWarnTop, SignalSCHiddenUnicode, withCompound, pinnedWith)
 	}
-	if withCompound <= without {
-		t.Fatalf("no inversion: compound-present %d should exceed compound-absent %d",
-			withCompound, without)
+	if without != maxImpactWarnTop || pinnedWithout != SignalSCHiddenUnicode {
+		t.Errorf("no-compound path: want %d pinned by %s, got %d/%q",
+			maxImpactWarnTop, SignalSCHiddenUnicode, without, pinnedWithout)
 	}
-	// And the inversion crosses a band: allow with the extra evidence, warn without.
-	if !(withCompound >= ThresholdWarn && without < ThresholdWarn) {
-		t.Fatalf("expected an allow/warn band flip, got %d vs %d (warn threshold %d)",
-			withCompound, without, ThresholdWarn)
+	// The band this used to flip across. 73 is an allow; the ceiling puts
+	// it at 59, a warn. Both paths must land on the strict side.
+	if withCompound >= ThresholdWarn {
+		t.Errorf("compound path scored %d, at or above the warn threshold %d — "+
+			"this is the allow the bypass was producing", withCompound, ThresholdWarn)
+	}
+}
+
+// TestMaxImpactCeilingIsMonotoneInCompounds is the general form, so the
+// guard does not depend on one fixture's numbers.
+//
+// For any rollup and any primitive set, adding compound rules must never
+// raise the result. The bypass violated this for every rollup above the
+// ceiling; a fixed-value test would only have caught it at 73.
+func TestMaxImpactCeilingIsMonotoneInCompounds(t *testing.T) {
+	prim := firedSet(SignalSCHiddenUnicode)
+	comp := map[string]FiredSignal{
+		CompoundSCEnvNetInstall: {ID: CompoundSCEnvNetInstall, Compound: true},
+	}
+	for rollup := 0; rollup <= 100; rollup++ {
+		with, _ := applyMaxImpactCeiling(rollup, prim, comp)
+		without, _ := applyMaxImpactCeiling(rollup, prim, nil)
+		if with > without {
+			t.Fatalf("rollup %d: compound-present %d > compound-absent %d", rollup, with, without)
+		}
+		if with > rollup {
+			t.Fatalf("rollup %d: ceiling raised the score to %d", rollup, with)
+		}
 	}
 }
 

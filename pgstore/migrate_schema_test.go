@@ -433,3 +433,129 @@ func assertMonitoredTargetsPresent(t *testing.T, db *sql.DB) {
 		t.Error("idx_monitored_targets_due missing after migration")
 	}
 }
+
+// TestVerdictHistorySchemaIsWiredIntoMigrate is the AST half of the
+// guard, identical in shape to the monitored-targets one above and for
+// the identical reason: ensure*Schema helpers are not self-registering,
+// so a helper added here and not called from ensureEnhancedColumns
+// compiles, ships, and creates nothing.
+func TestVerdictHistorySchemaIsWiredIntoMigrate(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "migrate_columns.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse migrate_columns.go: %v", err)
+	}
+
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "ensureEnhancedColumns" {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("ensureEnhancedColumns not found in migrate_columns.go: " +
+			"the migration entry point moved; re-point this guard at its new home")
+	}
+
+	var called bool
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "ensureVerdictHistorySchema" {
+			called = true
+		}
+		return true
+	})
+	if !called {
+		t.Fatal("call site missing: ensureEnhancedColumns no longer calls " +
+			"s.ensureVerdictHistorySchema(). Without it verdict_history is never " +
+			"created, every transition write fails, and the audit trail is empty " +
+			"while the build stays green.")
+	}
+}
+
+// TestEnsureVerdictHistorySchema_Idempotent is the DB half: Open() must
+// produce the table and both indexes, and re-running must be a no-op.
+//
+// DSN-GATED, the standard pgstore gate.
+func TestEnsureVerdictHistorySchema_Idempotent(t *testing.T) {
+	dsn := os.Getenv("CHAINSAW_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("CHAINSAW_DATABASE_URL not set; skipping integration test")
+	}
+	store, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.DB().Ping(); err != nil {
+		t.Skipf("database unreachable: %v", err)
+	}
+
+	// Re-running the helper must not error. Migrations run on every
+	// boot; one that is not idempotent is an outage on the second
+	// start, not a bug someone notices in review.
+	for i := 0; i < 2; i++ {
+		if err := store.ensureVerdictHistorySchema(); err != nil {
+			t.Fatalf("ensureVerdictHistorySchema (run %d): %v", i+1, err)
+		}
+	}
+
+	var n int
+	if err := store.DB().QueryRow(
+		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'verdict_history'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("query information_schema: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("verdict_history table count = %d, want 1", n)
+	}
+
+	// Both indexes. The coordinate index is what the "why was this
+	// allowed in March" read uses; without it that query is a seq scan
+	// over an append-only table, which gets worse every day.
+	for _, idx := range []string{
+		"idx_verdict_history_coordinate",
+		"idx_verdict_history_observed",
+	} {
+		var m int
+		if err := store.DB().QueryRow(
+			`SELECT count(*) FROM pg_indexes WHERE indexname = $1`, idx,
+		).Scan(&m); err != nil {
+			t.Fatalf("query pg_indexes for %s: %v", idx, err)
+		}
+		if m != 1 {
+			t.Errorf("index %s missing", idx)
+		}
+	}
+
+	// next_verdict is NOT NULL: a history row that does not say what
+	// the verdict became records nothing.
+	var nullable string
+	if err := store.DB().QueryRow(
+		`SELECT is_nullable FROM information_schema.columns
+		 WHERE table_name = 'verdict_history' AND column_name = 'next_verdict'`,
+	).Scan(&nullable); err != nil {
+		t.Fatalf("query column nullability: %v", err)
+	}
+	if nullable != "NO" {
+		t.Errorf("next_verdict is_nullable = %q, want NO", nullable)
+	}
+
+	// prior_verdict IS nullable, and that is load-bearing: a first-ever
+	// observation has no prior, and forcing an empty string there would
+	// make "first seen" indistinguishable from "transitioned from
+	// nothing".
+	if err := store.DB().QueryRow(
+		`SELECT is_nullable FROM information_schema.columns
+		 WHERE table_name = 'verdict_history' AND column_name = 'prior_verdict'`,
+	).Scan(&nullable); err != nil {
+		t.Fatalf("query prior_verdict nullability: %v", err)
+	}
+	if nullable != "YES" {
+		t.Errorf("prior_verdict is_nullable = %q, want YES", nullable)
+	}
+}

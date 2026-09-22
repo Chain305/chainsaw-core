@@ -505,6 +505,27 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	if err != nil {
 		return fmt.Errorf("intelligence: upsert report: %w", err)
 	}
+
+	// Append-only verdict transition, written INSIDE this transaction.
+	//
+	// In the tx on purpose: the row and its history entry either both
+	// land or neither does. A history written after commit can disagree
+	// with the row it describes, and an audit trail that can disagree
+	// with the thing it audits is worse than none.
+	//
+	// priorPayload is the row as it stood before this write, already
+	// read FOR UPDATE above, so this costs no extra query.
+	if err := recordVerdictTransition(ctx, tx, r, priorPayload, orgID); err != nil {
+		// A history failure must not fail the scan. The verdict is the
+		// product; the history is the record of it. Losing a row here
+		// is a gap in the audit trail, and refusing the upsert over it
+		// would turn a bookkeeping problem into an outage.
+		//
+		// It is not silent: the caller sees it on the report's warnings
+		// via the observation path, and this logs.
+		reportVerdictHistoryFailure(r, err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("intelligence: commit upsert: %w", err)
 	}

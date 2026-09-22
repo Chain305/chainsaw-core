@@ -232,3 +232,57 @@ func (s *Store) RefreshPackageEPSSScores() error {
 	}
 	return rows.Err()
 }
+
+// MaxEPSSForCVEs returns the highest EPSS score held for any of the
+// given CVEs, org-independently.
+//
+// `cve_epss` is keyed by CVE alone (core/pgstore/migrate.go) — there is
+// no org_id on it, which is precisely why it, and not the org-scoped
+// `vulnerability_metadata.epss_score` rollup, is the right source for a
+// federated intelligence report. Reading the rollup here would write one
+// tenant's number into the row every other tenant reads.
+//
+// It exists rather than reusing LoadCVEEPSSMap because that helper
+// `SELECT`s the whole table and filters in Go. That is fine for the
+// refresher's batch pass and wrong on the per-scan path, which is the
+// one this serves: the table only grows, and this repo has already taken
+// a production outage from unbounded per-scan work
+// (docs/plan_scan_backpressure.md).
+//
+// A CVE with no row contributes nothing. A zero return means "no EPSS
+// for any of these", which is not the same as "these are not exploited"
+// — the caller must not write a 0 anywhere a reader could mistake for a
+// measured score.
+func (s *Store) MaxEPSSForCVEs(cves []string) (float64, error) {
+	if s == nil || s.sql == nil {
+		return 0, ErrUnavailable
+	}
+	args := make([]any, 0, len(cves))
+	seen := make(map[string]struct{}, len(cves))
+	for _, cve := range cves {
+		cve = strings.TrimSpace(strings.ToUpper(cve))
+		if cve == "" {
+			continue
+		}
+		if _, dup := seen[cve]; dup {
+			continue
+		}
+		seen[cve] = struct{}{}
+		args = append(args, cve)
+	}
+	if len(args) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")
+	// MAX over an empty match set is NULL, hence the nullable scan.
+	var maxScore sql.NullFloat64
+	row := s.sql.DB().QueryRow(
+		`SELECT MAX(score) FROM cve_epss WHERE upper(cve) IN (`+placeholders+`)`, args...)
+	if err := row.Scan(&maxScore); err != nil {
+		return 0, err
+	}
+	if !maxScore.Valid {
+		return 0, nil
+	}
+	return maxScore.Float64, nil
+}

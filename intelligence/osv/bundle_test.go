@@ -800,3 +800,101 @@ func TestFlattenRecord_SkipsGitRanges(t *testing.T) {
 		t.Fatalf("untyped range must be kept, got %+v", got)
 	}
 }
+
+// TestCanonicalKey_PEP503FoldsBothSides pins the name half of the key.
+//
+// The bug this replaces: canonicalKey lowercased pypi/nuget/packagist and
+// stopped there, while its own comment claimed PyPI "normalises to
+// lower-case + collapsed separators". So an advisory published as
+// `zope.interface` was unreachable from a query for `zope_interface`, and
+// the miss reads as a CLEAN result rather than an unknown one — see
+// provider_osv.go's HasPackage branch.
+//
+// Every case runs through BOTH sides deliberately: the key is built once
+// the way Load builds it and once the way LookupEx builds it. They are the
+// same function today, and this is what fails if someone ever splits them
+// — which is exactly how core/malware/index.go got it wrong.
+func TestCanonicalKey_PEP503FoldsBothSides(t *testing.T) {
+	cases := []struct {
+		name      string
+		indexEco  string
+		indexPkg  string
+		queryEco  string
+		queryPkg  string
+		wantMatch bool
+	}{
+		// PyPI: PEP 503 — lowercase AND collapse runs of [-_.] to '-'.
+		{"pypi dot vs hyphen", "PyPI", "zope.interface", "pypi", "zope-interface", true},
+		{"pypi underscore vs hyphen", "PyPI", "zope_interface", "pypi", "zope-interface", true},
+		{"pypi dot vs underscore", "PyPI", "zope.interface", "pypi", "zope_interface", true},
+		{"pypi run of separators", "PyPI", "Requests._-X", "pip", "requests-x", true},
+		{"pypi case only", "PyPI", "Django", "pypi", "django", true},
+		{"pypi pip alias folds too", "PyPI", "typing_extensions", "pip", "typing.extensions", true},
+		{"pypi genuinely different names", "PyPI", "requests", "pypi", "requests2", false},
+
+		// NuGet is case-insensitive and has no separator rule: Foo.Bar and
+		// Foo-Bar are DIFFERENT packages there. Collapsing them would be a
+		// false positive, so this is the guard against over-folding.
+		{"nuget case folds", "NuGet", "Newtonsoft.Json", "nuget", "newtonsoft.json", true},
+		{"nuget separators do NOT fold", "NuGet", "Newtonsoft.Json", "nuget", "newtonsoft-json", false},
+
+		// Packagist lowercases vendor/package, same reasoning.
+		{"packagist case folds", "Packagist", "Monolog/Monolog", "composer", "monolog/monolog", true},
+		{"packagist separators do NOT fold", "Packagist", "foo/bar.baz", "packagist", "foo/bar-baz", false},
+
+		// Case-sensitive ecosystems must be left alone. npm serves
+		// JSONStream and jsonstream as different documents; Go module
+		// paths are case-sensitive per the OSV schema.
+		{"npm keeps case", "npm", "JSONStream", "npm", "jsonstream", false},
+		{"go keeps case", "Go", "github.com/Masterminds/semver", "gomod", "github.com/masterminds/semver", false},
+		{"maven keeps case", "Maven", "com.fasterxml:Jackson", "gradle", "com.fasterxml:jackson", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// bundle.go:209 — the Load side.
+			indexKey := canonicalKey(tc.indexEco, tc.indexPkg)
+			// bundle.go:259 / :291 — the LookupEx and HasPackage side.
+			queryKey := canonicalKey(tc.queryEco, tc.queryPkg)
+
+			if indexKey == "" || queryKey == "" {
+				t.Fatalf("canonicalKey returned empty: index=%q query=%q", indexKey, queryKey)
+			}
+			if got := indexKey == queryKey; got != tc.wantMatch {
+				t.Errorf("index %s/%s vs query %s/%s: match=%v, want %v\n  indexKey=%q\n  queryKey=%q",
+					tc.indexEco, tc.indexPkg, tc.queryEco, tc.queryPkg, got, tc.wantMatch, indexKey, queryKey)
+			}
+		})
+	}
+}
+
+// TestLoadAndLookup_PyPISeparatorSpelling drives the real Load →
+// HasPackage → LookupEx path rather than the key function directly,
+// because that is where the fail-open lives: a HasPackage miss makes
+// provider_osv stamp a clean VulnSection.
+func TestLoadAndLookup_PyPISeparatorSpelling(t *testing.T) {
+	bundle := gzippedJSON(t, []Advisory{{
+		Ecosystem:          "PyPI",
+		Package:            "zope.interface",
+		VulnerableVersions: []string{"5.4.0"},
+		AdvisoryID:         "GHSA-test-sep-fold",
+		Summary:            "separator-fold fixture",
+		Severity:           "HIGH",
+		CVSSScore:          7.5,
+	}})
+
+	idx, err := Load(bytes.NewReader(bundle))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	for _, spelling := range []string{"zope.interface", "zope_interface", "zope-interface", "Zope.Interface"} {
+		if !idx.HasPackage("pypi", spelling) {
+			t.Errorf("HasPackage(pypi, %q) = false; a miss here is served as a CLEAN result, not an unknown one", spelling)
+		}
+		hits, _, _ := idx.LookupEx("pypi", spelling, "5.4.0")
+		if len(hits) != 1 {
+			t.Errorf("LookupEx(pypi, %q, 5.4.0) = %d hits, want 1", spelling, len(hits))
+		}
+	}
+}

@@ -107,7 +107,7 @@ func registerCoreProvidersInOrder() {
 	// post-build OSV refresher / readiness wiring can still find it.
 	RegisterProvider(ProviderRegistration{
 		Name: "osv", Tier: TierCore, Order: 7,
-		Factory: func(cfg BootstrapConfig) Provider { return newOSVProvider(cfg.Logger) },
+		Factory: func(cfg BootstrapConfig) Provider { return newOSVProvider(cfg.Logger, cfg.MetadataStore) },
 	})
 	// CORE: registry metadata — runs unconditionally; Supports() gates it.
 	RegisterProvider(ProviderRegistration{

@@ -82,12 +82,25 @@ type RuntimeConfig struct {
 	// parsing under decoder.KnownFields(true). See
 	// docs/install/AIRGAP.md and docs/CONFIG_REFERENCE.md §B29.
 	IntelBundlePath string `yaml:"intel_bundle_path"`
-	// OfflineFailMode controls how remote-only providers behave when
-	// air-gapped: "condition-default" (per-condition fall-back —
-	// historical behaviour, default), "open" (allow installs through),
-	// "closed" (block installs). Mirrors CHAINSAW_OFFLINE_FAIL_MODE.
-	// See docs/install/AIRGAP.md for the per-provider matrix.
-	OfflineFailMode string `yaml:"offline_fail_mode"`
+	// runtime.offline_fail_mode was REMOVED. It parsed, round-tripped
+	// through the settings store, and was read by nothing — no code
+	// path ever consulted it for a decision, so an operator who set
+	// `closed` got a config value the engine did not honour. That is
+	// worse than an unsupported key: it reads as an enforcement knob.
+	//
+	// The knob that does enforce is CHAINSAW_COVERAGE_MODE=closed
+	// (core/coverage). The ADVISORY declaration of operator intent is
+	// intelligence.FailMode / CHAINSAW_OFFLINE_FAIL_MODE, which drives
+	// the `doctor --offline` matrix and is deliberately KEPT — the two
+	// answer different questions and lumping them together as a "dead
+	// pair" understated the second.
+	//
+	// Note for anyone restoring it: the decoder runs with
+	// KnownFields(true), so existing YAML carrying
+	// runtime.offline_fail_mode now fails to parse rather than
+	// silently ignoring the key. That is intentional. A config that
+	// names an enforcement mode we do not apply should stop the
+	// server, not be quietly dropped.
 	// WebhookLegacyPerUserRouting restores the pre-fix per-user routing
 	// path for install.blocked / install.flagged webhooks (keyed off
 	// client_credentials.created_by_user_id). Default false: org-wide
