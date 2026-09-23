@@ -91,6 +91,31 @@ var defaultHostLimits = map[string]float64{
 	"azuresearch-usnc.nuget.org": 15,
 	"huggingface.co":             10,
 	"search.maven.org":           15,
+
+	// repo.maven.apache.org is THE Maven host — the artifact and metadata
+	// repository every gradle/maven coordinate resolves against. It was
+	// missing from this map while `search.maven.org`, the search API we
+	// barely touch, had an entry. So the busiest upstream in the product fell
+	// through to DefaultRateLimit (30/s) and was effectively unthrottled.
+	//
+	// Measured 2026-09-23 with chainsaw_upstream_fetch_total, which is what
+	// exposed it: repo.maven.apache.org served 933 requests of which **831
+	// were 429** and ZERO succeeded, against 9 requests to search.maven.org.
+	// Sonatype throttles at the network edge and treats shared egress as one
+	// consumer, so a hosted deployment reaches their ceiling far sooner than
+	// request volume alone suggests.
+	//
+	// 5/s is a deliberate starting point, not a measurement: Sonatype
+	// publishes no number, and all we know is that ~30/s is far too high.
+	// Lower than every other entry here because Central is the only upstream
+	// observed rejecting the overwhelming majority of our traffic. Tune via
+	// CHAINSAW_UPSTREAM_HOST_LIMITS once the 429 rate can be watched falling.
+	//
+	// This is the technical half only. The official path for a security
+	// vendor at volume is to contact Sonatype — see
+	// docs/plan_upstream_rate_limits.md, which quotes their own FAQ branch
+	// naming this exact category.
+	"repo.maven.apache.org": 5,
 }
 
 // Default limits that exist so callers don't have to special-case a
