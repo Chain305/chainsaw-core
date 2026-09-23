@@ -107,15 +107,61 @@ func openBrowserReal(url string) error {
 	case "darwin":
 		cmd, args = "open", []string{url}
 	case "windows":
-		cmd, args = "cmd", []string{"/c", "start", "", url}
+		cmd, args = "cmd", []string{"/c", "start", "", escapeCmdMeta(url)}
 	default:
 		if isWSL() {
-			cmd, args = "cmd.exe", []string{"/c", "start", "", url}
+			cmd, args = "cmd.exe", []string{"/c", "start", "", escapeCmdMeta(url)}
 		} else {
 			cmd, args = "xdg-open", []string{url}
 		}
 	}
 	return exec.Command(cmd, args...).Start()
+}
+
+// escapeCmdMeta protects a URL from cmd.exe's own parser.
+//
+// BUG-02. Go's exec quotes an argument only when it contains a space, a tab,
+// a double quote or a backslash (syscall.EscapeArg). A CLI auth URL contains
+// none of those, so it reaches the command line bare — and cmd.exe then reads
+// its metacharacters. `&` is a command separator there, so
+//
+//	cmd /c start "" http://host/login?cli=NONCE&cli_port=54321
+//
+// runs `start "" http://host/login?cli=NONCE` and then tries to execute
+// `cli_port=54321` as a second command. The browser opens on a URL whose
+// query has been truncated at the first `&`.
+//
+// That is the whole bug: with no cli_port the page cannot see a CLI flow, so
+// a visitor who already has a session cookie is redirected to /overview
+// (login/page.tsx). Pasting the URL by hand worked because no shell was
+// involved — which is exactly why it read as "intermittent" rather than as a
+// quoting fault.
+//
+// Quoting the argument is not the fix: Go would escape the quotes we added as
+// \" for the C runtime, and cmd.exe does not use those rules. `^` is cmd's
+// own escape and survives the pass-through unquoted, which is the same
+// approach github.com/pkg/browser takes — on Windows. It has no WSL branch,
+// so the WSL arm below has no precedent to lean on: there Go does not apply
+// EscapeArg at all and the interop layer does its own quoting. The escape is
+// still correct there (a quoted argument makes `&` inert, an unquoted one is
+// caret-escaped), but it is reasoned, not borrowed, and it is unverified from
+// a Mac.
+//
+// `^` goes first or it would re-escape the carets added after it.
+//
+// `%` is deliberately NOT in the set, and the reason is worth keeping so the
+// set is not "tidied" later in either direction. cmd expands %VAR% in an
+// EARLIER parse phase than caret handling, so `^%` would not suppress an
+// expansion — a caret cannot defend against it. It does not need to: the URL
+// is built with url.Values.Encode (internal/server/auth_cli.go:1126), which
+// emits `%XX` pairs, and at the command line — unlike inside a batch file —
+// an undefined `%name%` is left literal. Reaching it would need an
+// attacker-influenced environment variable on the victim's own machine.
+func escapeCmdMeta(url string) string {
+	for _, c := range []string{"^", "&", "|", "<", ">", "(", ")"} {
+		url = strings.ReplaceAll(url, c, "^"+c)
+	}
+	return url
 }
 
 var (

@@ -25,6 +25,18 @@ type DefaultOption func(*defaultClientConfig)
 
 // WithTimeout sets the overall client timeout (a backstop covering
 // connect, TLS handshake, request, and response read).
+//
+// Pass 0 for NO deadline. That is worth stating, because it is the only way
+// to get one: omitting this option does not leave the client unbounded, it
+// leaves it on the 30s default below. A caller streaming a large body removed
+// WithTimeout on exactly that assumption and shortened its deadline from five
+// minutes to thirty seconds (see core/malware/sync.go).
+//
+// Note what this deadline covers: the RESPONSE READ is inside it, so it bounds
+// how long a transfer may take rather than how long it may be stuck. For a
+// large download that is the wrong question — a healthy but slow transfer is
+// killed while a connection dribbling one byte at a time is not. Bound the
+// phases separately there.
 func WithTimeout(d time.Duration) DefaultOption {
 	return func(c *defaultClientConfig) { c.timeout = d }
 }
