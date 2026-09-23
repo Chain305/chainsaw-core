@@ -447,7 +447,40 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 	// by row.UpdatedAt as a proxy because the refresher's own Scan writes
 	// update both.
 	staleAfter := r.now().Add(-r.cfg.MaxStaleness)
-	reportFresh := row.UpdatedAt.After(staleAfter)
+
+	// Staleness is measured on the REPORT, not on package_metadata.
+	//
+	// This read `row.UpdatedAt`, a package_metadata column, and the comment
+	// above justified it with "the refresher's own Scan writes update both".
+	// That premise is false, measured against production 2026-09-24: **zero
+	// package_metadata rows were touched in any two-hour window** while ticks
+	// ran. Meanwhile scanFederated gates its own cache-first read on the
+	// report's Observation.CollectedAt, so the two ends were reading different
+	// clocks — the refresher passed a row through as stale because a column
+	// nothing updates looked old, and Scan then answered it from cache.
+	//
+	// Three consecutive ticks logged byte-identical
+	// `scanned=934 skipped=1661 new_versions=626` on three different images,
+	// against ~35 rows actually written in the hour containing one. Each of
+	// those 934 fetched an ARTIFACT first (the fetch below runs before Scan),
+	// so the cost was a discarded multi-megabyte download per row per hour
+	// against upstreams we are already rate-limited on — not merely a wasted
+	// database read.
+	//
+	// The gate was also wrong in the OTHER direction, which is the half that
+	// lost data rather than wasting work: 15 coordinate pairs in production
+	// had a FRESH package_metadata row and a STALE report, so they were
+	// skipped every tick and never refreshed at all.
+	//
+	// Fallback to row.UpdatedAt only when there is NO store to ask. A store
+	// that is present and returns nothing means no report exists, which is a
+	// reason to scan, not to skip — and loadPriorReport also returns nil on
+	// error, so an unreachable store fails toward doing the work.
+	var priorReport *Report
+	if r.cfg.Store != nil {
+		priorReport = r.loadPriorReport(ctx, row, ecosystem)
+	}
+	reportFresh := reportIsFresh(priorReport, r.cfg.Store != nil, row.UpdatedAt, staleAfter)
 	if reportFresh && probeAnswered && (latest == "" || latest == row.Version) {
 		// `latest == ""` is the part that was missing, and it was a 24x
 		// amplifier on exactly the rows least worth rescanning.
@@ -543,11 +576,12 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 			req.Artifact = handle
 		}
 	}
-	// Issue #20: snapshot the prior on-disk Report before Scan overwrites
-	// it so the alerter can diff CVE state across the refresh boundary.
-	// Cheap when alerter is nil — we skip the read entirely.
-	var priorReport *Report
-	if r.alerter != nil {
+	// Issue #20: the alerter diffs CVE state across the refresh boundary
+	// against the prior on-disk Report. That snapshot is already in hand —
+	// the staleness gate above loaded it — so this no longer re-reads it.
+	// When there is no store, priorReport is nil and the alerter simply sees
+	// no prior, which is what it saw before.
+	if r.alerter != nil && priorReport == nil && r.cfg.Store == nil {
 		priorReport = r.loadPriorReport(ctx, row, ecosystem)
 	}
 	nextReport, err := r.cfg.Service.Scan(ctx, req)
