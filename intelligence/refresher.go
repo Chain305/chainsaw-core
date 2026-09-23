@@ -113,6 +113,23 @@ type RefresherConfig struct {
 	// recomputes. Zero means DefaultRecomputeMaxRows.
 	RecomputeMaxRows int
 
+	// StaleReportRefreshEnabled turns on the stale-report sweep (phase four).
+	//
+	// OFF by default, and the polarity is inverted relative to
+	// RecomputeDisabled / CoverageRecomputeDisabled on purpose: those two are
+	// database-only or already-bounded work, while this one reaches registries
+	// that rate-limit us across a population roughly 6x the primary walk's. An
+	// operator opts into that rather than discovering it.
+	StaleReportRefreshEnabled bool
+
+	// StaleReportMaxRows caps how many stale reports one tick refreshes.
+	// Zero means DefaultStaleReportMaxRows.
+	StaleReportMaxRows int
+
+	// StaleReportSource overrides the store for the stale-report sweep, so the
+	// budget and ordering logic can be tested without Postgres.
+	StaleReportSource StaleReportSource
+
 	// CoverageRecomputeMaxRows caps how many partial-closure rows one tick
 	// re-evaluates. Zero means DefaultCoverageRecomputeMaxRows.
 	CoverageRecomputeMaxRows int
@@ -268,6 +285,12 @@ type TickSummary struct {
 	// as the third phase of every tick. Zero-valued when the sweep is
 	// disabled or has no walk source. See refresher_coverage.go.
 	Coverage CoverageSummary
+
+	// StaleReports reports the stale-report sweep that runs as the fourth
+	// phase of every tick — the one that reaches coordinates with no
+	// package_metadata row. Zero-valued unless StaleReportRefreshEnabled.
+	// See refresher_stale_reports.go.
+	StaleReports StaleReportSummary
 }
 
 func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
@@ -340,13 +363,20 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 	// new to say. See refresher_coverage.go.
 	coverage := r.recomputeCoverageOnce(ctx)
 
+	// Phase four: refresh reports the primary walk cannot reach — the ones
+	// with no package_metadata row. Runs LAST because it is the widest and
+	// most upstream-expensive phase, so the three cheaper ones get the tick's
+	// budget first. See refresher_stale_reports.go.
+	staleReports := r.refreshStaleReportsOnce(ctx)
+
 	summary := TickSummary{
-		Scanned:     int(scanned.Load()),
-		Skipped:     int(skipped.Load()),
-		NewVersions: int(newVers.Load()),
-		Duration:    r.now().Sub(start),
-		Recompute:   recompute,
-		Coverage:    coverage,
+		Scanned:      int(scanned.Load()),
+		Skipped:      int(skipped.Load()),
+		NewVersions:  int(newVers.Load()),
+		Duration:     r.now().Sub(start),
+		Recompute:    recompute,
+		Coverage:     coverage,
+		StaleReports: staleReports,
 	}
 	r.lastScanned.Store(int64(summary.Scanned))
 	r.lastSkipped.Store(int64(summary.Skipped))
@@ -368,6 +398,8 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 		"coverage_backlog", summary.Coverage.Backlog,
 		"coverage_improved", summary.Coverage.Improved,
 		"coverage_verdict_changed", summary.Coverage.VerdictChanged,
+		"stale_report_backlog", summary.StaleReports.Backlog,
+		"stale_reports_refreshed", summary.StaleReports.Refreshed,
 		"duration", summary.Duration)
 	return summary
 }
@@ -697,6 +729,18 @@ func RefresherConfigFromEnv() RefresherConfig {
 	// Default ON, matching the refresher itself: an operator who has not
 	// thought about matcher epochs should still get a draining backlog.
 	cfg.RecomputeDisabled = !envBool("CHAINSAW_INTELLIGENCE_RECOMPUTE_ENABLED", true)
+
+	// Default OFF, and the polarity is inverted relative to the two sweeps
+	// above on purpose. Those are database-only or already-bounded work, so an
+	// operator who has not thought about them should still get a draining
+	// backlog. This one reaches registries that rate-limit us, across a
+	// population roughly 6x the primary walk's, so it is opted into.
+	cfg.StaleReportRefreshEnabled = envBool("CHAINSAW_INTELLIGENCE_STALE_REFRESH_ENABLED", false)
+	if v := strings.TrimSpace(os.Getenv("CHAINSAW_INTELLIGENCE_STALE_REFRESH_MAX_ROWS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.StaleReportMaxRows = n
+		}
+	}
 	if v := strings.TrimSpace(os.Getenv("CHAINSAW_INTELLIGENCE_COVERAGE_RECOMPUTE_MAX_ROWS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CoverageRecomputeMaxRows = n
