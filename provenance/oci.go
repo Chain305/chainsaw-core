@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/chain305/chainsaw-core/provenance/sigstoreverify"
@@ -331,9 +332,34 @@ func (c *ociChecker) checkGitHubAttestation(ctx context.Context, repo, digest st
 
 // resolveDigest returns a `sha256:…` digest for a tag or digest input. If
 // version already starts with "sha256:" it's returned as-is.
+// ociDigestTagRe matches the DASH spelling of a content digest,
+// "sha256-<64 lowercase hex>". Strict on purpose: a human-authored tag will not
+// collide with 64 hex characters, and a loose prefix check would turn cosign's
+// "sha256-<digest>.sig" / ".att" tags into malformed digest references.
+var ociDigestTagRe = regexp.MustCompile(`^sha256-[0-9a-f]{64}$`)
+
 func (c *ociChecker) resolveDigest(ctx context.Context, registry, repo, version string) (string, error) {
 	if strings.HasPrefix(version, "sha256:") {
 		return version, nil
+	}
+	// The dash spelling is a digest too, and missing it cost 76 production
+	// reports a FAILED attestation apiece (measured 2026-09-24, every docker
+	// failure in the corpus). It is the stored spelling — `library/alpine`
+	// arrives here as version "sha256-8e37...", not "sha256:8e37..." — and
+	// passing it through unconverted asks the registry for a TAG by that name,
+	// which does not exist. Verified against Docker Hub:
+	//
+	//	/v2/library/alpine/manifests/sha256-8e37848f...  404
+	//	/v2/library/alpine/manifests/sha256:8e37848f...  200
+	//
+	// THREE other sites already normalise this — core/malware/docker_feed.go
+	// and two in internal/server/package_metadata.go — so the spelling is
+	// expected everywhere except here. They are NOT consolidated in this
+	// change: they sit in two other packages, one of them on a request hot
+	// path, and a cross-package refactor of three two-line conversions is a
+	// separate change from fixing the one site that is wrong.
+	if ociDigestTagRe.MatchString(version) {
+		return "sha256:" + strings.TrimPrefix(version, "sha256-"), nil
 	}
 	manifestURL := c.registryURL(registry, fmt.Sprintf("/v2/%s/manifests/%s", repo, version))
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, manifestURL, nil)
