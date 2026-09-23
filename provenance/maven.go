@@ -92,6 +92,24 @@ func (c *mavenChecker) CheckWithSource(ctx context.Context, packageName, version
 // trySigstore fetches `.sigstore.json` and verifies the bundle.
 // Returns StatusMissing if the sidecar is absent, letting the caller try
 // the PGP fallback.
+//
+// KEPT DELIBERATELY, despite being a 404 on most coordinates. The ecosystem
+// sweep flagged this as a guaranteed-404 per Maven coordinate per tick, and
+// measured 2026-09-23 it is: commons-text, guava and slf4j-api all answer 404
+// here and 200 on `.asc`. Removing it would still be wrong.
+//
+// Sidecar presence is per-ARTIFACT, not per-host: artifacts published through
+// the new Central Portal do carry sigstore bundles, and there is no cheaper
+// way to learn that than asking. Skipping the probe would silently downgrade
+// those from a verified Sigstore bundle to PGP, or to nothing — trading a real
+// provenance signal for one request.
+//
+// The cost is also no longer what the sweep measured. The refresh amplifier
+// fixed in v0.22.8 meant every Maven row was rescanned hourly; it is now once
+// per staleness window, so this is ~1 request per coordinate per 24h rather
+// than per hour. If it needs reducing further, the answer is negative caching
+// on the provenance client (it uses `c.client` directly and so has none),
+// NOT dropping the probe.
 func (c *mavenChecker) trySigstore(ctx context.Context, jarURL string) Result {
 	sigURL := jarURL + ".sigstore.json"
 	sigBytes, status, err := fetchBytes(ctx, c.client, sigURL, 1<<20)

@@ -681,6 +681,18 @@ func (f *Fetcher) fetchComposer(ctx context.Context, limit int) ([]PopularPackag
 				packages = append(packages, PopularPackage{Name: name, Rank: len(packages)})
 			}
 		}
+
+		// Packagist's published API policy is unusually specific and asks for
+		// this by name: "If you send requests in parallel, be a good citizen
+		// and do a maximum of 10 concurrent requests", and "If not you can
+		// leave us with no choice but to block IPs which we'd rather not do."
+		// This loop paged with no delay at all while its crates.io sibling
+		// above already sleeps 1100ms.
+		select {
+		case <-ctx.Done():
+			return packages, ctx.Err()
+		case <-time.After(1100 * time.Millisecond):
+		}
 	}
 
 	return packages, nil
