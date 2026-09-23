@@ -16,7 +16,7 @@ package provenance
 // fails on 67% of everything". It is not a verification failure at all — the
 // request was malformed and the sumdb never got as far as looking.
 //
-// This is the THIRD site to hit the same bug. GoModuleZipPath's own comment
+// This is the THIRD site to hit the same bug. GoProxyArtifactPath's own comment
 // records the second ("the artifact path had the prefix problem the METADATA
 // path had already solved ... because each rebuilt the URL for itself"), so a
 // third private copy would be repeating the diagnosis rather than fixing it.

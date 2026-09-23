@@ -24,6 +24,13 @@ import (
 // duration of the test and restores the production roots afterwards.
 func withStubLatestRegistries(t *testing.T, h http.Handler) {
 	t.Helper()
+	// autoDepHTTPClient carries WithSSRFGuard, which correctly refuses
+	// loopback — and httptest serves on 127.0.0.1. Use the operator escape
+	// the guard itself documents rather than dropping the guard in
+	// production: CHAINSAW_ALLOW_PRIVATE_UPSTREAMS is the same switch a
+	// self-hosted registry uses, so the test exercises a configuration that
+	// really exists instead of one invented for the test.
+	t.Setenv("CHAINSAW_ALLOW_PRIVATE_UPSTREAMS", "1")
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	saved := latestRegistryBases
@@ -32,6 +39,14 @@ func withStubLatestRegistries(t *testing.T, h http.Handler) {
 	latestRegistryBases.pypi = srv.URL
 	latestRegistryBases.cargo = srv.URL
 	latestRegistryBases.rubygems = srv.URL
+	// Every base, or a resolver added later silently reaches the real
+	// internet from a unit test. That is exactly what happened when the
+	// maven/go/composer arms landed: the tests returned 3.2.4 and 3.12.0 —
+	// the genuine live versions — instead of the stub's, and would have
+	// started failing whenever an upstream published.
+	latestRegistryBases.maven = srv.URL
+	latestRegistryBases.goproxy = srv.URL
+	latestRegistryBases.composer = srv.URL
 }
 
 func TestResolvableLatestSentinel(t *testing.T) {
@@ -154,13 +169,35 @@ func TestLatestResolvableSetHasAResolver(t *testing.T) {
 	withStubLatestRegistries(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Every shape the four resolvers can read, so a resolver that
 		// exists answers and one that does not returns "".
+		// maven is XML; every other resolver reads JSON. Keyed on the
+		// request path so one handler serves both without either shape
+		// having to tolerate the other's body.
+		if strings.HasSuffix(r.URL.Path, "maven-metadata.xml") {
+			_, _ = w.Write([]byte(`<metadata><versioning><release>9.9.9</release>` +
+				`<versions><version>9.9.9</version></versions></versioning></metadata>`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"dist-tags":{"latest":"9.9.9"},` +
 			`"info":{"version":"9.9.9"},` +
 			`"crate":{"max_stable_version":"9.9.9"},` +
+			`"Version":"9.9.9",` +
+			`"packages":{"x":[{"version":"9.9.9"}]},` +
 			`"version":"9.9.9"}`))
 	}))
+	// A coordinate shape each ecosystem actually accepts. "anything" is not
+	// one: a Maven coordinate is `group:artifact`, so the resolver rightly
+	// refuses it and the invariant could not tell "no resolver" apart from
+	// "resolver rejected a nonsense name". Naming the shape per ecosystem
+	// makes this assert what it claims to.
+	// Kept for when an ecosystem whose coordinate is not a bare name ever
+	// joins the purge slice. Today it holds only bare-name ecosystems.
+	names := map[string]string{}
 	for _, eco := range latestResolvableEcosystems {
-		if got := ResolveLatestVersion(context.Background(), eco, "anything"); got != "9.9.9" {
+		name := names[eco]
+		if name == "" {
+			name = "anything"
+		}
+		if got := ResolveLatestVersion(context.Background(), eco, name); got != "9.9.9" {
 			t.Errorf("ResolveLatestVersion(%q) = %q, want 9.9.9 — "+
 				"the ecosystem is in latestResolvableEcosystems with no resolver arm", eco, got)
 		}

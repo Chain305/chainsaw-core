@@ -8,7 +8,7 @@ package intelligence
 
 import "testing"
 
-func TestGoModuleZipPath(t *testing.T) {
+func TestGoProxyArtifactPath(t *testing.T) {
 	cases := []struct {
 		name, pkg, ver, want string
 		ok                   bool
@@ -41,7 +41,8 @@ func TestGoModuleZipPath(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok := GoModuleZipPath(c.pkg, c.ver)
+			got := GoProxyArtifactPath(c.pkg, c.ver)
+			ok := got != ""
 			if ok != c.ok {
 				t.Fatalf("ok = %v, want %v (got path %q)", ok, c.ok, got)
 			}
@@ -52,12 +53,13 @@ func TestGoModuleZipPath(t *testing.T) {
 	}
 }
 
-// TestGoModuleZipPathLeadingSlash — the old inline version trimmed a leading
+// TestGoProxyArtifactPathLeadingSlash — the old inline version trimmed a leading
 // "/" off the module path, so something upstream produces one. Keep handling
 // it, or this fix would regress a case the buggy code got right.
-func TestGoModuleZipPathLeadingSlash(t *testing.T) {
-	got, ok := GoModuleZipPath("/rsc.io/sampler", "1.3.0")
+func TestGoProxyArtifactPathLeadingSlash(t *testing.T) {
+	got := GoProxyArtifactPath("/rsc.io/sampler", "1.3.0")
+	ok := got != ""
 	if !ok || got != "rsc.io/sampler/@v/v1.3.0.zip" {
-		t.Fatalf("GoModuleZipPath with a leading slash = %q, %v", got, ok)
+		t.Fatalf("GoProxyArtifactPath with a leading slash = %q, %v", got, ok)
 	}
 }

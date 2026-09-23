@@ -1040,12 +1040,22 @@ func expandLockfile(bin string, args []string) []packageSpec {
 				continue
 			}
 			deps, perr := src.parse(data)
-			if perr != nil || len(deps) == 0 {
-				// A malformed lockfile is not a reason to fall through to
-				// the NEXT one: the project has declared which tool owns it,
-				// and scanning a stale sibling would report coverage of a
-				// tree nobody is installing.
+			if perr != nil {
+				// MALFORMED is fatal: the project declared which tool owns
+				// it, the file is corrupt, and quietly scanning a stale
+				// sibling would report coverage of a tree nobody installs.
 				return nil
+			}
+			if len(deps) == 0 {
+				// EMPTY BUT VALID is NOT the same thing, and conflating the
+				// two was a real gap: pipenv writes
+				// `{"default":{},"develop":{}}` for an empty Pipfile, and a
+				// lockfile whose entries are all VCS/editable (no `version`
+				// key) parses cleanly to zero. A file that says nothing has
+				// not declared ownership of anything, so fall through to the
+				// next candidate — which is also what the npm arm above does
+				// (package-lock -> shrinkwrap -> pnpm -> yarn).
+				continue
 			}
 			return depsToSpecs("pypi", deps, nil)
 		}

@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func TestGoModuleZipPathResolvesLive(t *testing.T) {
+func TestGoProxyArtifactPathResolvesLive(t *testing.T) {
 	if os.Getenv("CHAINSAW_LIVE_GOPROXY") != "1" {
 		t.Skip("set CHAINSAW_LIVE_GOPROXY=1 to run (network, rate-limited upstream)")
 	}
@@ -28,7 +28,8 @@ func TestGoModuleZipPathResolvesLive(t *testing.T) {
 		{"cloud.google.com/go/webrisk", "1.9.6"},
 		{"github.com/google/uuid", "1.6.0"},
 	} {
-		path, ok := GoModuleZipPath(c.pkg, c.ver)
+		path := GoProxyArtifactPath(c.pkg, c.ver)
+		ok := path != ""
 		if !ok {
 			t.Errorf("%s@%s: refused", c.pkg, c.ver)
 			continue

@@ -155,3 +155,43 @@ version = "2.31.0"
 		t.Fatalf("colourama did not survive poetry.lock expansion; got %+v", specs)
 	}
 }
+
+// An EMPTY BUT VALID lockfile is not a malformed one, and conflating them
+// silently skipped a project that had a perfectly good poetry.lock.
+//
+// pipenv writes `{"default":{},"develop":{}}` for an empty Pipfile, and a
+// lockfile whose entries are all VCS/editable parses cleanly to zero deps.
+// Neither has declared ownership of anything, so the sweep must keep looking.
+func TestEmptyButValidLockfileFallsThroughToTheNextOne(t *testing.T) {
+	dir := chdirTemp(t)
+	if err := os.WriteFile(filepath.Join(dir, "Pipfile.lock"),
+		[]byte(`{"_meta":{},"default":{},"develop":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "poetry.lock"), []byte(poetryLockFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	specs := expandLockfile("pip", []string{"install"})
+	if len(specs) == 0 {
+		t.Fatal("an empty Pipfile.lock swallowed a valid poetry.lock; " +
+			"empty-but-valid is not malformed")
+	}
+}
+
+// A MALFORMED lockfile still stops the sweep. The project declared which tool
+// owns it and the file is corrupt; scanning a stale sibling would report
+// coverage of a tree nobody is installing.
+func TestMalformedLockfileStopsTheSweep(t *testing.T) {
+	dir := chdirTemp(t)
+	if err := os.WriteFile(filepath.Join(dir, "Pipfile.lock"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "poetry.lock"), []byte(poetryLockFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if specs := expandLockfile("pip", []string{"install"}); len(specs) != 0 {
+		t.Fatalf("a corrupt Pipfile.lock fell through to a sibling: %+v", specs)
+	}
+}

@@ -20,6 +20,7 @@ package intelligence
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 
 	"github.com/chain305/chainsaw-core/httpclient"
 )
@@ -257,7 +261,19 @@ func (s *DefaultService) tryFetchArtifact(ctx context.Context, eco, name, versio
 	return &ArtifactHandle{Bytes: body, MediaType: mediaType}
 }
 
-var autoDepHTTPClient = httpclient.New(httpclient.WithTimeout(autoDepResolveTimeout))
+// autoDepHTTPClient carries WithSSRFGuard.
+//
+// Not exploitable as configured — every host it reaches is a hardcoded public
+// registry — but httpclient.New is documented as NOT SSRF-safe, and the half
+// that bites is redirects: an allowed public host can 302 to 169.254.169.254.
+// core/provenance and core/upstreamhttp both install the guard after P8-52,
+// and this is the one outbound path in the package that did not. It becomes
+// load-bearing the moment GOPROXY or an enterprise registry mirror is made
+// configurable, which is the obvious next request for this code.
+var autoDepHTTPClient = httpclient.New(
+	httpclient.WithTimeout(autoDepResolveTimeout),
+	httpclient.WithSSRFGuard(),
+)
 
 // artifactURLFor returns the canonical tarball URL + Content-Type for
 // the given coordinate. Empty url means we don't know how to fetch
@@ -287,55 +303,67 @@ func artifactURLFor(eco, name, version string) (string, string) {
 	case "go", "gomod":
 		// The module proxy is fully deterministic — module path, @v, version,
 		// .zip — so unlike PyPI above there is no registry lookup to cache
-		// first. That is the whole reason Go could be wired here and PyPI
-		// could not.
+		// first.
 		//
-		// Measured before this existed: artifactScan.performed was true on
-		// 4 of 6,139 Go reports in production, because artifactURLFor
-		// returned empty, the scanner saw a nil Artifact, and every
-		// NeedsArtifact provider emitted WarnNeedsArtifact instead of
-		// running. Go is the largest ecosystem in the corpus.
-		// Through GoModuleZipPath — the THIRD copy of this URL construction,
-		// found by the ecosystem sweep after the other two were unified.
-		//
-		// What was here refused any bare version outright, on the reasoning
-		// that it would be a guaranteed 404 against a budget we are close to.
-		// Correct as far as it went, and it produced no bad requests — but it
-		// declined to build a URL for **6,093 of the 6,139** stored Go
-		// coordinates, because both Go lockfile parsers strip the leading "v"
-		// so the stored spelling is bare. Refusing is not the fix; restoring
-		// the prefix is, and the shared helper does that plus the proxy's "!"
-		// case-escape.
-		path, ok := GoModuleZipPath(name, version)
-		if !ok {
-			return "", ""
+		// NOTE ON REACHABILITY, because the tests here do NOT prove it: this
+		// branch is currently DEAD for Go. enqueueDependencyScans gates on
+		// canAutoResolve (dep_enqueuer.go:119), whose latestResolvableEcosystems
+		// has no go/gomod, and ResolveLatestVersionEx has no Go arm either. The
+		// live Go artifact path is internal/server's artifactLogicalPath. This
+		// case is kept correct-and-shared so the two cannot drift if Go ever
+		// joins the auto-resolve set, but it is not what fixed Go coverage.
+		if p := GoProxyArtifactPath(name, version); p != "" {
+			return "https://proxy.golang.org/" + p, "application/zip"
 		}
-		return "https://proxy.golang.org/" + path, "application/zip"
+		return "", ""
 	}
 	return "", ""
 }
 
-// escapeGoModulePath applies the module proxy's case-encoding: every uppercase
-// letter becomes "!" followed by its lowercase form.
+// GoProxyArtifactPath renders the module-proxy path segment for a coordinate:
+// `<escaped-module>/@v/<escaped-version>.zip`. Empty when the coordinate cannot
+// be expressed as a proxy path.
 //
-// Module paths are case-sensitive but many filesystems are not, so the proxy
-// cannot serve `.../Masterminds/...` and `.../masterminds/...` from the same
-// tree. Getting this wrong is not a subtle degradation — it is a 404 on every
-// module with a capitalised author or repo, which is a large share of real Go
-// dependencies. Deliberately NOT url.PathEscape: the separators in a module
-// path are real path separators and must survive.
-func escapeGoModulePath(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + 8)
-	for _, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			b.WriteByte('!')
-			b.WriteRune(r + ('a' - 'A'))
-			continue
-		}
-		b.WriteRune(r)
+// It delegates to golang.org/x/mod/module, which is a DIRECT dependency of both
+// module roots and is the spec implementation. Three reasons that matters more
+// than the eight lines it replaces:
+//
+//   - BOTH the module path and the version are case-encoded (uppercase ->
+//     "!" + lowercase). A hand-rolled version that escapes only the path
+//     produces a 404 on `v1.0.0-RC1`; one that escapes neither 404s on every
+//     capitalised module.
+//   - EscapePath/EscapeVersion RETURN AN ERROR for inputs a hand-rolled loop
+//     passes through silently: a literal "!" and any non-ASCII rune. Passing
+//     "!" through is not injective — `github.com/!masterminds/x` and
+//     `github.com/Masterminds/x` would fetch the SAME artifact, so a scan
+//     would be attributed to the wrong module. On a coordinate-keyed cache
+//     (see L-02) that is a real mis-attribution, not a curiosity.
+//   - There were already three copies of this rule in the tree
+//     (encodeGoModulePath here, core/provenance/gomod.go via x/mod, and the
+//     unescaped inline one in internal/server). Adding a fourth is how they
+//     drift; this is the one both remaining callers share.
+//
+// The version is normalised with goProxyVersion first: the Go depparsers strip
+// the leading "v" (core/depparser/parser/golang/{mod,sum}), so stored versions
+// are "1.8.1", not "v1.8.1", and the proxy requires the "v".
+func GoProxyArtifactPath(modulePath, version string) string {
+	esc, err := module.EscapePath(strings.TrimPrefix(modulePath, "/"))
+	if err != nil {
+		return ""
 	}
-	return b.String()
+	// semver.IsValid, not a "starts with v" check. The sentinel "latest" would
+	// pass the prefix check as "vlatest" and spend an upstream fetch on a
+	// guaranteed 404; a real stored version ("1.8.1") would FAIL it, which is
+	// the bug that made the first attempt at this a no-op.
+	v := goProxyVersion(version)
+	if !semver.IsValid(v) {
+		return ""
+	}
+	ev, err := module.EscapeVersion(v)
+	if err != nil {
+		return ""
+	}
+	return esc + "/@v/" + ev + ".zip"
 }
 
 // -- per-ecosystem latest-version resolvers ---------------------------
@@ -354,11 +382,17 @@ var latestRegistryBases = struct {
 	pypi     string
 	cargo    string
 	rubygems string
+	maven    string
+	goproxy  string
+	composer string
 }{
 	npm:      "https://registry.npmjs.org",
 	pypi:     "https://pypi.org",
 	cargo:    "https://crates.io",
 	rubygems: "https://rubygems.org",
+	maven:    "https://repo1.maven.org/maven2",
+	goproxy:  "https://proxy.golang.org",
+	composer: "https://repo.packagist.org",
 }
 
 func resolveNpmLatest(ctx context.Context, name string) (string, error) {
@@ -445,4 +479,30 @@ func autoDepGetJSON(ctx context.Context, endpoint string, out any) error {
 	}
 	limited := io.LimitReader(resp.Body, 8<<20)
 	return json.NewDecoder(limited).Decode(out)
+}
+
+// autoDepGetXML is autoDepGetJSON for an XML body — Maven Central serves
+// maven-metadata.xml and nothing else. Same 404 sentinel and the same 8 MiB
+// read cap, deliberately: a registry that answers "not found" must stay
+// distinguishable from one that could not be reached, and an unbounded read
+// off a remote is how a resolver becomes a memory exhaust.
+func autoDepGetXML(ctx context.Context, endpoint string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/xml")
+	req.Header.Set("User-Agent", UserAgent("deps"))
+	resp, err := autoDepHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrRegistryNotFound
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("http %d", resp.StatusCode)
+	}
+	return xml.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out)
 }

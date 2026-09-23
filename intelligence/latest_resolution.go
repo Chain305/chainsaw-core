@@ -46,6 +46,8 @@ package intelligence
 // answering a different question.
 
 import (
+	"golang.org/x/mod/module"
+
 	"context"
 	"errors"
 	"strings"
@@ -71,6 +73,17 @@ const LatestSentinel = "latest"
 // Adding an ecosystem here without adding its resolver arm below is the
 // one edit that breaks the invariant; TestLatestResolvableSetHasAResolver
 // fails on it.
+// NOTE — this slice is NOT what routes ResolveLatestVersionEx. That is the
+// switch below, and the two sets are deliberately different.
+//
+// This slice answers "is a STORED row whose version is literally `latest` a
+// placeholder we may DELETE?" — LatestSentinelRule feeds it to a purge. The
+// switch answers "can we look up what the newest version is?". Maven and
+// docker resolve the second question and must never appear in the first:
+// `LATEST` is a real Maven metaversion and `latest` is a real docker tag, so
+// a stored row carrying it can be a genuine evaluation, and deleting it
+// destroys data. TestLatestSentinelRuleExcludesDockerAndMaven enforces that,
+// and it caught exactly this mistake on 2026-09-23.
 var latestResolvableEcosystems = []string{
 	"npm", "yarn", "bun", "pypi", "pip", "cargo", "rubygems",
 }
@@ -173,6 +186,12 @@ func ResolveLatestVersionEx(ctx context.Context, ecosystem, name string) (string
 		v, err = resolveCargoLatest(resolveCtx, name)
 	case "rubygems":
 		v, err = resolveRubyGemsLatest(resolveCtx, name)
+	case "maven", "gradle":
+		v, err = resolveMavenLatest(resolveCtx, name)
+	case "go", "gomod":
+		v, err = resolveGoLatest(resolveCtx, name)
+	case "composer":
+		v, err = resolveComposerLatest(resolveCtx, name)
 	default:
 		// No resolver. Not an error, and emphatically not "not found".
 		return "", LatestUnknown
@@ -208,4 +227,89 @@ func ResolveLatestKey(ctx context.Context, key Key) (Key, string) {
 	was := key.Version
 	key.Version = resolved
 	return key, was
+}
+
+// --- resolvers added 2026-09-23 ------------------------------------------
+
+// resolveMavenLatest reads Maven Central's maven-metadata.xml for a
+// `group:artifact` coordinate. Serves both maven and gradle: they are the same
+// repository, and a gradle coordinate is a Maven one.
+//
+// It returns <release>, NOT <latest>. <latest> can point at a SNAPSHOT, and
+// serving a snapshot as the answer to a version-less query would scan an
+// artifact that is not what anybody installs. When <release> is absent it
+// falls back to the last non-snapshot <version> rather than guessing.
+func resolveMavenLatest(ctx context.Context, name string) (string, error) {
+	group, artifact, ok := strings.Cut(strings.TrimSpace(name), ":")
+	if !ok || group == "" || artifact == "" {
+		return "", nil
+	}
+	endpoint := latestRegistryBases.maven + "/" +
+		strings.ReplaceAll(group, ".", "/") + "/" + artifact + "/maven-metadata.xml"
+
+	var meta struct {
+		Versioning struct {
+			Release  string   `xml:"release"`
+			Latest   string   `xml:"latest"`
+			Versions []string `xml:"versions>version"`
+		} `xml:"versioning"`
+	}
+	if err := autoDepGetXML(ctx, endpoint, &meta); err != nil {
+		return "", err
+	}
+	if v := strings.TrimSpace(meta.Versioning.Release); v != "" && !isSnapshotVersion(v) {
+		return v, nil
+	}
+	for i := len(meta.Versioning.Versions) - 1; i >= 0; i-- {
+		if v := strings.TrimSpace(meta.Versioning.Versions[i]); v != "" && !isSnapshotVersion(v) {
+			return v, nil
+		}
+	}
+	return "", nil
+}
+
+func isSnapshotVersion(v string) bool {
+	return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(v)), "-SNAPSHOT")
+}
+
+// resolveGoLatest reads the module proxy's @latest endpoint. The module path
+// is case-escaped for the same reason the artifact URL is — an unescaped
+// capitalised module 404s.
+func resolveGoLatest(ctx context.Context, name string) (string, error) {
+	esc, err := module.EscapePath(strings.TrimPrefix(strings.TrimSpace(name), "/"))
+	if err != nil {
+		return "", nil
+	}
+	var out struct {
+		Version string `json:"Version"`
+	}
+	if err := autoDepGetJSON(ctx, latestRegistryBases.goproxy+"/"+esc+"/@latest", &out); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.Version), nil
+}
+
+// resolveComposerLatest reads packagist's p2 metadata. Entries are newest
+// first. `dev-*` branch versions are skipped: they are moving targets, so
+// scanning one answers a question about whatever it pointed at today.
+func resolveComposerLatest(ctx context.Context, name string) (string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var out struct {
+		Packages map[string][]struct {
+			Version string `json:"version"`
+		} `json:"packages"`
+	}
+	if err := autoDepGetJSON(ctx, latestRegistryBases.composer+"/p2/"+name+".json", &out); err != nil {
+		return "", err
+	}
+	for _, versions := range out.Packages {
+		for _, v := range versions {
+			ver := strings.TrimSpace(v.Version)
+			if ver == "" || strings.HasPrefix(strings.ToLower(ver), "dev-") {
+				continue
+			}
+			return ver, nil
+		}
+	}
+	return "", nil
 }
