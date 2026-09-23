@@ -321,3 +321,59 @@ func lastIndex(haystack, needle []byte) int {
 	}
 	return -1
 }
+
+// dsseSubjectSHA512Hex is the sha512 the corpus DSSE bundle's in-toto subject
+// actually binds (subject "slsa-provenance-0.0.7.tgz"). Read out of
+// testdata/dsse.sigstore.json, not invented.
+const dsseSubjectSHA512Hex = "bbfd372fc9beeb777fe35d05bb10c0c70a9733d366a75fed7dd18866c7391de3ee7e88ba74dd47abf3e15c845e547fcf0e5c3da80854c751554224d3a6d4e55f"
+
+// TestRealDSSEVerifyDigestSucceedsOnTheAlgorithmTheSubjectBinds is the
+// SUCCESS path this package has never had, and the guard for the npm
+// breakage.
+//
+// The sibling test above records the old boundary: "Our Verify() pins the
+// artifact-digest policy to sha256; the corpus subject is sha512-bound, so
+// verification fails at the FINAL digest-match step" — and a comment in
+// TestRealDSSEBundleSubjects... calls the missing success path a "documented
+// boundary". That boundary was the bug, not a property of the fixtures: in
+// production it meant **0 of 1,857 npm sigstore verifications had ever
+// succeeded** (2026-09-24), because npm subjects bind sha512 and only sha512,
+// and every one was checked against a sha256.
+//
+// Naming the algorithm the statement actually carries turns that same fixture
+// into a genuine end-to-end success — Fulcio cert chain, Rekor tlog inclusion,
+// DSSE signature AND the artifact-digest match, all against genuinely-signed
+// bytes, offline.
+//
+// It is also the only test that fails when VerifyDigest ignores its `alg`
+// argument and hardcodes "sha256" again. Every other test in the package
+// survives that mutation, because they all assert a FAILURE and the mutant
+// still fails.
+func TestRealDSSEVerifyDigestSucceedsOnTheAlgorithmTheSubjectBinds(t *testing.T) {
+	v := pgVerifier(t)
+	bundleJSON := readTestdata(t, "dsse.sigstore.json")
+
+	digest, err := hex.DecodeString(dsseSubjectSHA512Hex)
+	if err != nil {
+		t.Fatalf("decode subject digest: %v", err)
+	}
+
+	id, err := v.VerifyDigest(bundleJSON, sigstoreverify.DigestSHA512, digest)
+	if err != nil {
+		t.Fatalf("a genuinely-signed DSSE bundle failed to verify against the sha512 its own "+
+			"subject binds: %v\n\nThis is the npm defect: the verification policy is naming an "+
+			"algorithm the statement does not carry, so the digest can never match.", err)
+	}
+	if id == nil {
+		t.Fatal("verified with no identity extracted")
+	}
+
+	// And a WRONG sha512 must still be rejected, or the success above proves
+	// only that the digest check was skipped.
+	wrong := make([]byte, len(digest))
+	copy(wrong, digest)
+	wrong[0] ^= 0xff
+	if _, err := v.VerifyDigest(bundleJSON, sigstoreverify.DigestSHA512, wrong); err == nil {
+		t.Fatal("a WRONG sha512 verified — the artifact-digest policy is not being enforced at all")
+	}
+}

@@ -72,11 +72,11 @@ type cacheEntry struct {
 //
 // Stale entries are returned because the live-verification path treats
 // them as a last-known-good fallback when Rekor/Fulcio is unreachable.
-func (c *BundleCache) Get(bundleJSON, artifactSHA256 []byte) (id Identity, verifiedAt time.Time, fresh, ok bool) {
+func (c *BundleCache) Get(alg string, bundleJSON, artifactSHA256 []byte) (id Identity, verifiedAt time.Time, fresh, ok bool) {
 	if c == nil {
 		return Identity{}, time.Time{}, false, false
 	}
-	path := c.path(bundleJSON, artifactSHA256)
+	path := c.path(alg, bundleJSON, artifactSHA256)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Identity{}, time.Time{}, false, false
@@ -92,7 +92,7 @@ func (c *BundleCache) Get(bundleJSON, artifactSHA256 []byte) (id Identity, verif
 // Put stores a successful verification result. Errors are returned but
 // callers typically log-and-continue: a cache write failure should not
 // fail an otherwise-successful verification.
-func (c *BundleCache) Put(bundleJSON, artifactSHA256 []byte, id Identity) error {
+func (c *BundleCache) Put(alg string, bundleJSON, artifactSHA256 []byte, id Identity) error {
 	if c == nil {
 		return nil
 	}
@@ -103,7 +103,7 @@ func (c *BundleCache) Put(bundleJSON, artifactSHA256 []byte, id Identity) error 
 	if err != nil {
 		return fmt.Errorf("marshal cache entry: %w", err)
 	}
-	path := c.path(bundleJSON, artifactSHA256)
+	path := c.path(alg, bundleJSON, artifactSHA256)
 	tmp, err := os.CreateTemp(c.dir, ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
@@ -128,10 +128,14 @@ func (c *BundleCache) Put(bundleJSON, artifactSHA256 []byte, id Identity) error 
 // path returns the on-disk path for a given (bundle, artifact) pair. The
 // key includes the artifact digest so the same bundle replayed against a
 // different artifact never silently reuses the cached identity.
-func (c *BundleCache) path(bundleJSON, artifactSHA256 []byte) string {
+func (c *BundleCache) path(alg string, bundleJSON, artifactDigest []byte) string {
 	h := sha256.New()
 	h.Write(bundleJSON)
-	h.Write(artifactSHA256)
+	// The algorithm is part of the key, not just the digest bytes. A sha256
+	// and a sha512 answer for the same bundle are different questions, and
+	// serving one for the other would hand back a verdict nothing verified.
+	h.Write([]byte(alg))
+	h.Write(artifactDigest)
 	return filepath.Join(c.dir, hex.EncodeToString(h.Sum(nil))+".json")
 }
 
@@ -165,23 +169,28 @@ type VerifyResult struct {
 // If cache is nil, behaves like a plain Verify call (no caching, no
 // fallback).
 func (v *Verifier) VerifyWithCache(cache *BundleCache, bundleJSON, artifactSHA256 []byte) (*VerifyResult, error) {
+	return v.VerifyDigestWithCache(cache, bundleJSON, DigestSHA256, artifactSHA256)
+}
+
+// VerifyDigestWithCache is VerifyWithCache with the digest algorithm named.
+func (v *Verifier) VerifyDigestWithCache(cache *BundleCache, bundleJSON []byte, alg string, artifactSHA256 []byte) (*VerifyResult, error) {
 	if cache != nil {
-		if id, verifiedAt, fresh, ok := cache.Get(bundleJSON, artifactSHA256); ok && fresh {
+		if id, verifiedAt, fresh, ok := cache.Get(alg, bundleJSON, artifactSHA256); ok && fresh {
 			return &VerifyResult{Identity: id, VerifiedAt: verifiedAt}, nil
 		}
 	}
-	id, err := v.Verify(bundleJSON, artifactSHA256)
+	id, err := v.VerifyDigest(bundleJSON, alg, artifactSHA256)
 	if err == nil {
 		now := time.Now()
 		if cache != nil {
 			// Best-effort cache write; verification result stands
 			// regardless of write success.
-			_ = cache.Put(bundleJSON, artifactSHA256, *id)
+			_ = cache.Put(alg, bundleJSON, artifactSHA256, *id)
 		}
 		return &VerifyResult{Identity: *id, VerifiedAt: now}, nil
 	}
 	if cache != nil {
-		if staleID, staleAt, _, ok := cache.Get(bundleJSON, artifactSHA256); ok {
+		if staleID, staleAt, _, ok := cache.Get(alg, bundleJSON, artifactSHA256); ok {
 			return &VerifyResult{
 				Identity:   staleID,
 				VerifiedAt: staleAt,

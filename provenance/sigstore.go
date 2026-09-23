@@ -293,12 +293,18 @@ func noteUnverifiedBundle(r *Result, bundleJSON []byte, reason string) {
 // returned VerifyResult includes a CacheStale=true flag when Rekor/Fulcio
 // were unreachable but a stale cache entry is being served.
 func runSigstoreVerify(ctx context.Context, cache *sigstoreverify.BundleCache, bundleJSON, artifactSHA256 []byte) (*sigstoreverify.VerifyResult, error) {
+	return runSigstoreVerifyDigest(ctx, cache, bundleJSON, sigstoreverify.DigestSHA256, artifactSHA256)
+}
+
+// runSigstoreVerifyDigest is runSigstoreVerify with the artifact digest
+// algorithm named. npm binds sha512 and only sha512.
+func runSigstoreVerifyDigest(ctx context.Context, cache *sigstoreverify.BundleCache, bundleJSON []byte, alg string, artifactSHA256 []byte) (*sigstoreverify.VerifyResult, error) {
 	v, err := sigstoreverify.Default(ctx)
 	if err != nil {
 		// Trust root unreachable. Try the cache; if we have a stale entry
 		// we can still serve a last-known-good answer.
 		if cache != nil {
-			if id, verifiedAt, _, ok := cache.Get(bundleJSON, artifactSHA256); ok {
+			if id, verifiedAt, _, ok := cache.Get(alg, bundleJSON, artifactSHA256); ok {
 				return &sigstoreverify.VerifyResult{
 					Identity:   id,
 					VerifiedAt: verifiedAt,
@@ -309,5 +315,5 @@ func runSigstoreVerify(ctx context.Context, cache *sigstoreverify.BundleCache, b
 		}
 		return nil, fmt.Errorf("sigstore trust root: %w", err)
 	}
-	return v.VerifyWithCache(cache, bundleJSON, artifactSHA256)
+	return v.VerifyDigestWithCache(cache, bundleJSON, alg, artifactSHA256)
 }

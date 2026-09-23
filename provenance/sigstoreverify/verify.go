@@ -74,8 +74,42 @@ func NewLiveVerifier(ctx context.Context) (*Verifier, error) {
 // attests to (32 bytes). Identity-of-signer is not constrained — callers
 // receive whatever identity the bundle binds to.
 func (v *Verifier) Verify(bundleJSON []byte, artifactSHA256 []byte) (*Identity, error) {
-	if len(artifactSHA256) != 32 {
-		return nil, fmt.Errorf("artifactSHA256: want 32 bytes, got %d", len(artifactSHA256))
+	return v.VerifyDigest(bundleJSON, DigestSHA256, artifactSHA256)
+}
+
+// DigestAlgorithms are the artifact digest algorithms an in-toto subject may
+// bind, and the raw byte length of each.
+//
+// sha512 is here because npm uses it and ONLY it. Until 2026-09-24 this
+// package hardcoded "sha256" into the verification policy, so every npm
+// attestation was checked against a digest algorithm its statement does not
+// carry: **0 of 1,857 npm sigstore verifications had ever succeeded** in
+// production, 1,852 of them recorded as StatusFailed with "provided artifact
+// digests does not match digests in statement". A 100% failure rate across 439
+// distinct publishers — including plainly legitimate ones like
+// radix-ui/primitives — was us, not them.
+const (
+	DigestSHA256 = "sha256"
+	DigestSHA512 = "sha512"
+)
+
+var digestLengths = map[string]int{
+	DigestSHA256: 32,
+	DigestSHA512: 64,
+}
+
+// VerifyDigest is Verify with the artifact digest algorithm named explicitly.
+// The algorithm must be one the bundle's in-toto subject actually binds —
+// sigstore-go matches on the algorithm key, so naming one the statement does
+// not carry fails with a digest mismatch rather than an unsupported-algorithm
+// error, which is why the npm breakage above read as "the digests differ".
+func (v *Verifier) VerifyDigest(bundleJSON []byte, alg string, digest []byte) (*Identity, error) {
+	want, ok := digestLengths[alg]
+	if !ok {
+		return nil, fmt.Errorf("unsupported artifact digest algorithm %q", alg)
+	}
+	if len(digest) != want {
+		return nil, fmt.Errorf("artifact %s digest: want %d bytes, got %d", alg, want, len(digest))
 	}
 	b, err := parseBundle(bundleJSON)
 	if err != nil {
@@ -92,7 +126,7 @@ func (v *Verifier) Verify(bundleJSON []byte, artifactSHA256 []byte) (*Identity, 
 	}
 
 	policy := verify.NewPolicy(
-		verify.WithArtifactDigest("sha256", artifactSHA256),
+		verify.WithArtifactDigest(alg, digest),
 		verify.WithoutIdentitiesUnsafe(), // we extract the identity, we don't constrain it
 	)
 

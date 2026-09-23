@@ -23,10 +23,10 @@ func TestBundleCacheRoundTrip(t *testing.T) {
 		BuilderID:  "https://github.com/foo/bar/.github/workflows/release.yml@refs/tags/v1",
 		Issuer:     "https://token.actions.githubusercontent.com",
 	}
-	if err := c.Put(bundle, artifact, want); err != nil {
+	if err := c.Put(DigestSHA256, bundle, artifact, want); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	got, _, fresh, ok := c.Get(bundle, artifact)
+	got, _, fresh, ok := c.Get(DigestSHA256, bundle, artifact)
 	if !ok {
 		t.Fatal("Get: ok=false after Put")
 	}
@@ -47,14 +47,14 @@ func TestBundleCacheStaleAfterTTL(t *testing.T) {
 	}
 	bundle := []byte("b")
 	artifact := make([]byte, 32)
-	if err := c.Put(bundle, artifact, Identity{SourceRepo: "r"}); err != nil {
+	if err := c.Put(DigestSHA256, bundle, artifact, Identity{SourceRepo: "r"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, _, fresh, ok := c.Get(bundle, artifact); !ok || !fresh {
+	if _, _, fresh, ok := c.Get(DigestSHA256, bundle, artifact); !ok || !fresh {
 		t.Fatalf("immediately after Put: ok=%v fresh=%v", ok, fresh)
 	}
 	fake.Advance(2 * time.Hour)
-	got, _, fresh, ok := c.Get(bundle, artifact)
+	got, _, fresh, ok := c.Get(DigestSHA256, bundle, artifact)
 	if !ok {
 		t.Fatal("expected stale entry to still be returned")
 	}
@@ -75,20 +75,20 @@ func TestBundleCacheKeyIncludesArtifact(t *testing.T) {
 	a1 := make([]byte, 32)
 	a2 := make([]byte, 32)
 	a2[0] = 1
-	if err := c.Put(bundle, a1, Identity{SourceRepo: "one"}); err != nil {
+	if err := c.Put(DigestSHA256, bundle, a1, Identity{SourceRepo: "one"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, ok := c.Get(bundle, a2); ok {
+	if _, _, _, ok := c.Get(DigestSHA256, bundle, a2); ok {
 		t.Fatal("entry leaked across artifact digests")
 	}
 }
 
 func TestBundleCacheNilSafe(t *testing.T) {
 	var c *BundleCache
-	if _, _, _, ok := c.Get(nil, nil); ok {
+	if _, _, _, ok := c.Get(DigestSHA256, nil, nil); ok {
 		t.Error("nil cache returned ok=true")
 	}
-	if err := c.Put(nil, nil, Identity{}); err != nil {
+	if err := c.Put(DigestSHA256, nil, nil, Identity{}); err != nil {
 		t.Errorf("nil cache Put returned err: %v", err)
 	}
 }
@@ -101,11 +101,11 @@ func TestBundleCacheCorruptEntryIgnored(t *testing.T) {
 	}
 	bundle := []byte("b")
 	artifact := make([]byte, 32)
-	path := c.path(bundle, artifact)
+	path := c.path(DigestSHA256, bundle, artifact)
 	if err := os.WriteFile(path, []byte("{not-valid-json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, ok := c.Get(bundle, artifact); ok {
+	if _, _, _, ok := c.Get(DigestSHA256, bundle, artifact); ok {
 		t.Error("corrupt entry should report ok=false")
 	}
 }
@@ -118,7 +118,7 @@ func TestVerifyWithCacheServesFreshHit(t *testing.T) {
 	bundle := []byte("b")
 	artifact := make([]byte, 32)
 	want := Identity{SourceRepo: "https://github.com/cached/repo"}
-	if err := cache.Put(bundle, artifact, want); err != nil {
+	if err := cache.Put(DigestSHA256, bundle, artifact, want); err != nil {
 		t.Fatal(err)
 	}
 	// Verifier with nil trusted root would fail any live call — proves
@@ -150,7 +150,7 @@ func TestVerifyWithCacheStaleFallbackOnLiveError(t *testing.T) {
 	staleID := Identity{SourceRepo: "https://github.com/stale/repo"}
 	// Pre-populate the cache directly so we know the Get key matches.
 	c := &BundleCache{dir: dir, ttl: time.Hour, clock: fake}
-	if err := c.Put(bundle, artifact, staleID); err != nil {
+	if err := c.Put(DigestSHA256, bundle, artifact, staleID); err != nil {
 		t.Fatal(err)
 	}
 	fake.Advance(2 * time.Hour) // make the entry stale
@@ -210,5 +210,20 @@ func TestVerifyWithCacheNilCache(t *testing.T) {
 	}
 	if !errors.Is(err, err) { // sanity
 		t.Fatal("error should be returnable")
+	}
+}
+
+// The algorithm is part of the cache key. A sha256 answer and a sha512 answer
+// for the same bundle are different questions, and serving one for the other
+// would hand back a verdict nothing verified. The digest byte lengths differ
+// (32 vs 64) so a real collision is implausible, but "implausible" is not the
+// standard for a key that gates a signature verdict.
+func TestCacheKeyIncludesTheDigestAlgorithm(t *testing.T) {
+	c := &BundleCache{dir: t.TempDir()}
+	bundle := []byte("bundle")
+	digest := []byte("same-bytes-either-way")
+	if c.path(DigestSHA256, bundle, digest) == c.path(DigestSHA512, bundle, digest) {
+		t.Error("sha256 and sha512 share a cache path for the same bundle and digest bytes; " +
+			"a cached verdict for one algorithm can be served for the other")
 	}
 }

@@ -2,7 +2,8 @@ package provenance
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -99,20 +100,19 @@ func (c *npmChecker) Check(ctx context.Context, packageName, version string) Res
 		return result
 	}
 
-	// Resolve the tarball SHA-256 needed to crypto-verify the bundle. npm
-	// dist.integrity is base64-encoded sha512 by default; fetching the
-	// tarball is the only way to get a verifier-compatible sha256. The
-	// BundleCache means we only pay this cost once per (bundle, artifact).
-	tarballSHA, err := c.tarballSHA256(ctx, packageName, version)
+	// Resolve the tarball SHA-512 the bundle's in-toto subject binds. npm
+	// subjects carry sha512 and nothing else; see tarballSHA512 for why this
+	// was sha256 and what that cost.
+	tarballSHA, err := c.tarballSHA512(ctx, packageName, version)
 	if err != nil {
 		// Bundle present but we can't get the artifact digest to verify
 		// against. Surface identity from the bundle (informational) and
 		// leave Status=StatusUnverified.
-		noteUnverifiedBundle(&result, bundleJSON, fmt.Sprintf("resolve tarball sha256: %v", err))
+		noteUnverifiedBundle(&result, bundleJSON, fmt.Sprintf("resolve tarball sha512: %v", err))
 		return result
 	}
 
-	vr, err := runSigstoreVerify(ctx, c.cacheFor(), bundleJSON, tarballSHA)
+	vr, err := runSigstoreVerifyDigest(ctx, c.cacheFor(), bundleJSON, sigstoreverify.DigestSHA512, tarballSHA)
 	if err != nil {
 		// Verification attempted and failed. Distinguish "bundle malformed
 		// or signed by an untrusted identity" (StatusFailed) from "we
@@ -162,10 +162,29 @@ func pickSLSAAttestation(attestations []any) ([]byte, string, bool) {
 	return nil, "", false
 }
 
-// tarballSHA256 fetches the npm tarball for (pkg, version) and computes
-// its SHA-256 digest. Used as the artifact digest input to Sigstore
-// bundle verification.
-func (c *npmChecker) tarballSHA256(ctx context.Context, packageName, version string) ([]byte, error) {
+// tarballSHA512 resolves the SHA-512 digest of the npm tarball for
+// (pkg, version) — the digest npm's attestation subjects actually bind.
+//
+// It was tarballSHA256, and it was the reason **0 of 1,857 npm sigstore
+// verifications had ever succeeded** in production (measured 2026-09-24).
+// npm in-toto subjects carry `{"sha512": ...}` and nothing else, so checking
+// against a sha256 could only ever produce "provided artifact digests does
+// not match digests in statement" — which is exactly what all 1,852 failed
+// rows said, across 439 distinct publishers including radix-ui/primitives.
+//
+// The old comment justified the download: "npm dist.integrity is
+// base64-encoded sha512 by default; fetching the tarball is the only way to
+// get a verifier-compatible sha256." The premise was inverted. sha512 IS the
+// verifier-compatible digest here, dist.integrity already carries it, and
+// verified against the live registry it is byte-identical to the attestation
+// subject:
+//
+//	sigstore@3.0.0          dist.integrity sha512 == subject sha512
+//	@sigstore/bundle@3.0.0  dist.integrity sha512 == subject sha512
+//
+// So the common path now downloads no tarball at all. The fetch survives only
+// as a fallback for metadata that lacks a sha512 integrity string.
+func (c *npmChecker) tarballSHA512(ctx context.Context, packageName, version string) ([]byte, error) {
 	encodedPkg := url.PathEscape(packageName)
 	encodedVer := url.PathEscape(version)
 	metaURL := fmt.Sprintf("%s/%s/%s", c.registryBase(), encodedPkg, encodedVer)
@@ -177,9 +196,19 @@ func (c *npmChecker) tarballSHA256(ctx context.Context, packageName, version str
 	if !ok {
 		return nil, fmt.Errorf("metadata missing dist")
 	}
+	// Preferred: the registry already told us the sha512.
+	if integrity, _ := dist["integrity"].(string); strings.HasPrefix(integrity, "sha512-") {
+		raw, decErr := base64.StdEncoding.DecodeString(strings.TrimPrefix(integrity, "sha512-"))
+		if decErr == nil && len(raw) == sha512.Size {
+			return raw, nil
+		}
+		// A malformed integrity string is not fatal — fall through and hash
+		// the bytes ourselves rather than failing a verification we can still
+		// do.
+	}
 	tarballURL, _ := dist["tarball"].(string)
 	if tarballURL == "" {
-		return nil, fmt.Errorf("metadata missing dist.tarball")
+		return nil, fmt.Errorf("metadata missing dist.tarball and no usable dist.integrity")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tarballURL, nil)
 	if err != nil {
@@ -193,7 +222,7 @@ func (c *npmChecker) tarballSHA256(ctx context.Context, packageName, version str
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("tarball fetch HTTP %d", resp.StatusCode)
 	}
-	h := sha256.New()
+	h := sha512.New()
 	// Cap at 200 MiB to keep memory bounded; npm packages above that are
 	// vanishingly rare. If we ever hit one we'd surface as an error.
 	if _, err := io.Copy(h, io.LimitReader(resp.Body, 200<<20)); err != nil {
