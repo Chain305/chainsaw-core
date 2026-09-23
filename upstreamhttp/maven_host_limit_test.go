@@ -18,12 +18,24 @@ func TestEveryConfiguredUpstreamHostHasALimit(t *testing.T) {
 	// The hosts real traffic actually reaches. A host here that is missing
 	// from defaultHostLimits is silently running at DefaultRateLimit, which
 	// for Maven Central meant 30/s and an 89% rejection rate.
+	// Every host observed in production traffic on 2026-09-23. Sourced from
+	// chainsaw_upstream_fetch_total rather than from reading the code, which
+	// is the point: the map looked populated while the busiest upstream in
+	// the product was missing from it.
 	mustBeLimited := []string{
 		"repo.maven.apache.org",
+		"repo1.maven.org",
 		"registry.npmjs.org",
+		"registry.yarnpkg.com",
 		"pypi.org",
+		"files.pythonhosted.org",
 		"crates.io",
+		"static.crates.io",
 		"rubygems.org",
+		"proxy.golang.org",
+		"api.nuget.org",
+		"dl.google.com",
+		"repo.packagist.org",
 	}
 	for _, h := range mustBeLimited {
 		if _, ok := defaultHostLimits[h]; !ok {

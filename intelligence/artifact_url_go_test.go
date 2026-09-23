@@ -71,13 +71,34 @@ func TestArtifactURLFor_GoModule(t *testing.T) {
 	}
 }
 
-// A version without the leading v, or an empty one, is not a module version.
-// Building a URL from it yields a 404 and burns an upstream fetch against a
-// rate limit the product is already close to.
-func TestArtifactURLFor_GoRejectsNonModuleVersions(t *testing.T) {
-	for _, ver := range []string{"", "1.8.1", "latest"} {
+// A BARE version is the normal stored spelling, not an error.
+//
+// This used to assert that "1.8.1" produced no URL, on the reasoning that a
+// version without the leading "v" is not a module version and building a URL
+// from it burns an upstream fetch on a guaranteed 404. The reasoning was
+// sound and the conclusion was backwards: both Go lockfile parsers STRIP the
+// "v" so their coordinates dedup and match how vulnerability databases index
+// semver, which means bare is what **6,093 of the 6,139** stored Go
+// coordinates look like. Refusing them did avoid 404s — by declining to scan
+// 99.2% of the Go corpus.
+//
+// The prefix is restored now (intelligence.GoModuleZipPath), so a bare version
+// resolves. What must still be refused is a string that is not a version at
+// all, where there is nothing to restore.
+func TestArtifactURLFor_GoRestoresBareVersions(t *testing.T) {
+	got, _ := artifactURLFor("go", "github.com/gorilla/mux", "1.8.1")
+	const want = "https://proxy.golang.org/github.com/gorilla/mux/@v/v1.8.1.zip"
+	if got != want {
+		t.Errorf("bare version produced %q, want %q — this is the spelling 6,093 of "+
+			"6,139 stored Go coordinates use", got, want)
+	}
+}
+
+func TestArtifactURLFor_GoRejectsNonVersions(t *testing.T) {
+	for _, ver := range []string{"", "latest", "not-a-version", "main"} {
 		if got, _ := artifactURLFor("go", "github.com/gorilla/mux", ver); got != "" {
-			t.Errorf("version %q produced url %q, want empty", ver, got)
+			t.Errorf("version %q produced url %q, want empty — there is no prefix to "+
+				"restore on a string that is not semver, so this is a guaranteed 404", ver, got)
 		}
 	}
 }

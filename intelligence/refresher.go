@@ -417,15 +417,21 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 
 	latest := ""
 	probeErr := error(nil)
+	// probeAnswered: the latest-version probe has a CURRENT answer, whether
+	// that answer is a version or a failure. The distinction matters for the
+	// skip rule below — see the comment there.
+	probeAnswered := false
 	if r.cfg.LatestProber != nil {
 		probe := r.lookupProbe(ctx, row.OrgID, ecosystem, row.Package)
 		if probe != nil && probe.FreshUntil.After(r.now()) {
 			latest = probe.LatestVersion
+			probeAnswered = true
 		} else {
 			probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			latest, probeErr = r.cfg.LatestProber(probeCtx, row)
 			cancel()
 			r.storeProbe(ctx, row.OrgID, ecosystem, row.Package, latest, probeErr)
+			probeAnswered = true
 		}
 	}
 
@@ -436,7 +442,27 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 	// update both.
 	staleAfter := r.now().Add(-r.cfg.MaxStaleness)
 	reportFresh := row.UpdatedAt.After(staleAfter)
-	if reportFresh && latest != "" && latest == row.Version {
+	if reportFresh && probeAnswered && (latest == "" || latest == row.Version) {
+		// `latest == ""` is the part that was missing, and it was a 24x
+		// amplifier on exactly the rows least worth rescanning.
+		//
+		// A probe that FAILS — package deleted, renamed, made private, or
+		// upstream refusing us — stores LatestVersion:"" with a 24h
+		// FreshUntil, so the probe itself is not retried. But the old
+		// condition required `latest != ""` to skip, so the row fell through
+		// to a full Scan plus an artifact fetch on EVERY tick. At a 1h
+		// interval against a 24h staleness bound that is **24 refreshes per
+		// day instead of one**, and every one of them is a request upstream
+		// has already said it cannot satisfy.
+		//
+		// Measured shape in production: npm 80 not_found against 30 ok,
+		// registry.yarnpkg.com 36 requests and zero successes — the yarn host
+		// is healthy, it was this loop at saturation.
+		//
+		// Skipping is safe because `reportFresh` still gates it: once the
+		// stored report ages past MaxStaleness the row scans regardless, and
+		// the probe's own TTL expiring is what schedules the retry. A package
+		// that comes back gets picked up on the next probe, not the next tick.
 		return actionSkipped
 	}
 

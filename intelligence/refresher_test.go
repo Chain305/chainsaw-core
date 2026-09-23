@@ -421,3 +421,102 @@ func TestNewRefresher_RequiresServiceAndMetadata(t *testing.T) {
 		t.Fatalf("NewRefresher without Service must return nil")
 	}
 }
+
+// TestRefresher_SkipsFreshRowWhenProbeFailed — a 24x amplifier on exactly the
+// rows least worth rescanning.
+//
+// A probe that fails (package deleted, renamed, made private, or upstream
+// refusing us) stores LatestVersion:"" with a 24h FreshUntil, so the probe is
+// not retried. But the skip rule used to require `latest != ""`, so the row
+// fell through to a full Scan — and an artifact fetch — on EVERY tick. At a 1h
+// interval against a 24h staleness bound that is 24 refreshes a day instead of
+// one, each of them a request upstream has already said it cannot satisfy.
+//
+// Production shape when this was found: npm 80 not_found against 30 ok, and
+// registry.yarnpkg.com 36 requests with zero successes — a healthy host, at
+// saturation from this loop.
+func TestRefresher_SkipsFreshRowWhenProbeFailed(t *testing.T) {
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	src := &fakeMetadataSource{
+		rows: []metadata.PackageMetadataRow{{
+			OrgID: "org1",
+			PackageMetadata: metadata.PackageMetadata{
+				Repository: "npmjs",
+				Package:    "deleted-package",
+				Version:    "1.0.0",
+				UpdatedAt:  now.Add(-1 * time.Hour), // report still fresh
+			},
+		}},
+	}
+	svc := &fakeService{}
+	artifactFetches := 0
+	ref := NewRefresher(RefresherConfig{
+		Service:      svc,
+		Metadata:     src,
+		MaxStaleness: 24 * time.Hour,
+		Concurrency:  1,
+		PageSize:     10,
+		LatestProber: func(ctx context.Context, row metadata.PackageMetadataRow) (string, error) {
+			return "", errors.New("404 Not Found")
+		},
+		ArtifactEnabled: true,
+		ArtifactFetcher: func(ctx context.Context, row metadata.PackageMetadataRow) (*ArtifactHandle, error) {
+			artifactFetches++
+			return nil, nil
+		},
+		EcosystemResolver: func(string) string { return "npm" },
+	})
+	ref.now = func() time.Time { return now }
+
+	summary := ref.RunOnce(context.Background())
+
+	if summary.Skipped != 1 {
+		t.Errorf("a fresh row whose probe FAILED was not skipped (skipped=%d scanned=%d). "+
+			"Upstream has already said it cannot serve this package; rescanning it every tick "+
+			"is 24 guaranteed-failing requests a day against a rate-limited registry.",
+			summary.Skipped, summary.Scanned)
+	}
+	if summary.Scanned != 0 {
+		t.Errorf("expected 0 scans, got %d", summary.Scanned)
+	}
+	if artifactFetches != 0 {
+		t.Errorf("artifact fetched %d times for a package upstream cannot resolve", artifactFetches)
+	}
+}
+
+// The skip must stay gated on report freshness: once the stored report ages
+// past MaxStaleness the row scans again regardless of the probe, so a package
+// that comes back is not ignored forever.
+func TestRefresher_StaleRowStillScansWhenProbeFailed(t *testing.T) {
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	src := &fakeMetadataSource{
+		rows: []metadata.PackageMetadataRow{{
+			OrgID: "org1",
+			PackageMetadata: metadata.PackageMetadata{
+				Repository: "npmjs",
+				Package:    "maybe-back",
+				Version:    "1.0.0",
+				UpdatedAt:  now.Add(-48 * time.Hour), // report is STALE
+			},
+		}},
+	}
+	svc := &fakeService{}
+	ref := NewRefresher(RefresherConfig{
+		Service:      svc,
+		Metadata:     src,
+		MaxStaleness: 24 * time.Hour,
+		Concurrency:  1,
+		PageSize:     10,
+		LatestProber: func(ctx context.Context, row metadata.PackageMetadataRow) (string, error) {
+			return "", errors.New("404 Not Found")
+		},
+		EcosystemResolver: func(string) string { return "npm" },
+	})
+	ref.now = func() time.Time { return now }
+
+	if summary := ref.RunOnce(context.Background()); summary.Scanned != 1 {
+		t.Errorf("a STALE row was skipped on a failed probe (scanned=%d skipped=%d); "+
+			"the skip must be gated on report freshness or a package that returns is never rescanned",
+			summary.Scanned, summary.Skipped)
+	}
+}

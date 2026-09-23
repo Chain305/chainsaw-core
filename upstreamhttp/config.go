@@ -116,6 +116,26 @@ var defaultHostLimits = map[string]float64{
 	// docs/plan_upstream_rate_limits.md, which quotes their own FAQ branch
 	// naming this exact category.
 	"repo.maven.apache.org": 5,
+
+	// Every remaining host observed in production traffic on 2026-09-23 via
+	// chainsaw_upstream_fetch_total. Each was falling through to
+	// DefaultRateLimit (30/s) purely because nobody had listed it — the same
+	// omission that left Maven Central unthrottled, and invisible for the
+	// same reason: the map LOOKED populated.
+	//
+	// repo1.maven.org is the canonical name repo.maven.apache.org is a CNAME
+	// of. Sonatype counts both at one edge, so it carries the same 5/s — a
+	// limit on one hostname is no limit at all if the other is open.
+	"repo1.maven.org":        5,
+	"proxy.golang.org":       10,
+	"registry.yarnpkg.com":   15, // an npm mirror; same budget as npmjs
+	"api.nuget.org":          15, // the v3 flat container; azuresearch is the search host
+	"static.crates.io":       15, // crate bytes; crates.io is the API
+	"files.pythonhosted.org": 15, // wheel/sdist bytes; pypi.org is the API
+	"dl.google.com":          10, // Google Maven (androidx), reached via the gradle group
+	"plugins.gradle.org":     10,
+	"repo.packagist.org":     15, // the metadata host; packagist.org is search/legacy
+	"api.npmjs.org":          15, // download counts
 }
 
 // Default limits that exist so callers don't have to special-case a

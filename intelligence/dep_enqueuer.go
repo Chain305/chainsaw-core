@@ -295,14 +295,22 @@ func artifactURLFor(eco, name, version string) (string, string) {
 		// returned empty, the scanner saw a nil Artifact, and every
 		// NeedsArtifact provider emitted WarnNeedsArtifact instead of
 		// running. Go is the largest ecosystem in the corpus.
-		if !strings.HasPrefix(version, "v") {
-			// Not a module version. Building a URL from it is a guaranteed
-			// 404 that still costs an upstream fetch against a budget this
-			// product is already close to.
+		// Through GoModuleZipPath — the THIRD copy of this URL construction,
+		// found by the ecosystem sweep after the other two were unified.
+		//
+		// What was here refused any bare version outright, on the reasoning
+		// that it would be a guaranteed 404 against a budget we are close to.
+		// Correct as far as it went, and it produced no bad requests — but it
+		// declined to build a URL for **6,093 of the 6,139** stored Go
+		// coordinates, because both Go lockfile parsers strip the leading "v"
+		// so the stored spelling is bare. Refusing is not the fix; restoring
+		// the prefix is, and the shared helper does that plus the proxy's "!"
+		// case-escape.
+		path, ok := GoModuleZipPath(name, version)
+		if !ok {
 			return "", ""
 		}
-		return fmt.Sprintf("https://proxy.golang.org/%s/@v/%s.zip",
-			escapeGoModulePath(name), escapeGoModulePath(version)), "application/zip"
+		return "https://proxy.golang.org/" + path, "application/zip"
 	}
 	return "", ""
 }
