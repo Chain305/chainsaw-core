@@ -33,6 +33,7 @@ const (
 	EgressOK          EgressOutcome = "ok"
 	EgressNotFound    EgressOutcome = "not_found"
 	EgressRateLimited EgressOutcome = "rate_limited"
+	EgressForbidden   EgressOutcome = "forbidden"
 	EgressServerError EgressOutcome = "server_error"
 	EgressTransport   EgressOutcome = "transport_error"
 	EgressOther       EgressOutcome = "other"
@@ -122,10 +123,20 @@ func outcomeForStatus(status int) EgressOutcome {
 	case status == 429:
 		return EgressRateLimited
 	case status == 403:
-		// Ambiguous on purpose: GitHub answers a spent rate limit with 403,
-		// not 429, and GitHub is the upstream most likely to be limited.
-		// The useful reading beats the pedantic one.
-		return EgressRateLimited
+		// SEPARATE from 429, and the first production read is why. Folding
+		// them together reported "58.8% of upstream requests rate_limited"
+		// with repo.maven.apache.org at 498 requests — and left no way to
+		// tell burst throttling (429, wait and retry) from a rejected
+		// User-Agent or a blocked path (403, a config problem that retrying
+		// will never fix). Those need opposite responses, and
+		// plan_upstream_rate_limits turns on exactly that distinction: it is
+		// the difference between "Maven Central needs a commercial
+		// conversation" and "we are sending something it refuses".
+		//
+		// GitHub does answer a spent rate limit with 403. That is a reason to
+		// read github.com's `forbidden` series as throttling, not a reason to
+		// destroy the distinction for every other host.
+		return EgressForbidden
 	case status == 404:
 		return EgressNotFound
 	case status >= 500:

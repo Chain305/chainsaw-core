@@ -84,7 +84,7 @@ func TestOutcomeClassification(t *testing.T) {
 		{200, EgressOK}, {204, EgressOK},
 		{404, EgressNotFound},
 		{429, EgressRateLimited},
-		{403, EgressRateLimited}, // GitHub spends its limit as a 403
+		{403, EgressForbidden}, // distinct from 429: retrying never fixes a 403
 		{500, EgressServerError}, {503, EgressServerError},
 		{301, EgressOther}, {418, EgressOther},
 	} {
