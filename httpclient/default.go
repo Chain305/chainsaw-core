@@ -164,6 +164,7 @@ func New(opts ...DefaultOption) *http.Client {
 	if cfg.transportFn != nil {
 		rt = cfg.transportFn(base)
 	}
+	rt = withEgressCounting(rt)
 	client := &http.Client{Transport: rt, Timeout: cfg.timeout}
 	if cfg.ssrfGuard {
 		// Refuse redirects rather than re-validating each hop: the

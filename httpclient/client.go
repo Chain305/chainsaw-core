@@ -120,8 +120,10 @@ func (f *Factory) NewClient(remote config.RemoteConfig) *http.Client {
 		ForceAttemptHTTP2: true,
 	}
 	return &http.Client{
-		Timeout:   timeout,
-		Transport: transport,
+		Timeout: timeout,
+		// Counted here too: artifact downloads go through this constructor,
+		// not New(), and they are the bulk of upstream byte volume.
+		Transport: withEgressCounting(transport),
 	}
 }
 

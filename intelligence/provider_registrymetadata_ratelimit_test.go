@@ -2,6 +2,8 @@ package intelligence
 
 import (
 	"net/http"
+
+	"github.com/chain305/chainsaw-core/httpclient"
 	"testing"
 
 	"github.com/chain305/chainsaw-core/upstreamhttp"
@@ -31,7 +33,11 @@ func TestRegistryMetadataClientIsRateLimited(t *testing.T) {
 	// upstreamhttp.HTTPClient() installs its own RoundTripper that
 	// funnels every request through Do(), which is where limiter.Wait
 	// lives. A plain *http.Transport here means the limiter is gone.
-	if _, isPlain := p.client.Transport.(*http.Transport); isPlain {
+	// Unwrap the egress counter FIRST. It wraps every transport this package
+	// builds, so without this the assertion below is true no matter what —
+	// the counter alone would satisfy "not a bare *http.Transport" and this
+	// guard would stop detecting a missing limiter entirely.
+	if _, isPlain := httpclient.UnwrapTransport(p.client.Transport).(*http.Transport); isPlain {
 		t.Error("provider client uses a bare *http.Transport — the per-host rate limiter is not installed. " +
 			"npm/PyPI/Maven metadata is the highest-volume upstream path in the product and it must be throttled.")
 	}

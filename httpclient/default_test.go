@@ -18,7 +18,7 @@ func TestNew_DefaultsApplied(t *testing.T) {
 	if c.Timeout != 30*time.Second {
 		t.Errorf("default Timeout = %v, want 30s", c.Timeout)
 	}
-	tr, ok := c.Transport.(*http.Transport)
+	tr, ok := UnwrapTransport(c.Transport).(*http.Transport)
 	if !ok {
 		t.Fatalf("default Transport is %T, want *http.Transport", c.Transport)
 	}
@@ -60,7 +60,10 @@ func TestNew_OptionsOverride(t *testing.T) {
 	if c.Timeout != 7*time.Second {
 		t.Errorf("Timeout = %v, want 7s", c.Timeout)
 	}
-	tr, ok := c.Transport.(*http.Transport)
+	// Through UnwrapTransport: every client this package returns now wraps
+	// its transport in the egress counter, so a direct assertion would test
+	// the wrapper rather than the tuning this case is about.
+	tr, ok := UnwrapTransport(c.Transport).(*http.Transport)
 	if !ok {
 		t.Fatalf("Transport is %T, want *http.Transport", c.Transport)
 	}
@@ -110,8 +113,8 @@ func TestNew_TransportWrapping(t *testing.T) {
 	if counter == nil {
 		t.Fatal("WithTransport callback was not invoked")
 	}
-	if c.Transport != counter {
-		t.Errorf("client.Transport = %T, want *countingRoundTripper", c.Transport)
+	if UnwrapTransport(c.Transport) != counter {
+		t.Errorf("client.Transport unwraps to %T, want *countingRoundTripper", UnwrapTransport(c.Transport))
 	}
 
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
