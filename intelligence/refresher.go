@@ -350,6 +350,12 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 	}
 	r.lastScanned.Store(int64(summary.Scanned))
 	r.lastSkipped.Store(int64(summary.Skipped))
+	// Cumulative, alongside the per-tick last* values. The per-tick numbers
+	// are overwritten every tick and live only in a log line; D-2 needs a
+	// denominator it can graph against chainsaw_upstream_fetch_total over the
+	// same window. See refresher_rowmetrics.go.
+	refreshRowsScannedTotal.Add(uint64(summary.Scanned))
+	refreshRowsSkippedTotal.Add(uint64(summary.Skipped))
 	r.lastNewVers.Store(int64(summary.NewVersions))
 	r.lastTickEnd.Store(r.now().UnixNano())
 
