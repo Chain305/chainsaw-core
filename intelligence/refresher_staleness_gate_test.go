@@ -127,3 +127,68 @@ func TestRefreshRowUsesTheReportStalenessGate(t *testing.T) {
 		t.Error("refreshRow still derives reportFresh straight from the package_metadata column")
 	}
 }
+
+// The new-version check must ask the REPORT store too, not only
+// package_metadata.
+//
+// package_metadata records what the proxy has SERVED. A coordinate scanned on
+// the public path, or enqueued as a transitive dependency, has an
+// intelligence_reports row and no metadata row — so it counted as a new version
+// on every tick, forever, because nothing in this path ever inserts into
+// package_metadata. That was 626 of the 934 rows the production walk "scanned"
+// each hour, each issuing a Scan the report cache then answered without
+// writing.
+//
+// A SOURCE guard for the same reason as the gate above: RefresherConfig.Store
+// is a concrete *Store over a live database, so this branch is unreachable from
+// a unit test.
+//
+// KNOWN LIMIT, stated so nobody over-trusts it: a source guard catches the
+// block being DELETED, which is what a real regression looks like. It cannot
+// see the block being DISABLED — wrapping it in `if false` leaves the text in
+// place and this stays green. Verified both ways when it was written.
+func TestNewVersionCheckConsultsTheReportStore(t *testing.T) {
+	src, err := os.ReadFile("refresher.go")
+	if err != nil {
+		t.Fatalf("read refresher.go: %v", err)
+	}
+	text := string(src)
+
+	// Anchor on the CALL, not on the MetadataSource interface declaration —
+	// that is the first occurrence of the bare name and it is 300 lines away.
+	// The first draft of this test anchored there and reported the fix
+	// missing when it was present.
+	i := strings.Index(text, "r.cfg.Metadata.PackageVersionExists(")
+	if i < 0 {
+		t.Fatal("the PackageVersionExists call site was not found in refresher.go")
+	}
+	// The report-store fallback must sit in the same block, after it.
+	window := text[i:min(i+1600, len(text))]
+	if !strings.Contains(window, "loadReportForKey(") {
+		t.Error("the new-version check asks package_metadata and stops there. A version already " +
+			"covered by a fresh report but absent from package_metadata counts as new on every " +
+			"tick, forever — 626 of 934 rows per tick in production.")
+	}
+	if !strings.Contains(window, "CollectedAt.After(staleAfter)") {
+		t.Error("the report-store fallback does not check freshness; a STALE report for the latest " +
+			"version must not suppress the scan that would refresh it")
+	}
+}
+
+// Freshness is load-bearing in that fallback: treating any stored report as
+// "exists" would suppress the new-version scan permanently once a single stale
+// report existed.
+func TestNewVersionFallbackRequiresAFreshReport(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	staleAfter := now.Add(-24 * time.Hour)
+	stale := &Report{}
+	stale.Observation.CollectedAt = now.Add(-9 * 24 * time.Hour)
+	if stale.Observation.CollectedAt.After(staleAfter) {
+		t.Fatal("fixture is not stale")
+	}
+	fresh := &Report{}
+	fresh.Observation.CollectedAt = now.Add(-1 * time.Hour)
+	if !fresh.Observation.CollectedAt.After(staleAfter) {
+		t.Fatal("fixture is not fresh")
+	}
+}

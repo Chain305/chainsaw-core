@@ -519,6 +519,27 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 				exists = true
 			}
 		}
+		// package_metadata is not the only place a version can already be
+		// covered. It records what the PROXY has served; a coordinate scanned
+		// on the public path, or enqueued as a transitive dependency, has an
+		// intelligence_reports row and no metadata row. This check asked only
+		// the first table, so such a version counted as new on EVERY tick —
+		// 626 of the 934 rows the walk "scanned" each hour in production, each
+		// one issuing a Scan that the report cache then answered without
+		// writing, forever, because nothing here ever inserts into
+		// package_metadata (deliberately — see the comment above).
+		//
+		// Asking the report store closes that loop. Same reasoning as the
+		// staleness gate in refresher_staleness_gate.go: the question is "do we
+		// already have current intelligence on this version", and the table
+		// that answers it is the one holding the reports.
+		if !exists && r.cfg.Store != nil {
+			latestKey := Key{Ecosystem: ecosystem, Package: row.Package, Version: latest}
+			if rep := r.loadReportForKey(ctx, row.OrgID, latestKey); rep != nil &&
+				rep.Observation.CollectedAt.After(staleAfter) {
+				exists = true
+			}
+		}
 		if !exists {
 			newReq := Request{
 				Key: Key{
