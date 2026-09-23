@@ -72,17 +72,26 @@ type registryEndpoints struct {
 	// resource for no reason, so the deprecation lookup gets its own.
 	nugetRegistrationV2 string
 	composer            string
-	goproxy             string
-	cocoapods           string
-	cocoapodsCDN        string
-	pub                 string
-	huggingface         string
-	docker              string
-	depsdev             string
-	github              string
-	gitlab              string
-	bitbucket           string
-	codeberg            string
+	// composerAPI is a SEPARATE host from composer, and conflating them was a
+	// guaranteed 404 on every composer scan. repo.packagist.org serves the p2
+	// metadata mirror (which is what `composer` is correctly used for) but does
+	// NOT serve the legacy /packages/<pkg>.json API that exposes maintainers.
+	// Verified live 2026-09-23:
+	//   repo.packagist.org/packages/monolog/monolog.json  404
+	//   packagist.org/packages/monolog/monolog.json       200
+	//   repo.packagist.org/p2/monolog/monolog.json        200
+	composerAPI  string
+	goproxy      string
+	cocoapods    string
+	cocoapodsCDN string
+	pub          string
+	huggingface  string
+	docker       string
+	depsdev      string
+	github       string
+	gitlab       string
+	bitbucket    string
+	codeberg     string
 }
 
 func defaultRegistryEndpoints() registryEndpoints {
@@ -97,6 +106,7 @@ func defaultRegistryEndpoints() registryEndpoints {
 		nugetRegistration:   "https://api.nuget.org/v3/registration5-semver1",
 		nugetRegistrationV2: "https://api.nuget.org/v3/registration5-gz-semver2",
 		composer:            "https://repo.packagist.org",
+		composerAPI:         "https://packagist.org",
 		goproxy:             "https://proxy.golang.org",
 		cocoapods:           "https://trunk.cocoapods.org",
 		cocoapodsCDN:        "https://cdn.cocoapods.org",
@@ -3724,7 +3734,16 @@ type packagistMaintainer struct {
 // (separate from the p2 metadata we already use) — it is the only
 // place Packagist exposes the maintainer list.
 func (p *registryMetadataProvider) fetchPackagistMaintainers(ctx context.Context, pkg string) []packagistMaintainer {
-	endpoint := fmt.Sprintf("%s/packages/%s.json", p.endpoints.composer, pkg)
+	// composerAPI, not composer. The p2 mirror does not serve this route, so
+	// using the metadata base 404s every time and the maintainer list comes
+	// back silently empty — the same class of mistake as pointing a Maven
+	// fetch at search.maven.org. `premium/provider_wave4_maintainer_age.go`
+	// already had this right.
+	base := p.endpoints.composerAPI
+	if base == "" {
+		base = "https://packagist.org"
+	}
+	endpoint := fmt.Sprintf("%s/packages/%s.json", base, pkg)
 	var resp struct {
 		Package struct {
 			Maintainers []packagistMaintainer `json:"maintainers"`
