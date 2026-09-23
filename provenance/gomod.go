@@ -40,7 +40,23 @@ func (c *gomodChecker) Check(ctx context.Context, packageName, version string) R
 	if err != nil {
 		return Result{Status: StatusFailed, Ecosystem: "go", Error: fmt.Sprintf("escape module: %v", err)}
 	}
-	escVersion, err := module.EscapeVersion(version)
+	// Restore the "v" the lockfile parser stripped. Without this the sumdb
+	// answers HTTP 400 and we record it as a FAILED attestation — 5,905 rows
+	// in production, 39% of every failed attestation in the corpus. See
+	// gomod_version.go.
+	canonical, ok := CanonicalGoVersion(version)
+	if !ok {
+		// Not a verification failure: we never asked. StatusUnavailable with
+		// a reason, so "this coordinate is unusable" does not read as "this
+		// package's provenance is bad" on the report.
+		return Result{
+			Status:    StatusUnavailable,
+			Ecosystem: "go",
+			Reason:    ReasonInconclusive,
+			Error:     fmt.Sprintf("version %q is not canonical semver; sumdb cannot be queried", version),
+		}
+	}
+	escVersion, err := module.EscapeVersion(canonical)
 	if err != nil {
 		return Result{Status: StatusFailed, Ecosystem: "go", Error: fmt.Sprintf("escape version: %v", err)}
 	}

@@ -44,6 +44,13 @@ func newMavenChecker(client *http.Client, logger *slog.Logger) *mavenChecker {
 }
 
 func newGradleChecker(client *http.Client, logger *slog.Logger) *mavenChecker {
+	// plugins.gradle.org answers every /m2 artifact with a 303 to
+	// plugins-artifacts.gradle.org, and the SSRF-guarded client refuses all
+	// redirects — 2,078 gradle attestations recorded "HTTP 303" as a
+	// verification failure. Both the sidecar fetch and the PGP verifier need
+	// the derived client; the signature and the artifact live behind the same
+	// redirect. See registry_redirect.go.
+	client = followRegistryRedirects(client, registryRedirectHosts)
 	return &mavenChecker{
 		client:    client,
 		logger:    logger,

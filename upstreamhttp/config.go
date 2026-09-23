@@ -126,8 +126,30 @@ var defaultHostLimits = map[string]float64{
 	// repo1.maven.org is the canonical name repo.maven.apache.org is a CNAME
 	// of. Sonatype counts both at one edge, so it carries the same 5/s — a
 	// limit on one hostname is no limit at all if the other is open.
-	"repo1.maven.org":        5,
-	"proxy.golang.org":       10,
+	"repo1.maven.org":  5,
+	"proxy.golang.org": 10,
+	// The Go checksum database, pinned AT the default rather than below it.
+	//
+	// Added 2026-09-23 with the sumdb version fix. 5,905 coordinates had been
+	// sending a malformed URL and getting HTTP 400, so this host has never
+	// seen the path's real volume — after the fix it becomes the busiest Go
+	// endpoint we have, at roughly 6,000 lookups per refresh cycle.
+	//
+	// The first draft of this entry set 10 to "be polite", matching
+	// proxy.golang.org. That would have made the observed symptom WORSE: 151
+	// of the remaining Go failures were already our OWN limiter refusing
+	// ("rate: Wait(n=1) would exceed context deadline") at the unlisted
+	// default of 30, and tightening to 10 turns more of the newly-working
+	// 5,905 into that same refusal. Slower is not safer when the limiter is
+	// the thing failing.
+	//
+	// Pinned explicitly, at the same number, so a future cut to
+	// DefaultRateLimit does not silently reintroduce the timeout on the one
+	// path that now depends on the default being this high. sum.golang.org is
+	// Google-fronted, heavily cached and hammered by every `go` invocation on
+	// earth; it publishes no numeric limit and 30 req/s is not near anything
+	// it would consider abusive.
+	"sum.golang.org":         30,
 	"registry.yarnpkg.com":   15, // an npm mirror; same budget as npmjs
 	"api.nuget.org":          15, // the v3 flat container; azuresearch is the search host
 	"static.crates.io":       15, // crate bytes; crates.io is the API

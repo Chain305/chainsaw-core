@@ -43,6 +43,7 @@ import (
 	"golang.org/x/net/html/charset"
 
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/provenance"
 	"github.com/chain305/chainsaw-core/upstreamhttp"
 	"golang.org/x/mod/modfile"
 )
@@ -3793,7 +3794,16 @@ func encodeGoModulePath(p string) string {
 // DBs index semver, which means every version reaching this provider needs
 // the prefix put back. Idempotent: a version that already has it is returned
 // untouched. Mirrors the idiom in core/depparser/dependency/id.go.
+// goProxyVersion restores the "v" a Go lockfile parser stripped, for the
+// METADATA path. It deliberately does NOT reject a non-canonical version the
+// way provenance.CanonicalGoVersion does: the proxy's .info endpoint answers
+// some things the sumdb will not, and tightening this here would drop metadata
+// we currently collect. It shares the prefix rule and nothing else.
 func goProxyVersion(ver string) string {
+	if canonical, ok := provenance.CanonicalGoVersion(ver); ok {
+		return canonical
+	}
+	// Fall back to the bare prefix rule for a version the sumdb would reject.
 	ver = strings.TrimSpace(ver)
 	if ver == "" || strings.HasPrefix(ver, "v") {
 		return ver
