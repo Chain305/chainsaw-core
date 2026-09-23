@@ -545,9 +545,16 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 			// before sleeping; here just treat as transient.
 			_ = pErr
 		}
+		recordUpstreamFetch(endpoint, UpstreamFetchTransport)
 		return &Warning{Provider: "registrymetadata", Code: "transport", Message: err.Error(), At: p.now()}, isTransientErr(err), 0, err
 	}
 	defer resp.Body.Close()
+
+	// Counted here, once, for every response that came back — before the
+	// status branches below, so no branch can forget it. A request-build
+	// failure above is deliberately NOT counted: it never left the process,
+	// so it cost no upstream quota.
+	recordUpstreamFetch(endpoint, outcomeForStatus(resp.StatusCode))
 
 	if resp.StatusCode == http.StatusNotFound {
 		return &Warning{Provider: "registrymetadata", Code: WarnRegistryNotFound, Message: endpoint, At: p.now()}, false, resp.StatusCode, nil
