@@ -562,6 +562,21 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 					"error", err)
 			}
 			action = actionNewVersion
+		} else if reportFresh && probeAnswered {
+			// Nothing left to do for this row. Its OWN report is fresh, and
+			// the newer version upstream is already covered — so the only
+			// reason it fell past the skip gate above has been answered.
+			//
+			// The gate could not know that: it fires before `exists` is
+			// computed, and its condition requires `latest == row.Version`.
+			// So a row with a newer version upstream never skipped, even when
+			// both versions were already current. In production that was 626
+			// rows an hour, each fetching an artifact and running a Scan the
+			// report cache then answered without writing.
+			//
+			// Returning here is what avoids the artifact fetch; the fetch is
+			// below, and it is the expensive half.
+			return actionSkipped
 		}
 	}
 

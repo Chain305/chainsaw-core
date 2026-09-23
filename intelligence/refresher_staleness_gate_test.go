@@ -192,3 +192,46 @@ func TestNewVersionFallbackRequiresAFreshReport(t *testing.T) {
 		t.Fatal("fixture is not fresh")
 	}
 }
+
+// A row whose own report is fresh AND whose newer upstream version is already
+// covered has nothing left to do, and must not reach the artifact fetch.
+//
+// The skip gate cannot decide this: it fires before `exists` is computed, and
+// its condition requires `latest == row.Version`. So a row with a newer version
+// upstream never skipped even when both versions were current — 626 rows an
+// hour in production, each downloading an artifact and running a Scan the
+// report cache then answered without writing.
+//
+// SOURCE guard, same constraint as the two above (concrete *Store). It asserts
+// the skip sits on the `else` of the new-version branch — before the artifact
+// fetch, which is the expensive half — and not merely somewhere in the file.
+func TestFreshRowWithCoveredNewVersionSkipsBeforeTheArtifactFetch(t *testing.T) {
+	src, err := os.ReadFile("refresher.go")
+	if err != nil {
+		t.Fatalf("read refresher.go: %v", err)
+	}
+	text := string(src)
+
+	i := strings.Index(text, "action = actionNewVersion")
+	if i < 0 {
+		t.Fatal("the new-version branch was not found in refresher.go")
+	}
+	fetchAt := strings.Index(text, "r.cfg.ArtifactFetcher(fetchCtx, row)")
+	if fetchAt < 0 {
+		t.Fatal("the artifact fetch was not found in refresher.go")
+	}
+	between := text[i:fetchAt]
+	if !strings.Contains(between, "else if reportFresh && probeAnswered") {
+		t.Error("no skip between the new-version branch and the artifact fetch. A row whose report " +
+			"is fresh and whose newer version is already covered still downloads an artifact and " +
+			"scans, every tick, forever.")
+	}
+	if !strings.Contains(between, "return actionSkipped") {
+		t.Error("that branch does not return actionSkipped, so the row still falls through to the " +
+			"artifact fetch — the expensive half")
+	}
+	if fetchAt < i {
+		t.Fatal("the artifact fetch precedes the new-version branch; this guard is asserting the " +
+			"wrong ordering and would pass on the bug")
+	}
+}
