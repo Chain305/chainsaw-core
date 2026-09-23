@@ -2073,13 +2073,23 @@ func mavenDeclaredLicense(pom *mavenPOM, requestedVersion string) string {
 // artifact inherits from `androidx:androidx-*`) therefore resolves, and a
 // repo1 outage still costs one request, not two.
 func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, artifact, version string) (*mavenPOM, bool) {
+	// Cache-first. Parent POMs are the highest-multiplier immutable re-fetch in
+	// the product — every Apache Commons artifact walks to commons-parent — and
+	// they go to repo1.maven.org, the host already rejecting most of our
+	// requests with 429. See maven_pom_cache.go for why the earlier refusal to
+	// cache is answered rather than overruled.
+	if cached, ok := lookupMavenPOM(p.endpoints.maven, group, artifact, version); ok {
+		return cached, true
+	}
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	pom, warn, err := p.fetchMavenPOMFrom(ctx, p.endpoints.maven, groupPath, artifact, version)
 	if err == nil && warn == nil {
+		storeMavenPOM(p.endpoints.maven, group, artifact, version, pom)
 		return pom, true
 	}
 	if isDefiniteAbsence(warn) && groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != "" {
 		if alt, w, e := p.fetchMavenPOMFrom(ctx, p.endpoints.mavenGoogle, groupPath, artifact, version); e == nil && w == nil {
+			storeMavenPOM(p.endpoints.maven, group, artifact, version, alt)
 			return alt, true
 		}
 	}
