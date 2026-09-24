@@ -45,6 +45,19 @@ import (
 var registryRedirectHosts = map[string]struct{}{
 	// plugins.gradle.org/m2/... -> 303 (verified 2026-09-23)
 	"plugins-artifacts.gradle.org": {},
+	// huggingface.co -> huggingface.co, a SAME-HOST repo rename (verified
+	// 2026-09-24). HF moved its canonical legacy models under organisations
+	// and 307s the old paths: /api/models/gpt2 ->
+	// /api/models/openai-community/gpt2, bert-base-uncased -> google-bert/...,
+	// t5-base -> google-t5/... . Five production reports recorded "HTTP 307"
+	// as a verification FAILURE for exactly those models.
+	//
+	// An earlier note in plan_signal_repair said HF could not use this
+	// mechanism because its CDN host is region-dependent. That is true of the
+	// LFS *download* redirect (us.aws.cdn.hf.co and siblings) and irrelevant
+	// here — none of the corpus failures is that redirect. The hop that
+	// actually fails is host-invariant.
+	"huggingface.co": {},
 }
 
 // maxRegistryRedirects bounds a chain. Go's default is 10; one hop is all any

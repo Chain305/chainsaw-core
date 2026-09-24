@@ -47,6 +47,10 @@ type huggingfaceChecker struct {
 }
 
 func newHuggingFaceChecker(client *http.Client, logger *slog.Logger) *huggingfaceChecker {
+	// HF 307s its canonical legacy models to their org-qualified paths, and
+	// the SSRF-guarded client refuses every redirect. Same mechanism and same
+	// allowlist as the gradle artifact CDN; see registry_redirect.go.
+	client = followRegistryRedirects(client, registryRedirectHosts)
 	return &huggingfaceChecker{client: client, logger: logger, baseURL: "https://huggingface.co"}
 }
 
@@ -75,6 +79,23 @@ func (c *huggingfaceChecker) Check(ctx context.Context, packageName, version str
 		if isNotFound(status) {
 			// No model.sig → try commit signature as a weaker signal.
 			return c.tryCommitSig(ctx, packageName, version)
+		}
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			// HF answers a repository we cannot see with 401 — private,
+			// deleted, or gated behind an accepted licence — rather than 404,
+			// so existence is not disclosed. Same ambiguity as the object
+			// stores that 403 a missing key (see httpclient's
+			// ambiguous403Hosts). "failed" reads as "this model's provenance
+			// is bad"; the truth is that we never got to look, and the two
+			// need opposite responses. 21 of the 26 production huggingface
+			// failures were this, nearly all of them QA fixtures that do not
+			// exist upstream.
+			return Result{
+				Status:    StatusUnavailable,
+				Ecosystem: "huggingface",
+				Reason:    ReasonInconclusive,
+				Error:     fmt.Sprintf("repository not visible (HTTP %d): private, removed, or gated", status),
+			}
 		}
 		return Result{Status: StatusFailed, Ecosystem: "huggingface", Error: err.Error()}
 	}
