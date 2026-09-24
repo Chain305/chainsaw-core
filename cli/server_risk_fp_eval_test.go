@@ -399,10 +399,14 @@ var maxFireRate = map[sigEco]fireCeiling{
 	// junit (EPL-1.0), jakarta.annotation-api (EPL-2.0) and two more.
 	// NOT a defect baseline — the claim is TRUE and the -10 weak-copyleft
 	// weight is what it should cost.
-	{"license.copyleft", "maven"}: {10, "Legitimate classification, newly VISIBLE. These five " +
+	{"license.copyleft", "maven"}: {15, "Legitimate classification, newly VISIBLE. These " +
 		"artifacts declare EPL/MPL as a licence NAME rather than an SPDX id; before the " +
 		"name normalisation they were reported merely 'unidentified', which is a false " +
-		"negative on a real copyleft dependency. Weak copyleft, -10."},
+		"negative on a real copyleft dependency. Weak copyleft, -10. Raised 10 -> 15 on " +
+		"2026-09-25 once license_unavailable stopped fetch failures masking licences: " +
+		"8/70, every one checked and genuinely EPL/MPL — logback-classic, logback-core " +
+		"(EPL-2.0), h2 (MPL 2.0), jakarta.annotation-api, jetty-server, " +
+		"junit-jupiter-api, junit-jupiter-engine (EPL 2.0), junit 4.13.2 (EPL 1.0)."},
 	{"license.non_permissive", "go"}: {6, defectBaseline + "the copyleft double-count. This " +
 		"signal fires on exactly the coordinates license.copyleft fires on, adding a " +
 		"second −20 for one licence fact. Measured co-fire: 2/2."},
@@ -1101,6 +1105,66 @@ func TestBuildServerRiskCorpus(t *testing.T) {
 		err  string
 	}
 	results := make([]result, len(coords))
+	verdicts := make([]string, len(coords))
+	scanOne := func(c serverRiskRow) (result, string) {
+		// ARTIFACT BYTES, opt-in.
+		//
+		// Without these the scan runs METADATA-ONLY: scanner.go skips
+		// every NeedsArtifact() provider and the whole Tier-2 byte
+		// lane — codesmell, capability, installscripts, iocscan,
+		// pysource, hiddenunicode — never executes. The 2026-09-15
+		// run proved it: PROVIDERS THAT RAN listed six, none of them
+		// artifact-bound.
+		//
+		// That matters beyond coverage. A corpus scanned without
+		// bytes reports the artifact lane as SILENT, and silence is
+		// indistinguishable from "we looked and found nothing" unless
+		// someone reads the provider list. Reporting that as a
+		// product result is how the withdrawn F-1 was manufactured in
+		// the socket.dev comparison — an unobservable lane graded as
+		// a measured one.
+		//
+		// Opt-in because it is real network egress across every
+		// coordinate, and npm/cargo only because that is what
+		// fetchArtifactBytes derives a URL for. Ecosystems it cannot
+		// fetch stay metadata-only and must be reported as
+		// UNOBSERVABLE, never as clean.
+		req := intelligence.Request{
+			Key: intelligence.Key{Ecosystem: c.Eco, Package: c.Pkg, Version: c.Ver},
+		}
+		if corpusArtifactsEnabled() {
+			if raw, res := fetchArtifactBytes(packageSpec{
+				Ecosystem: c.Eco, Name: c.Pkg, Version: c.Ver,
+			}); res == acquireOK && len(raw) > 0 {
+				sum := sha256.Sum256(raw)
+				req.Artifact = &intelligence.ArtifactHandle{
+					Bytes:  raw,
+					SHA256: hex.EncodeToString(sum[:]),
+				}
+			}
+		}
+		rep, err := svc.Scan(ctx, req)
+		if err != nil || rep == nil {
+			return result{err: fmt.Sprintf("%s %s@%s: scan failed: %v", c.Eco, c.Pkg, c.Ver, err)}, ""
+		}
+		ev := risk.EvaluatePackage(intelligence.ProjectToRiskInput(rep), risk.Options{})
+		verdict := ""
+		if ev != nil {
+			verdict = string(ev.Verdict)
+		}
+		raw, err := json.Marshal(rep)
+		if err != nil {
+			return result{err: fmt.Sprintf("%s %s@%s: marshal: %v", c.Eco, c.Pkg, c.Ver, err)}, ""
+		}
+		out, err := json.Marshal(serverRiskRow{
+			Eco: c.Eco, Pkg: c.Pkg, Ver: c.Ver,
+			Persisted: verdict, Report: raw,
+		})
+		if err != nil {
+			return result{err: fmt.Sprintf("%s %s@%s: marshal row: %v", c.Eco, c.Pkg, c.Ver, err)}, ""
+		}
+		return result{line: string(out)}, verdict
+	}
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	for i, c := range coords {
@@ -1109,69 +1173,31 @@ func TestBuildServerRiskCorpus(t *testing.T) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			// ARTIFACT BYTES, opt-in.
-			//
-			// Without these the scan runs METADATA-ONLY: scanner.go skips
-			// every NeedsArtifact() provider and the whole Tier-2 byte
-			// lane — codesmell, capability, installscripts, iocscan,
-			// pysource, hiddenunicode — never executes. The 2026-09-15
-			// run proved it: PROVIDERS THAT RAN listed six, none of them
-			// artifact-bound.
-			//
-			// That matters beyond coverage. A corpus scanned without
-			// bytes reports the artifact lane as SILENT, and silence is
-			// indistinguishable from "we looked and found nothing" unless
-			// someone reads the provider list. Reporting that as a
-			// product result is how the withdrawn F-1 was manufactured in
-			// the socket.dev comparison — an unobservable lane graded as
-			// a measured one.
-			//
-			// Opt-in because it is real network egress across every
-			// coordinate, and npm/cargo only because that is what
-			// fetchArtifactBytes derives a URL for. Ecosystems it cannot
-			// fetch stay metadata-only and must be reported as
-			// UNOBSERVABLE, never as clean.
-			req := intelligence.Request{
-				Key: intelligence.Key{Ecosystem: c.Eco, Package: c.Pkg, Version: c.Ver},
-			}
-			if corpusArtifactsEnabled() {
-				if raw, res := fetchArtifactBytes(packageSpec{
-					Ecosystem: c.Eco, Name: c.Pkg, Version: c.Ver,
-				}); res == acquireOK && len(raw) > 0 {
-					sum := sha256.Sum256(raw)
-					req.Artifact = &intelligence.ArtifactHandle{
-						Bytes:  raw,
-						SHA256: hex.EncodeToString(sum[:]),
-					}
-				}
-			}
-			rep, err := svc.Scan(ctx, req)
-			if err != nil || rep == nil {
-				results[i] = result{err: fmt.Sprintf("%s %s@%s: scan failed: %v", c.Eco, c.Pkg, c.Ver, err)}
-				return
-			}
-			ev := risk.EvaluatePackage(intelligence.ProjectToRiskInput(rep), risk.Options{})
-			verdict := ""
-			if ev != nil {
-				verdict = string(ev.Verdict)
-			}
-			raw, err := json.Marshal(rep)
-			if err != nil {
-				results[i] = result{err: fmt.Sprintf("%s %s@%s: marshal: %v", c.Eco, c.Pkg, c.Ver, err)}
-				return
-			}
-			out, err := json.Marshal(serverRiskRow{
-				Eco: c.Eco, Pkg: c.Pkg, Ver: c.Ver,
-				Persisted: verdict, Report: raw,
-			})
-			if err != nil {
-				results[i] = result{err: fmt.Sprintf("%s %s@%s: marshal row: %v", c.Eco, c.Pkg, c.Ver, err)}
-				return
-			}
-			results[i] = result{line: string(out)}
+			results[i], verdicts[i] = scanOne(c)
 		}(i, c)
 	}
 	wg.Wait()
+
+	// An `unknown` verdict means the registry fetch did not finish inside
+	// the production provider budget (DefaultProviderTimeout) — usually a
+	// large PyPI document under 8-way concurrency. The eval fails the whole
+	// run on any such row (CORPUS FAULT), so one slow response made a
+	// mandatory gate flip. Re-scan those rows one at a time, twice at most.
+	// A row that is still unknown stays unknown and still fails the eval:
+	// this retries latency, it does not hide an unavailable package.
+	retried, recovered := 0, 0
+	for i, c := range coords {
+		for attempt := 0; attempt < 2 && verdicts[i] == string(risk.VerdictUnknown); attempt++ {
+			retried++
+			results[i], verdicts[i] = scanOne(c)
+			if verdicts[i] != string(risk.VerdictUnknown) {
+				recovered++
+			}
+		}
+	}
+	if retried > 0 {
+		t.Logf("re-scanned %d unknown row(s) sequentially; %d recovered", retried, recovered)
+	}
 
 	var lines, failures []string
 	for _, r := range results {

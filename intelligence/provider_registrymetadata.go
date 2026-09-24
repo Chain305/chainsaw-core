@@ -732,6 +732,32 @@ func (h *npmHuman) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// npmHomepage tolerates the shapes npm has accepted for "homepage": a
+// string, or (on old publishes, e.g. fs-extra's early versions) an array
+// of strings. One malformed historical version otherwise fails the whole
+// packument decode and the package scores unknown. Anything else reads
+// as no homepage.
+type npmHomepage string
+
+func (h *npmHomepage) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*h = npmHomepage(strings.TrimSpace(s))
+		return nil
+	}
+	var list []string
+	if json.Unmarshal(b, &list) == nil {
+		for _, v := range list {
+			if v = strings.TrimSpace(v); v != "" {
+				*h = npmHomepage(v)
+				return nil
+			}
+		}
+	}
+	*h = ""
+	return nil
+}
+
 type npmVersionMeta struct {
 	License any `json:"license"`
 	// `any`, like its Repository/Bugs siblings below, because npm's legacy
@@ -740,11 +766,11 @@ type npmVersionMeta struct {
 	// decode — rc has 19 such versions, so a package with ~30M weekly
 	// downloads returned no registry metadata at all and scored `allow`.
 	// See npmLicense for the type switch. (F-4, 2026-09-13.)
-	Licenses    any    `json:"licenses"`
-	Description string `json:"description"`
-	Homepage    string `json:"homepage"`
-	Repository  any    `json:"repository"`
-	Bugs        any    `json:"bugs"`
+	Licenses    any         `json:"licenses"`
+	Description string      `json:"description"`
+	Homepage    npmHomepage `json:"homepage"`
+	Repository  any         `json:"repository"`
+	Bugs        any         `json:"bugs"`
 	Dist        struct {
 		Tarball   string `json:"tarball"`
 		Shasum    string `json:"shasum"`
@@ -896,7 +922,7 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 		Name        string                    `json:"name"`
 		Description string                    `json:"description"`
 		License     any                       `json:"license"`
-		Homepage    string                    `json:"homepage"`
+		Homepage    npmHomepage               `json:"homepage"`
 		Repository  any                       `json:"repository"`
 		Bugs        any                       `json:"bugs"`
 		DistTags    map[string]string         `json:"dist-tags"`
@@ -982,7 +1008,7 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 	// URLs — artifact URL + repo/homepage/bugs. Fall back to packument
 	// level when the per-version record doesn't carry them.
 	urls := &URLSection{MetadataURL: endpoint}
-	homepage := firstNonEmpty(ifEntry(hasEntry, entry.Homepage), pack.Homepage)
+	homepage := firstNonEmpty(ifEntry(hasEntry, string(entry.Homepage)), string(pack.Homepage))
 	if homepage != "" {
 		urls.HomepageURL = homepage
 	}
