@@ -42,6 +42,7 @@ import (
 
 	"golang.org/x/net/html/charset"
 
+	"github.com/chain305/chainsaw-core/coverage"
 	"github.com/chain305/chainsaw-core/httpclient"
 	"github.com/chain305/chainsaw-core/provenance"
 	"github.com/chain305/chainsaw-core/upstreamhttp"
@@ -353,6 +354,14 @@ func (p *registryMetadataProvider) Run(ctx context.Context, req Request, _ *Repo
 	// gate would vouch for a lane that fell through this switch.
 	eco := normalizeEcosystemKey(req.Key.Ecosystem)
 	ctx = withEcosystem(ctx, eco)
+	pr, err := p.runEcosystem(ctx, eco, pkg, ver)
+	if err == nil {
+		markPrimaryLicenseUnavailable(&pr, p.now())
+	}
+	return pr, err
+}
+
+func (p *registryMetadataProvider) runEcosystem(ctx context.Context, eco, pkg, ver string) (PartialReport, error) {
 	switch eco {
 	case "npm", "yarn", "bun":
 		return p.runNPM(ctx, pkg, ver)
@@ -380,6 +389,48 @@ func (p *registryMetadataProvider) Run(ctx context.Context, req Request, _ *Repo
 		return p.runDocker(ctx, pkg, ver)
 	}
 	return PartialReport{}, nil
+}
+
+// markPrimaryLicenseUnavailable stamps WarnLicenseUnavailable when the
+// ecosystem handler returned without reading its primary document — the
+// one every ecosystem carries the licence in — because the fetch FAILED.
+//
+// "Did not read it" is Metadata AND URLs both nil: every success path sets
+// URLs, and runPub legitimately leaves Metadata nil on a document with no
+// licence and no description, so Metadata alone would mis-read that.
+// A definite absence (404, version/package not found) is an answer, not a
+// failure, and already routes the whole coordinate to unavailableInput.
+//
+// Only a failure core/coverage already classifies as unavailable qualifies,
+// so this stamp never changes the coverage ledger on its own: decode is
+// routed to unavailableInput anyway, and our-side codes (body_too_large,
+// request_build) keep their deliberate never-blocks StatusError.
+func markPrimaryLicenseUnavailable(pr *PartialReport, at time.Time) {
+	if pr.Metadata != nil || pr.URLs != nil {
+		return
+	}
+	failed := ""
+	for _, w := range pr.Warnings {
+		if w.Provider != "registrymetadata" {
+			continue
+		}
+		switch w.Code {
+		case WarnRegistryNotFound, "http_404", WarnVersionNotFound, WarnPackageNotFound, WarnLicenseUnavailable:
+			return
+		}
+		if failed == "" && coverage.StatusForWarnCode(w.Code) == coverage.StatusUnavailable {
+			failed = w.Code
+		}
+	}
+	if failed != "" {
+		// Prepended: LedgerFromReport is last-in-slice-wins, so the
+		// coverage entry keeps naming the real cause (transport, http_503).
+		pr.Warnings = append([]Warning{licenseUnavailableWarning("primary registry document not read: "+failed, at)}, pr.Warnings...)
+	}
+}
+
+func licenseUnavailableWarning(msg string, at time.Time) Warning {
+	return Warning{Provider: "registrymetadata", Code: WarnLicenseUnavailable, Message: msg, At: at}
 }
 
 var _ Provider = (*registryMetadataProvider)(nil)
@@ -2063,38 +2114,43 @@ func mavenDeclaredLicense(pom *mavenPOM, requestedVersion string) string {
 	return ""
 }
 
-// fetchMavenPOM reads one published POM. Returns (nil, false) for every
-// failure — a 404, a 5xx, a parse error — because the only caller is the
-// parent walk, where "could not read it" and "it said nothing" have the
-// same correct outcome: leave the artifact as it is.
+// fetchMavenPOM reads one published POM. On failure it returns nil and the
+// warning that ended the attempt, so the parent walk can tell a definite
+// absence (a 404: "it said nothing") from a fetch that failed ("could not
+// read it") — the latter leaves the licence unknown, not absent.
 //
 // Base-URL selection mirrors fetchMavenTimelineDoc exactly: repo1 first,
 // and for the namespaces Google hosts, maven.google.com on a DEFINITE
 // absence only. A parent hosted on maven.google.com (every androidx
 // artifact inherits from `androidx:androidx-*`) therefore resolves, and a
 // repo1 outage still costs one request, not two.
-func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, artifact, version string) (*mavenPOM, bool) {
+func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, artifact, version string) (*mavenPOM, *Warning) {
 	// Cache-first. Parent POMs are the highest-multiplier immutable re-fetch in
 	// the product — every Apache Commons artifact walks to commons-parent — and
 	// they go to repo1.maven.org, the host already rejecting most of our
 	// requests with 429. See maven_pom_cache.go for why the earlier refusal to
 	// cache is answered rather than overruled.
 	if cached, ok := lookupMavenPOM(p.endpoints.maven, group, artifact, version); ok {
-		return cached, true
+		return cached, nil
 	}
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	pom, warn, err := p.fetchMavenPOMFrom(ctx, p.endpoints.maven, groupPath, artifact, version)
 	if err == nil && warn == nil {
 		storeMavenPOM(p.endpoints.maven, group, artifact, version, pom)
-		return pom, true
+		return pom, nil
 	}
 	if isDefiniteAbsence(warn) && groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != "" {
-		if alt, w, e := p.fetchMavenPOMFrom(ctx, p.endpoints.mavenGoogle, groupPath, artifact, version); e == nil && w == nil {
+		alt, w, e := p.fetchMavenPOMFrom(ctx, p.endpoints.mavenGoogle, groupPath, artifact, version)
+		if e == nil && w == nil {
 			storeMavenPOM(p.endpoints.maven, group, artifact, version, alt)
-			return alt, true
+			return alt, nil
 		}
+		warn, err = w, e
 	}
-	return nil, false
+	if warn == nil {
+		warn = &Warning{Provider: "registrymetadata", Code: "transport", Message: fmt.Sprint(err), At: p.now()}
+	}
+	return nil, warn
 }
 
 func (p *registryMetadataProvider) fetchMavenPOMFrom(ctx context.Context, base, groupPath, artifact, version string) (*mavenPOM, *Warning, error) {
@@ -2126,12 +2182,14 @@ func (p *registryMetadataProvider) fetchMavenPOMFrom(ctx context.Context, base, 
 //     (A cache spanning packages would have to live on the provider,
 //     which is process-lifetime, unbounded and stale-prone; deliberately
 //     not done.)
-//   - A missing or unfetchable parent is silence. No warning is added to
-//     the artifact's report: the artifact itself was fetched fine, and a
-//     parent's 404 is not a fact about the artifact.
-func (p *registryMetadataProvider) inheritMavenLicense(ctx context.Context, pom *mavenPOM, group, artifact, version string) string {
+//   - A MISSING parent (404) is silence: the artifact itself was fetched
+//     fine, and a parent's 404 is not a fact about the artifact. An
+//     UNFETCHABLE parent (5xx, timeout, transport) returns unknown=true —
+//     the licence the child would inherit was never read, so the empty
+//     result is "unknown", not "none", and runMaven says so.
+func (p *registryMetadataProvider) inheritMavenLicense(ctx context.Context, pom *mavenPOM, group, artifact, version string) (license string, unknown bool) {
 	if pom == nil {
-		return ""
+		return "", false
 	}
 	seen := map[string]struct{}{mavenCoordKey(group, artifact, version): {}}
 	cur := pom
@@ -2140,30 +2198,30 @@ func (p *registryMetadataProvider) inheritMavenLicense(ctx context.Context, pom 
 		pa := strings.TrimSpace(cur.Parent.ArtifactID)
 		pv := strings.TrimSpace(cur.Parent.Version)
 		if pg == "" || pa == "" || pv == "" {
-			return "" // no parent, or one we cannot address
+			return "", false // no parent, or one we cannot address
 		}
 		// A `${revision}`-style parent version (the flatten-plugin
 		// idiom) is not resolvable from the child document, and the
 		// coordinate has to be URL-safe before it becomes a request.
 		if !isSafeMavenCoordinateSegment(pg) || !isSafeMavenCoordinateSegment(pa) || !isSafeMavenCoordinateSegment(pv) {
-			return ""
+			return "", false
 		}
 		key := mavenCoordKey(pg, pa, pv)
 		if _, dup := seen[key]; dup {
-			return "" // cycle
+			return "", false // cycle
 		}
 		seen[key] = struct{}{}
 
-		parent, ok := p.fetchMavenPOM(ctx, pg, pa, pv)
-		if !ok {
-			return ""
+		parent, warn := p.fetchMavenPOM(ctx, pg, pa, pv)
+		if warn != nil {
+			return "", !isDefiniteAbsence(warn)
 		}
 		if lic := mavenDeclaredLicense(parent, pv); lic != "" {
-			return lic
+			return lic, false
 		}
 		cur = parent
 	}
-	return ""
+	return "", false
 }
 
 func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string) (PartialReport, error) {
@@ -2197,7 +2255,11 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 	// genuinely silent. See inheritMavenLicense.
 	license := mavenDeclaredLicense(&pom, ver)
 	if license == "" {
-		license = p.inheritMavenLicense(ctx, &pom, group, artifact, ver)
+		var unknown bool
+		license, unknown = p.inheritMavenLicense(ctx, &pom, group, artifact, ver)
+		if unknown {
+			pr.Warnings = append(pr.Warnings, licenseUnavailableWarning("maven parent POM fetch failed; inherited licence not read", p.now()))
+		}
 	}
 
 	people := &PeopleSection{}
@@ -3882,9 +3944,16 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	// proxy.golang.org's @v/{ver}.info has no license field — Go modules
 	// store license inside the archive itself. Use deps.dev as the
 	// canonical secondary source so the UI gets a license expression
-	// without us shelling out to extract LICENSE files. Soft-fail.
-	if lic := p.fetchDepsDevGoLicense(ctx, pkg, ver); lic != "" {
-		metadata.LicenseExpression = lic
+	// without us shelling out to extract LICENSE files. Soft-fail, but
+	// not silent: deps.dev is the ONLY Go licence source, so a failed
+	// fetch (timeout, transport, 5xx) must say so or lic.missing reads the
+	// empty expression as "declares no licence" (go-cmp v0.7.0 flipped
+	// -30 between two identical FP-eval runs on a deps.dev timeout). A
+	// 404 stays silent: deps.dev answered, it just does not index it.
+	lic, licWarn := p.fetchDepsDevGoLicense(ctx, pkg, ver)
+	metadata.LicenseExpression = lic
+	if licWarn != nil && !isDefiniteAbsence(licWarn) {
+		pr.Warnings = append(pr.Warnings, licenseUnavailableWarning("deps.dev licence fetch failed: "+licWarn.Code, p.now()))
 	}
 
 	// Populate Dependencies.Direct from the module's go.mod file. We
@@ -4051,7 +4120,10 @@ func (p *registryMetadataProvider) fetchGoMod(ctx context.Context, module, ver s
 // `licenses` array reflects what tooling like license scanners see.
 // Joins multi-license entries with " OR " to match SPDX expression
 // conventions used by the other providers in this file.
-func (p *registryMetadataProvider) fetchDepsDevGoLicense(ctx context.Context, pkg, ver string) string {
+//
+// The warning is non-nil when the fetch did not produce an answer; the
+// caller decides which failures mean "licence unknown".
+func (p *registryMetadataProvider) fetchDepsDevGoLicense(ctx context.Context, pkg, ver string) (string, *Warning) {
 	// deps.dev indexes Go versions in canonical "vX.Y.Z" form, same as the
 	// module proxy — a stripped version returns 404.
 	endpoint := fmt.Sprintf("%s/v3/systems/go/packages/%s/versions/%s",
@@ -4062,8 +4134,11 @@ func (p *registryMetadataProvider) fetchDepsDevGoLicense(ctx context.Context, pk
 		Licenses []string `json:"licenses"`
 	}
 	warn, err := p.fetchJSON(ctx, endpoint, "application/json", &resp)
-	if err != nil || warn != nil {
-		return ""
+	if warn != nil {
+		return "", warn
+	}
+	if err != nil {
+		return "", &Warning{Provider: "registrymetadata", Code: "transport", Message: err.Error(), At: p.now()}
 	}
 	out := make([]string, 0, len(resp.Licenses))
 	for _, l := range resp.Licenses {
@@ -4071,7 +4146,7 @@ func (p *registryMetadataProvider) fetchDepsDevGoLicense(ctx context.Context, pk
 			out = append(out, s)
 		}
 	}
-	return strings.Join(out, " OR ")
+	return strings.Join(out, " OR "), nil
 }
 
 // -- Cocoapods (trunk.cocoapods.org) ---------------------------------

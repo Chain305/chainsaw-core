@@ -519,14 +519,18 @@ func computeCategoryScores(primitives, compound map[string]FiredSignal, in Input
 // "never scanned", not "scanned and clean". The UI renders unavailable
 // categories as "—" and the rollup re-normalises remaining weights.
 //
-// Currently only Vulnerability is gated because that is the regression
-// surface — Maintenance always has Tier-1 publish/maintainer data on
-// any cached package, and Quality/License/SupplyChain signals stay
-// dormant when their underlying inputs are missing.
+// Vulnerability and License are gated. License only when the licence
+// fetch is known to have FAILED (LicenseDataUnavailable): an unread
+// licence would otherwise sit at a perfect 100 and vouch for a licence
+// we never saw. Maintenance always has Tier-1 publish/maintainer data on
+// any cached package, and Quality/SupplyChain signals stay dormant when
+// their underlying inputs are missing.
 func dataAvailable(cat Category, in Input) bool {
 	switch cat {
 	case CategoryVulnerability:
 		return in.VulnDataAvailable
+	case CategoryLicense:
+		return !in.LicenseDataUnavailable
 	default:
 		return true
 	}

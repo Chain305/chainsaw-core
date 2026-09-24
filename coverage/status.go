@@ -66,8 +66,19 @@ var unavailableCodes = map[string]bool{
 	"codeberg_meta_fetch_failed":       true,
 	"bitbucket_meta_fetch_failed":      true,
 	"timeline_fetch_failed":            true,
-	"repolink_probe_error":             true,
-	"transitive_dep_not_cached":        true,
+	// license_unavailable: the fetch that carries the licence failed
+	// (primary document, deps.dev for Go, a Maven parent POM). Classified
+	// with its registrymetadata enrichment-failure siblings above —
+	// timeline_fetch_failed, mod_fetch_failed, github_meta_fetch_failed —
+	// which are all unavailable. It must NOT be not_applicable or error:
+	// LedgerFromReport is last-in-slice-wins, so either would OVERWRITE
+	// the primary fetch's own unavailable code and unblock the source. On
+	// the primary path it rides alongside an already-unavailable code, so
+	// it only newly blocks for a deps.dev / parent-POM failure, and only
+	// for an org that declared registry_metadata mandatory in mode: closed.
+	"license_unavailable":       true,
+	"repolink_probe_error":      true,
+	"transitive_dep_not_cached": true,
 	// osv_bundle_dormant: the osv provider ran with no advisory index
 	// loaded and the ecosystem has no scanner advisory source, so no
 	// producer supplied vulnerability data for the coordinate. Registered

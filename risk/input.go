@@ -228,6 +228,15 @@ type Input struct {
 
 	// --- License ---
 	LicenseSPDX string
+	// LicenseDataUnavailable is true when the fetch that carries the
+	// licence FAILED (the registry-metadata provider's license_unavailable
+	// warning) and no licence was read. When true, lic.missing and the
+	// License* tag signals stay dormant and the License category is marked
+	// DataAvailable=false and excluded from the overall rollup — "we could
+	// not read the licence" must not score the same as "the package
+	// declares none". The zero value keeps today's behaviour: licence data
+	// is assumed available and an empty LicenseSPDX is a claim.
+	LicenseDataUnavailable bool
 	// LicenseChangedFromPrev: this version's licence adds a restrictive
 	// class (copyleft / non-permissive) the prior version we hold lacked.
 	// LicensePriorSPDX / LicensePriorVersion are that prior row, for

@@ -20,6 +20,7 @@ func TestStatusForWarnCode(t *testing.T) {
 		{"codeberg_meta_fetch_failed", StatusUnavailable},
 		{"bitbucket_meta_fetch_failed", StatusUnavailable},
 		{"timeline_fetch_failed", StatusUnavailable},
+		{"license_unavailable", StatusUnavailable},
 		{"repolink_probe_error", StatusUnavailable},
 		{"transitive_dep_not_cached", StatusUnavailable},
 		{"transitive_dep_superseded", StatusUnavailable},

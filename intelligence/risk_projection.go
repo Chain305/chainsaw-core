@@ -347,6 +347,10 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		// --- License ---
 		LicenseSPDX: r.Metadata.LicenseExpression,
 		LicenseTags: risk.Classify(r.Metadata.LicenseExpression),
+		// A licence fetch that FAILED is not a declaration of none. Only
+		// when nothing was read anyway: a licence obtained on another
+		// path still scores. See WarnLicenseUnavailable.
+		LicenseDataUnavailable: licenseFetchFailed(r) && r.Metadata.LicenseExpression == "",
 		// LicenseChangedFromPrev is set by projectLicenseDiff below.
 		// (LicensePolicyBlocked was removed with its signal — there was
 		// no licence allow/deny config to wire it to, and the policy
@@ -399,6 +403,13 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		AgentToolCapabilities:        r.Scan.AgentToolCapabilities,
 		MCPServerUnverified:          r.Scan.MCPServerUnverified,
 		PromptTemplateInjection:      r.Scan.PromptTemplateInjection,
+	}
+
+	// Classify("") tags the empty expression Unidentified, which is the
+	// same false claim lic.missing makes. nil keeps every tag signal
+	// dormant: not classified, not "none".
+	if in.LicenseDataUnavailable {
+		in.LicenseTags = nil
 	}
 
 	// PublishVelocityAnomaly — prefer the explicit pointer when an
@@ -565,6 +576,17 @@ func registryDecodeReason(r *Report) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// licenseFetchFailed reports whether the registry-metadata provider said the
+// fetch that carries the licence failed (WarnLicenseUnavailable).
+func licenseFetchFailed(r *Report) bool {
+	for _, w := range r.Observation.Warnings {
+		if w.Provider == "registrymetadata" && w.Code == WarnLicenseUnavailable {
+			return true
+		}
+	}
+	return false
 }
 
 // registryCancelledReason is the sibling of registryDecodeReason: the same

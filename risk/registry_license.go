@@ -46,7 +46,9 @@ func init() {
 		Title:       "No license declared",
 		Description: "Package does not declare a license — ambiguous legal standing for downstream use.",
 		Fires: func(in Input) (bool, string, map[string]any) {
-			if in.LicenseSPDX != "" {
+			// An empty licence we never managed to READ is not a
+			// declaration of none. See Input.LicenseDataUnavailable.
+			if in.LicenseSPDX != "" || in.LicenseDataUnavailable {
 				return false, "", nil
 			}
 			return true, "Package does not declare a license.", nil

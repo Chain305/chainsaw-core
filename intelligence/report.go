@@ -1439,6 +1439,34 @@ const (
 	// upstream coverage misses on @solana/web3.js.
 	WarnRegistryBodyTooLarge = "body_too_large"
 
+	// WarnLicenseUnavailable is emitted by the registry-metadata provider
+	// when the fetch that carries the licence FAILED (timeout, transport,
+	// 5xx, decode) rather than answered: the primary per-version document
+	// in every ecosystem, deps.dev for Go (the only Go licence source),
+	// and a Maven parent POM the licence would be inherited from.
+	//
+	// It exists because lic.missing keys on `LicenseSPDX == ""` and cannot
+	// tell "declares no licence" from "we never read it". Two identical
+	// runs of the 400-package benign FP eval disagreed on lic.missing +
+	// license.unidentified (-30) for 55 coordinates, e.g. go
+	// github.com/google/go-cmp v0.7.0 whenever deps.dev hit its 3s budget.
+	//
+	// It is LICENCE-SCOPED: risk_projection.go turns it into
+	// risk.Input.LicenseDataUnavailable (only when no licence was read
+	// anyway), which makes the licence signals dormant and drops the
+	// License category from the rollup. Every other category still
+	// scores. A definite absence (404) never produces it — a parent POM
+	// or deps.dev 404 stays silent, as does a 200 with no licence.
+	//
+	// Keyed on this code, never on `transport`: GitHub/forge enrichment
+	// emits `transport` AFTER a successful primary fetch, so that code
+	// says nothing about whether the licence was read.
+	//
+	// Classified StatusUnavailable in core/coverage/status.go, with its
+	// enrichment-failure siblings from this same provider
+	// (timeline_fetch_failed, mod_fetch_failed, github_meta_fetch_failed).
+	WarnLicenseUnavailable = "license_unavailable"
+
 	// FlagRegistryWithdrawn is the VersionAnomalyFlags entry for a
 	// registry-native "this coordinate was withdrawn" fact: an npm unpublish, a
 	// pub.dev retraction, a discontinued package.
