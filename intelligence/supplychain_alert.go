@@ -164,7 +164,14 @@ func DiffSupplyChain(row metadata.PackageMetadataRow, ecosystem string, prior, n
 	// not "a new risk appeared". Diffing Scan.* across an unperformed
 	// side turns every large artifact (the 256 MiB skip) into a phantom
 	// alert.
-	if prior.Scan.Performed && next.Scan.Performed {
+	//
+	// Performed is report-level: any artifact provider sets it. An empty
+	// InstallScriptKind means the installscripts provider itself did not
+	// contribute (no manifest reached it, or it did not run), and it reads
+	// as "none" in the alert text. cpu-features@0.0.10 raised
+	// install_script_appeared that way on an immutable version.
+	if prior.Scan.Performed && next.Scan.Performed &&
+		prior.Scan.InstallScriptKind != "" && next.Scan.InstallScriptKind != "" {
 		switch {
 		case !prior.Scan.InstallScriptFetches && next.Scan.InstallScriptFetches:
 			add(AlertInstallScriptAppeared, "install script fetches remote code",

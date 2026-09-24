@@ -59,6 +59,9 @@ func TestDiffSupplyChain_ScanPerformedGuard(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			prior := &Report{Scan: ArtifactScanSection{Performed: tc.priorDone}}
+			if tc.priorDone {
+				prior.Scan.InstallScriptKind = "none" // installscripts ran, found nothing
+			}
 			nextScan := worst
 			nextScan.Performed = tc.nextDone
 			next := &Report{Scan: nextScan}
@@ -72,6 +75,22 @@ func TestDiffSupplyChain_ScanPerformedGuard(t *testing.T) {
 				t.Fatalf("trigger = %q, want %q", got[0].Trigger, AlertInstallScriptAppeared)
 			}
 		})
+	}
+}
+
+// Performed is report-level, so it is true whenever ANY artifact provider
+// ran. A prior whose InstallScriptKind is empty never had installscripts
+// look at it — cpu-features@0.0.10 raised a false install_script_appeared
+// on an immutable version exactly this way. Verified by deleting the kind
+// clauses from the guard: this goes red.
+func TestDiffSupplyChain_InstallScriptsProviderMustHaveRunOnBothSides(t *testing.T) {
+	present := ArtifactScanSection{Performed: true, HasInstallScript: true, InstallScriptKind: "present"}
+	for name, priorKind := range map[string]string{"installscripts silent": "", "installscripts ran": "none"} {
+		prior := &Report{Scan: ArtifactScanSection{Performed: true, InstallScriptKind: priorKind}}
+		got := DiffSupplyChain(recallRow(), "npm", prior, &Report{Scan: present})
+		if want := priorKind != ""; (len(got) > 0) != want {
+			t.Errorf("%s: fired %v, want %v", name, triggers(got), want)
+		}
 	}
 }
 
@@ -319,7 +338,7 @@ func TestDiffSupplyChain_UndiffedFieldsStaySilent(t *testing.T) {
 func TestDiffSupplyChain_MultipleFlipsAreDeterministic(t *testing.T) {
 	prior := &Report{
 		SupplyChain: SupplyChainSection{MalwareStatus: "clean", TyposquatStatus: "clean", PublisherChanged: ptr(false)},
-		Scan:        ArtifactScanSection{Performed: true},
+		Scan:        ArtifactScanSection{Performed: true, InstallScriptKind: "none"},
 		Risk:        &risk.Evaluation{Verdict: risk.VerdictAllow},
 	}
 	next := &Report{

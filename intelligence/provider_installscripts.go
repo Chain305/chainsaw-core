@@ -501,30 +501,48 @@ func ManifestsFor(h *ArtifactHandle) map[string][]byte {
 	return res.Files.SelectLower(artifactmap.WantsInstallManifest)
 }
 
-// FirstMatch returns the body of the first entry whose basename matches
-// `basename` (case-insensitive). npm tarballs ship their manifest under
+// FirstMatch returns the body of the SHALLOWEST entry whose basename matches
+// `basename` (case-insensitive), ties broken by name. npm tarballs ship their manifest under
 // "package/package.json"; we don't want the caller to guess the prefix.
 //
 // Exported as part of the open-core seam: the premium aiartifact provider
 // (internal/intelligence/premium) reuses this manifest lookup.
 func FirstMatch(files map[string][]byte, basename string) []byte {
 	lower := strings.ToLower(basename)
-	for name, body := range files {
-		if strings.ToLower(path.Base(name)) == lower {
-			return body
-		}
-	}
-	return nil
+	return shallowestMatch(files, func(name string) bool {
+		return strings.ToLower(path.Base(name)) == lower
+	})
 }
 
-// firstGemspec returns the body of the first *.gemspec entry in the map.
+// firstGemspec returns the body of the shallowest *.gemspec entry.
 func firstGemspec(files map[string][]byte) []byte {
-	for name, body := range files {
-		if strings.HasSuffix(strings.ToLower(path.Base(name)), ".gemspec") {
-			return body
+	return shallowestMatch(files, func(name string) bool {
+		return strings.HasSuffix(strings.ToLower(path.Base(name)), ".gemspec")
+	})
+}
+
+// shallowestMatch returns the body of the matching entry with the fewest
+// path segments, ties broken by name. Ranging over the map and returning
+// the first hit read a RANDOM manifest whenever the archive held more than
+// one: posthog-js ships four package.json files, so its install-script
+// verdict changed from scan to scan and raised a false recall alert on an
+// immutable version. It was also a hole — nested manifests could hide the
+// root one's postinstall. The package's own manifest is the root one.
+func shallowestMatch(files map[string][]byte, match func(string) bool) []byte {
+	best, bestDepth := "", -1
+	for name := range files {
+		if !match(name) {
+			continue
+		}
+		depth := strings.Count(strings.Trim(name, "/"), "/")
+		if bestDepth < 0 || depth < bestDepth || (depth == bestDepth && name < best) {
+			best, bestDepth = name, depth
 		}
 	}
-	return nil
+	if bestDepth < 0 {
+		return nil
+	}
+	return files[best]
 }
 
 // walkForFile collects the body of the first archive entry whose
