@@ -466,8 +466,24 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	// (docs/qa-remediation/L-02-REDIAGNOSIS.md records why the obvious fix is
 	// worse than the bug). So: count it first. The counter answers "does this
 	// actually happen, and how often" before anyone pays for the fix.
+	// The digest discriminator, added 2026-09-24. Without it this counter
+	// cannot answer the question it exists for.
+	//
+	// A cross-org rewrite is only interesting when the two orgs disagree about
+	// the FACTS. When both computed their vulnerability section from the same
+	// advisory snapshot — the same scannerDbDigest — the incoming section says
+	// what the prior one said, and replacing it changes nothing. Production has
+	// 361 foreign-read pairs across 13 of 15 orgs, so counting those benign
+	// rewrites leaves the counter permanently non-zero and therefore silent:
+	// the L-02 gate asks for a ZERO, and a number that can never be zero is not
+	// decision support.
+	//
+	// An UNKNOWN digest on either side still counts. That keeps this a
+	// conservative upper bound: failing to count a real overwrite would hide
+	// exactly the event the counter is watching for, and an over-count is the
+	// safe direction for a number that gates "do we pay for partitioning".
 	if prior := strings.TrimSpace(priorOrg.String); prior != "" && prior != strings.TrimSpace(orgID) &&
-		!vulnSectionEmpty(r.Vulnerabilities) {
+		!vulnSectionEmpty(r.Vulnerabilities) && vulnFactsDiffer(priorPayload, r.Vulnerabilities) {
 		crossOrgVulnOverwrites.Add(1)
 	}
 
@@ -1290,4 +1306,30 @@ func decodeCursor(s string) (searchCursor, error) {
 		return searchCursor{}, err
 	}
 	return c, nil
+}
+
+// vulnFactsDiffer reports whether an incoming vulnerability section was derived
+// from a DIFFERENT advisory snapshot than the row it is about to replace.
+//
+// Returns true when either digest is unknown: see the call site for why the
+// unknown case counts rather than being waved through.
+func vulnFactsDiffer(priorPayload []byte, incoming VulnSection) bool {
+	if len(priorPayload) == 0 {
+		return true
+	}
+	var prior struct {
+		Vulnerabilities struct {
+			ScannerDBDigest string `json:"scannerDbDigest"`
+		} `json:"vulnerabilities"`
+	}
+	if err := json.Unmarshal(priorPayload, &prior); err != nil {
+		// A payload we cannot read is a payload we cannot clear.
+		return true
+	}
+	a := strings.TrimSpace(prior.Vulnerabilities.ScannerDBDigest)
+	b := strings.TrimSpace(incoming.ScannerDBDigest)
+	if a == "" || b == "" {
+		return true
+	}
+	return a != b
 }
