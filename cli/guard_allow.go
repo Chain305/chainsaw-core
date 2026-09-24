@@ -1,7 +1,7 @@
 package cli
 
 // `chainsaw guard allow` — the local, offline escape hatch for a FALSE BLOCK
-// on the install path. P4 in docs/proposal_typosquat_fp_class.md, and a
+// on the install path. P4 in docs/ENFORCEMENT_AND_POLICY.md#proposal-typosquat-fp-class, and a
 // standing ruling from the 742-false-positive postmortem.
 //
 // The problem it solves: the block-lane gate (guard_typosquat_gate.go)

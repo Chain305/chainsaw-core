@@ -1,7 +1,7 @@
 package intelligence
 
 // store_tenancy_test.go pins the L-02 cross-tenant contamination defect
-// described in docs/qa-remediation/L-02-REDIAGNOSIS.md.
+// described in docs/QA.md#qa-remediation-l-02-rediagnosis.
 //
 // These are CHARACTERIZATION tests: they assert the behaviour the product
 // has TODAY, which is the defective behaviour. They exist so that the

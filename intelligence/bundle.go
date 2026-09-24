@@ -6,7 +6,7 @@ package intelligence
 // intelligence providers consult.
 //
 // The bundle is a separate artefact from the OPA policy bundle
-// (see internal/policy/dsl/verify.go and docs/policy/SIGNED_BUNDLES.md).
+// (see internal/policy/dsl/verify.go and docs/ENFORCEMENT_AND_POLICY.md#policy-signed-bundles).
 // Both ride the same Sigstore trust root (Fulcio + Rekor via the
 // chainsaw release-signer identity) but are kept in separate files
 // so the rotation cadences stay independent — air-gapped operators
@@ -63,7 +63,7 @@ import (
 const BundleManifestSchema = "chainsaw.intel-bundle/v1"
 
 // BundleEnvVar is the env var operators set to point chainsaw at a
-// pre-mirrored intel bundle. Documented in docs/install/AIRGAP.md.
+// pre-mirrored intel bundle. Documented in docs/OPERATIONS.md#install-airgap.
 const BundleEnvVar = "CHAINSAW_INTEL_BUNDLE_PATH"
 
 // BundleIdentityEnvVar overrides the expected Sigstore signer identity
@@ -689,7 +689,7 @@ const (
 )
 
 // FailModeEnvVar is the env var operators set to override the default.
-// Documented in docs/install/AIRGAP.md.
+// Documented in docs/OPERATIONS.md#install-airgap.
 const FailModeEnvVar = "CHAINSAW_OFFLINE_FAIL_MODE"
 
 // ParseFailMode tolerates the same case variants as the other env

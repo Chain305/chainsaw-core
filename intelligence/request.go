@@ -251,7 +251,7 @@ type Options struct {
 	// tree -- with no depth limit, and with a per-CALL concurrency
 	// semaphore that is not a process ceiling. Fifty on-demand scans
 	// were enough to exhaust the database pool and shed 503s onto the
-	// unauthenticated public read path (docs/plan_scan_backpressure.md).
+	// unauthenticated public read path (docs/PLANS_INTELLIGENCE.md#plan-scan-backpressure).
 	//
 	// Callers do not set this. WarmDirectDeps sets it on the requests
 	// it schedules, and refuses to schedule past maxWarmDepth -- which

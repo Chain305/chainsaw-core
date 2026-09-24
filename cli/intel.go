@@ -449,7 +449,7 @@ const notRefusedPrefix = "This package was NOT refused. Chainsaw could not evalu
 // (transport, timeout, 5xx, breaker). The gate is exactly the control for
 // this, so keep the original wording.
 const adviceCoverageGate = "To refuse packages Chainsaw cannot\n" +
-	"evaluate, enable the coverage gate (see docs/COVERAGE_SOURCES.md)."
+	"evaluate, enable the coverage gate (see docs/REFERENCE.md)."
 
 // adviceAbsentCoordinate — the registry ANSWERED and the answer was "no
 // such package/version", or the coordinate is one no registry in that

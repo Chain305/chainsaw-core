@@ -1217,7 +1217,7 @@ func TestEvaluate_BehavioralBlock_Integration(t *testing.T) {
 // install that still proceeds.
 //
 // The non-block half is the load-bearing assertion. Per the 2026-08-24 ruling
-// in docs/plan_competitive_depth.md, warn-vs-block on a degraded analysis is a
+// in docs/PLANS_PRODUCT.md#plan-competitive-depth, warn-vs-block on a degraded analysis is a
 // policy decision — the built-in bundle answers monitor and an operator bundle
 // answers block. A hardcoded refusal here would be the per-surface hardcoding
 // the acquireResult split exists to prevent, and it would hard-fail installs on

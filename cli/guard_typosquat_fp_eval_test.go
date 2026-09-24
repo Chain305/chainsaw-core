@@ -6,7 +6,7 @@ package cli
 //
 // ─── WHY THIS EXISTS: the published FP rate cannot see this defect ──────────
 //
-// docs/launch/fp-rate-measurement.md publishes a false-block rate measured by
+// docs/GTM_SALES.md#launch-fp-rate-measurement publishes a false-block rate measured by
 // TestBenignFalseBlockRate over the corpus build-benign-corpus.sh builds. That
 // number is structurally incapable of producing a typosquat false block, for
 // two independent reasons — write them down once so the next person does not
@@ -25,7 +25,7 @@ package cli
 //     byte scanner. The typosquat verdict lives in guard_eval.go's evaluate()
 //     ladder and is never reached on that path.
 //
-// The false-block class (docs/proposal_typosquat_fp_class.md) lives OUTSIDE
+// The false-block class (docs/ENFORCEMENT_AND_POLICY.md#proposal-typosquat-fp-class) lives OUTSIDE
 // the seed: a legitimate package absent from the corpus that sits one edit
 // from a top-guardTyposquatBlockRankCutoff corpus member — `nano`→`nan`,
 // `args`→`arg`. So the corpus for THIS measurement has to be held out from

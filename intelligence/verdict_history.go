@@ -6,7 +6,7 @@ package intelligence
 // was this allowed in March" is not a hard question, it is an
 // unanswerable one: there is no data. This is the table that answers it,
 // and the same table that makes the recall subscription measurable
-// (docs/plan_signal_repair.md Wave 4).
+// (docs/PLANS_INTELLIGENCE.md#plan-signal-repair Wave 4).
 
 import (
 	"context"

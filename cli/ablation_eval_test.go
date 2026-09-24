@@ -4,7 +4,7 @@ package cli
 //
 // ─── THE QUESTION THIS ANSWERS ──────────────────────────────────────────────
 //
-// docs/socket-comparison-2026-09-15-corpus-v1.md §4 reports malware 600/600
+// docs/REPORTS.md#socket-comparison-2026-09-15-corpus-v1 §4 reports malware 600/600
 // and immediately disowns it: M1/M2/M3 are drawn from the OpenSSF
 // malicious-packages feed that our own malware provider consumes. That number
 // is FEED PARITY. It grades us on our own input.
@@ -105,7 +105,7 @@ import (
 // ─── STRATA ─────────────────────────────────────────────────────────────────
 //
 // Deliberately NOT blended into one recall figure — see
-// docs/detection-benchmark-purpose.md §5. Each group answers a different
+// docs/ARCHITECTURE.md#detection-benchmark-purpose §5. Each group answers a different
 // question and averaging them reports architecture as detector quality.
 
 var (
@@ -347,7 +347,7 @@ func ablRefuse(format string, args ...any) {
 
 func TestFeedlessAblation(t *testing.T) {
 	if os.Getenv("CHAINSAW_ABLATION_EVAL") == "" {
-		t.Skip("feedless ablation instrument; set CHAINSAW_ABLATION_EVAL=1 — see docs/feedless-ablation.md")
+		t.Skip("feedless ablation instrument; set CHAINSAW_ABLATION_EVAL=1 — see docs/REPORTS.md")
 	}
 	reportsPath := os.Getenv("CHAINSAW_ABLATION_REPORTS")
 	truthPath := os.Getenv("CHAINSAW_ABLATION_TRUTH")
@@ -469,7 +469,7 @@ func TestFeedlessAblation(t *testing.T) {
 	}
 
 	t.Log("")
-	t.Log("FULL (no ablation) — reproduces §4 of docs/socket-comparison-2026-09-15-corpus-v1.md")
+	t.Log("FULL (no ablation) — reproduces §4 of docs/REPORTS.md")
 	ablLogGroups(t, base)
 
 	// ─── EACH ABLATION ──────────────────────────────────────────────────

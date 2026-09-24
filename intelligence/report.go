@@ -1056,7 +1056,7 @@ type ObservationSection struct {
 //	    verbatim and the refresher short-circuits on
 //	    `reportFresh && latest == row.Version`, which is exactly the
 //	    most-pulled coordinates. The staged drain in
-//	    docs/runbooks/matcher-epoch-backfill.md is REQUIRED and, at the
+//	    docs/RUNBOOKS.md#runbooks-matcher-epoch-backfill is REQUIRED and, at the
 //	    time of this commit, OUTSTANDING.
 //	epoch 10 (2026-09-01, P8-11): maint.single_maintainer no longer fires on
 //	    Maven/Gradle. The maintainer list for those ecosystems is built from

@@ -54,7 +54,7 @@ const (
 // It has to be its OWN number. `policy lint` publishes 2 for "your policies
 // have errors", and root.go's classifyCLIError maps every unclassified
 // operational failure to ExitOpError(2) as well — so before this existed, a CI
-// gate wired per docs/policy-audit.md could not tell "your policies are bad"
+// gate wired per docs/ENFORCEMENT_AND_POLICY.md#policy-audit could not tell "your policies are bad"
 // from "the scan never ran". 12 follows exitcodes.go's contract that codes >=10
 // are command-specific outcomes; it is deliberately NOT one of the shared
 // >=10 constants (ExitSoakNotCleared 10, ExitIntelBlock 11,
@@ -516,7 +516,7 @@ func looksLikePolicyEntry(raw []byte) bool {
 // bigger of the two defects being fixed — a sweep of an ordinary project
 // counted package.json as a policy, inflated the rule total with it, and
 // emitted a hard ERROR (exit 2) on tsconfig.json, breaking the CI gate
-// docs/policy-audit.md tells operators to wire up.
+// docs/ENFORCEMENT_AND_POLICY.md#policy-audit tells operators to wire up.
 //
 // A non-nil skip and a non-empty entry list can be returned together: that is
 // a real policy bundle with some non-policy entries in it.

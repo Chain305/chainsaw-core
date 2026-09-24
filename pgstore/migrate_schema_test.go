@@ -13,11 +13,11 @@ import (
 // TestEnsureIntelligenceReportsDenormColumns_Idempotent gates the additive
 // migration that adds `verdict TEXT` and `overall_score INT` plus their
 // supporting indexes to `intelligence_reports`. The columns are documented
-// in docs/architecture/package-intelligence.md and required by the
+// in docs/ARCHITECTURE.md#architecture-package-intelligence and required by the
 // /intelligence list-page filtering API; production schemas were observed
 // without them, which is what this migration fixes.
 //
-// The chainsaw migration thesis (docs/MIGRATIONS.md) is "additive DDL only,
+// The chainsaw migration thesis (docs/OPERATIONS.md#migrations) is "additive DDL only,
 // idempotent on every Open()". This test pins that contract for the new
 // migration by:
 //
@@ -94,7 +94,7 @@ func TestEnsureIntelligenceReportsDenormColumns_Idempotent(t *testing.T) {
 // migration that adds `secret_ciphertext`, `format`, and `topic` to the
 // `webhooks` table as `ADD COLUMN IF NOT EXISTS` statements. These columns
 // were previously added out-of-band (a manual ALTER documented in
-// docs/MIGRATIONS.md), which is why the webhook store carried a runtime
+// docs/OPERATIONS.md#migrations), which is why the webhook store carried a runtime
 // schema-detection ladder. The ladder is now collapsed; the store assumes
 // all three columns exist, so migrate() MUST guarantee them.
 //

@@ -112,7 +112,7 @@ const (
 	// PermMonitoredTargetsManage gates CRUD on monitored_targets —
 	// declaring a (repo_label, branch) target, uploading its package set,
 	// and archiving it (branch-scoped supply-chain monitoring, see
-	// docs/designs/branch-scoped-supply-chain-monitoring.md).
+	// docs/DESIGNS.md#designs-branch-scoped-supply-chain-monitoring).
 	//
 	// Deliberately NOT PermReposManage. That permission governs proxy /
 	// registry repositories — upstream mirrors and their credentials. A

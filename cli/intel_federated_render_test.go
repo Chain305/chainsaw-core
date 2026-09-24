@@ -177,7 +177,7 @@ func TestUnknownVerdictIsNotRenderedAsGradeF(t *testing.T) {
 	if !strings.Contains(out, "coverage gate") {
 		t.Errorf("output does not point at the coverage gate:\n%s", out)
 	}
-	if !strings.Contains(out, "docs/COVERAGE_SOURCES.md") {
+	if !strings.Contains(out, "docs/REFERENCE.md") {
 		t.Errorf("output does not cite the coverage doc:\n%s", out)
 	}
 	// The reason must survive: it is the only thing that says WHY.

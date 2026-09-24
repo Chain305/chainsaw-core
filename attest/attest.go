@@ -10,7 +10,7 @@
 // consumer trusts the verdict, not the artifact.
 //
 // Two consequences are load-bearing and are enforced here rather than
-// left to callers (docs/plan_attestation_and_recall.md A8):
+// left to callers (docs/PLANS_INTELLIGENCE.md#plan-attestation-and-recall A8):
 //
 //   - The predicate is ALWAYS https://slsa.dev/verification_summary/v1.
 //     Never emit anything that could be mistaken for SLSA Provenance

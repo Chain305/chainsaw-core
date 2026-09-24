@@ -51,7 +51,7 @@ func newBundleCmd() *cobra.Command {
 		Long: `Manage the air-gapped intelligence bundle that powers offline policy
 evaluation (CHAINSAW_OFFLINE=1). The bundle is a signed tarball
 shipped alongside the chainsaw-proxy release; see
-docs/install/AIRGAP.md for the refresh cadence and per-provider matrix.`,
+docs/OPERATIONS.md for the refresh cadence and per-provider matrix.`,
 	}
 	cmd.AddCommand(newBundleVerifyCmd())
 	cmd.AddCommand(newBundleApplyCmd())

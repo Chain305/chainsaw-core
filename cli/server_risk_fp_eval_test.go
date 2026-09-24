@@ -8,7 +8,7 @@ package cli
 // Every eval harness that existed before this one measures the offline guard:
 // benign_fp_eval_test.go, guard_eval_test.go, guard_typosquat_{fp,recall}_
 // eval_test.go. All four call analyzeArtifact on package BYTES, and
-// docs/launch/fp-rate-measurement-2026-08.md states that scope boundary
+// docs/GTM_SALES.md#launch-fp-rate-measurement-2026-08 states that scope boundary
 // outright. There was no false-positive harness for the server-side risk
 // engine at all.
 //

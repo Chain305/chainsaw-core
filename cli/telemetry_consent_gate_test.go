@@ -144,7 +144,7 @@ func TestEmit_DeclinedConsent_SendsZeroRequests(t *testing.T) {
 
 func TestEmit_UndecidedConsent_SendsZeroRequests(t *testing.T) {
 	// The CI shape: no guard_state.json at all, so nobody has ever been
-	// asked. docs/TELEMETRY.md: "Non-TTY / CI runs collect and send nothing
+	// asked. docs/REFERENCE.md#telemetry: "Non-TTY / CI runs collect and send nothing
 	// — ever."
 	cs := newCaptureServer(t)
 	dir := withTelemetrySandbox(t, cs.URL)

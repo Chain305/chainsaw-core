@@ -126,7 +126,7 @@ type doctorMode struct {
 //   - --attest was never consulted at all. Its own help text says "Implies
 //     --strict", and postAttestation is only reachable from runDoctorStrict,
 //     so `chainsaw doctor --bundle-id=<id> --attest` — the exact command in
-//     docs/DEPLOYMENT.md step 8 — printed the plain manager table, exited 0
+//     docs/OPERATIONS.md#deployment step 8 — printed the plain manager table, exited 0
 //     ("returns OK"), POSTed nothing, and left applied_at NULL. The operator
 //     then concluded the hardening-bundle loop was broken server-side.
 //   - The chain dispatched by PRECEDENCE with no conflict detection, so a CI

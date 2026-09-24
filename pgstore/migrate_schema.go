@@ -36,7 +36,7 @@ func (s *Store) ensureAnalyticsRollupSchema() error {
 	}
 	// Chain the intelligence-reports denorm-column migration so it runs
 	// inside the same migrate() pass as the other Open-time schema
-	// enforcements. Documented in docs/architecture/package-intelligence.md
+	// enforcements. Documented in docs/ARCHITECTURE.md#architecture-package-intelligence
 	// (intelligence_reports table — `verdict`, `overall_score`); production
 	// schemas were observed without them, which made the list-page filter
 	// SQL fall back to scanning the JSONB column. Idempotent — see comment
@@ -382,7 +382,7 @@ func (s *Store) ensureBillyProposalsSchema() error {
 
 // ensureMonitoredTargetsSchema creates the monitored_targets table that backs
 // branch-scoped supply-chain monitoring for orgs with no proxy traffic
-// (docs/designs/branch-scoped-supply-chain-monitoring.md). One row per
+// (docs/DESIGNS.md#designs-branch-scoped-supply-chain-monitoring). One row per
 // (org_id, repo_label, branch): the declared package set, the trigger set the
 // customer subscribes to, and the tick bookkeeping the worker writes back.
 //
@@ -401,7 +401,7 @@ func (s *Store) ensureBillyProposalsSchema() error {
 // It is an opaque display label the customer types, stored and echoed back and
 // nothing else. A column called "url" reads to a future contributor as "fetch
 // me", and this repo already carries an unfixed provenance SSRF (P8-52,
-// docs/plan_qa_phase8_remediation.md). Adding an outbound request against this
+// docs/PLANS_QA.md#plan-qa-phase8-remediation). Adding an outbound request against this
 // value is crossing a security boundary — do not do it without a threat model.
 //
 // The octet_length CHECKs are load-bearing, not hygiene. UNIQUE (org_id,

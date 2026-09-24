@@ -160,7 +160,7 @@ func init() {
 	// sc.npm_install_net_shell — npm ONLY, and the gate is the point.
 	//
 	// MEASURED on retained artifacts, 2026-09-16
-	// (docs/correlation-layer-measured-2026-09-16.md). The SAME conjunction,
+	// (docs/REPORTS.md#correlation-layer-measured-2026-09-16). The SAME conjunction,
 	// on the same day, with the same harness:
 	//
 	//	         marginal catches    held-out benign FP

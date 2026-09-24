@@ -3,7 +3,7 @@ package cli
 // guard_coverage.go — the optional fail-closed gate on the workstation guard.
 //
 // Off by default. When off, evaluateAll behaves exactly as it did before this
-// file existed. See docs/plan_optional_fail_closed.md for the design, and for
+// file existed. See docs/PLANS_PRODUCT.md#plan-optional-fail-closed for the design, and for
 // why the guard is defence-in-depth rather than proof: a developer can
 // uninstall the shim, so the provable chokepoints are the proxy, CI, publish,
 // and admission.

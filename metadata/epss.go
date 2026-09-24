@@ -247,7 +247,7 @@ func (s *Store) RefreshPackageEPSSScores() error {
 // refresher's batch pass and wrong on the per-scan path, which is the
 // one this serves: the table only grows, and this repo has already taken
 // a production outage from unbounded per-scan work
-// (docs/plan_scan_backpressure.md).
+// (docs/PLANS_INTELLIGENCE.md#plan-scan-backpressure).
 //
 // A CVE with no row contributes nothing. A zero return means "no EPSS
 // for any of these", which is not the same as "these are not exploited"

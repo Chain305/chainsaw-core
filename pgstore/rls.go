@@ -381,7 +381,7 @@ func VerifyBillyRole(ctx context.Context, billyDB, writerDB *sql.DB) error {
 // making it fatal would refuse to boot every existing deployment. What it
 // must not be is silent: while the writer holds SUPERUSER or BYPASSRLS,
 // chainsaw_writer_all is never exercised, so the day the role is demoted is
-// the first day that policy runs in anger. See docs/plan_qa_phase9_remediation.md
+// the first day that policy runs in anger. See docs/PLANS_QA.md#plan-qa-phase9-remediation
 // P9-23 for the migration shape and why it needs its own wave.
 //
 // Returns ok=true when the writer is already least-privilege.
@@ -515,7 +515,7 @@ func QueryOrgScoped(ctx context.Context, db *sql.DB, orgID, query string, args .
 //     row before the GRANT returns both rows after it, with no attribute
 //     change (TestVerifyBillyRole_RejectsInheritedWriterPolicy);
 //  3. whether ROW LEVEL SECURITY is enabled on the table at all. The
-//     documented incident rollback in docs/MIGRATIONS.md is
+//     documented incident rollback in docs/OPERATIONS.md#migrations is
 //     `ALTER TABLE … DISABLE ROW LEVEL SECURITY`, which is exactly the state
 //     nothing else here would notice.
 //

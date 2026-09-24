@@ -7,7 +7,7 @@ import (
 )
 
 // rbacScopesFlagEnv is the environment variable that gates the entire
-// resource/feature-scoped RBAC feature (see docs/plan_rbac_scoped_roles.md).
+// resource/feature-scoped RBAC feature (see docs/PLANS_PRODUCT.md#plan-rbac-scoped-roles).
 // Phase 1 ships DARK: the flag defaults OFF and nothing in the request path
 // consumes a resource scope while it is off, so behaviour is byte-for-byte
 // identical to a build without this plumbing. Flip to a truthy value only on

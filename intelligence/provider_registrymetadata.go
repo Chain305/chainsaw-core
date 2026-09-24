@@ -156,7 +156,7 @@ func newRegistryMetadataProvider() *registryMetadataProvider {
 // refresher's Concurrency semaphore (default 4), which is a CONCURRENCY
 // cap, not a rate limit: four goroutines in a tight loop will still
 // out-request any per-minute budget a registry publishes. That is
-// docs/plan_upstream_rate_limits.md item 5, and it is the half of the
+// docs/PLANS_INTELLIGENCE.md#plan-upstream-rate-limits item 5, and it is the half of the
 // problem the User-Agent work did not touch.
 //
 // Three deliberate choices:

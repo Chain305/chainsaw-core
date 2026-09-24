@@ -935,7 +935,7 @@ func (s *Store) PublishCountByPublishers(ctx context.Context, publishers []strin
 	args = append(args, since.UTC())
 
 	// COUNT(DISTINCT package), not COUNT(*), and that is the fix for a
-	// measured false positive (docs/plan_signal_repair.md S-5).
+	// measured false positive (docs/PLANS_INTELLIGENCE.md#plan-signal-repair S-5).
 	//
 	// sc.publish_velocity_anomaly has fired exactly once in 14,948
 	// production reports: on maven:org.apache.commons:commons-lang3:3.18.0

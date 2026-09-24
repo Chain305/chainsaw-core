@@ -979,7 +979,7 @@ func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSig
 	// number, and the early return could only ever RAISE the result.
 	//
 	// The effect, measured across 14,948 prod reports (S-7,
-	// docs/designs/audit-score-inversion.md): 20 verdicts were computed
+	// docs/DESIGNS.md#designs-audit-score-inversion): 20 verdicts were computed
 	// with the ceiling deleted, and 5 of them are stored `allow` that
 	// would not be. More evidence of malice produced a better score.
 	// `undici@7.20.0` fired both install-script compounds AND

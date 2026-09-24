@@ -113,7 +113,7 @@ var defaultHostLimits = map[string]float64{
 	//
 	// This is the technical half only. The official path for a security
 	// vendor at volume is to contact Sonatype — see
-	// docs/plan_upstream_rate_limits.md, which quotes their own FAQ branch
+	// docs/PLANS_INTELLIGENCE.md#plan-upstream-rate-limits, which quotes their own FAQ branch
 	// naming this exact category.
 	"repo.maven.apache.org": 5,
 

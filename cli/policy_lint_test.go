@@ -292,7 +292,7 @@ func TestPolicyLint_RepoArchivedCheckFires(t *testing.T) {
 //	(2) the walker had no directory skip-list and no notion of "this JSON
 //	    isn't a policy", so a sweep of an ordinary project counted
 //	    package.json as a rule and hard-ERRORed on tsconfig.json — a
-//	    false-positive break of the CI gate docs/policy-audit.md documents.
+//	    false-positive break of the CI gate docs/ENFORCEMENT_AND_POLICY.md#policy-audit documents.
 // --------------------------------------------------------------------------
 
 // newLintTestCmd builds a cobra command wired to runPolicyLint with the same
@@ -633,7 +633,7 @@ func TestPolicyLint_ZeroThresholdMatchesEverything(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// Range-classifier parity (§5 follow-up of docs/plan_qa_phase9_fresh_remediation.md).
+// Range-classifier parity (§5 follow-up of docs/PLANS_QA.md#plan-qa-phase9-fresh-remediation).
 //
 // `policy lint` used to hand-roll a two-field check (cvssMin: 0, epssMin: 0)
 // while `policy audit` classified NINE bounded fields through

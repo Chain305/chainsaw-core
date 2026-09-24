@@ -49,7 +49,7 @@ package intelligence
 // swift/docker/cocoapods/huggingface a NEW hard block for every opted-in
 // org, which is a strictly larger enforcement change than the one this
 // wave is measuring, needs its own flip count, and per the plan needs a
-// founder decision, a docs/COVERAGE_SOURCES.md row and a release note. It
+// founder decision, a docs/REFERENCE.md#coverage-sources row and a release note. It
 // is a separable follow-up, and separating it is the point: this change
 // moves the VERDICT (allow → unknown, which maps to Monitored, not
 // Blocked) and leaves the GATE exactly where it was.
@@ -266,7 +266,7 @@ func vulnerabilityScanCouldHaveFound(r *Report) bool {
 // fix for a routing bug belongs where the routing happens.
 //
 // PHASE 7 WAVE 6 ADJUDICATED THIS EXACT CLASS and the precedent is binding
-// (docs/archive/2026/plan_qa_phase7_remediation.md, "Wave 6 — the maven-hosted ecosystem,
+// (docs/ARCHIVE.md#archive-2026-plan-qa-phase7-remediation, "Wave 6 — the maven-hosted ecosystem,
 // correctly diagnosed"):
 //
 //   - `maven-hosted` is a repository NAME, not an ecosystem. The

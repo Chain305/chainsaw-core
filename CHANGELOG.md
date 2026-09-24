@@ -45,7 +45,7 @@ once the first signed release is cut.
   against 227,525 real malicious coordinates from the OpenSSF feed, the guard
   gives up **8.2% of the typosquat lane's block recall**. 247 of the held-out
   packages are still refused — the class is narrowed, not closed. Method and the
-  full survivor list: `docs/launch/fp-rate-measurement.md`.
+  full survivor list: `docs/GTM_SALES.md#launch-fp-rate-measurement`.
 - **Typosquat verdicts are now deterministic.** Equidistant matches were resolved
   by Go map-iteration order, so the same package on the same binary could refuse
   on one run and warn on the next once the block decision started depending on

@@ -7,7 +7,7 @@
 // the decision identical on every surface and testable without a fixture.
 //
 // Design, rejected alternatives, and accepted risks:
-// docs/plan_optional_fail_closed.md.
+// docs/PLANS_PRODUCT.md#plan-optional-fail-closed.
 package coverage
 
 import "strings"
@@ -39,7 +39,7 @@ const (
 // same as the WarnXxx constants declared in intelligence/report.go — several
 // of those (WarnUpstream5xx, WarnUpstream4xx, WarnBreakerOpen,
 // WarnRateLimited) have zero emission sites in the tree. See the P0 section
-// of docs/plan_optional_fail_closed.md.
+// of docs/PLANS_PRODUCT.md#plan-optional-fail-closed.
 //
 // CORRECTED 2026-09-06: WarnUnsupported was in that list and does NOT belong
 // there — advisory_coverage.go:411 emits it, which is the P8-05 fix. The

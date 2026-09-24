@@ -39,7 +39,7 @@ const (
 // verdict. That is the intended behaviour, not an oversight, and not the F-2
 // gap that was fixed elsewhere.
 //
-// The labelled-corpus eval (docs/labelled-corpus-eval-2026-09-13.md, F-2)
+// The labelled-corpus eval (docs/REPORTS.md#labelled-corpus-eval-2026-09-13, F-2)
 // found 0 of 9 "suspicious" rows scoring adverse. The fix was to ceiling
 // sc.deprecated_by_maintainer in registry_wave1.go — a first-party MAINTAINER
 // DECLARATION we are merely repeating. It was NOT to ceiling anything here,

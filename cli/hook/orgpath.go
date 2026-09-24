@@ -10,7 +10,7 @@
 // applies the same rule, and this file is its CLI mirror — deliberately
 // down to the returned string, so `chainsaw install-hook <ecosystem>` and
 // the dashboard's "Save this secret now" snippet emit the same URL.
-// See docs/archive/2026/smoke-test-appsec-journey.md (BUG-A6, BUG-14) for the full
+// See docs/ARCHIVE.md#archive-2026-smoke-test-appsec-journey (BUG-A6, BUG-14) for the full
 // failure recipe and the rationale for the fail-closed placeholder.
 package hook
 
@@ -47,7 +47,7 @@ const placeholderOrgSlug = "your-org-slug"
 // NO deployment prefix is baked in here, and that is load-bearing (B5).
 // `/chainproxy` is an OPTIONAL edge mount: nginx/Traefik route
 // chain305.com/chainproxy/* to the proxy and STRIP the prefix before
-// forwarding (docs/dockerized/README.md, docs/install-k3s-helm.md). The
+// forwarding (docs/OPERATIONS.md#dockerized-readme, docs/OPERATIONS.md#install-k3s-helm). The
 // server itself routes on the literal `/repository/` prefix and has no
 // StripPrefix anywhere — so a hardcoded `chainproxy/` here 404s on every
 // root-mounted deployment: the documented `docker compose up` quick-start,

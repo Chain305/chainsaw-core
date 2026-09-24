@@ -55,7 +55,7 @@ var (
 // on real release builds: after `chainsaw telemetry off` the CLI still
 // POSTed cli.session.started + cli.session.completed carrying install_id,
 // and a CI host with NO consent record at all sent both events too —
-// directly contradicting docs/TELEMETRY.md ("Non-TTY / CI runs collect
+// directly contradicting docs/REFERENCE.md#telemetry ("Non-TTY / CI runs collect
 // and send nothing — ever"). The gap was the intersection of two commits:
 // 6333714e added the consent gate to the guard path; 1583d651 later opened
 // the anonymous session-event tier without one.

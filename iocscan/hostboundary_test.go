@@ -26,7 +26,7 @@ func TestHostBoundary_RejectsInWordMatches(t *testing.T) {
 		// litellm@1.82.7 in the DataDog malware corpus — on evidence that is
 		// identical boilerplate in clean releases, so the "catch" was
 		// coincidental, not detection. See the A/B in
-		// docs/launch/fp-rate-measurement-2026-08.md.
+		// docs/GTM_SALES.md#launch-fp-rate-measurement-2026-08.
 		{"litellm nothooks placeholder", `'budget_alerts': 'https://nothooks.slack.com/services/T00000000/B00000000/XXXX'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

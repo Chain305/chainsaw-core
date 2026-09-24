@@ -303,7 +303,7 @@ func TestOSVProvider_Run_EcosystemAliasResolves(t *testing.T) {
 //
 // This test was `TestOSVProvider_CannotServeAsUniversalVulnBaseline`. It
 // pinned the blocker on the L-02 remedy in
-// docs/qa-remediation/L-02-REDIAGNOSIS.md ("keep the universal row's
+// docs/QA.md#qa-remediation-l-02-rediagnosis ("keep the universal row's
 // INPUTS universal — OSV only — and move the org's Trivy contribution to
 // a per-org overlay"), and its doc block said: if this ever fails because
 // osvProvider learned to stamp a clean section, do NOT just update the

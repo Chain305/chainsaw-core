@@ -2,7 +2,7 @@ package cli
 
 // bypass_matrix_test.go — the "we tried to bypass and couldn't" artifact for the
 // enforcement-closure wedge, and a permanent regression guard that the FP
-// burn-down (docs/launch/fp-rate-measurement.md) relaxed FALSE positives without
+// burn-down (docs/GTM_SALES.md#launch-fp-rate-measurement) relaxed FALSE positives without
 // opening a detection hole.
 //
 // It is a DIFFERENTIAL matrix: for every benign shape we now allow, the malicious
@@ -14,7 +14,7 @@ package cli
 // server/proxy + deep-CLI path. The FREE offline CLI's shell hook is
 // intentionally bypassable by calling the package manager directly (absolute
 // path) — closure there is a proxy-tier + registry-pinning property, documented
-// in docs/launch/enforcement-bypass-matrix.md, not a claim this test makes.
+// in docs/GTM_SALES.md#launch-enforcement-bypass-matrix, not a claim this test makes.
 
 import (
 	"strings"

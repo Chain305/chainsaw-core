@@ -33,7 +33,7 @@ package intelligence
 // exhaustion and shed 503s onto the unauthenticated public read path,
 // which performs no writes at all. It did not recover at zero load,
 // because the recursion was still expanding. See
-// docs/plan_scan_backpressure.md.
+// docs/PLANS_INTELLIGENCE.md#plan-scan-backpressure.
 //
 // Two bounds now hold, and both are enforced by tests:
 //

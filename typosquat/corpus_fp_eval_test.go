@@ -24,7 +24,7 @@ package typosquat
 // blocking verdict where it previously could only warn. That is why supplying
 // a corpus to three ecosystems that had never fired had to be measured before
 // it was shipped, not after: this is the shape of the 742-false-positive
-// incident (docs/launch/fp-rate-measurement-2026-08.md).
+// incident (docs/GTM_SALES.md#launch-fp-rate-measurement-2026-08).
 //
 // ─── THE CORPUS MUST BE HELD OUT ───────────────────────────────────────────
 //

@@ -47,7 +47,7 @@ func newTelemetryCmd() *cobra.Command {
 		Short:   "Inspect or control local analytics",
 		Long: `Chainsaw emits anonymous usage analytics to help us prioritize the
 product. Events are forwarded through your configured server so your
-PostHog API key never leaves the backend. See docs/TELEMETRY.md for the
+PostHog API key never leaves the backend. See docs/REFERENCE.md for the
 full event catalog.
 
 Opt out:    CHAINSAW_TELEMETRY_DISABLED=1

@@ -223,7 +223,7 @@ func TestScanKindHits(t *testing.T) {
 }
 
 // TestAdverseKindSplit is the guard for the false positive in
-// docs/artifact-lane-observability-2026-09-15.md: npm/webpack@5.110.3 carried
+// docs/REPORTS.md#artifact-lane-observability-2026-09-15: npm/webpack@5.110.3 carried
 // 9 surviving zero-width hits and moved to warn, while a single bidi override
 // (Trojan Source) must still fire.
 func TestAdverseKindSplit(t *testing.T) {

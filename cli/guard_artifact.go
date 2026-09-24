@@ -15,7 +15,7 @@ package cli
 // That keeps the "nothing leaves the box" guarantee intact and doubles as the
 // air-gap story (operators stage the tarballs they allow). Auto-acquiring bytes
 // from the package-manager cache, or an opt-in pinned-version fetch, are the
-// next increments tracked in docs/plan_competitive_depth.md.
+// next increments tracked in docs/PLANS_PRODUCT.md#plan-competitive-depth.
 //
 // Fail-open is absolute: any missing dir, unreadable file, or empty analysis
 // degrades to "no behavioral verdict" and the install proceeds — a guard that
@@ -447,7 +447,7 @@ func shallowerArchivePath(a, b string) bool {
 // the same silent ALLOW as a package the guard was never asked about.
 //
 // Splitting the two does NOT decide what happens next. Per the 2026-08-24
-// ruling in docs/plan_competitive_depth.md, warn-vs-block on acquireIncomplete
+// ruling in docs/PLANS_PRODUCT.md#plan-competitive-depth, warn-vs-block on acquireIncomplete
 // is a policy question (it maps onto input.signalsUnavailable, which already
 // exists), not a Go constant and not a per-surface table. This type only
 // produces the fact honestly; guard_eval.go decides.
@@ -483,7 +483,7 @@ const (
 	//     that only care about severity use degraded(); callers that want to
 	//     say WHY compare the constant.
 	//   - Not a block, because per the 2026-08-24 ruling in
-	//     docs/plan_competitive_depth.md warn-vs-block on a degraded
+	//     docs/PLANS_PRODUCT.md#plan-competitive-depth warn-vs-block on a degraded
 	//     analysis is a POLICY decision. This lane produces the SIGNAL; the
 	//     built-in bundle answers "monitor" and an operator who wants
 	//     fail-closed ships a rule that answers "block". Hardcoding a

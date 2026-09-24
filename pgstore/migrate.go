@@ -73,7 +73,7 @@ func (s *Store) migrate() error {
 //   - Data backfills
 //   - Schema rollback
 //
-// See docs/MIGRATIONS.md for the documentary per-release record.
+// See docs/OPERATIONS.md#migrations for the documentary per-release record.
 //
 // by release just trades lines for files; the inline record is the per-release
 // canonical history. Re-evaluate if it crosses 1500. TODO: refactor when a
@@ -523,7 +523,7 @@ func (s *Store) migrateSchema() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_custom_roles_org_slug ON custom_roles(org_id, slug)`,
 		`CREATE INDEX IF NOT EXISTS idx_custom_roles_org_deleted ON custom_roles(org_id, deleted_at)`,
-		// Resource/feature-scoped RBAC (docs/plan_rbac_scoped_roles.md, Phase 1).
+		// Resource/feature-scoped RBAC (docs/PLANS_PRODUCT.md#plan-rbac-scoped-roles, Phase 1).
 		// Additive, nullable-by-default column carrying a per-role JSON scope
 		// map: {"findings": {"repo_ids": ["..."], "self": false}}. Empty '{}'
 		// means UNSCOPED = full org-wide access, so every existing role keeps
@@ -1020,7 +1020,7 @@ func (s *Store) migrateSchema() error {
 		// 404s for any org that hasn't explicitly opted in, so a per-org
 		// block count is never leaked on the public surface without consent.
 		// An org admin flips it via PATCH /api/orgs/{id}/settings
-		// {"badge_blocked_public": true}. See docs/archive/2026/plan_10of10_surfaces.md.
+		// {"badge_blocked_public": true}. See docs/ARCHIVE.md#archive-2026-plan-10of10-surfaces.
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS badge_blocked_public INTEGER NOT NULL DEFAULT 0`,
 		// Org slugs are unique among LIVE orgs, not for all time.
 		//
@@ -1789,7 +1789,7 @@ func (s *Store) migrateSchema() error {
 		// banner queue. The (exception_id, milestone) PRIMARY KEY on
 		// exception_reminders_sent is the load-bearing idempotency
 		// invariant: concurrent leaders' INSERT … ON CONFLICT DO
-		// NOTHING cannot double-fire a milestone. See docs/MIGRATIONS.md
+		// NOTHING cannot double-fire a milestone. See docs/OPERATIONS.md#migrations
 		// for the per-release documentary record.
 		`CREATE TABLE IF NOT EXISTS exception_reminders_sent (
 			exception_id TEXT NOT NULL,
@@ -1877,7 +1877,7 @@ func (s *Store) migrateSchema() error {
 		// Pain 4 (ownership routing) — idempotent CREATE TABLE /
 		// CREATE INDEX statements for the team_webhook_destinations
 		// and ownership_glob_rules tables. This is the schema source
-		// of truth (docs/MIGRATIONS.md is the per-release documentary
+		// of truth (docs/OPERATIONS.md#migrations is the per-release documentary
 		// record).
 		//
 		// team_webhook_destinations: per-team outbound webhook destination
@@ -2186,11 +2186,11 @@ func (s *Store) migrateSchema() error {
 		// isMissing*Column sniffs) to tolerate self-hosted DBs whose
 		// `webhooks` table predated the M-SEC-05 ciphertext column or the
 		// format/topic columns — those columns were only ever added by an
-		// out-of-band manual ALTER (docs/MIGRATIONS.md "[Unreleased]"),
+		// out-of-band manual ALTER (docs/OPERATIONS.md#migrations "[Unreleased]"),
 		// never by migrate(). These idempotent ALTERs make migrate() the
 		// single source of truth so the collapsed store can assume the
 		// canonical schema unconditionally. The legacy plaintext-bridge in
-		// the store is retired alongside this; see docs/MIGRATIONS.md. Each
+		// the store is retired alongside this; see docs/OPERATIONS.md#migrations. Each
 		// is ADD COLUMN IF NOT EXISTS, so re-running migrate() (and running
 		// against a DB where the column already exists from the manual
 		// ALTER) is a no-op. New rows are written with secret='' +

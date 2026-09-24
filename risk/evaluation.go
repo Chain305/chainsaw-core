@@ -37,7 +37,7 @@ const (
 	// reporting surfaces the honest handling is to report it as
 	// "not evaluated" and let the operator decide; on enforcement
 	// surfaces the unavailability posture is owned by core/coverage's
-	// opt-in gate (docs/plan_optional_fail_closed.md), not by this
+	// opt-in gate (docs/PLANS_PRODUCT.md#plan-optional-fail-closed), not by this
 	// verdict — the risk engine advises, it does not gate.
 	VerdictUnknown Verdict = "unknown"
 )
@@ -236,7 +236,7 @@ func (r *Resolution) ApplyKnownFix(safeVersion string) {
 // advisory data but was NOT confirmed to be published upstream, and the
 // advisory sentence drops its imperative accordingly.
 //
-// AMENDS Phase 7 D-1/D-2 (docs/archive/2026/plan_qa_phase7_remediation.md). D-2 fixed
+// AMENDS Phase 7 D-1/D-2 (docs/ARCHIVE.md#archive-2026-plan-qa-phase7-remediation). D-2 fixed
 // the SOURCE of the safe version (per-CVE FixedVersion, resolved to the
 // minimum clearing every CVE) and explicitly rejected
 // intelligence_latest_probes.latest_version as a source because "latest

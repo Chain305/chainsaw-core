@@ -521,7 +521,7 @@ runs:
           # rules (core/cli/pr_scan.go, prOfflineSignals). There is no
           # vulnerability lane, no advisory lookup and no malware lane on any
           # of the three commands. A vuln lane was proposed and deliberately
-          # killed — see docs/plan_qa_phase9_remediation.md, DO NOT SHIP,
+          # killed — see docs/PLANS_QA.md#plan-qa-phase9-remediation, DO NOT SHIP,
           # P9-03. If one is ever built it belongs at the standing TODO in
           # pr_scan.go, ecosystem-agnostic and behind an opt-in input; this
           # footer stays behind it, not ahead of it.

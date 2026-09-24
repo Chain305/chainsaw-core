@@ -448,7 +448,7 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 	// observed in Wave O when network-bound) but is NOT a /readyz gate
 	// — the pod serves traffic with typosquat detection degraded
 	// ("skip" in Check) during the warm-up window. See
-	// docs/runbooks/cold-start.md.
+	// docs/RUNBOOKS.md#runbooks-cold-start.
 	go func() {
 		bootstrapCtx, cancel := context.WithTimeout(ctx, 10*time.Minute+popularBootstrapJitterMax)
 		defer cancel()

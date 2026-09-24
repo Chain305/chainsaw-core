@@ -182,8 +182,8 @@ func runRepoCreate(cmd *cobra.Command, _ []string) error {
 
 // ── enable / disable ──────────────────────────────────────────────────────────
 
-// There is deliberately NO `repo delete`. L-18 (docs/qa-remediation/W5-W6-
-// server-ux.md) rejected it: ten tables carry a bare `repository TEXT` with no
+// There is deliberately NO `repo delete`. L-18 (docs/QA.md#qa-remediation-w5-w6-server-ux)
+// rejected it: ten tables carry a bare `repository TEXT` with no
 // foreign key, so re-adopting a deleted name inherits the old `index_entries`
 // (blobs from the previous upstream), `vulnerability_metadata` (stale
 // verdicts) and `package_permissions` — a client credential silently regains

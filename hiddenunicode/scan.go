@@ -315,7 +315,7 @@ func Threshold() int {
 // ASCII character as roughly 8 zero-width runes, so below ~4 characters of
 // smuggled payload there is nothing to smuggle. Minified bundles, emoji ZWJ
 // sequences and i18n fixtures sit far below that — npm/webpack@5.110.3, the
-// measured false positive in docs/artifact-lane-observability-2026-09-15.md,
+// measured false positive in docs/REPORTS.md#artifact-lane-observability-2026-09-15,
 // carries 9. Anything that clears 32 is carrying data, not typography.
 //
 // This bar applies only AFTER the provider's benign-context suppression

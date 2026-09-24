@@ -9,7 +9,7 @@ import (
 // Environment variables every surface reads. One spelling, one parser, so the
 // guard, the proxy, the publish path, CI and admission cannot drift into
 // dialects of the same option — which is the failure the whole design exists
-// to prevent (see decision D1 in docs/plan_optional_fail_closed.md).
+// to prevent (see decision D1 in docs/PLANS_PRODUCT.md#plan-optional-fail-closed).
 const (
 	EnvMode       = "CHAINSAW_COVERAGE_MODE"
 	EnvRequired   = "CHAINSAW_COVERAGE_REQUIRED"

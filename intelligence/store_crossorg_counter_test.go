@@ -7,7 +7,7 @@ import (
 )
 
 // L-02 slice 1. The partition itself was deliberately NOT attempted — see
-// docs/qa-remediation/L-02-REDIAGNOSIS.md for why the obvious fix is worse
+// docs/QA.md#qa-remediation-l-02-rediagnosis for why the obvious fix is worse
 // than the bug. What ships instead is the measurement that decides whether
 // the expensive fix is worth doing, so this test's job is to prove the
 // counter actually observes the defect rather than sitting at zero forever.

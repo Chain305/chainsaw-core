@@ -2,7 +2,7 @@
 // into the binary.
 //
 // It exists because of the 2026-08-24 ruling recorded in
-// docs/plan_competitive_depth.md: warn-vs-block on a degraded analysis
+// docs/PLANS_PRODUCT.md#plan-competitive-depth: warn-vs-block on a degraded analysis
 // is a policy question, and the offline guard falls back to defaults
 // when no signed bundle is present. Those two together force the shape
 // here — if "defaults" meant hardcoded Go, the ruling would be violated

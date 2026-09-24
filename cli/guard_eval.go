@@ -25,7 +25,7 @@ package cli
 //     EXCEPTION, opt-in and off by default: an operator who sets
 //     CHAINSAW_COVERAGE_MODE=closed with CHAINSAW_COVERAGE_REQUIRED=<sources>
 //     asks us to refuse instead. See guard_coverage.go and
-//     docs/plan_optional_fail_closed.md. With the variable unset, behaviour is
+//     docs/PLANS_PRODUCT.md#plan-optional-fail-closed. With the variable unset, behaviour is
 //     byte-identical to the fail-open default described above.
 
 import (
@@ -828,7 +828,7 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	// and could not finish (a truncated cache index scan, a transport failure,
 	// a present-but-unreadable artifact) — a materially different fact from a
 	// miss, and the one an attacker can drive. Per the 2026-08-24 ruling in
-	// docs/plan_competitive_depth.md, whether that warns or blocks is a POLICY
+	// docs/PLANS_PRODUCT.md#plan-competitive-depth, whether that warns or blocks is a POLICY
 	// question, not a Go constant and not a per-surface table. So this step
 	// produces the FACT and the policy decision point below consumes it, via
 	// guardPolicyInput's input.signalsUnavailable. That PDP is wired — see
@@ -931,7 +931,7 @@ func supplementalInstallAdvisory(spec packageSpec) (string, bool) {
 // signals: if a data source the operator declared mandatory could not be
 // evaluated, no per-package verdict can be trusted to mean "clean". Off by
 // default, so the common path is unchanged. See
-// docs/plan_optional_fail_closed.md.
+// docs/PLANS_PRODUCT.md#plan-optional-fail-closed.
 func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verdicts []guardVerdict, blocked bool) {
 	verdicts = make([]guardVerdict, 0, len(specs))
 

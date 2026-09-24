@@ -97,7 +97,7 @@ func TestWarmDirectDeps_DoesNotRecurse(t *testing.T) {
 		t.Fatalf("cache-warm recursed to depth %d; maxWarmDepth is %d (deepest expected: dep-%d). "+
 			"Every level is a full Scan that schedules WarmDirectDeps again, so losing this "+
 			"bound restores an exponential fan-out: 50 scans exhausted the database pool and "+
-			"shed 503s onto the public read path on 2026-09-14. See docs/plan_scan_backpressure.md.",
+			"shed 503s onto the public read path on 2026-09-14. See docs/PLANS_INTELLIGENCE.md.",
 			prov.depth(), maxWarmDepth, maxWarmDepth)
 	case <-time.After(3 * time.Second):
 		if d := prov.depth(); d > maxWarmDepth {

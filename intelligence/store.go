@@ -64,7 +64,7 @@ import (
 // coordinates and feeds the opt-in core/coverage fail-closed gate. See
 // TestOSVProvider_CannotServeAsUniversalVulnBaseline in
 // provider_osv_test.go, which pins that blocker, and
-// docs/qa-remediation/L-02-REDIAGNOSIS.md for the four earlier diagnoses
+// docs/QA.md#qa-remediation-l-02-rediagnosis for the four earlier diagnoses
 // that were wrong. Any real fix has to supply a universal "scanned, clean"
 // stamp from a source that actually covers clean packages before the
 // per-org split can be made without a product-wide score shift.
@@ -202,7 +202,7 @@ func (s *Store) ListVersions(ctx context.Context, orgID, ecosystem, name string)
 // version string.
 //
 // WHY THIS EXISTS. Measured 2026-09-17 on 71 real takeover pairs against 117
-// benign version bumps (docs/cross-version-diff-measured-2026-09-17.md): an
+// benign version bumps (docs/REPORTS.md#cross-version-diff-measured-2026-09-17): an
 // axis APPEARING between versions discriminates far better than the same axis
 // being present on one version —
 //
@@ -463,7 +463,7 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	// critical. Both were reproduced against Postgres.
 	//
 	// Partitioning this table is expensive and was deliberately not attempted
-	// (docs/qa-remediation/L-02-REDIAGNOSIS.md records why the obvious fix is
+	// (docs/QA.md#qa-remediation-l-02-rediagnosis records why the obvious fix is
 	// worse than the bug). So: count it first. The counter answers "does this
 	// actually happen, and how often" before anyone pays for the fix.
 	// The digest discriminator, added 2026-09-24. Without it this counter

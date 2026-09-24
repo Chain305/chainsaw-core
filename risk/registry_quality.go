@@ -65,7 +65,7 @@ func init() {
 	// the package returned ALLOW with the composite pinned at 60 — the
 	// signature the vendor QA saw on requests 2.31.0 (ALLOW / Overall 60
 	// with no rationale lines, against five sub-scores all >= 85). See
-	// P8-02 in docs/plan_qa_phase8_remediation.md.
+	// P8-02 in docs/PLANS_QA.md#plan-qa-phase8-remediation.
 	register(Signal{
 		ID:          SignalQualVersionAnomaly,
 		Category:    CategoryQuality,

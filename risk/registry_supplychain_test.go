@@ -340,7 +340,7 @@ func TestSCBothURLDepSignalsFire(t *testing.T) {
 // equivalent guard, which is why the gap survived.
 //
 // The list is the "high-confidence harmful" tier from the MaxImpact policy
-// table in docs/architecture/package-intelligence.md. sc.typosquat_high is
+// table in docs/ARCHITECTURE.md#architecture-package-intelligence. sc.typosquat_high is
 // excluded deliberately: it is the same severity but a heavier -40, and its
 // tighter 30 ceiling is a deliberate calibration, not drift.
 func TestSCHighSeverityCeilingsArePresentAndUniform(t *testing.T) {
@@ -427,7 +427,7 @@ func TestSCReservedNamespaceScoresLikeItsPeers(t *testing.T) {
 }
 
 // TestSCHiddenUnicodeKindSplit pins the kind split from
-// docs/artifact-lane-observability-2026-09-15.md. Before it, the signal fired
+// docs/REPORTS.md#artifact-lane-observability-2026-09-15. Before it, the signal fired
 // on a hit COUNT alone, so npm/webpack@5.110.3's 9 benign zero-width hits in a
 // minified bundle scored the same as 9 bidi overrides in a credential helper
 // and moved a real verdict to warn.

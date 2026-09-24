@@ -338,7 +338,7 @@ var acceptedBenignFalseBlocks = map[string]bool{
 // but prose. It could not fail on a result. A change that dropped the catch to
 // ZERO produced a green build, while the number it printed — "104/238 = 43.7%"
 // — was quoted as verified fact in three commit messages and in
-// docs/launch/fp-rate-measurement-2026-08.md. Its sibling above was hardened to
+// docs/GTM_SALES.md#launch-fp-rate-measurement-2026-08. Its sibling above was hardened to
 // an identity set on 2026-08-24 and this half was left open, which is the worse
 // half to leave open: a false-block regression annoys a developer, a catch
 // regression means malware installs.
@@ -507,7 +507,7 @@ func TestBlockCatchRate(t *testing.T) {
 			"Removing the coordinate from mustStayCaught makes this message go away "+
 			"and the malware ship; do that only with the argument written down, the "+
 			"way the litellm@1.82.7 case is argued in "+
-			"docs/launch/fp-rate-measurement-2026-08.md.", len(lost), strings.Join(lost, "\n  "))
+			"docs/GTM_SALES.md.", len(lost), strings.Join(lost, "\n  "))
 	}
 
 	// The reverse direction is good news, so it reports rather than fails —
@@ -572,7 +572,7 @@ const (
 // guard hard-blocks, keyed "ecosystem:name@version". Measured 104/238 on
 // 2026-08-25 against scripts/detection-eval/corpus-datadog/ddcorpus/corpus with
 // -count=1 (70 npm of 120, 34 pypi of 118) — the same 43.7% figure
-// docs/launch/fp-rate-measurement-2026-08.md publishes, now pinned by identity
+// docs/GTM_SALES.md#launch-fp-rate-measurement-2026-08 publishes, now pinned by identity
 // instead of by prose.
 //
 // READ THIS BEFORE REMOVING A NAME. Every line is a piece of real, published
@@ -591,7 +591,7 @@ const (
 //     litellm releases, so tightening exfilHostRE's host boundary dropped it —
 //     and dropped nothing real, because the own-bytes scanners had never
 //     actually detected what makes 1.82.7 malicious. That reasoning is written
-//     out in docs/launch/fp-rate-measurement-2026-08.md; anything removed here
+//     out in docs/GTM_SALES.md#launch-fp-rate-measurement-2026-08; anything removed here
 //     needs the same.
 //
 // It is NOT legitimate to delete a line because it went red.

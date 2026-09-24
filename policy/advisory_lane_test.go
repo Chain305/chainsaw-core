@@ -57,7 +57,7 @@ func withVulnCellsLowered(fn func()) {
 // makes detectUnsupported fire, the evaluator `continue`s past the whole
 // policy, and all of those blocks silently stop.
 //
-// That is the direction docs/plan_qa_phase8_remediation.md:1284-1285
+// That is the direction docs/PLANS_QA.md#plan-qa-phase8-remediation:1284-1285
 // forbids ("RECONCILE UPWARD ONLY... That is a proxy fail-open. The
 // direction is not optional"), and it is why the fix in advisory_lane.go
 // is a marker rather than a cell move.

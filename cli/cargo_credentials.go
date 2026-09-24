@@ -166,7 +166,7 @@ Sub-verbs:
   chainsaw cargo-credentials status   Show which source is providing credentials
   chainsaw cargo-credentials clear    Remove the stored credential
 
-See docs/integrations/cargo.md for the full setup recipe.`,
+See docs/ENFORCEMENT_AND_POLICY.md for the full setup recipe.`,
 		// DisableFlagParsing lets cargo pass --cargo-plugin without
 		// cobra erroring. The sub-verbs below override this by being
 		// real subcommands cargo never calls.

@@ -900,7 +900,7 @@ func TestStandaloneContextOnlyAcceptsEveryRealConstraint(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// A1 — policy threshold bounds (docs/plan_qa_phase9_fresh_remediation.md).
+// A1 — policy threshold bounds (docs/PLANS_QA.md#plan-qa-phase9-fresh-remediation).
 //
 // Every policy write funnels through Store.Create / Store.Update, so a
 // bound there is total. Create rejects any out-of-range value; Update

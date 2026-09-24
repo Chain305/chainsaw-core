@@ -142,7 +142,7 @@ type LatestSentinelCount struct {
 //
 // Deliberately not org-scoped: intelligence_reports is keyed on the
 // coordinate alone and carries no tenant scope (see L-02,
-// docs/plan_intel_cache_tenancy.md). Ordered largest bucket first.
+// docs/PLANS_INTELLIGENCE.md#plan-intel-cache-tenancy). Ordered largest bucket first.
 func (s *Store) LatestSentinelCounts(ctx context.Context, rule LatestSentinelRule) ([]LatestSentinelCount, error) {
 	if s == nil || s.db == nil {
 		return nil, nil

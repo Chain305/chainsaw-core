@@ -443,7 +443,7 @@ func TestPrivateHatchSubsumesCGNATAtDialTime(t *testing.T) {
 
 // TestClassifyOutboundIPIgnoresPrivateHatch — the broad dial-time flag must
 // NOT make an RFC1918 webhook or SIEM destination savable. This is the
-// documented split in docs/DEPLOYMENT.md §6.2 and the reason the narrow
+// documented split in docs/OPERATIONS.md#deployment §6.2 and the reason the narrow
 // CGNAT knob had to exist separately.
 func TestClassifyOutboundIPIgnoresPrivateHatch(t *testing.T) {
 	t.Setenv(AllowPrivateUpstreamsEnv, "1")

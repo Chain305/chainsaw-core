@@ -9,7 +9,7 @@ import "fmt"
 // one producer, and a positive signal like sc.provenance_verified legitimately
 // does not fire on most packages. Availability is a property of the producer,
 // so that is what the operator declares. See decision D2 in
-// docs/plan_optional_fail_closed.md.
+// docs/PLANS_PRODUCT.md#plan-optional-fail-closed.
 type Source string
 
 const (

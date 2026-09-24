@@ -1,6 +1,6 @@
 package risk
 
-// Audit harness for docs/designs/audit-score-inversion.md (2026-09-21).
+// Audit harness for docs/DESIGNS.md#designs-audit-score-inversion (2026-09-21).
 //
 // Two shipped behaviours can make a WORSE package score BETTER:
 //
@@ -54,7 +54,7 @@ func firedSet(ids ...string) map[string]FiredSignal {
 }
 
 // TestCeilingBypassIsClosed was TestCeilingBypassInvertsScore, and the
-// rewrite is the point (S-7, docs/plan_signal_repair.md).
+// rewrite is the point (S-7, docs/PLANS_INTELLIGENCE.md#plan-signal-repair).
 //
 // The old version ASSERTED the bug. It required
 // `withCompound == rollup` — the uncapped number — and then required

@@ -25,7 +25,7 @@ import (
 // It is listed in knownContradictions with the reason, rather than silently
 // excluded, so a NEW system policy with the same defect still fails. Delete
 // the entry when the decision lands. See the SLSA polarity note in
-// docs/plan_qa_phase9_fresh_remediation.md.
+// docs/PLANS_QA.md#plan-qa-phase9-fresh-remediation.
 var knownContradictions = map[string]string{
 	"system:slsa-baseline-tier1": "block-by-default is asserted by TestSLSABaselineTier1Shape; " +
 		"the enabled/disabled contradiction and the inverted RequireAttestation polarity " +

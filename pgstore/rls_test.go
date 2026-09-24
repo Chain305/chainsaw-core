@@ -435,7 +435,7 @@ func TestBillyRLS_ColumnGrantsExcludeRemoteURL(t *testing.T) {
 
 // TestBillyRLSStatements_Idempotent re-runs the migration. "Idempotent" is
 // the load-bearing property of this project's migration story
-// (docs/MIGRATIONS.md) and DROP POLICY / CREATE POLICY is the part of this
+// (docs/OPERATIONS.md#migrations) and DROP POLICY / CREATE POLICY is the part of this
 // change most likely to break it.
 func TestBillyRLSStatements_Idempotent(t *testing.T) {
 	env := newRLSTestEnv(t)
@@ -695,7 +695,7 @@ func TestVerifyBillyRole_RejectsInheritedWriterPolicy(t *testing.T) {
 }
 
 // TestVerifyBillyRole_RejectsDisabledRowSecurity covers the third mechanism:
-// the documented incident rollback in docs/MIGRATIONS.md is
+// the documented incident rollback in docs/OPERATIONS.md#migrations is
 // `ALTER TABLE … DISABLE ROW LEVEL SECURITY`, and nothing else in this file
 // would notice a deployment left in that state — the policies are all still
 // present and every role attribute is still correct.

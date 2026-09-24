@@ -356,7 +356,7 @@ func TestComputeOverall_AllUnavailableReturnsZero(t *testing.T) {
 
 // TestMaxImpactCalibration_PerTier asserts each tier of fired-alone signals
 // lands the rolled-up overall in the documented band. See the MaxImpact
-// policy table in docs/architecture/package-intelligence.md.
+// policy table in docs/ARCHITECTURE.md#architecture-package-intelligence.
 //
 // Critical → ≤20 (KEV, dangerous pickle, sentinel malware/checksum), with
 //
@@ -413,7 +413,7 @@ func TestMaxImpactCalibration_PerTier(t *testing.T) {
 		// --- Medium tier — the 50-59 band. ---
 		{
 			// Added 2026-09-13 with the signal's ceiling. Required by
-			// docs/architecture/package-intelligence.md: "add a row to
+			// docs/ARCHITECTURE.md#architecture-package-intelligence: "add a row to
 			// TestMaxImpactCalibration_PerTier whenever a tiered signal is
 			// introduced."
 			//

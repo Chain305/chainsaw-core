@@ -80,7 +80,7 @@ type RuntimeConfig struct {
 	// `runtime.intel_bundle_path` in YAML does not load a bundle — use
 	// CHAINSAW_INTEL_BUNDLE_PATH. Retained so existing YAML keeps
 	// parsing under decoder.KnownFields(true). See
-	// docs/install/AIRGAP.md and docs/CONFIG_REFERENCE.md §B29.
+	// docs/OPERATIONS.md#install-airgap and docs/CONFIG_REFERENCE.md §B29.
 	IntelBundlePath string `yaml:"intel_bundle_path"`
 	// runtime.offline_fail_mode was REMOVED. It parsed, round-tripped
 	// through the settings store, and was read by nothing — no code
@@ -140,7 +140,7 @@ const allowInsecureTLSEnvVar = "CHAINSAW_ALLOW_INSECURE_TLS"
 // security signals belong to the org, not to whichever CI user happened
 // to create the client credential. Set CHAINSAW_WEBHOOK_LEGACY_PERUSER_ROUTING=1
 // for operators who depend on the legacy per-user fan-out during a
-// staged migration; see docs/TELEMETRY.md and the chain305.com 2026-05-21
+// staged migration; see docs/REFERENCE.md#telemetry and the chain305.com 2026-05-21
 // smoke for the gap this flag protects against.
 const webhookLegacyPerUserRoutingEnvVar = "CHAINSAW_WEBHOOK_LEGACY_PERUSER_ROUTING"
 

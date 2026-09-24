@@ -1094,7 +1094,7 @@ func projectCapabilityReport(rep *capability.Report, in *risk.Input) {
 // computed, stored, and read by no signal.
 //
 // That is the whole reason the artifact bucket in
-// docs/socket-comparison-2026-09-14-rev2.md read 0 Chainsaw-only concepts:
+// docs/REPORTS.md#socket-comparison-2026-09-14-rev2 read 0 Chainsaw-only concepts:
 // not a missing detector, an unconsumed one.
 //
 // EVERY SIGNAL FED HERE IS WEIGHT 0. That is a hard constraint, not an
@@ -1103,7 +1103,7 @@ func projectCapabilityReport(rep *capability.Report, in *risk.Input) {
 // standalone policy gates because their measured false-positive rate on
 // legitimate top-100 packages is 60-85%; surfacing them as scored
 // penalties would spend the 0/39 benign false-positive rate that
-// docs/f2-suspicious-tier-decision-2026-09-13.md identifies as the number
+// docs/REPORTS.md#f2-suspicious-tier-decision-2026-09-13 identifies as the number
 // actually protecting the public surface. These are OBSERVATIONS. The
 // compound rules are where they become a verdict.
 //
@@ -1115,7 +1115,7 @@ func projectCapabilityReport(rep *capability.Report, in *risk.Input) {
 // for codesmell's regex detector which fires on roughly half the corpus.
 // Feeding it would silently apply an unmeasured penalty to a large
 // fraction of all packages. It needs the labelled-corpus eval first
-// (reproduction in docs/f2-suspicious-tier-decision-2026-09-13.md); if
+// (reproduction in docs/REPORTS.md#f2-suspicious-tier-decision-2026-09-13); if
 // the benign false-positive rate holds at 0/39 it can be mapped, or given
 // its own weight-0 signal.
 //

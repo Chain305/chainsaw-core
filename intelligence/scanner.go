@@ -283,7 +283,7 @@ func (s *DefaultService) scanFederated(ctx context.Context, req Request) (*Repor
 	// warmDirectDepsAtDepth refuses to schedule past maxWarmDepth. Passing
 	// the depth through HERE is what makes the recursion terminate -- this
 	// call site is the recursion, and before 2026-09-14 it had no base case
-	// (docs/plan_scan_backpressure.md).
+	// (docs/PLANS_INTELLIGENCE.md#plan-scan-backpressure).
 	if len(report.Dependencies.Direct) > 0 {
 		go warmDirectDepsAtDepth(s.bg, report, s, req.Options.WarmDepth)
 	}
@@ -787,7 +787,7 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 		// Worth the query: an axis APPEARING between versions measured
 		// 13-58x on 71 real takeover pairs, against 3.2-3.7x for the same
 		// axis being present on one version
-		// (docs/cross-version-diff-measured-2026-09-17.md). It reads facts
+		// (docs/REPORTS.md#cross-version-diff-measured-2026-09-17). It reads facts
 		// we already store — no artifact, no second scan.
 		//
 		// Soft failure is deliberate and safe in one direction only: with no

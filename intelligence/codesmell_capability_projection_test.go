@@ -78,7 +78,7 @@ func TestCodeSmellCapabilityFallbackRequiresAPerformedScan(t *testing.T) {
 //
 // core/policy/proxy_matrix.go:166-180 bars these axes from standalone
 // policy gates because their measured false-positive rate on legitimate
-// top-100 packages is 60-85%. docs/f2-suspicious-tier-decision-2026-09-13.md
+// top-100 packages is 60-85%. docs/REPORTS.md#f2-suspicious-tier-decision-2026-09-13
 // identifies the 0/39 benign false-positive rate as the number actually
 // protecting the public surface. A weighted signal fed by a detector that
 // fires on half the corpus spends exactly that.
@@ -105,7 +105,7 @@ func TestCodeSmellCapabilityFallbackCannotMoveAVerdict(t *testing.T) {
 				"60-85%% (core/policy/proxy_matrix.go:166-180). Giving it weight applies "+
 				"that rate to every verdict and spends the 0/39 benign false-positive "+
 				"rate the public surface rests on. Measure against the labelled corpus "+
-				"first (docs/f2-suspicious-tier-decision-2026-09-13.md).", id, sig.Weight)
+				"first (docs/REPORTS.md).", id, sig.Weight)
 		}
 	}
 }

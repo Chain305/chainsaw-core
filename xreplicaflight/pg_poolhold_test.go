@@ -82,7 +82,7 @@ func (r *boolRows) Next(dest []driver.Value) error {
 // directly and touches no database. This test was briefly published as a
 // root cause of the 2026-09-14 outage and that claim is WITHDRAWN -- the
 // mechanism there was volume from an unbounded cache-warm recursion, not
-// held connections. See docs/plan_scan_backpressure.md M1-B.
+// held connections. See docs/PLANS_INTELLIGENCE.md#plan-scan-backpressure M1-B.
 //
 // It stays because the flag exists to be turned on. The day a
 // multi-replica rollout sets it, every concurrent Scan begins pinning a
@@ -93,7 +93,7 @@ func (r *boolRows) Next(dest []driver.Value) error {
 func TestPGFlight_LeaderDoesNotPinAConnectionAcrossFn(t *testing.T) {
 	if os.Getenv("CHAINSAW_REPRO_M1") != "1" {
 		t.Skip("REPRODUCTION, NOT A GUARD. This test FAILS on purpose today: it is the " +
-			"red half of the red-before-green pair for docs/plan_scan_backpressure.md M1-B, " +
+			"red half of the red-before-green pair for docs/PLANS_INTELLIGENCE.md M1-B, " +
 			"which is a LANDMINE in dormant code, not a live production bug -- PGFlight is " +
 			"only installed when CHAINSAW_XREPLICA_SINGLEFLIGHT is set, and production does " +
 			"not set it. Run with CHAINSAW_REPRO_M1=1 to watch it fail; it becomes an " +

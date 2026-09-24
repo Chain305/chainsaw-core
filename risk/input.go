@@ -30,7 +30,7 @@ type Input struct {
 	//
 	// Name mirrors policy.Input.SignalsUnavailable, the existing
 	// vocabulary for the same fact on the enforcement side (see
-	// docs/plan_optional_fail_closed.md). Callers that DO have facts
+	// docs/PLANS_PRODUCT.md#plan-optional-fail-closed). Callers that DO have facts
 	// must leave this false.
 	SignalsUnavailable bool
 	// UnavailableReason is the operator-facing explanation for
@@ -84,7 +84,7 @@ type Input struct {
 	// a change — the same trap that produced four instrument errors on
 	// 2026-09-16.
 	//
-	// Measured (docs/cross-version-diff-measured-2026-09-17.md), 71 real
+	// Measured (docs/REPORTS.md#cross-version-diff-measured-2026-09-17), 71 real
 	// takeover pairs vs 117 benign version bumps:
 	//
 	//	shell appeared  49.3% vs 0.9%   (57.7x)
@@ -156,7 +156,7 @@ type Input struct {
 	// The negative signal that reads it (an attestation whose builder
 	// identity is anomalous for that package's own history) is GATED on
 	// measuring its false-positive rate against the clean corpus, per
-	// docs/plan_signal_repair.md S-3. Plenty of legitimate projects
+	// docs/PLANS_INTELLIGENCE.md#plan-signal-repair S-3. Plenty of legitimate projects
 	// release from tags. Given this repo's history with FP rates, an
 	// unmeasured behavioural signal is how the guard incident happened.
 	//

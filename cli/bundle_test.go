@@ -376,7 +376,7 @@ func TestBundleStaleZeroBuildTime(t *testing.T) {
 
 // TestBundleApply_IsUnavailableAndHidden is P13. The subcommand POSTed to
 // /api/admin/intel-bundle/apply, a route no server build has ever served,
-// and docs/install/AIRGAP.md documented it as a runnable hot-swap step —
+// and docs/OPERATIONS.md#install-airgap documented it as a runnable hot-swap step —
 // so an operator following the air-gap runbook got a 404 and went to
 // debug their proxy. It is not being implemented (the body names a
 // server-local path chosen by a remote client), so it now hands back the

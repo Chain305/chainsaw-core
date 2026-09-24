@@ -42,7 +42,7 @@ import (
 // AllowPrivateUpstreamsEnv is the broad escape hatch operators set to 1
 // to bypass the block (e.g. they genuinely want to proxy an internal
 // registry on RFC1918). It is honoured ONLY at dial time — see the
-// blockClass table below and docs/DEPLOYMENT.md §6.2.
+// blockClass table below and docs/OPERATIONS.md#deployment §6.2.
 const AllowPrivateUpstreamsEnv = "CHAINSAW_ALLOW_PRIVATE_UPSTREAMS"
 
 // AllowCGNATUpstreamsEnv is the narrow, dedicated opt-in for the RFC 6598
@@ -243,7 +243,7 @@ type OutboundIPVerdict struct {
 // CHAINSAW_ALLOW_PRIVATE_UPSTREAMS: that flag is a dial-time-only hatch
 // for internal registry upstreams, and widening it to make arbitrary
 // RFC1918 webhook targets savable is a much larger blast radius than any
-// operator asks for. See docs/DEPLOYMENT.md §6.2.
+// operator asks for. See docs/OPERATIONS.md#deployment §6.2.
 func ClassifyOutboundIP(ip net.IP) OutboundIPVerdict {
 	rule := classifyIP(ip)
 	switch rule.class {

@@ -41,7 +41,7 @@ func snapshotColumns(db *sql.DB) (map[string]bool, error) {
 // TestMigrate_FromV015Schema is the load-bearing scaffold for Eng review E10.
 //
 // What it proves: chainsaw's "no migration runner, idempotent DDL is enough"
-// thesis (docs/MIGRATIONS.md) actually holds when migrate() is pointed at a
+// thesis (docs/OPERATIONS.md#migrations) actually holds when migrate() is pointed at a
 // non-empty database that lags the binary's expected schema.
 //
 // How it proves it:
@@ -279,7 +279,7 @@ func TestMigrate_FromV015Schema(t *testing.T) {
 	// "additive only" claim is a lie.
 	//
 	// NOTE: we deliberately do NOT assert on webhooks.secret_ciphertext
-	// here. Per docs/MIGRATIONS.md → "[0.16.0] / webhooks.secret_ciphertext",
+	// here. Per docs/OPERATIONS.md#migrations → "[0.16.0] / webhooks.secret_ciphertext",
 	// that column is one of the explicit operator-action items
 	// ("Self-hosters must run, before restarting the upgraded binary,
 	// ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS secret_ciphertext TEXT;")

@@ -31,7 +31,7 @@ func TestGateActionableReasonKeepsCoverageGateAdvice(t *testing.T) {
 		var buf bytes.Buffer
 		renderEvaluation(&buf, unknownEvaluation(), "", []string{code})
 		out := buf.String()
-		if !strings.Contains(out, "coverage gate") || !strings.Contains(out, "docs/COVERAGE_SOURCES.md") {
+		if !strings.Contains(out, "coverage gate") || !strings.Contains(out, "docs/REFERENCE.md") {
 			t.Errorf("%s is gate-actionable but the render dropped the gate advice:\n%s", code, out)
 		}
 		if strings.Contains(out, "does not apply here") {

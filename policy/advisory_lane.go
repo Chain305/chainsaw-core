@@ -33,7 +33,7 @@ package policy
 //     because the dark signal reads as "absent" — `isVulnerable: false`,
 //     `cvssMax: 5.0`, `epssMax: 0.5` all match against the 0.0/false
 //     zero values and BLOCK. Lowering the cell turns all three off.
-//     That is the fail-open docs/plan_qa_phase8_remediation.md:1285
+//     That is the fail-open docs/PLANS_QA.md#plan-qa-phase8-remediation:1285
 //     (P8-17 WITHDRAWN) and :1284 (P8-16, "RECONCILE UPWARD ONLY")
 //     rejected, and it is why ten `pub` cells are held at Full in
 //     internal/intelligence/premium/policy_matrix_provider_drift_test.go.

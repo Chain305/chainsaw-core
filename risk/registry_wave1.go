@@ -32,7 +32,7 @@ func init() {
 		// maintainer stating in the registry that the version should not
 		// be used. An absent MaxImpact contributes no cap at all, which
 		// registry_supplychain_test.go already warns about in prose, and
-		// docs/architecture/package-intelligence.md puts Medium-confidence
+		// docs/ARCHITECTURE.md#architecture-package-intelligence puts Medium-confidence
 		// signals in the 50-59 band — so the old shape was also out of
 		// compliance with the project's own published calibration policy.
 		//

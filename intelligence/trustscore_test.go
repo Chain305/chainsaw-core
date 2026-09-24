@@ -191,7 +191,7 @@ func TestComputeTrustScore_OrgWeightsResolverChangesScore(t *testing.T) {
 			// this test exists to prove — and vuln.epss_high is now the
 			// most severe vulnerability signal without one. It used to be
 			// vuln.cvss_medium, which gained maxImpactWarnTop in V-4
-			// (docs/plan_vuln_severity_gate.md). CVSSScore stays 0 so no
+			// (docs/PLANS_INTELLIGENCE.md#plan-vuln-severity-gate). CVSSScore stays 0 so no
 			// cvss tier joins the fired set.
 			Vulnerabilities: VulnSection{IsVulnerable: true, EPSSScore: 0.9, ScannedAt: &scannedAt},
 		}

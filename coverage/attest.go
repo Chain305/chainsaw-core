@@ -21,7 +21,7 @@ import (
 // refuses every install forever is indistinguishable from an outage, and it
 // punishes the operator for a typo instead of telling them about it).
 //
-// See "Surface attestation rule" in docs/plan_optional_fail_closed.md.
+// See "Surface attestation rule" in docs/PLANS_PRODUCT.md#plan-optional-fail-closed.
 
 // metadataOnlySources are attestable by any surface that evaluates a package
 // coordinate without reading the artifact bytes: the registry-proxy hot path

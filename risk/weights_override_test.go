@@ -22,7 +22,7 @@ func TestEvaluatePackage_CategoryWeightsOverride(t *testing.T) {
 	// exists to lock in. vuln.epss_high (-15) is now the most severe
 	// vulnerability signal with no ceiling; vuln.cvss_medium, which this
 	// fixture used to use, gained maxImpactWarnTop in V-4
-	// (docs/plan_vuln_severity_gate.md) and stopped being weight-sensitive.
+	// (docs/PLANS_INTELLIGENCE.md#plan-vuln-severity-gate) and stopped being weight-sensitive.
 	// MaxCVSS stays 0 so no cvss tier joins the fired set.
 	in := Input{
 		Ecosystem:         "npm",

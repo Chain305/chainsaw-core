@@ -25,7 +25,7 @@ package intelligence
 // Version (internal/server/admin_intelligence.go) answers from the
 // intelligence cache via a SearchQuery that carries NO OrgID while the
 // Get it feeds does — a filed tenancy asymmetry (L-02,
-// docs/plan_intel_cache_tenancy.md) that is explicitly not fixable in
+// docs/PLANS_INTELLIGENCE.md#plan-intel-cache-tenancy) that is explicitly not fixable in
 // isolation because intelligence_reports has no org_id column at all.
 // Reaching it from a public surface would widen that asymmetry's blast
 // radius. The resolvers here are pure outbound registry reads: no DB, no
@@ -147,7 +147,7 @@ var ErrRegistryNotFound = errors.New("intelligence: package not found in registr
 // could not check" into "it does not exist" publishes a claim about
 // somebody's package that the evidence does not support, which is
 // precisely how the withdrawn F-1 and F-3 findings were manufactured in
-// docs/socket-comparison-2026-09-14.md.
+// docs/REPORTS.md#socket-comparison-2026-09-14.
 type LatestState int
 
 const (

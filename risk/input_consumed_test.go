@@ -144,7 +144,7 @@ var unconsumedInputFields = map[string]string{
 		"`release.yml@refs/tags/setup-files-v1`, the clean ones " +
 		"`release.yml@refs/heads/main`, and the engine could not see either. " +
 		"The signal that reads it is GATED on measuring its false-positive rate " +
-		"against the clean corpus (docs/plan_signal_repair.md S-3) — plenty of " +
+		"against the clean corpus (docs/PLANS_INTELLIGENCE.md S-3) — plenty of " +
 		"legitimate projects release from tags, and an unmeasured behavioural signal " +
 		"is how the guard incident happened. Make the data readable first, ship the " +
 		"scoring second. TestBuilderIDIsCarriedNotScored in core/intelligence pins " +

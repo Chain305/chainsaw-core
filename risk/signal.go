@@ -65,7 +65,7 @@ type Signal struct {
 // many uncapped signals fired alongside it. That defect shipped on four
 // medium-tier signals (qual.version_anomaly, sc.hidden_unicode,
 // sc.repo_archived, sc.repo_missing); see P8-02 in
-// docs/plan_qa_phase8_remediation.md.
+// docs/PLANS_QA.md#plan-qa-phase8-remediation.
 //
 // Use this rather than a literal for any signal whose intended claim is
 // "alone, this holds the package at the TOP of the warn band". Signals that

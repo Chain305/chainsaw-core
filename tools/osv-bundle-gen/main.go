@@ -18,7 +18,7 @@
 // CVEs on 0 of 10 coordinates that OSV itself lists as vulnerable. Without
 // a bundle, any CVE comparison reports a total coverage failure that is
 // entirely an artifact of the instrument -- the same shape as the withdrawn
-// F-1 finding in docs/socket-comparison-2026-09-14-rev2.md, where a dormant
+// F-1 finding in docs/REPORTS.md#socket-comparison-2026-09-14-rev2, where a dormant
 // provider was read as engine silence.
 //
 // The same gap applies to airgapped and self-hosted deployments, which is

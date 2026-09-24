@@ -7,7 +7,7 @@ import (
 )
 
 // Replay of the 2026-08-04 keyv/cacheable campaign against the real
-// evaluator, for docs/designs/cacheable-campaign-signal-replay.md.
+// evaluator, for docs/DESIGNS.md#designs-cacheable-campaign-signal-replay.
 //
 // The question this answers: between keyv@6.0.0 going live (09:35:00Z)
 // and MAL-2026-11524 existing (11:19:14Z), would the NON-advisory
@@ -124,7 +124,7 @@ func TestCacheableCampaignReplay(t *testing.T) {
 			// Tarball fetched and the two -25/MaxImpact-40 install-script
 			// detectors work as designed.
 			//
-			// WAS ALLOW UNTIL S-7 (docs/plan_signal_repair.md). The campaign
+			// WAS ALLOW UNTIL S-7 (docs/PLANS_INTELLIGENCE.md#plan-signal-repair). The campaign
 			// ships verified provenance, so it banks sc.provenance_verified
 			// (+15) and sc.slsa_level_bonus — and the two compound rules it
 			// trips used to DELETE the MaxImpact ceiling outright, so the

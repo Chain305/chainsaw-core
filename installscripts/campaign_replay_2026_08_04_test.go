@@ -8,7 +8,7 @@ import (
 
 // Replay of the referenced-script path against the loader shape
 // MAL-2026-11524 documents for keyv@6.0.0, for
-// docs/designs/cacheable-campaign-signal-replay.md §3.
+// docs/DESIGNS.md#designs-cacheable-campaign-signal-replay §3.
 //
 // The real setup.mjs is gone (npm 404, deps.dev 404, no cached copy), so
 // the bodies below are built ONLY from behaviours the advisory states in

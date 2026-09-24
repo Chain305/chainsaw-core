@@ -42,7 +42,7 @@ var projectedConstantFields = map[string]string{
 		"never fire. Needs the PREVIOUS version's licence, which requires cross-version " +
 		"comparison -- nothing fetches version N-1 today (DiffReports iterates CVEs only; " +
 		"metadiff declares NeedsArtifact() false). Tracked as the cross-version work in " +
-		"docs/plan_public_artifact_intelligence.md §5.",
+		"docs/PLANS_INTELLIGENCE.md §5.",
 }
 
 // constantAssignRe matches `FieldName: false,` / `FieldName: true,` inside a

@@ -137,7 +137,7 @@ func TestDefault_ReturnsSameInstance(t *testing.T) {
 }
 
 // TestEnvOverrideKey_UppercasesAndPrefixes — small but worth pinning
-// because the contract is documented in docs/feature-flag-inventory.md.
+// because the contract is documented in docs/REFERENCE.md#feature-flag-inventory.
 func TestEnvOverrideKey(t *testing.T) {
 	cases := map[string]string{
 		"risk_threshold_overrides": "CHAINSAW_FF_RISK_THRESHOLD_OVERRIDES",

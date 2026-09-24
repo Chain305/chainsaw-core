@@ -273,7 +273,7 @@ func init() {
 	// and it was found by measuring, not by reading.
 	//
 	// MEASURED on retained malware artifacts, 2026-09-16
-	// (docs/correlation-layer-measured-2026-09-16.md):
+	// (docs/REPORTS.md#correlation-layer-measured-2026-09-16):
 	//
 	//	PyPI malware  20.4%   (51 of 250)
 	//	npm  malware   0.0%   (the npm AST detector does not set it)
@@ -320,7 +320,7 @@ func init() {
 	// The comment here used to read "Low weight — many legitimate packages
 	// use postinstall for native builds". That suspicion was correct and was
 	// never measured. Measured on retained malware artifacts against
-	// held-out popular packages (docs/compound-rule-inversion-2026-09-16.md):
+	// held-out popular packages (docs/REPORTS.md#compound-rule-inversion-2026-09-16):
 	//
 	//	         malware   held-out benign   lift
 	//	npm       50.0%         15.5%        3.22x
@@ -386,7 +386,7 @@ func init() {
 	// much as a warning — `60 < 60` is false, band 2 is skipped and the
 	// verdict is ALLOW. See P8-02.
 	//
-	// Kind-split (docs/artifact-lane-observability-2026-09-15.md): the hit
+	// Kind-split (docs/REPORTS.md#artifact-lane-observability-2026-09-15): the hit
 	// COUNT alone graded nine zero-width joiners in a minified bundle the
 	// same as nine bidi overrides in a credential helper, and turning the
 	// artifact lane on cost the 0% benign false-positive rate on exactly
@@ -831,7 +831,7 @@ func init() {
 	// MEASURED 2026-09-17 on 71 real npm takeover pairs (a compromised
 	// library version against the version published immediately before it)
 	// vs 117 benign version bumps of download-ranked popular packages
-	// (docs/cross-version-diff-measured-2026-09-17.md):
+	// (docs/REPORTS.md#cross-version-diff-measured-2026-09-17):
 	//
 	//	                takeover   benign bump   lift
 	//	shell appeared    49.3%        0.9%      57.7x

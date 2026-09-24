@@ -43,7 +43,7 @@ type Posture struct {
 // Callers MUST treat a validation error on an explicitly-configured posture as
 // fatal and refuse to proceed. Silently degrading to ModeOff would reproduce
 // exactly the failure this feature exists to prevent — see decision D3 in
-// docs/plan_optional_fail_closed.md.
+// docs/PLANS_PRODUCT.md#plan-optional-fail-closed.
 func (p Posture) Validate() error {
 	if p.Version != 1 {
 		return fmt.Errorf("coverage: unsupported config version %d (want 1)", p.Version)

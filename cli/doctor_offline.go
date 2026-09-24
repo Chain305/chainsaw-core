@@ -24,7 +24,7 @@ package cli
 // replacement box. See glyphSet in output.go.
 //
 // The output matrix is the operator-facing equivalent of the per-
-// provider table in docs/install/AIRGAP.md — keep the two in sync
+// provider table in docs/OPERATIONS.md#install-airgap — keep the two in sync
 // when adding new providers.
 
 import (
@@ -79,7 +79,7 @@ func statusGlyph(g glyphSet, k statusKind) string {
 }
 
 // providerOfflineRow is one row in the doctor matrix. The column shape
-// matches the markdown table in docs/install/AIRGAP.md so an operator
+// matches the markdown table in docs/OPERATIONS.md#install-airgap so an operator
 // can paste the doctor output directly into a runbook.
 type providerOfflineRow struct {
 	Name      string

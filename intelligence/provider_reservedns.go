@@ -22,7 +22,7 @@ package intelligence
 //
 // The provider was renamed rather than deleted. Deleting it would drop the
 // "reservedns" ProviderRegistration (registry_providers.go, Order 6), which
-// is a documented and marketed name: docs/feature_inventory.md §2 item 6,
+// is a documented and marketed name: docs/REFERENCE.md#feature-inventory §2 item 6,
 // chainsaw-landing/src/data/coverage-matrix.ts, and two registry-order
 // tests. Registration name ("reservedns" — the capability slot) and runtime
 // Name() ("namespace_extract" — what this component actually does) are

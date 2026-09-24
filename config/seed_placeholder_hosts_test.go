@@ -147,7 +147,7 @@ func TestSeedRemoteURLsAreRealHosts(t *testing.T) {
 // different absolute path there.
 //
 // DEVIATION FROM THE FIX DESIGN, recorded here rather than in a commit
-// message that nobody re-reads: docs/qa-remediation/W5-W6-server-ux.md
+// message that nobody re-reads: docs/QA.md#qa-remediation-w5-w6-server-ux
 // states the two files are byte-identical and asks for a raw byte
 // compare. They are NOT — this drift predates the L-20 work and a plain
 // byte compare could not be committed green. The guard still does the

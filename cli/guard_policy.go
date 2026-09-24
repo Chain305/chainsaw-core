@@ -4,11 +4,11 @@ package cli
 //
 // Before this, guard_eval.go contained ZERO references to policy: the
 // guard was env-var driven end to end and was not one of the wired
-// enforcement surfaces (docs/feature_inventory.md § Surface wiring
+// enforcement surfaces (docs/REFERENCE.md#feature-inventory § Surface wiring
 // status). That is why an outcome like "behavioral analysis did not
 // complete" had nowhere to go — any handling would have been a Go
 // constant, and the 2026-08-24 ruling in
-// docs/plan_competitive_depth.md is that warn-vs-block on a degraded
+// docs/PLANS_PRODUCT.md#plan-competitive-depth is that warn-vs-block on a degraded
 // analysis is a POLICY question, decided once in a rule rather than
 // per surface in code.
 //

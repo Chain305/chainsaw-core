@@ -4,8 +4,8 @@ package cli
 //
 // `repo` shipped list / create / status and nothing else, so a repository
 // created with the wrong name could only be dealt with from the dashboard.
-// `repo delete` was REJECTED for sound reasons (L-18, docs/qa-remediation/
-// W5-W6-server-ux.md: re-adopting a deleted name inherits index_entries,
+// `repo delete` was REJECTED for sound reasons (L-18,
+// docs/QA.md#qa-remediation-w5-w6-server-ux: re-adopting a deleted name inherits index_entries,
 // vulnerability_metadata and package_permissions, so a credential silently
 // regains access to a repository an admin believes destroyed) — and its stated
 // substitute, "make PATCH {enabled:false} discoverable", was never built.

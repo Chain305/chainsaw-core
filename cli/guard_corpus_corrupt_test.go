@@ -18,7 +18,7 @@ package cli
 // prove that rather than assuming it, across the five shapes a real cache
 // actually breaks in.
 //
-// NOTE ON THE PLAN'S WORDING. docs/plan_qa_phase9_fresh_remediation.md §5 says
+// NOTE ON THE PLAN'S WORDING. docs/PLANS_QA.md#plan-qa-phase9-fresh-remediation §5 says
 // to "re-run with `lodahs` to prove the embedded floor still blocks". `lodahs`
 // is NOT a floor coordinate — the floor holds eleven famous attacks and lodahs
 // is none of them (it is refused by the TYPOSQUAT lane, off the embedded
