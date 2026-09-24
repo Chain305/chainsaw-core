@@ -49,10 +49,10 @@ func (c StaleReportCursor) IsZero() bool { return c.CollectedAt.IsZero() && c.Ec
 // fetched at all (a Maven `pom` packaging, a 404, a gated model): each such row
 // costs one extra refresh per cool-down, not one per tick.
 //
-// "Never scanned" reads the MERGED report JSON, not the has_artifact_scan
-// column. The column is written from the incoming report alone, so a bytes-less
-// rewrite sets it false while the payload keeps the earlier scan — selecting on
-// it would re-download packages that were already scanned.
+// "Never scanned" reads the merged report JSON — what the report itself says —
+// rather than the has_artifact_scan projection. The upsert ORs that column with
+// its stored value, so it cannot go false after a bytes-less rewrite; measured
+// 2026-09-24, zero rows had the column false with the JSON true.
 type StaleReportScope struct {
 	OlderThan          time.Time
 	ArtifactEcosystems []string

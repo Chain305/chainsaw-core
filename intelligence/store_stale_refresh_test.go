@@ -35,8 +35,9 @@ func TestStaleReportScopeSelectsNeverScannedReports(t *testing.T) {
 	}
 	insert(listed, "no-section", `{}`, false, 13*time.Hour)
 	insert(listed, "performed-false", `{"artifactScan":{"performed":false}}`, false, 14*time.Hour)
-	// The column says false but the merged payload kept an earlier scan: a
-	// bytes-less rewrite does exactly this. It must NOT be re-downloaded.
+	// The report JSON says scanned and the column projection says not. The
+	// upsert keeps the column sticky, so this shape does not occur today; the
+	// row pins that the JSON, not the projection, decides "never scanned".
 	insert(listed, "column-drifted", `{"artifactScan":{"performed":true}}`, false, 15*time.Hour)
 	insert(listed, "inside-cooldown", `{}`, false, 1*time.Hour)
 	insert(unlisted, "unlisted-ecosystem", `{}`, false, 13*time.Hour)
