@@ -381,7 +381,7 @@ func VerifyBillyRole(ctx context.Context, billyDB, writerDB *sql.DB) error {
 // making it fatal would refuse to boot every existing deployment. What it
 // must not be is silent: while the writer holds SUPERUSER or BYPASSRLS,
 // chainsaw_writer_all is never exercised, so the day the role is demoted is
-// the first day that policy runs in anger. See docs/PLANS_QA.md#plan-qa-phase9-remediation
+// the first day that policy runs in anger. See docs/ARCHIVE.md#archive-2026-plan-qa-phase9-remediation
 // P9-23 for the migration shape and why it needs its own wave.
 //
 // Returns ok=true when the writer is already least-privilege.
