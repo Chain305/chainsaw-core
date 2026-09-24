@@ -327,43 +327,18 @@ var maxFireRate = map[sigEco]fireCeiling{
 	// com.google.guava:guava is Apache-2.0, monolog/monolog is MIT,
 	// ch.qos.logback:* is EPL-1.0/LGPL-2.1. The engine says they declare
 	// nothing.
-	{"lic.missing", "maven"}: {42, defectBaseline + "P8-06. 25/70 Apache-2.0 and EPL " +
-		"artifacts read as unlicensed: the POM's <licenses><name> is a human string " +
-		"(\"Apache License, Version 2.0\"), not an SPDX id, and the reader wants an id. " +
-		"True value is near zero."},
-	{"lic.missing", "composer"}: {65, defectBaseline + "P8-06, same root cause on the " +
-		"packagist reader. 35/60, including monolog/monolog (MIT) and the whole " +
-		"doctrine/* and sebastian/* families."},
-	{"lic.missing", "go"}: {24, defectBaseline + "P8-06, same root cause on the module " +
-		"reader. The Go module proxy exposes no licence field at all for many modules, " +
-		"so part of this is a genuine data gap rather than a misread — but go-spew " +
-		"(ISC) and fatih/color (MIT) publish one, so it is not all gap."},
 	{"lic.missing", "pypi"}: {11, defectBaseline + "P8-06 residual. jinja2 (BSD-3-Clause) " +
 		"and colorama (BSD-3-Clause) both declare licences via classifiers the reader " +
 		"does not consult."},
-	{"lic.missing", "npm"}: {5, "npm is the reader that mostly works — 2/100 versus 35/70 " +
-		"on Maven. Both fires (react-is, fs-extra) are MIT-licensed, so this is a small " +
-		"residual of the same defect and not a floor. Held near zero deliberately: npm is " +
-		"the ecosystem with the best metadata, so it is where a regression shows first."},
 
 	// ── license.unidentified (−15) — "licence string not recognised" ──────
 	//
 	// Fires alongside lic.missing on the same coordinates, so a mis-read POM
 	// costs −30, not −15. That double charge is the reason a licence-reader
 	// bug moves scores at all.
-	{"license.unidentified", "maven"}: {88, defectBaseline + "P8-06. 58/70 — the worst " +
-		"single number this harness measures. spring-core fires BOTH lic.spdx_present " +
-		"AND license.unidentified on the same report, which is a self-contradiction the " +
-		"engine currently emits with a straight face."},
-	{"license.unidentified", "composer"}: {65, defectBaseline + "P8-06, co-fires 1:1 with " +
-		"lic.missing on composer — same 35 coordinates."},
-	{"license.unidentified", "go"}: {24, defectBaseline + "P8-06, co-fires 1:1 with " +
-		"lic.missing on go — same 13 coordinates."},
 	{"license.unidentified", "pypi"}: {28, defectBaseline + "P8-06. 23/100, more than three " +
 		"times the pypi lic.missing rate, so this arm has failure modes of its own: " +
 		"beautifulsoup4 and aiosignal declare licences the classifier does not resolve."},
-	{"license.unidentified", "npm"}: {5, "Same two npm coordinates as lic.missing. Held near " +
-		"zero for the same reason."},
 
 	// ── license.ambiguous_classifier (−10) ────────────────────────────────
 	//
@@ -407,11 +382,6 @@ var maxFireRate = map[sigEco]fireCeiling{
 		"8/70, every one checked and genuinely EPL/MPL — logback-classic, logback-core " +
 		"(EPL-2.0), h2 (MPL 2.0), jakarta.annotation-api, jetty-server, " +
 		"junit-jupiter-api, junit-jupiter-engine (EPL 2.0), junit 4.13.2 (EPL 1.0)."},
-	{"license.non_permissive", "go"}: {6, defectBaseline + "the copyleft double-count. This " +
-		"signal fires on exactly the coordinates license.copyleft fires on, adding a " +
-		"second −20 for one licence fact. Measured co-fire: 2/2."},
-	{"license.non_permissive", "pypi"}: {5, defectBaseline + "the copyleft double-count. " +
-		"Measured co-fire: 2/2."},
 	{"license.exception_present", "pypi"}: {6, "Legitimate — pandas, scipy and sglang carry " +
 		"licences with exception clauses, which is what the signal says. −5, info severity."},
 
@@ -434,10 +404,16 @@ var maxFireRate = map[sigEco]fireCeiling{
 	// VersionCount reports data, at which point assertion 0 stops objecting
 	// on its own.
 
-	// ── supply chain ──────────────────────────────────────────────────────
-	{"sc.install_script_only", "npm"}: {4, "Legitimate and rare — 1/100. An npm package may " +
-		"have an install script and nothing else remarkable; that is exactly what this " +
-		"low-weight (−5) signal is for."},
+	// ── PRUNED 2026-09-25 ─────────────────────────────────────────────────
+	//
+	// Eleven ceilings read 0 in four consecutive green runs and were removed,
+	// so a recurrence now fails as UNDECLARED instead of hiding under an old
+	// allowance: lic.missing and license.unidentified on composer/go/maven/npm,
+	// license.non_permissive on go/pypi (P8-06 reader fixes, then
+	// license_unavailable stopping fetch failures from reading as "no
+	// licence"), and sc.install_script_only on npm (weight 0; the npm parser
+	// no longer counts prepare/prepublish*/uninstall hooks, which no package
+	// manager runs on a registry install).
 }
 
 // ─── ASSERTION 3: ACCEPTED (SIGNAL, COORDINATE) SET ─────────────────────────
