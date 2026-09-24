@@ -130,6 +130,19 @@ type RefresherConfig struct {
 	// budget and ordering logic can be tested without Postgres.
 	StaleReportSource StaleReportSource
 
+	// StaleReportArtifactEcosystems widens the sweep to reports that have never
+	// had an artifact scan, in these ecosystems, once they are older than
+	// StaleReportArtifactCooldown — see StaleReportScope. Set it only to the
+	// ecosystems StaleReportArtifactFetcher can actually download: a rescan
+	// without bytes gains nothing. Ignored unless the fetcher is wired and
+	// ArtifactEnabled.
+	StaleReportArtifactEcosystems []string
+
+	// StaleReportArtifactCooldown is how long a never-scanned report waits
+	// between attempts. Zero means DefaultStaleReportArtifactCooldown; it is
+	// clamped to MaxStaleness, past which the row is plain stale anyway.
+	StaleReportArtifactCooldown time.Duration
+
 	// StaleReportArtifactFetcher fetches artifact bytes for a coordinate that
 	// has NO org and NO repository, by ecosystem alone.
 	//

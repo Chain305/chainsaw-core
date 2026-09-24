@@ -59,6 +59,13 @@ const DefaultStaleReportMaxRows = 200
 // be legible from the row itself.
 const RefreshReasonStaleReport = "stale_report_refresh"
 
+// DefaultStaleReportArtifactCooldown is the retry interval for a report that
+// has never had an artifact scan. Twelve hours, not one tick: a package whose
+// bytes cannot be fetched at all would otherwise be refreshed every hour, and
+// repeated work that changes nothing is the waste the 2026-09-24 refresher
+// wave spent eight releases removing.
+const DefaultStaleReportArtifactCooldown = 12 * time.Hour
+
 // staleReportArtifactTimeout bounds one artifact download. Matches the walk's
 // 30s: the same registries, the same sizes.
 const staleReportArtifactTimeout = 30 * time.Second
@@ -108,8 +115,8 @@ type StaleReportSummary struct {
 // A skipped DB test reports its package "ok", which is how a sweep that never
 // runs reaches production unnoticed.
 type StaleReportSource interface {
-	CountStaleReports(ctx context.Context, olderThan time.Time) (int, error)
-	IterateStaleReports(ctx context.Context, olderThan time.Time, after StaleReportCursor, limit int) ([]StaleReportRow, StaleReportCursor, error)
+	CountStaleReports(ctx context.Context, scope StaleReportScope) (int, error)
+	IterateStaleReports(ctx context.Context, scope StaleReportScope, after StaleReportCursor, limit int) ([]StaleReportRow, StaleReportCursor, error)
 }
 
 func (r *Refresher) staleReportSource() StaleReportSource {
@@ -135,11 +142,11 @@ func (r *Refresher) refreshStaleReportsOnce(ctx context.Context) StaleReportSumm
 		return summary
 	}
 
-	olderThan := r.now().Add(-r.cfg.MaxStaleness)
+	scope := r.staleReportScope()
 
 	// Sample the backlog before any work — this is the gauge's only producer,
 	// so it must run even when the budget is zero or the sweep finds nothing.
-	if n, err := src.CountStaleReports(ctx, olderThan); err == nil {
+	if n, err := src.CountStaleReports(ctx, scope); err == nil {
 		summary.Backlog = n
 		staleReportBacklog.Store(int64(n))
 	} else {
@@ -166,7 +173,7 @@ walk:
 		if remaining := budget - seen; page > remaining {
 			page = remaining
 		}
-		rows, next, err := src.IterateStaleReports(ctx, olderThan, cursor, page)
+		rows, next, err := src.IterateStaleReports(ctx, scope, cursor, page)
 		if err != nil {
 			r.cfg.Logger.Warn("intelligence stale-report pagination failed", "error", err)
 			break
@@ -221,6 +228,39 @@ walk:
 	return summary
 }
 
+// staleReportScope is the population one sweep draws from. The artifact half is
+// empty unless the sweep can actually fetch bytes, so it can never turn into a
+// loop of bytes-less rescans.
+func (r *Refresher) staleReportScope() StaleReportScope {
+	now := r.now()
+	scope := StaleReportScope{OlderThan: now.Add(-r.cfg.MaxStaleness)}
+	if r.cfg.ArtifactEnabled && r.cfg.StaleReportArtifactFetcher != nil && len(r.cfg.StaleReportArtifactEcosystems) > 0 {
+		scope.ArtifactEcosystems = r.cfg.StaleReportArtifactEcosystems
+		scope.ArtifactOlderThan = now.Add(-r.staleReportArtifactCooldown())
+	}
+	return scope
+}
+
+func (r *Refresher) staleReportArtifactCooldown() time.Duration {
+	c := r.cfg.StaleReportArtifactCooldown
+	if c <= 0 {
+		c = DefaultStaleReportArtifactCooldown
+	}
+	if r.cfg.MaxStaleness > 0 && c > r.cfg.MaxStaleness {
+		c = r.cfg.MaxStaleness
+	}
+	return c
+}
+
+// staleReportMaxStaleness is the MaxStaleness each sweep Scan runs with: the
+// cool-down while the artifact half is active, else the ordinary bound.
+func (r *Refresher) staleReportMaxStaleness() time.Duration {
+	if len(r.staleReportScope().ArtifactEcosystems) > 0 {
+		return r.staleReportArtifactCooldown()
+	}
+	return r.cfg.MaxStaleness
+}
+
 // refreshStaleReportRow issues the Scan. By Key alone: intelligence_reports has
 // no org, and Scan's federated half does not need one.
 func (r *Refresher) refreshStaleReportRow(ctx context.Context, row StaleReportRow) bool {
@@ -232,11 +272,15 @@ func (r *Refresher) refreshStaleReportRow(ctx context.Context, row StaleReportRo
 		},
 		Options: Options{
 			RefreshReason: RefreshReasonStaleReport,
-			// AllowStale:false forces the fan-out. The row is stale by
-			// construction — it was selected on collected_at — so Scan's
-			// cache-first read will miss and do real work.
+			// AllowStale:false plus a MaxStaleness no longer than the row's
+			// age forces the fan-out. A plainly stale row is older than
+			// MaxStaleness; a never-scanned row picked for its bytes may be
+			// FRESH, and against the full bound Scan's cache-first read would
+			// hand back the cached report and drop the bytes on the floor.
+			// Every selected row is older than the cool-down, which is
+			// clamped to MaxStaleness, so the cool-down forces both.
 			AllowStale:   false,
-			MaxStaleness: r.cfg.MaxStaleness,
+			MaxStaleness: r.staleReportMaxStaleness(),
 		},
 	}
 	// Attach artifact bytes where we can. Without them Scan skips every

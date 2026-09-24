@@ -19,15 +19,17 @@ type fakeStaleSource struct {
 	countCall atomic.Int32
 	iterCalls atomic.Int32
 	olderThan atomic.Value // time.Time, as the sweep passed it
+	scope     atomic.Value // StaleReportScope, as the sweep passed it
 }
 
-func (f *fakeStaleSource) CountStaleReports(_ context.Context, olderThan time.Time) (int, error) {
+func (f *fakeStaleSource) CountStaleReports(_ context.Context, scope StaleReportScope) (int, error) {
 	f.countCall.Add(1)
-	f.olderThan.Store(olderThan)
+	f.olderThan.Store(scope.OlderThan)
+	f.scope.Store(scope)
 	return len(f.rows), nil
 }
 
-func (f *fakeStaleSource) IterateStaleReports(_ context.Context, _ time.Time, after StaleReportCursor, limit int) ([]StaleReportRow, StaleReportCursor, error) {
+func (f *fakeStaleSource) IterateStaleReports(_ context.Context, _ StaleReportScope, after StaleReportCursor, limit int) ([]StaleReportRow, StaleReportCursor, error) {
 	f.iterCalls.Add(1)
 	start := 0
 	if !after.IsZero() {
@@ -334,5 +336,119 @@ func TestStaleReportSweepHonoursArtifactEnabled(t *testing.T) {
 
 	if got := atomic.LoadInt32(&fetched); got != 0 {
 		t.Errorf("artifact fetcher called %d times with ArtifactEnabled=false", got)
+	}
+}
+
+type StaleReportArtifactFetcherFunc = func(ctx context.Context, ecosystem, pkg, version string) (*ArtifactHandle, error)
+
+// artifactBackfillRefresher builds a sweep with the artifact half configured.
+// fetcher=nil or enabled=false are the two ways the half must switch itself off.
+func artifactBackfillRefresher(src StaleReportSource, fetcher StaleReportArtifactFetcherFunc, enabled bool, cooldown time.Duration) (*Refresher, *fakeService) {
+	svc := &fakeService{}
+	ref := NewRefresher(RefresherConfig{
+		Service:                       svc,
+		Metadata:                      &fakeMetadataSource{},
+		MaxStaleness:                  24 * time.Hour,
+		Concurrency:                   1,
+		PageSize:                      50,
+		StaleReportRefreshEnabled:     true,
+		StaleReportSource:             src,
+		ArtifactEnabled:               enabled,
+		EcosystemResolver:             func(string) string { return "go" },
+		StaleReportArtifactFetcher:    fetcher,
+		StaleReportArtifactEcosystems: []string{"nuget", "maven"},
+		StaleReportArtifactCooldown:   cooldown,
+	})
+	ref.now = func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) }
+	return ref, svc
+}
+
+func okFetcher(context.Context, string, string, string) (*ArtifactHandle, error) {
+	return &ArtifactHandle{Bytes: []byte("artifact"), SHA256: "abc"}, nil
+}
+
+// Reports refreshed without bytes (cache-warm, new-version detection) are
+// stamped fresh, so staleness alone never brings them back to the one writer
+// that fetches bytes. The scope must ask for them, bounded by the cool-down.
+func TestStaleReportSweepAlsoAsksForNeverScannedReports(t *testing.T) {
+	resetStaleReportMetrics()
+	t.Cleanup(resetStaleReportMetrics)
+
+	src := &fakeStaleSource{rows: staleRows(2)}
+	ref, _ := artifactBackfillRefresher(src, okFetcher, true, 0)
+	ref.RunOnce(context.Background())
+
+	scope, _ := src.scope.Load().(StaleReportScope)
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	if len(scope.ArtifactEcosystems) != 2 {
+		t.Fatalf("scope.ArtifactEcosystems = %v, want the configured nuget+maven", scope.ArtifactEcosystems)
+	}
+	if want := now.Add(-DefaultStaleReportArtifactCooldown); !scope.ArtifactOlderThan.Equal(want) {
+		t.Errorf("ArtifactOlderThan = %v, want now minus the default cool-down (%v)", scope.ArtifactOlderThan, want)
+	}
+	if want := now.Add(-24 * time.Hour); !scope.OlderThan.Equal(want) {
+		t.Errorf("OlderThan = %v, want now minus MaxStaleness (%v) — the stale half must not change", scope.OlderThan, want)
+	}
+}
+
+// A never-scanned row can be FRESH. Against the full 24h bound Scan's
+// cache-first read would return the cached report and drop the bytes, so the
+// sweep must scan with a MaxStaleness no longer than the cool-down.
+func TestStaleReportSweepForcesTheRescanForFreshRows(t *testing.T) {
+	resetStaleReportMetrics()
+	t.Cleanup(resetStaleReportMetrics)
+
+	src := &fakeStaleSource{rows: staleRows(2)}
+	ref, svc := artifactBackfillRefresher(src, okFetcher, true, 6*time.Hour)
+	ref.RunOnce(context.Background())
+
+	if len(svc.seen) != 2 {
+		t.Fatalf("Scan called %d times, want 2", len(svc.seen))
+	}
+	for _, req := range svc.seen {
+		if req.Options.MaxStaleness != 6*time.Hour {
+			t.Errorf("MaxStaleness = %v, want the 6h cool-down: a longer bound lets Scan serve the "+
+				"cached bytes-less report for a fresh row", req.Options.MaxStaleness)
+		}
+	}
+}
+
+// The cool-down cannot exceed MaxStaleness: past that the row is plain stale,
+// and a longer cool-down would make Scan serve rows the stale half selected.
+func TestStaleReportArtifactCooldownIsClampedToMaxStaleness(t *testing.T) {
+	ref, _ := artifactBackfillRefresher(&fakeStaleSource{}, okFetcher, true, 72*time.Hour)
+	if got := ref.staleReportArtifactCooldown(); got != 24*time.Hour {
+		t.Errorf("cool-down = %v, want it clamped to MaxStaleness (24h)", got)
+	}
+}
+
+// Without a way to fetch bytes, revisiting never-scanned rows is a loop of
+// bytes-less rescans that gains nothing. The half must switch itself off, and
+// the sweep must keep the ordinary bound.
+func TestStaleReportArtifactHalfNeedsAFetcherAndArtifactEnabled(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fetcher StaleReportArtifactFetcherFunc
+		enabled bool
+	}{
+		"no fetcher":         {nil, true},
+		"artifacts disabled": {okFetcher, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetStaleReportMetrics()
+			t.Cleanup(resetStaleReportMetrics)
+			src := &fakeStaleSource{rows: staleRows(1)}
+			ref, svc := artifactBackfillRefresher(src, tc.fetcher, tc.enabled, 0)
+			ref.RunOnce(context.Background())
+
+			scope, _ := src.scope.Load().(StaleReportScope)
+			if len(scope.ArtifactEcosystems) != 0 {
+				t.Errorf("artifact half active (%v) with no way to fetch bytes", scope.ArtifactEcosystems)
+			}
+			for _, req := range svc.seen {
+				if req.Options.MaxStaleness != 24*time.Hour {
+					t.Errorf("MaxStaleness = %v, want the ordinary 24h bound", req.Options.MaxStaleness)
+				}
+			}
+		})
 	}
 }
