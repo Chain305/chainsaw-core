@@ -28,7 +28,7 @@ func OpenWithConfig(dsn, readDSN string, writePool, readPool PoolConfig) (*Store
 		return nil, fmt.Errorf("database DSN is required")
 	}
 	writePool = writePool.applyDefaults()
-	readPool = readPool.applyDefaults()
+	readPool = readPool.applyReadDefaults()
 
 	config, err := pgx.ParseConfig(dsn)
 	if err != nil {

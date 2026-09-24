@@ -52,6 +52,30 @@ func defaultPoolConfig() PoolConfig {
 	}
 }
 
+// Read-pool defaults. The read pool used to take defaultPoolConfig()'s 50
+// connections, so setting CHAINSAW_DATABASE_READ_URL without also sizing the
+// pool gave 50 read + 50-60 write connections against Postgres's usual
+// max_connections of 100 — the new pool would exhaust the server under the
+// very load it exists to survive. It serves primary-key and index lookups
+// under a 5s statement timeout, so a small pool is enough; override with
+// CHAINSAW_DB_READ_MAX_OPEN_CONNS.
+const (
+	defaultReadMaxOpenConns = 10
+	defaultReadMaxIdleConns = 5
+)
+
+// applyReadDefaults is applyDefaults for the read pool: the same fill, but
+// with the read pool's own, smaller connection counts.
+func (p PoolConfig) applyReadDefaults() PoolConfig {
+	if p.MaxOpenConns == 0 {
+		p.MaxOpenConns = defaultReadMaxOpenConns
+	}
+	if p.MaxIdleConns == 0 {
+		p.MaxIdleConns = defaultReadMaxIdleConns
+	}
+	return p.applyDefaults()
+}
+
 // applyDefaults fills any zero field with the pre-Phase-5 default.
 func (p PoolConfig) applyDefaults() PoolConfig {
 	d := defaultPoolConfig()

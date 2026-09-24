@@ -128,13 +128,14 @@ func (s *Store) latestVersionCorroborator(ecosystem, pkg string) (string, bool) 
 // is retained to avoid changing every caller's signature.
 func (s *Store) Get(ctx context.Context, orgID string, key Key) (*Report, error) {
 	_ = orgID
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	db := s.readerFor(ctx)
+	if db == nil {
 		return nil, ErrNotFound
 	}
 	// risk_evaluation is selected as NULLable — rows predating Phase 2
 	// carry SQL NULL and must deserialise to report.Risk = nil, never
 	// an empty Evaluation struct.
-	row := s.sql.DB().QueryRowContext(ctx, `
+	row := db.QueryRowContext(ctx, `
 		SELECT report, risk_evaluation FROM intelligence_reports
 		WHERE ecosystem=$1 AND package_name=$2 AND version=$3
 	`, key.Ecosystem, key.Package, key.Version)
@@ -957,7 +958,7 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, erro
 		LIMIT $%d
 	`, matcherEpochExpr, whereClause, orderBy, idx)
 
-	rows, err := s.sql.DB().QueryContext(ctx, query, args...)
+	rows, err := s.readerFor(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("intelligence: search: %w", err)
 	}
