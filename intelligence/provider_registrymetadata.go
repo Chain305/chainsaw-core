@@ -2501,6 +2501,17 @@ var googleMavenGroupPrefixes = []string{
 	"com.google.firebase",
 }
 
+// GroupUsesGoogleMaven reports whether a Maven group — dotted or
+// slash-separated — belongs to a namespace Google hosts rather than Maven
+// Central.
+//
+// Exported for internal/server's public artifact fetcher, which needs the same
+// answer and must not carry a second copy of the prefix list. The stale-report
+// sweep made that concrete: every one of 200 artifact fetches in a single pass
+// 404'd because androidx coordinates were being asked of
+// repo.maven.apache.org, which does not host them.
+func GroupUsesGoogleMaven(group string) bool { return groupUsesGoogleMaven(group) }
+
 // groupUsesGoogleMaven reports whether a Maven groupPath (slash-separated,
 // as it appears in the repository layout) belongs to a namespace Google
 // hosts.
