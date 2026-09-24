@@ -357,10 +357,19 @@ func init() {
 		},
 	})
 
-	// The weighted half. npm only, where install-script presence measures
-	// 3.22x (50.0% of malware against 15.5% of held-out popular packages).
-	// Weight -5 is carried over unchanged from the pre-split signal: this
-	// commit moves where the weight applies, and does not re-tune it.
+	// The weighted half. npm only. The original 3.22x lift (50.0% of malware
+	// against 15.5% of held-out popular packages) counted prepare and the
+	// publish hooks; since the parser counts only preinstall/install/
+	// postinstall (7c473d3b) it fires on 60.9% of the Datadog npm malware
+	// set, 0.14% of popular npm and 2.9% of the rev4 benign stratum.
+	//
+	// The -5 is verdict-inert and knowingly so: a package firing only this
+	// signal allows at 97, and even -100 would allow at 63, so no weight can
+	// move a verdict on its own. Only a MaxImpact tier could, and it stays
+	// off until someone measures what it would buy: the feedless verdicts of
+	// npm packages scored BEFORE they were found malicious (prod reports
+	// preceding a clean->malicious recall flip). Its cost is already known —
+	// a warn on ~2.9% of long-tail benign packages and on core-js.
 	register(Signal{
 		ID:       SignalSCInstallScriptOnlyNPM,
 		Category: CategorySupplyChain,
