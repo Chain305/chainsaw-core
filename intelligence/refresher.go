@@ -130,6 +130,22 @@ type RefresherConfig struct {
 	// budget and ordering logic can be tested without Postgres.
 	StaleReportSource StaleReportSource
 
+	// StaleReportArtifactFetcher fetches artifact bytes for a coordinate that
+	// has NO org and NO repository, by ecosystem alone.
+	//
+	// The walk's ArtifactFetcher cannot serve the sweep: it takes a
+	// metadata.PackageMetadataRow, and the sweep exists precisely because
+	// these coordinates have no such row. Production already answers "which
+	// repository fetches a coordinate nobody owns" on the public deep-scan
+	// path — publicArtifactFetcher resolves a per-format upstream base from
+	// config — so this is wired to the same fetcher rather than inventing a
+	// second answer.
+	//
+	// Gated by ArtifactEnabled, the same knob as the walk: "do we fetch
+	// artifacts while refreshing" deserves one answer, and the sweep is
+	// already opt-in on top of it.
+	StaleReportArtifactFetcher func(ctx context.Context, ecosystem, pkg, version string) (*ArtifactHandle, error)
+
 	// CoverageRecomputeMaxRows caps how many partial-closure rows one tick
 	// re-evaluates. Zero means DefaultCoverageRecomputeMaxRows.
 	CoverageRecomputeMaxRows int

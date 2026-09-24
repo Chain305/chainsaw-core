@@ -59,6 +59,10 @@ const DefaultStaleReportMaxRows = 200
 // be legible from the row itself.
 const RefreshReasonStaleReport = "stale_report_refresh"
 
+// staleReportArtifactTimeout bounds one artifact download. Matches the walk's
+// 30s: the same registries, the same sizes.
+const staleReportArtifactTimeout = 30 * time.Second
+
 var (
 	staleReportBacklog      atomic.Int64
 	staleReportSweptTotal   atomic.Uint64
@@ -235,6 +239,29 @@ func (r *Refresher) refreshStaleReportRow(ctx context.Context, row StaleReportRo
 			MaxStaleness: r.cfg.MaxStaleness,
 		},
 	}
+	// Attach artifact bytes where we can. Without them Scan skips every
+	// provider that declares NeedsArtifact (scanner.go:477) and records
+	// WarnNeedsArtifact instead, so the refreshed report would carry current
+	// metadata, vulnerability and provenance facts and an EMPTY artifact
+	// section — which is what the first cut of this sweep did, and why Go
+	// artifact coverage did not move when it shipped.
+	//
+	// Best-effort: a fetch failure logs and continues, exactly as the walk's
+	// does. Refusing to refresh the other signals because the bytes were
+	// unavailable would trade a partial improvement for none.
+	if r.cfg.ArtifactEnabled && r.cfg.StaleReportArtifactFetcher != nil {
+		fetchCtx, cancel := context.WithTimeout(ctx, staleReportArtifactTimeout)
+		handle, err := r.cfg.StaleReportArtifactFetcher(fetchCtx, row.Ecosystem, row.Package, row.Version)
+		cancel()
+		if err != nil {
+			r.cfg.Logger.Debug("stale-report artifact fetch failed",
+				"ecosystem", row.Ecosystem, "package", row.Package,
+				"version", row.Version, "error", err)
+		} else if handle != nil {
+			req.Artifact = handle
+		}
+	}
+
 	if _, err := r.cfg.Service.Scan(ctx, req); err != nil {
 		r.cfg.Logger.Debug("stale-report refresh failed",
 			"ecosystem", row.Ecosystem, "package", row.Package,

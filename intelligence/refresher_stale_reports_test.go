@@ -219,3 +219,120 @@ func TestStaleReportSweepCountsFailuresSeparately(t *testing.T) {
 		t.Errorf("StaleReportSweptTotal = %d, want 5 — attempts are still attempts", got)
 	}
 }
+
+// Without artifact bytes the sweep refreshes metadata, vulnerability and
+// provenance facts and leaves the artifact section EMPTY — Scan skips every
+// NeedsArtifact provider on a nil req.Artifact (scanner.go:477). That is what
+// the first cut of this sweep did, and why Go artifact coverage did not move
+// when it shipped: 6,117 of Go's 6,140 rows are orphans only this sweep
+// reaches, and it was reaching them without bytes.
+func TestStaleReportSweepAttachesArtifactBytes(t *testing.T) {
+	resetStaleReportMetrics()
+	t.Cleanup(resetStaleReportMetrics)
+
+	var fetched int32
+	src := &fakeStaleSource{rows: staleRows(3)}
+	svc := &fakeService{}
+	ref := NewRefresher(RefresherConfig{
+		Service:                   svc,
+		Metadata:                  &fakeMetadataSource{},
+		MaxStaleness:              24 * time.Hour,
+		Concurrency:               1,
+		PageSize:                  50,
+		StaleReportRefreshEnabled: true,
+		StaleReportSource:         src,
+		ArtifactEnabled:           true,
+		EcosystemResolver:         func(string) string { return "go" },
+		StaleReportArtifactFetcher: func(_ context.Context, eco, pkg, version string) (*ArtifactHandle, error) {
+			atomic.AddInt32(&fetched, 1)
+			if eco == "" || pkg == "" || version == "" {
+				t.Errorf("fetcher called with an incomplete coordinate: %q %q %q", eco, pkg, version)
+			}
+			return &ArtifactHandle{Bytes: []byte("artifact"), SHA256: "abc"}, nil
+		},
+	})
+	ref.now = func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) }
+
+	ref.RunOnce(context.Background())
+
+	if got := atomic.LoadInt32(&fetched); got != 3 {
+		t.Errorf("artifact fetcher called %d times, want 3", got)
+	}
+	if len(svc.seen) != 3 {
+		t.Fatalf("Scan called %d times, want 3", len(svc.seen))
+	}
+	for _, req := range svc.seen {
+		if req.Artifact == nil {
+			t.Errorf("Scan for %s got a nil Artifact — every NeedsArtifact provider will skip and "+
+				"the refreshed report carries an empty artifact section", req.Key.Package)
+		}
+	}
+}
+
+// A fetch failure must not cost the row its other signals. Refusing to refresh
+// metadata, vulnerability and provenance because the bytes were unavailable
+// trades a partial improvement for none.
+func TestStaleReportSweepRefreshesEvenWhenTheArtifactFetchFails(t *testing.T) {
+	resetStaleReportMetrics()
+	t.Cleanup(resetStaleReportMetrics)
+
+	src := &fakeStaleSource{rows: staleRows(3)}
+	svc := &fakeService{}
+	ref := NewRefresher(RefresherConfig{
+		Service:                   svc,
+		Metadata:                  &fakeMetadataSource{},
+		MaxStaleness:              24 * time.Hour,
+		Concurrency:               1,
+		PageSize:                  50,
+		StaleReportRefreshEnabled: true,
+		StaleReportSource:         src,
+		ArtifactEnabled:           true,
+		EcosystemResolver:         func(string) string { return "go" },
+		StaleReportArtifactFetcher: func(context.Context, string, string, string) (*ArtifactHandle, error) {
+			return nil, fmt.Errorf("registry returned 404")
+		},
+	})
+	ref.now = func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) }
+
+	summary := ref.RunOnce(context.Background())
+	if summary.StaleReports.Refreshed != 3 {
+		t.Errorf("refreshed=%d, want 3 — an artifact fetch failure must not suppress the rest of "+
+			"the refresh", summary.StaleReports.Refreshed)
+	}
+	for _, req := range svc.seen {
+		if req.Artifact != nil {
+			t.Error("a failed fetch produced a non-nil Artifact")
+		}
+	}
+}
+
+// ArtifactEnabled=false must skip the download entirely — it is the same knob
+// the walk uses, and an operator who turned it off there means it here too.
+func TestStaleReportSweepHonoursArtifactEnabled(t *testing.T) {
+	resetStaleReportMetrics()
+	t.Cleanup(resetStaleReportMetrics)
+
+	var fetched int32
+	src := &fakeStaleSource{rows: staleRows(3)}
+	ref := NewRefresher(RefresherConfig{
+		Service:                   &fakeService{},
+		Metadata:                  &fakeMetadataSource{},
+		MaxStaleness:              24 * time.Hour,
+		Concurrency:               1,
+		PageSize:                  50,
+		StaleReportRefreshEnabled: true,
+		StaleReportSource:         src,
+		ArtifactEnabled:           false,
+		EcosystemResolver:         func(string) string { return "go" },
+		StaleReportArtifactFetcher: func(context.Context, string, string, string) (*ArtifactHandle, error) {
+			atomic.AddInt32(&fetched, 1)
+			return &ArtifactHandle{Bytes: []byte("x")}, nil
+		},
+	})
+	ref.now = func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) }
+	ref.RunOnce(context.Background())
+
+	if got := atomic.LoadInt32(&fetched); got != 0 {
+		t.Errorf("artifact fetcher called %d times with ArtifactEnabled=false", got)
+	}
+}
