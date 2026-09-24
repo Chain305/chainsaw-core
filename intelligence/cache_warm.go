@@ -267,6 +267,15 @@ func pinnedVersion(constraint string) string {
 	if v == "" {
 		return ""
 	}
+	// Unwrap ONE enclosing bracket pair. NuGet writes an exact pin as
+	// "[2.8.0]" and PEP 345 requires_dist as "(==2.14.3)"; neither carries a
+	// range operator, so both used to pass through verbatim and were warmed
+	// into intelligence_reports as the literal version "[2.8.0]" — a
+	// coordinate no registry serves and no advisory range matches. A real
+	// interval ("[1.0,2.0)", "(,1.0]") still fails on its comma below.
+	if n := len(v); n >= 2 && ((v[0] == '[' && v[n-1] == ']') || (v[0] == '(' && v[n-1] == ')')) {
+		v = strings.TrimSpace(v[1 : n-1])
+	}
 	// Strip exact-pin prefixes from PyPI/Cargo/RubyGems. Order matters:
 	// "==" must be checked before "=".
 	switch {
@@ -283,7 +292,7 @@ func pinnedVersion(constraint string) string {
 	// is always a range marker ("1.2.3 - 2.0", "1.2 || 1.3").
 	for _, r := range v {
 		switch r {
-		case '^', '~', '>', '<', '*', ',', '|', ' ', '\t':
+		case '^', '~', '>', '<', '*', ',', '|', ' ', '\t', '[', ']', '(', ')':
 			return ""
 		}
 	}

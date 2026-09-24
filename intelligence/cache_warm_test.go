@@ -314,6 +314,18 @@ func TestPinnedVersion(t *testing.T) {
 		// A real version that merely contains a brace-like character in a
 		// prerelease tag must still pass; the guard keys on "${".
 		{"1.2.3-beta1", "1.2.3-beta1"},
+
+		// Enclosing brackets. NuGet's exact pin and PEP 345's parenthesised
+		// requires_dist were warmed verbatim — prod held "[2.8.0]" and
+		// "(==11.10.3.66)" as versions on 2026-09-24.
+		{"[2.8.0]", "2.8.0"},
+		{"(==2.14.3)", "2.14.3"},
+		{"( == 11.7.101 )", "11.7.101"},
+		{"[1.0,2.0)", ""}, // NuGet interval
+		{"(,1.0]", ""},    // NuGet upper bound
+		{"(>=1.0)", ""},   // PEP 345 lower bound
+		{"[2.8.0", ""},    // unbalanced: not unwrapped; the leftover bracket rejects
+		{"[]", ""},
 	}
 	for _, tc := range cases {
 		if got := pinnedVersion(tc.in); got != tc.want {
