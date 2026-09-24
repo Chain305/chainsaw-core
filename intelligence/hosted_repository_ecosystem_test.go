@@ -13,7 +13,7 @@ package intelligence
 // every such upload into NOT EVALUATED and pushes the org's scan to exit 2
 // on a claim that is simply untrue.
 //
-// PRECEDENT: Phase 7 Wave 6 (docs/plan_qa_phase7_remediation.md). It ruled
+// PRECEDENT: Phase 7 Wave 6 (docs/archive/2026/plan_qa_phase7_remediation.md). It ruled
 // that `maven-hosted` is a repository NAME, that
 // osv.CanonicalEcosystem("maven-hosted") == "" is CORRECT, and that
 // teaching the canonicaliser about it would be the WRONG fix — it would

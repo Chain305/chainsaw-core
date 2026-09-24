@@ -266,7 +266,7 @@ func vulnerabilityScanCouldHaveFound(r *Report) bool {
 // fix for a routing bug belongs where the routing happens.
 //
 // PHASE 7 WAVE 6 ADJUDICATED THIS EXACT CLASS and the precedent is binding
-// (docs/plan_qa_phase7_remediation.md, "Wave 6 — the maven-hosted ecosystem,
+// (docs/archive/2026/plan_qa_phase7_remediation.md, "Wave 6 — the maven-hosted ecosystem,
 // correctly diagnosed"):
 //
 //   - `maven-hosted` is a repository NAME, not an ecosystem. The

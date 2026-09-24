@@ -236,7 +236,7 @@ func (r *Resolution) ApplyKnownFix(safeVersion string) {
 // advisory data but was NOT confirmed to be published upstream, and the
 // advisory sentence drops its imperative accordingly.
 //
-// AMENDS Phase 7 D-1/D-2 (docs/plan_qa_phase7_remediation.md). D-2 fixed
+// AMENDS Phase 7 D-1/D-2 (docs/archive/2026/plan_qa_phase7_remediation.md). D-2 fixed
 // the SOURCE of the safe version (per-CVE FixedVersion, resolved to the
 // minimum clearing every CVE) and explicitly rejected
 // intelligence_latest_probes.latest_version as a source because "latest
