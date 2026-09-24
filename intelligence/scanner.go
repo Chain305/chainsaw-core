@@ -284,8 +284,11 @@ func (s *DefaultService) scanFederated(ctx context.Context, req Request) (*Repor
 	// the depth through HERE is what makes the recursion terminate -- this
 	// call site is the recursion, and before 2026-09-14 it had no base case
 	// (docs/PLANS_INTELLIGENCE.md#plan-scan-backpressure).
+	// ctx, not s.bg: the warm takes only the egress caller tag from it and
+	// keeps s.bg for its lifetime, so a refresher-triggered warm counts as
+	// refresh egress (declared_inventory D-2).
 	if len(report.Dependencies.Direct) > 0 {
-		go warmDirectDepsAtDepth(s.bg, report, s, req.Options.WarmDepth)
+		go warmDirectDepsAtDepth(ctx, report, s, req.Options.WarmDepth)
 	}
 	return report, nil
 }

@@ -47,6 +47,7 @@ package intelligence
 
 import (
 	"context"
+	"github.com/chain305/chainsaw-core/httpclient"
 	"os"
 	"strings"
 	"sync"
@@ -155,11 +156,16 @@ func warmDirectDepsAtDepth(ctx context.Context, parent *Report, svc *DefaultServ
 	// instant their HTTP response writes — we want the warm-up to keep
 	// running anyway. The `ctx` parameter is accepted for API symmetry
 	// (callers may want to log against the originating trace) but is not
-	// propagated into the inner Scans.
-	_ = ctx
+	// propagated into the inner Scans — except the egress caller tag below.
 	bg := svc.bg
 	if bg == nil {
 		bg = context.Background()
+	}
+	// The one value that DOES cross over: who asked. A warm triggered by the
+	// refresher is refresh egress, and counting it as customer traffic would
+	// understate D-2's per-coordinate cost by exactly the warm's share.
+	if caller := httpclient.EgressCallerFrom(ctx); caller != "" {
+		bg = httpclient.WithEgressCaller(bg, caller)
 	}
 
 	// Collect the (eco, name, version) triples we'll actually warm so the

@@ -22,6 +22,7 @@ package httpclient
 // for a cost model than a hand-picked subset.
 
 import (
+	"context"
 	"net/http"
 	"sync/atomic"
 )
@@ -45,16 +46,56 @@ const (
 	EgressOther             EgressOutcome = "other"
 )
 
+// Egress callers. D-2's cost model divides upstream requests by refreshed
+// coordinates, and the refresher's requests share this transport with every
+// customer install the proxy serves — npm alone was 71k requests/day on
+// 2026-09-24, most of it install traffic. Without a caller label the division
+// only yields an upper bound. The refresher tags its context; everything
+// untagged is EgressCallerOther.
+const (
+	EgressCallerRefresh = "refresh"
+	EgressCallerOther   = "other"
+)
+
+type egressCallerKey struct{}
+
+// WithEgressCaller tags ctx so requests made under it are counted against
+// caller. The tag survives context.WithoutCancel, so detached follow-up work
+// (the dependency cache-warm) is attributed to whoever started it.
+func WithEgressCaller(ctx context.Context, caller string) context.Context {
+	return context.WithValue(ctx, egressCallerKey{}, caller)
+}
+
+// EgressCallerFrom returns the caller ctx was tagged with, or "" when none.
+// Work that deliberately detaches from its caller's context (a background
+// cache-warm) uses it to carry the tag across.
+func EgressCallerFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	c, _ := ctx.Value(egressCallerKey{}).(string)
+	return c
+}
+
+func egressCallerOf(req *http.Request) string {
+	if req != nil {
+		if c := EgressCallerFrom(req.Context()); c != "" {
+			return c
+		}
+	}
+	return EgressCallerOther
+}
+
 // egressRecorder is nil until an operator installs one. atomic.Pointer because
 // clients are built and used from many goroutines.
-var egressRecorder atomic.Pointer[func(host string, outcome EgressOutcome)]
+var egressRecorder atomic.Pointer[func(host, caller string, outcome EgressOutcome)]
 
 // SetEgressRecorder installs a callback invoked once per outbound request
 // attempt made through any client this package constructs. nil disables it.
 //
 // Runs on the request path, so it must not block: a counter increment is the
 // intended shape.
-func SetEgressRecorder(f func(host string, outcome EgressOutcome)) {
+func SetEgressRecorder(f func(host, caller string, outcome EgressOutcome)) {
 	if f == nil {
 		egressRecorder.Store(nil)
 		return
@@ -81,11 +122,12 @@ func (t countingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		// caller-controlled text, and a hostname is bounded in practice.
 		host = req.URL.Hostname()
 	}
+	caller := egressCallerOf(req)
 	switch {
 	case err != nil:
-		(*fp)(host, EgressTransport)
+		(*fp)(host, caller, EgressTransport)
 	case resp != nil:
-		(*fp)(host, outcomeFor(host, resp.StatusCode))
+		(*fp)(host, caller, outcomeFor(host, resp.StatusCode))
 	}
 	return resp, err
 }

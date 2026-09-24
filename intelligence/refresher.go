@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"context"
+	"github.com/chain305/chainsaw-core/httpclient"
 	"log/slog"
 	"os"
 	"strconv"
@@ -326,6 +327,10 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 	if r == nil {
 		return TickSummary{}
 	}
+	// Attribute every upstream request this tick makes — walk, sweeps and the
+	// cache-warm they trigger — to the refresher, so D-2 can divide refresh
+	// egress by refreshed coordinates instead of by all egress.
+	ctx = httpclient.WithEgressCaller(ctx, httpclient.EgressCallerRefresh)
 	start := r.now()
 	var scanned, skipped, newVers atomic.Int64
 

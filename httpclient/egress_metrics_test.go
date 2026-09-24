@@ -8,6 +8,7 @@ package httpclient
 // out, not on the function you happened to instrument.
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -20,7 +21,7 @@ func recorded(t *testing.T) (*sync.Mutex, map[string]int) {
 	t.Helper()
 	var mu sync.Mutex
 	got := map[string]int{}
-	SetEgressRecorder(func(host string, outcome EgressOutcome) {
+	SetEgressRecorder(func(host, _ string, outcome EgressOutcome) {
 		mu.Lock()
 		defer mu.Unlock()
 		got[host+"/"+string(outcome)]++
@@ -226,5 +227,44 @@ func TestRoundTripPassesHostToTheOutcomeMapper(t *testing.T) {
 	if n := got["repo1.maven.org/"+string(EgressForbidden)]; n != 1 {
 		t.Errorf("repo1.maven.org recorded %q %d times, want 1 — an ordinary host's 403 must "+
 			"stay forbidden. recorded=%v", EgressForbidden, n, got)
+	}
+}
+
+// The transport is where the caller label is read. A tagged request must be
+// counted against its caller and an untagged one against "other", or D-2's
+// refresh numerator silently absorbs customer install traffic.
+func TestEgressCountsTheCaller(t *testing.T) {
+	var mu sync.Mutex
+	got := map[string]int{}
+	SetEgressRecorder(func(_, caller string, _ EgressOutcome) {
+		mu.Lock()
+		defer mu.Unlock()
+		got[caller]++
+	})
+	t.Cleanup(func() { SetEgressRecorder(nil) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+	client := &http.Client{Transport: countingTransport{next: http.DefaultTransport}}
+
+	for _, ctx := range []context.Context{
+		WithEgressCaller(context.Background(), EgressCallerRefresh),
+		context.Background(),
+	} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got[EgressCallerRefresh] != 1 || got[EgressCallerOther] != 1 {
+		t.Errorf("counted %v, want one refresh and one other", got)
 	}
 }
