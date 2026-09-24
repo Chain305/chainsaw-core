@@ -100,6 +100,11 @@ hooks:
     size_cap_bytes: 2147483648
   trivial:
     max_concurrent_scans: 7
+coverage_gate:
+  mode: closed
+  required: [malware, cve]
+  grace: 90m
+  max_ledger_age: 36h
 remotes:
   npm:
     url: https://npm.internal.example/
@@ -161,6 +166,14 @@ repositories:
 	// intelligence.FailMode, which is kept.
 	if got.Runtime.IntelBundlePath != "/srv/chainsaw/intel-bundle.tar.gz" {
 		t.Errorf("runtime.intel_bundle_path = %q", got.Runtime.IntelBundlePath)
+	}
+
+	// --- coverage_gate.* ---------------------------------------------
+	// A fail-closed control: dropping it on the round trip would leave an
+	// operator believing installs are gated while the gate is off.
+	if g := got.CoverageGate; g.Mode != "closed" || strings.Join(g.Required, ",") != "malware,cve" ||
+		g.Grace != "90m" || g.MaxLedgerAge != "36h" {
+		t.Errorf("coverage_gate did not survive the round trip: %+v", g)
 	}
 
 	// --- provenance.* -----------------------------------------------

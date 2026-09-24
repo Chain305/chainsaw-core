@@ -105,6 +105,10 @@ var settingsBackedFields = map[string]string{
 	"SBOM.AttributionWindowDays": settingSBOMAttributionWindowDays,
 	"Correlation.Enabled":        settingCorrelationEnabled,
 	"Coverage.Enabled":           settingCoverageEnabled,
+	"CoverageGate.Mode":          settingCoverageGateMode,
+	"CoverageGate.Required":      settingCoverageGateRequired,
+	"CoverageGate.Grace":         settingCoverageGateGrace,
+	"CoverageGate.MaxLedgerAge":  settingCoverageGateMaxLedgerAge,
 	"Policy.EvalCacheTTLSeconds": settingPolicyEvalCacheTTLSeconds,
 
 	// swift

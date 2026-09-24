@@ -125,6 +125,10 @@ const (
 	settingSBOMAttributionWindowDays    = "sbom.attribution_window_days"
 	settingCorrelationEnabled           = "correlation.enabled"
 	settingCoverageEnabled              = "coverage.enabled"
+	settingCoverageGateMode             = "coverage_gate.mode"
+	settingCoverageGateRequired         = "coverage_gate.required"
+	settingCoverageGateGrace            = "coverage_gate.grace"
+	settingCoverageGateMaxLedgerAge     = "coverage_gate.max_ledger_age"
 	settingPolicyEvalCacheTTLSeconds    = "policy.eval_cache_ttl_seconds"
 	settingDockerLayerMode              = "hooks.docker_layer.mode"
 	settingDockerLayerSizeCapBytes      = "hooks.docker_layer.size_cap_bytes"
@@ -286,6 +290,10 @@ func applySettingsOverlay(cfg *Config, settings settingMap) {
 	settings.overlayInt(settingSBOMAttributionWindowDays, &cfg.SBOM.AttributionWindowDays)
 	settings.overlayBool(settingCorrelationEnabled, &cfg.Correlation.Enabled)
 	settings.overlayBoolPtr(settingCoverageEnabled, &cfg.Coverage.Enabled)
+	settings.overlayString(settingCoverageGateMode, &cfg.CoverageGate.Mode)
+	settings.overlayCommaList(settingCoverageGateRequired, &cfg.CoverageGate.Required)
+	settings.overlayString(settingCoverageGateGrace, &cfg.CoverageGate.Grace)
+	settings.overlayString(settingCoverageGateMaxLedgerAge, &cfg.CoverageGate.MaxLedgerAge)
 	settings.overlayIntPtr(settingPolicyEvalCacheTTLSeconds, &cfg.Policy.EvalCacheTTLSeconds)
 
 	// swift — Wave AA/AF semantics preserved exactly. These two knobs
@@ -571,6 +579,21 @@ func saveFeatureSettings(set settingSetter, cfg *Config) error {
 		if err := set(settingCoverageEnabled, boolString(*cfg.Coverage.Enabled)); err != nil {
 			return err
 		}
+	}
+	// coverage_gate.* — persisted so the round trip does not discard it; the
+	// CHAINSAW_COVERAGE_* env vars still win at read time (see
+	// internal/server coverageGateGetenv).
+	if err := set(settingCoverageGateMode, cfg.CoverageGate.Mode); err != nil {
+		return err
+	}
+	if err := set(settingCoverageGateRequired, joinCommaList(cfg.CoverageGate.Required)); err != nil {
+		return err
+	}
+	if err := set(settingCoverageGateGrace, cfg.CoverageGate.Grace); err != nil {
+		return err
+	}
+	if err := set(settingCoverageGateMaxLedgerAge, cfg.CoverageGate.MaxLedgerAge); err != nil {
+		return err
 	}
 	if cfg.Policy.EvalCacheTTLSeconds != nil {
 		if err := set(settingPolicyEvalCacheTTLSeconds, strconv.Itoa(*cfg.Policy.EvalCacheTTLSeconds)); err != nil {

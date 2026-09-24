@@ -70,6 +70,15 @@ type Config struct {
 	// contract gets broken by a key name. The gate goes in its own
 	// top-level `coverage_gate:` block.
 	Coverage CoverageConfig `yaml:"coverage"`
+	// CoverageGate is the opt-in fail-closed coverage gate — the block the
+	// comment above keeps OUT of `coverage:`. It is the YAML twin of the
+	// CHAINSAW_COVERAGE_* env vars, and the env vars WIN when set: an
+	// operator's deploy-time env is never overridden by a stored setting.
+	// Break-glass (CHAINSAW_COVERAGE_BREAK_GLASS) is deliberately env-only,
+	// so disabling the gate in an emergency never depends on the database.
+	// Only the proxy reads this; the guard and the admission controller
+	// have no config file and stay env-driven.
+	CoverageGate CoverageGateConfig `yaml:"coverage_gate"`
 	// RepositoryAnonymousAccess controls whether /repository/* endpoints allow requests
 	// without client credentials. When nil, anonymous access is enabled.
 	//
@@ -253,6 +262,16 @@ func (m MalwareConfig) GHSAEnabled() bool {
 // existing K8s admission webhook with --enable-deployment-correlation;
 // without that flag the webhook never POSTs, even if the proxy side is
 // turned on.
+// CoverageGateConfig mirrors the CHAINSAW_COVERAGE_* env vars one for one, as
+// strings, so the gate keeps a single parser (coverage.PostureFromEnv): the
+// YAML only supplies the text an unset env var would have held.
+type CoverageGateConfig struct {
+	Mode         string   `yaml:"mode"`           // CHAINSAW_COVERAGE_MODE: off | closed | ...
+	Required     []string `yaml:"required"`       // CHAINSAW_COVERAGE_REQUIRED, one source per entry
+	Grace        string   `yaml:"grace"`          // CHAINSAW_COVERAGE_GRACE, a Go duration
+	MaxLedgerAge string   `yaml:"max_ledger_age"` // CHAINSAW_COVERAGE_MAX_LEDGER_AGE, a Go duration
+}
+
 type CorrelationConfig struct {
 	// Enabled flips the feature on. Pointer-to-bool was tempting (so
 	// "absent key" feels different from "explicit false"), but the

@@ -394,6 +394,7 @@ type strictConfigRoot struct {
 	RepositoryAnonymousAccess *bool        `yaml:"repository_anonymous_access"`
 	Repositories              yaml.Node    `yaml:"repositories"`
 	Remotes                   yaml.Node    `yaml:"remotes"`
+	CoverageGate              yaml.Node    `yaml:"coverage_gate"`
 }
 
 // strictServer is the one section we fully mirror, because server.*
