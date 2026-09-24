@@ -39,6 +39,7 @@ package intelligence
 // 40-line need.
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -63,6 +64,19 @@ var (
 	mavenPOMCache   = map[string]mavenPOMCacheEntry{}
 )
 
+// mavenVersionIsMutable reports whether a version names a document that can
+// change under the same coordinate, and so must never be cached. A -SNAPSHOT
+// is republished in place; LATEST / RELEASE are Maven 2 meta-versions that
+// resolve to whatever was published last; a range (`[1.0,2.0)`) is not one
+// version at all. Ranges are already refused by isSafeMavenCoordinateSegment
+// before a URL is built, so they are listed here only so this guard does not
+// depend on that one.
+func mavenVersionIsMutable(version string) bool {
+	v := strings.ToUpper(strings.TrimSpace(version))
+	return strings.Contains(v, "SNAPSHOT") || v == "LATEST" || v == "RELEASE" ||
+		strings.ContainsAny(v, "[](),")
+}
+
 // mavenPOMCacheKey namespaces a coordinate by the repository it came from.
 func mavenPOMCacheKey(endpoint, group, artifact, version string) string {
 	return endpoint + "\x00" + mavenCoordKey(group, artifact, version)
@@ -80,12 +94,13 @@ func lookupMavenPOM(endpoint, group, artifact, version string) (*mavenPOM, bool)
 	return e.pom, true
 }
 
-// storeMavenPOM caches a successfully fetched POM. A FAILED fetch is never
-// cached: a negative entry would turn one transient upstream error into an
-// hour of missing licence inheritance across every child of that parent, which
-// is worse than the refetch it saves.
+// storeMavenPOM caches a successfully fetched POM. A mutable version (see
+// mavenVersionIsMutable) is never cached. A FAILED fetch is never cached: a
+// negative entry would turn one transient upstream error into an hour of
+// missing licence inheritance across every child of that parent, which is
+// worse than the refetch it saves.
 func storeMavenPOM(endpoint, group, artifact, version string, pom *mavenPOM) {
-	if pom == nil {
+	if pom == nil || mavenVersionIsMutable(version) {
 		return
 	}
 	key := mavenPOMCacheKey(endpoint, group, artifact, version)

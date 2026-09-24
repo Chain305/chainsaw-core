@@ -2156,19 +2156,25 @@ func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, art
 	// they go to repo1.maven.org, the host already rejecting most of our
 	// requests with 429. See maven_pom_cache.go for why the earlier refusal to
 	// cache is answered rather than overruled.
-	if cached, ok := lookupMavenPOM(p.endpoints.maven, group, artifact, version); ok {
+	//
+	// The cache base names BOTH repositories this provider can answer from:
+	// the google fallback's document is stored under it, so two providers that
+	// share repo1 but point the fallback at different hosts must not share an
+	// entry.
+	base := p.endpoints.maven + " " + p.endpoints.mavenGoogle
+	if cached, ok := lookupMavenPOM(base, group, artifact, version); ok {
 		return cached, nil
 	}
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	pom, warn, err := p.fetchMavenPOMFrom(ctx, p.endpoints.maven, groupPath, artifact, version)
 	if err == nil && warn == nil {
-		storeMavenPOM(p.endpoints.maven, group, artifact, version, pom)
+		storeMavenPOM(base, group, artifact, version, pom)
 		return pom, nil
 	}
 	if isDefiniteAbsence(warn) && groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != "" {
 		alt, w, e := p.fetchMavenPOMFrom(ctx, p.endpoints.mavenGoogle, groupPath, artifact, version)
 		if e == nil && w == nil {
-			storeMavenPOM(p.endpoints.maven, group, artifact, version, alt)
+			storeMavenPOM(base, group, artifact, version, alt)
 			return alt, nil
 		}
 		warn, err = w, e
@@ -2202,12 +2208,11 @@ func (p *registryMetadataProvider) fetchMavenPOMFrom(ctx context.Context, base, 
 //
 //   - Bounded: at most maxMavenParentDepth hops.
 //   - Cycle-safe: a self-parent, or A->B->A, terminates.
-//   - Each coordinate is fetched at most once. The visited set IS the
-//     cache — within one walk a repeated coordinate can only be a cycle,
-//     so the right response is to stop, not to serve it again from a map.
-//     (A cache spanning packages would have to live on the provider,
-//     which is process-lifetime, unbounded and stale-prone; deliberately
-//     not done.)
+//   - Each coordinate is fetched at most once per walk: within one walk a
+//     repeated coordinate can only be a cycle, so the visited set stops it.
+//     ACROSS walks, successfully parsed parents are shared through the
+//     bounded, expiring cache in maven_pom_cache.go (the objection this
+//     comment used to carry is answered there).
 //   - A MISSING parent (404) is silence: the artifact itself was fetched
 //     fine, and a parent's 404 is not a fact about the artifact. An
 //     UNFETCHABLE parent (5xx, timeout, transport) returns unknown=true —
