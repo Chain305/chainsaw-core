@@ -37,13 +37,10 @@ import (
 // Everything in here is DEAD BY CONSTRUCTION: whatever signal reads it can
 // never fire. Shrinking this map is always an improvement. Growing it
 // requires writing down why a field is computed at all.
-var projectedConstantFields = map[string]string{
-	"LicenseChangedFromPrev": "lic.changed_from_previous_version (SevMedium, -15) can " +
-		"never fire. Needs the PREVIOUS version's licence, which requires cross-version " +
-		"comparison -- nothing fetches version N-1 today (DiffReports iterates CVEs only; " +
-		"metadiff declares NeedsArtifact() false). Tracked as the cross-version work in " +
-		"docs/PLANS_INTELLIGENCE.md §5.",
-}
+//
+// EMPTY since LicenseChangedFromPrev was wired to projectLicenseDiff (the
+// prior row's licence comes back from Store.PriorVersionScan).
+var projectedConstantFields = map[string]string{}
 
 // constantAssignRe matches `FieldName: false,` / `FieldName: true,` inside a
 // composite literal — the shape a hardcoded projection takes.
@@ -71,13 +68,14 @@ func TestNoSignalIsFedByAHardcodedConstant(t *testing.T) {
 	}
 	fn := body[start : start+1+end]
 
-	matches := constantAssignRe.FindAllStringSubmatch(fn, -1)
-	if len(matches) == 0 {
-		t.Fatal("no constant field assignments found at all. ProjectToRiskInput has " +
-			"carried at least two for months, so this is the regex having stopped " +
-			"matching rather than the defect having been fixed — a guard that finds " +
-			"nothing is reporting a state it did not measure")
+	// ProjectToRiskInput carries no constant assignment any more, so an
+	// empty match set is now the expected state. Prove the regex can still
+	// see one, or "found nothing" would be a state this guard did not
+	// measure.
+	if !constantAssignRe.MatchString("\t\tLicenseChangedFromPrev: false,\n") {
+		t.Fatal("constantAssignRe no longer matches a hardcoded `Field: false,` line — the guard went blind")
 	}
+	matches := constantAssignRe.FindAllStringSubmatch(fn, -1)
 
 	var undeclared, stale []string
 	found := map[string]bool{}

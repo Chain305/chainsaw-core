@@ -302,9 +302,9 @@ func isPyPIEco(eco string) bool {
 // P8-70 widened the scope of this predicate beyond the maintainer COUNT.
 // The same `<developers>` block is also the only source of maven/gradle
 // publisher identity (`intelligence.MavenDeveloperPublisherIDs`), so it
-// gates three signals now: maint.single_maintainer (P8-11),
-// sc.publisher_changed / sc.pom_developer_list_changed and
-// sc.first_time_collaborator (both P8-70), plus the
+// gates these signals: maint.single_maintainer (P8-11),
+// sc.publisher_changed / sc.pom_developer_list_changed (P8-70; the
+// sc.first_time_collaborator signal it also gated is deleted), plus the
 // CompoundSCTakeoverSignature rule in compound.go. The name says
 // "Maintainer" for history; read it as "this ecosystem's People data is
 // POM prose". Every caller wants the same answer, so keep it one function

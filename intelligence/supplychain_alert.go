@@ -41,11 +41,8 @@ import (
 // not change. Defensible, and deliberate, but it means recall is not an
 // audit trail of everything that happened to a coordinate.
 //
-// Three fields are deliberately NOT diffed here:
+// Two fields are deliberately NOT diffed here:
 //
-//   - SupplyChain.ReservedNamespaceViolation — no provider writes it
-//     (report.go, the ReservedNamespaceViolation doc comment). A diff
-//     over a field with no writer can only ever produce noise.
 //   - SupplyChain.RepoLastCommitAt / RepoArchived — in-memory mirrors
 //     that the persistence layer does not store, so the loaded `prior`
 //     never carries them and EVERY refresh would look like a flip. The

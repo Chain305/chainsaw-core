@@ -48,6 +48,7 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 		r.Observation.CollectedAt = collected
 		r.Observation.FreshUntil = collected.Add(24 * time.Hour)
 		r.Scan = ArtifactScanSection{Performed: true, ShellAccess: shell}
+		r.Metadata.LicenseExpression = "MIT-" + version
 		if err := store.Upsert(ctx, "", r); err != nil {
 			t.Fatalf("seed %s@%s: %v", name, version, err)
 		}
@@ -61,7 +62,7 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 	seed(pkg, "2.0.0", now.Add(-24*time.Hour), false)
 	seed(other, "9.9.9", now.Add(-1*time.Hour), true)
 
-	scan, version, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "2.0.0"})
+	scan, version, license, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "2.0.0"})
 	if err != nil {
 		t.Fatalf("PriorVersionScan: %v", err)
 	}
@@ -71,12 +72,15 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 	if version != "1.1.0" {
 		t.Errorf("prior version = %q, want 1.1.0 (the most recently collected OTHER version)", version)
 	}
+	if license != "MIT-1.1.0" {
+		t.Errorf("prior licence = %q, want MIT-1.1.0 (the same row as the prior version)", license)
+	}
 	if !scan.Performed || !scan.ShellAccess {
 		t.Errorf("prior scan facts not returned: Performed=%v ShellAccess=%v", scan.Performed, scan.ShellAccess)
 	}
 
 	// Must never return the version being scanned.
-	if _, v, _ := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "1.1.0"}); v == "1.1.0" {
+	if _, v, _, _ := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "1.1.0"}); v == "1.1.0" {
 		t.Error("returned the version being scanned as its own prior version")
 	}
 
@@ -86,7 +90,7 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 	single := "pvs-single-" + uniq
 	t.Cleanup(func() { _, _ = db.DB().Exec(`DELETE FROM intelligence_reports WHERE package_name=$1`, single) })
 	seed(single, "1.0.0", now, true)
-	s2, v2, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: single, Version: "1.0.0"})
+	s2, v2, _, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: single, Version: "1.0.0"})
 	if err != nil {
 		t.Fatalf("single-version lookup errored: %v", err)
 	}
@@ -95,7 +99,7 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 	}
 
 	// Ecosystem must be part of the key.
-	if _, v, _ := store.PriorVersionScan(ctx, Key{Ecosystem: "pypi", Package: pkg, Version: "2.0.0"}); v != "" {
+	if _, v, _, _ := store.PriorVersionScan(ctx, Key{Ecosystem: "pypi", Package: pkg, Version: "2.0.0"}); v != "" {
 		t.Errorf("crossed an ecosystem boundary: got prior %q for pypi/%s", v, pkg)
 	}
 }

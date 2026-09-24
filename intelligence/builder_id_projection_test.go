@@ -17,7 +17,7 @@ import (
 // ask the question.
 //
 // This pins the wire. It deliberately does NOT assert that anything
-// scores off it -- see TestBuilderIDIsCarriedNotScored.
+// scores off it -- see TestBuilderIDIsObservedNotScored.
 func TestBuilderIDReachesTheRiskInput(t *testing.T) {
 	const malicious = "https://github.com/acme/app/.github/workflows/release.yml@refs/tags/setup-files-v1"
 
@@ -51,43 +51,66 @@ func TestBuilderIDEmptyIsUnknownNotBuiltByNobody(t *testing.T) {
 	}
 }
 
-// TestBuilderIDIsCarriedNotScored is the GATE, and it is meant to fail
-// the day someone wires a signal to this field without the measurement.
+// TestBuilderIDIsObservedNotScored is the GATE, and it is meant to fail
+// the day someone gives builder identity a WEIGHT without pricing it.
 //
-// S-3 is explicit: the negative signal that reads builder identity is
-// gated on measuring its false-positive rate against the clean corpus,
-// because plenty of legitimate projects release from tags. Given this
-// repo's history with FP rates -- the guard incident -- an unmeasured
-// behavioural signal is precisely how that went wrong.
+// S-3 measured the candidate rules against the clean corpus (2026-09-24):
+// a refs/tags vs refs/heads flip fires on 10.2% of clean packages, so it
+// was rejected. sc.builder_ref_version_mismatch (a tag that does not name
+// the version) fires on 0 of 398 clean packages, but its recall is
+// unmeasured — no malicious corpus row carries a builderId — so it is
+// OBSERVED at weight 0: visible in the evaluation, moving nothing.
 //
-// So this asserts that two inputs differing ONLY in BuilderID score
-// identically today. When the measurement exists and a signal ships,
-// this test should be deleted on purpose, not tripped over.
-func TestBuilderIDIsCarriedNotScored(t *testing.T) {
-	base := func(builder string) risk.Input {
-		return risk.Input{
-			Ecosystem:        "npm",
-			Package:          "cacheable",
-			Version:          "1.0.0",
-			HasProvenance:    true,
-			ProvenanceStatus: "verified",
-			SLSALevel:        3,
-			BuilderID:        builder,
+// So two inputs differing ONLY in BuilderID must still score identically,
+// and the tagged one must carry the observation.
+func TestBuilderIDIsObservedNotScored(t *testing.T) {
+	// Both statuses: a verified attestation's +15 reward saturates the
+	// supply-chain category and would hide a small weight, and "failed"
+	// is realistic — 1,802 npm reports carry a parsed builder ID on a
+	// failed verification.
+	for _, status := range []string{"verified", "failed"} {
+		base := func(builder string) risk.Input {
+			return risk.Input{
+				Ecosystem:        "npm",
+				Package:          "cacheable",
+				Version:          "1.0.0",
+				HasProvenance:    status == "verified",
+				ProvenanceStatus: status,
+				SLSALevel:        3,
+				BuilderID:        builder,
+			}
+		}
+
+		clean := risk.EvaluatePackage(base("https://github.com/acme/app/.github/workflows/release.yml@refs/heads/main"), risk.Options{})
+		tagged := risk.EvaluatePackage(base("https://github.com/acme/app/.github/workflows/release.yml@refs/tags/setup-files-v1"), risk.Options{})
+
+		if clean.DirectScore.Overall != tagged.DirectScore.Overall {
+			t.Errorf("%s: BuilderID moved the score (%d vs %d). sc.builder_ref_version_mismatch is "+
+				"observed at weight 0 until its recall is measured; a weight here needs that "+
+				"measurement first.",
+				status, clean.DirectScore.Overall, tagged.DirectScore.Overall)
+		}
+		if clean.Verdict != tagged.Verdict {
+			t.Errorf("%s: BuilderID moved the verdict (%s vs %s)", status, clean.Verdict, tagged.Verdict)
+		}
+		if !hasFired(tagged, risk.SignalSCBuilderRefVersionMismatch) {
+			t.Errorf("%s: tagged build did not carry %s", status, risk.SignalSCBuilderRefVersionMismatch)
+		}
+		if hasFired(clean, risk.SignalSCBuilderRefVersionMismatch) {
+			t.Errorf("%s: branch build carried %s", status, risk.SignalSCBuilderRefVersionMismatch)
 		}
 	}
+}
 
-	clean := risk.EvaluatePackage(base("https://github.com/acme/app/.github/workflows/release.yml@refs/heads/main"), risk.Options{})
-	tagged := risk.EvaluatePackage(base("https://github.com/acme/app/.github/workflows/release.yml@refs/tags/setup-files-v1"), risk.Options{})
-
-	if clean.DirectScore.Overall != tagged.DirectScore.Overall {
-		t.Errorf("BuilderID moved the score (%d vs %d). S-3 gates that signal on an FP "+
-			"measurement against the clean corpus — plenty of legitimate projects release "+
-			"from tags. If the measurement now exists, delete this test deliberately.",
-			clean.DirectScore.Overall, tagged.DirectScore.Overall)
+func hasFired(eval *risk.Evaluation, id string) bool {
+	for _, cat := range eval.DirectScore.Categories {
+		for _, f := range cat.FiredSignals {
+			if f.ID == id {
+				return true
+			}
+		}
 	}
-	if clean.Verdict != tagged.Verdict {
-		t.Errorf("BuilderID moved the verdict (%s vs %s)", clean.Verdict, tagged.Verdict)
-	}
+	return false
 }
 
 // TestBuilderIDSurvivesAReportRoundTrip — the field has to reach the

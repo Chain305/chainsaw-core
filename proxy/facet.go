@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -589,7 +590,8 @@ func (f *facet) describe(logicalPath string) (common.PackageCoordinate, bool) {
 // fetchWithRetry wraps fetchFromRemote with retry logic for transient failures.
 // It retries on network errors and HTTP 502/503/429 with short exponential
 // backoff (100ms, 500ms). Non-retryable: 4xx (except 429), context cancelled,
-// circuit breaker open.
+// circuit breaker open, and any response whose Retry-After outlasts the next
+// backoff step.
 func (f *facet) fetchWithRetry(ctx context.Context, remote RemoteDefinition, logicalPath string, header http.Header) (*http.Response, error) {
 	const maxRetries = 2
 	backoff := [...]time.Duration{100 * time.Millisecond, 500 * time.Millisecond}
@@ -618,6 +620,22 @@ func (f *facet) fetchWithRetry(ctx context.Context, remote RemoteDefinition, log
 			return resp, nil
 		}
 
+		// Wait with jitter before retrying.
+		delay := backoff[attempt]
+		jitter := time.Duration(int64(delay) / 10) // 10% jitter
+		if jitter > 0 {
+			delay += time.Duration(time.Now().UnixNano() % int64(jitter))
+		}
+
+		// The upstream said when to come back. A retry inside that window
+		// is refused by construction and only spends the rate budget that
+		// produced the 429, so hand the response back instead.
+		if resp != nil {
+			if wait, ok := retryAfter(resp.Header.Get("Retry-After"), time.Now()); ok && wait > delay {
+				return resp, nil
+			}
+		}
+
 		// Close the previous response body before retrying.
 		if resp != nil {
 			resp.Body.Close()
@@ -625,13 +643,6 @@ func (f *facet) fetchWithRetry(ctx context.Context, remote RemoteDefinition, log
 
 		if f.upstreamTracker != nil {
 			f.upstreamTracker.RecordRetry()
-		}
-
-		// Wait with jitter before retrying.
-		delay := backoff[attempt]
-		jitter := time.Duration(int64(delay) / 10) // 10% jitter
-		if jitter > 0 {
-			delay += time.Duration(time.Now().UnixNano() % int64(jitter))
 		}
 
 		select {
@@ -652,6 +663,24 @@ func (f *facet) fetchWithRetry(ctx context.Context, remote RemoteDefinition, log
 	}
 
 	return resp, err
+}
+
+// retryAfter parses a Retry-After header in either RFC 9110 form: delay
+// seconds or an HTTP-date. ok is false when the header is absent, malformed
+// or already in the past. Mirrors upstreamhttp's parser; importing that
+// package would pull policy and config into the proxy.
+func retryAfter(header string, now time.Time) (time.Duration, bool) {
+	s := strings.TrimSpace(header)
+	if s == "" {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Second, n > 0
+	}
+	if t, err := http.ParseTime(s); err == nil && t.After(now) {
+		return t.Sub(now), true
+	}
+	return 0, false
 }
 
 func isRetryableStatus(status int) bool {

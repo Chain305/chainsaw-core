@@ -4,11 +4,13 @@ package risk
 // `uses:` references in workflow files (unpinned refs, unknown publishers,
 // typosquat name similarity).
 //
-// NOTE: these signals stay dormant until the Actions parser + risk
-// projection wiring lands — mirroring how SignalVulnFixAvailable stays
-// dormant on un-enriched rows. The Input fields (ActionRef*) default to
-// zero values, so the Fires() callbacks return false until a future
-// projection populates them.
+// These fire on the WORKFLOW surface, not on package reports: the
+// scan-actions CLI (core/cli/scan_actions.go) and the
+// /api/v1/intel/evaluate-actions endpoint (internal/server/api_v1_intel.go)
+// both run findings through githubactions.EvaluateRisk -> BuildReport ->
+// ProjectToRiskInput, which fills the ActionRef* fields. No package
+// Report carries an Actions section, so on the package path they are
+// always zero — that is expected, not a dead wire.
 const (
 	SignalActionUnpinnedRef      = "action.unpinned_ref"
 	SignalActionUnknownPublisher = "action.unknown_publisher"

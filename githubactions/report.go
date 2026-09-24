@@ -164,6 +164,12 @@ func actionInputFields(in risk.Input) map[string]any {
 	if len(in.ActionRefUnknownPublishers) > 0 {
 		out["ActionRefUnknownPublishers"] = in.ActionRefUnknownPublishers
 	}
+	if in.ActionRefMalicious {
+		out["ActionRefMalicious"] = true
+	}
+	if len(in.ActionRefMaliciousRefs) > 0 {
+		out["ActionRefMaliciousRefs"] = in.ActionRefMaliciousRefs
+	}
 	if len(out) == 0 {
 		return nil
 	}

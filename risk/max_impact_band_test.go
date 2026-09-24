@@ -128,14 +128,8 @@ func loneFireFixtures() map[string]Input {
 		SignalSCRepoMissing: set(func(in *Input) {
 			in.RepoLinkStatus = "missing"
 		}),
-		SignalSCReservedNamespace: set(func(in *Input) {
-			in.ReservedNamespaceViolation = true
-		}),
 		SignalSCPublishVelocity: set(func(in *Input) {
 			in.PublishVelocityAnomaly = true
-		}),
-		SignalSCSuspiciousRepoStars: set(func(in *Input) {
-			in.SuspiciousRepoStars = true
 		}),
 		SignalSCMaintainerAccountVeryYoung: set(func(in *Input) {
 			in.MaintainerAccountAgeDays = 10

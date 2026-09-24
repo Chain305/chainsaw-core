@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **83 risk signals**. Each is scored, not merely
+Chainsaw registers **81 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,15 +23,15 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 55 |
+| Supply chain | 53 |
 | Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 6 |
 | Quality | 6 |
-| **Total** | **83** |
+| **Total** | **81** |
 
 
-## Supply chain (55)
+## Supply chain (53)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -54,8 +54,8 @@ a configured server.
 | `cap.native_code` | info | 0.00 | Package uses native (C/C++) bindings |
 | `cap.network` | info | 0.00 | Package can open network connections |
 | `cap.shell` | info | 0.00 | Package can execute shell commands |
+| `sc.builder_ref_version_mismatch` | info | 0.00 | Built from a tag that does not name this version |
 | `sc.deprecated_by_maintainer` | medium | -15.00 | Deprecated by maintainer |
-| `sc.first_time_collaborator` | medium | -15.00 | First-time collaborator on this package |
 | `sc.git_url_dependency` | low | -8.00 | Git URL dependency |
 | `sc.hidden_unicode` | medium | -20.00 | Hidden Unicode in source |
 | `sc.http_url_dependency` | low | -8.00 | HTTP(S) tarball URL dependency |
@@ -79,11 +79,9 @@ a configured server.
 | `sc.repo_archived` | medium | -12.00 | Source repo archived |
 | `sc.repo_missing` | medium | -12.00 | Source repo missing |
 | `sc.repo_ownership_mismatch` | high | -20.00 | Source repo ownership mismatch |
-| `sc.reserved_namespace_violation` | high | -25.00 | Reserved namespace violation |
 | `sc.shrinkwrap_present` | low | -10.00 | Bundled dependency lockfile |
 | `sc.signature_verified` | info | 5.00 | Upstream signature verified |
 | `sc.slsa_level_bonus` | info | 0.00 | SLSA build level bonus |
-| `sc.suspicious_repo_stars` | high | -25.00 | Suspicious repo: low stars + young repo + young maintainer |
 | `sc.transitive_critical_vuln` | critical | -40.00 | Transitive critical vulnerability |
 | `sc.transitive_high_vuln` | high | -20.00 | Transitive high-severity vulnerability |
 | `sc.transitive_malware` | critical | -1000.00 | Malware in transitive closure |
@@ -108,7 +106,7 @@ a configured server.
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
-| `lic.changed_from_previous_version` | medium | -15.00 | License changed from previous version |
+| `lic.changed_from_previous_version` | medium | 0.00 | Licence became more restrictive than a version we hold |
 | `lic.missing` | medium | -15.00 | No license declared |
 | `lic.spdx_present` | info | 5.00 | SPDX license declared |
 | `license.ambiguous_classifier` | low | -10.00 | Ambiguous license expression |

@@ -683,3 +683,49 @@ func TestProjectVersionDiffRequiresBothScans(t *testing.T) {
 		t.Error("PriorScanAvailable must still be true when both scans ran")
 	}
 }
+
+// TestProjectLicenseDiff drives lic.changed_from_previous_version through
+// ProjectToRiskInput, so the wiring (report.priorLicense -> projection ->
+// Input) is covered, not just the helper. Only a NEW restrictive class
+// fires; loosening, a permissive-to-permissive swap and a missing prior are
+// all silent.
+func TestProjectLicenseDiff(t *testing.T) {
+	cases := []struct {
+		name, prior, cur string
+		want             bool
+	}{
+		{"MIT to GPL-3.0 fires", "MIT", "GPL-3.0-only", true},
+		{"GPL to MIT is silent", "GPL-3.0-only", "MIT", false},
+		{"missing prior is silent", "", "GPL-3.0-only", false},
+		{"MIT to Apache-2.0 is silent", "MIT", "Apache-2.0", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Report{
+				Identity: IdentitySection{Ecosystem: "npm", Package: "p", Version: "2.0.0"},
+				Metadata: MetadataSection{LicenseExpression: tc.cur},
+			}
+			r.priorLicense = tc.prior
+			r.priorVersion = "1.0.0"
+			in := ProjectToRiskInput(r)
+			if in.LicenseChangedFromPrev != tc.want {
+				t.Fatalf("LicenseChangedFromPrev = %v, want %v", in.LicenseChangedFromPrev, tc.want)
+			}
+			eval := risk.EvaluatePackage(in, risk.Options{})
+			var fired *risk.FiredSignal
+			for _, cat := range eval.DirectScore.Categories {
+				for i := range cat.FiredSignals {
+					if cat.FiredSignals[i].ID == risk.SignalLicChangedFromPrev {
+						fired = &cat.FiredSignals[i]
+					}
+				}
+			}
+			if (fired != nil) != tc.want {
+				t.Fatalf("signal fired = %v, want %v", fired != nil, tc.want)
+			}
+			if fired != nil && (fired.Evidence["priorLicense"] != tc.prior || fired.Evidence["priorVersion"] != "1.0.0") {
+				t.Errorf("evidence = %v, want priorLicense=%q priorVersion=1.0.0", fired.Evidence, tc.prior)
+			}
+		})
+	}
+}

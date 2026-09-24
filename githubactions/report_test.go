@@ -118,3 +118,32 @@ func TestBuildReport(t *testing.T) {
 		}
 	})
 }
+
+// TestEvaluateRiskSurfacesMaliciousAction pins the workflow-surface path
+// for action.malicious: the signal must fire AND its projected input
+// fields must reach the RiskBlock. actionInputFields omitted the
+// ActionRefMalicious pair, so the one finding that matters most came back
+// with a fired signal and no evidence of which ref caused it.
+func TestEvaluateRiskSurfacesMaliciousAction(t *testing.T) {
+	got := EvaluateRisk([]Finding{{
+		Ref:      ActionRef{Raw: "tj-actions/changed-files@v1"},
+		Signal:   SignalActionMalicious,
+		Severity: "high",
+	}})
+	found := false
+	for _, id := range got.Signals {
+		if id == "action.malicious" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Signals = %v, want action.malicious", got.Signals)
+	}
+	if got.Fields["ActionRefMalicious"] != true {
+		t.Errorf("Fields[ActionRefMalicious] = %v, want true", got.Fields["ActionRefMalicious"])
+	}
+	refs, _ := got.Fields["ActionRefMaliciousRefs"].([]string)
+	if len(refs) != 1 || refs[0] != "tj-actions/changed-files@v1" {
+		t.Errorf("Fields[ActionRefMaliciousRefs] = %v, want [tj-actions/changed-files@v1]", got.Fields["ActionRefMaliciousRefs"])
+	}
+}

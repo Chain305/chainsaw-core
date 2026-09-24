@@ -222,38 +222,3 @@ func TestTakeoverCompound_DoesNotEscalateOnPOMEcosystems(t *testing.T) {
 		}
 	}
 }
-
-// sc.first_time_collaborator (-15) is computed by
-// firstTimeCollaboratorProvider from the same two fields as the publisher
-// diff — prior publisher_set vs Report.People.PublisherIDs — so on
-// maven/gradle it reads the same POM <developers> roster. "Publisher has
-// never previously CONTRIBUTED to this package" is false by construction
-// there: a new name in <developers> is a documentation edit, not a push.
-//
-// It contributes no prod flips today because the provider is env-gated off
-// for maven (CHAINSAW_WAVE4_FIRST_TIME_COLLABORATOR unset), which is exactly
-// why it needs a test — the guard's whole job is to stop that flag from
-// silently reintroducing the class.
-func TestFirstTimeCollaborator_SuppressedOnPOMEcosystems(t *testing.T) {
-	yes := true
-	mk := func(eco string) map[string]FiredSignal {
-		return firedIDs(EvaluatePackage(Input{
-			Ecosystem:             eco,
-			Package:               "p",
-			Version:               "1.0.0",
-			FirstTimeCollaborator: &yes,
-			VersionDataAvailable:  true,
-			VersionCount:          24,
-		}, Options{}))
-	}
-	if _, ok := mk("npm")[SignalSCFirstTimeCollaborator]; !ok {
-		t.Fatalf("control failed: %q did not fire on npm", SignalSCFirstTimeCollaborator)
-	}
-	for _, eco := range []string{"maven", "gradle"} {
-		if _, ok := mk(eco)[SignalSCFirstTimeCollaborator]; ok {
-			t.Errorf("%s: %q fired off a POM <developers> roster — the same P8-70 "+
-				"root cause as sc.publisher_changed, treated inconsistently",
-				eco, SignalSCFirstTimeCollaborator)
-		}
-	}
-}

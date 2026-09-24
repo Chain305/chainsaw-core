@@ -137,19 +137,6 @@ var unconsumedInputFields = map[string]string{
 		"comment does not say which.",
 	"TransitiveLowCount":     "See TransitiveMediumCount.",
 	"TransitiveBlockedCount": "See TransitiveMediumCount.",
-	"BuilderID": "UNCONSUMED ON PURPOSE, and the only entry here that is. Every other " +
-		"field in this set is a field the pipeline pays to compute and then discards. " +
-		"This one is carried so the 2026-08-04 cacheable/keyv campaign's cleanest " +
-		"discriminator stops being unreadable: the malicious releases attested " +
-		"`release.yml@refs/tags/setup-files-v1`, the clean ones " +
-		"`release.yml@refs/heads/main`, and the engine could not see either. " +
-		"The signal that reads it is GATED on measuring its false-positive rate " +
-		"against the clean corpus (docs/PLANS_INTELLIGENCE.md S-3) — plenty of " +
-		"legitimate projects release from tags, and an unmeasured behavioural signal " +
-		"is how the guard incident happened. Make the data readable first, ship the " +
-		"scoring second. TestBuilderIDIsCarriedNotScored in core/intelligence pins " +
-		"that nothing scores off it today; delete BOTH deliberately when the " +
-		"measurement exists.",
 }
 
 // inputFieldRe matches an exported field declaration inside `type Input struct`.

@@ -200,7 +200,8 @@ func (s *Store) ListVersions(ctx context.Context, orgID, ecosystem, name string)
 
 // PriorVersionScan returns the artifact-scan facts we already hold for the
 // most recently collected OTHER version of the same package, plus that
-// version string.
+// version string and that version's declared licence expression (for
+// lic.changed_from_previous_version).
 //
 // WHY THIS EXISTS. Measured 2026-09-17 on 71 real takeover pairs against 117
 // benign version bumps (docs/REPORTS.md#cross-version-diff-measured-2026-09-17): an
@@ -221,11 +222,11 @@ func (s *Store) ListVersions(ctx context.Context, orgID, ecosystem, name string)
 // resolving semver order in SQL for every ecosystem's scheme is a second
 // parser.
 //
-// Returns (nil, "", nil) when we hold no other version — absence of a prior
+// Returns (nil, "", "", nil) when we hold no other version — absence of a prior
 // row is NOT a diff result and callers must not treat it as one.
-func (s *Store) PriorVersionScan(ctx context.Context, key Key) (*ArtifactScanSection, string, error) {
+func (s *Store) PriorVersionScan(ctx context.Context, key Key) (*ArtifactScanSection, string, string, error) {
 	if s == nil || s.sql == nil || s.sql.DB() == nil {
-		return nil, "", nil
+		return nil, "", "", nil
 	}
 	var version string
 	var payload []byte
@@ -236,17 +237,17 @@ func (s *Store) PriorVersionScan(ctx context.Context, key Key) (*ArtifactScanSec
 		LIMIT 1
 	`, key.Ecosystem, key.Package, key.Version).Scan(&version, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, "", nil
+		return nil, "", "", nil
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf("intelligence: prior version scan: %w", err)
+		return nil, "", "", fmt.Errorf("intelligence: prior version scan: %w", err)
 	}
 	var prior Report
 	if err := json.Unmarshal(payload, &prior); err != nil {
-		return nil, "", fmt.Errorf("intelligence: decode prior version report: %w", err)
+		return nil, "", "", fmt.Errorf("intelligence: decode prior version report: %w", err)
 	}
 	scan := prior.Scan
-	return &scan, version, nil
+	return &scan, version, prior.Metadata.LicenseExpression, nil
 }
 
 // Upsert writes the Report and its denormalised search columns. When a

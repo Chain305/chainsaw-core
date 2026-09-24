@@ -51,24 +51,14 @@ func TestMaxImpactCeiling_BypassedWhenCompoundFires(t *testing.T) {
 	}
 }
 
-// TestNewWave4Signals_FireAndContribute confirms each of the four new RTT
-// signals projects from Input → fired primitive on the expected condition.
+// TestNewWave4Signals_FireAndContribute confirms each remaining RTT
+// signal projects from Input → fired primitive on the expected condition.
 func TestNewWave4Signals_FireAndContribute(t *testing.T) {
 	tt := []struct {
 		name string
 		in   Input
 		want string
 	}{
-		{
-			name: "SuspiciousRepoStars",
-			in:   Input{LicenseSPDX: "MIT", SuspiciousRepoStars: true},
-			want: SignalSCSuspiciousRepoStars,
-		},
-		{
-			name: "FirstTimeCollaborator true",
-			in:   Input{LicenseSPDX: "MIT", FirstTimeCollaborator: ptrBool(true)},
-			want: SignalSCFirstTimeCollaborator,
-		},
 		{
 			name: "MaintainerAccountAge very young",
 			in:   Input{LicenseSPDX: "MIT", MaintainerAccountAgeDays: 7},
@@ -87,16 +77,6 @@ func TestNewWave4Signals_FireAndContribute(t *testing.T) {
 				t.Errorf("expected %s to fire; fired=%v", tc.want, keys(fired))
 			}
 		})
-	}
-}
-
-// TestFirstTimeCollaborator_NilDoesNotFire — sparse-data path; nil should
-// never fire (we don't penalise on missing data).
-func TestFirstTimeCollaborator_NilDoesNotFire(t *testing.T) {
-	in := Input{LicenseSPDX: "MIT", FirstTimeCollaborator: nil}
-	fired := runPrimitiveSignals(in, nil)
-	if _, ok := fired[SignalSCFirstTimeCollaborator]; ok {
-		t.Errorf("nil FirstTimeCollaborator should not fire signal")
 	}
 }
 

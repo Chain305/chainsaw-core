@@ -330,7 +330,8 @@ func TestSCBothURLDepSignalsFire(t *testing.T) {
 // across fired primitives, and an absent value is simply skipped. So omitting
 // one on a High-severity supply-chain signal does not make it "uncapped in a
 // neutral way"; it makes that signal score MORE LENIENTLY than its identical
-// peers, silently. sc.reserved_namespace_violation carried Weight -25 and
+// peers, silently. sc.reserved_namespace_violation (since deleted, see
+// TestDeletedSignalsStayDeleted) carried Weight -25 and
 // SevHigh with no ceiling while five same-category, same-or-lighter peers all
 // declared 40, so a lone dependency-confusion hit landed around 91 (Allow)
 // where a lone publisher-change landed at 40 (Warn).
@@ -350,10 +351,8 @@ func TestSCHighSeverityCeilingsArePresentAndUniform(t *testing.T) {
 		SignalSCPublisherChanged,
 		SignalSCInstallScriptNetwork,
 		SignalSCRepoOwnershipMismatch,
-		SignalSCSuspiciousRepoStars,
 		SignalSCMaintainerAccountVeryYoung,
 		SignalSCNonExistentAuthor,
-		SignalSCReservedNamespace,
 	}
 
 	for _, id := range tier {
@@ -370,59 +369,6 @@ func TestSCHighSeverityCeilingsArePresentAndUniform(t *testing.T) {
 				"an absent MaxImpact contributes no cap at all, so the signal scores more leniently than its peers",
 				id, sig.MaxImpact, wantCeiling)
 		}
-	}
-}
-
-// TestSCReservedNamespaceCeilingOrdersAgainstItsSiblings checks the direction
-// of the fix rather than just its value: the ceiling must be no looser than a
-// more-severe sibling's and no tighter than a less-severe one's, or the
-// correction would have traded one inversion for another.
-func TestSCReservedNamespaceCeilingOrdersAgainstItsSiblings(t *testing.T) {
-	reserved := Registry[SignalSCReservedNamespace]
-
-	// Heavier High-severity sibling — must be at least as tight as reserved.
-	if tighter := Registry[SignalSCTyposquatHigh]; tighter.MaxImpact > reserved.MaxImpact {
-		t.Errorf("%s (weight %v) ceilings at %d, looser than %s (weight %v) at %d",
-			tighter.ID, tighter.Weight, tighter.MaxImpact,
-			reserved.ID, reserved.Weight, reserved.MaxImpact)
-	}
-
-	// Less-severe siblings in the same category — must be no tighter.
-	for _, id := range []string{
-		SignalSCHiddenUnicode,
-		SignalSCRepoArchived,
-		SignalSCRepoMissing,
-		SignalSCPublishVelocity,
-	} {
-		sib := Registry[id]
-		if sib.MaxImpact > 0 && sib.MaxImpact < reserved.MaxImpact {
-			t.Errorf("%s (%s) ceilings at %d, TIGHTER than the more-severe %s (%s) at %d — inverted",
-				sib.ID, sib.Severity, sib.MaxImpact, reserved.ID, reserved.Severity, reserved.MaxImpact)
-		}
-	}
-}
-
-// TestSCReservedNamespaceScoresLikeItsPeers is the behavioural half: fired
-// alone against an otherwise-clean input, a reserved-namespace violation must
-// land in the same band as sc.publisher_changed rather than tens of points
-// above it.
-func TestSCReservedNamespaceScoresLikeItsPeers(t *testing.T) {
-	base := Input{Ecosystem: "npm", Package: "internal-utils", Version: "1.0.0", LicenseSPDX: "MIT"}
-
-	reservedIn := base
-	reservedIn.ReservedNamespaceViolation = true
-	reserved := EvaluatePackage(reservedIn, Options{}).RolledUp.Overall
-
-	peerIn := base
-	peerIn.PublisherChanged = true
-	peer := EvaluatePackage(peerIn, Options{}).RolledUp.Overall
-
-	if reserved != peer {
-		t.Errorf("reserved-namespace scores %d but its same-severity, same-weight peer publisher-changed scores %d",
-			reserved, peer)
-	}
-	if reserved > 50 {
-		t.Errorf("reserved-namespace fired alone scores %d — the High tier is documented as 30-50", reserved)
 	}
 }
 
@@ -654,6 +600,75 @@ func TestVersionDiffSignalsRequireAPriorScan(t *testing.T) {
 		other := Input{PriorScanAvailable: true, PriorVersion: "1.2.2"}
 		if fired, _, _ := sig.Fires(other); fired {
 			t.Errorf("%s fired with no axis actually appearing", c.id)
+		}
+	}
+}
+
+// TestBuilderRefVersionMismatch pins the S-3 rule: fire only when the
+// builder ref is a git TAG that does not contain the version's numeric
+// core. Every silent row is a legitimate shape measured in prod.
+func TestBuilderRefVersionMismatch(t *testing.T) {
+	const wf = "https://github.com/acme/app/.github/workflows/release.yml"
+	cases := []struct {
+		name, builder, version string
+		want                   bool
+	}{
+		{"campaign tag vs 2.5.1", wf + "@refs/tags/setup-files-v1", "2.5.1", true},
+		{"campaign tag vs 11.1.6", wf + "@refs/tags/setup-files-v1", "11.1.6", true},
+		{"branch build", wf + "@refs/heads/main", "2.5.1", false},
+		{"v-prefixed tag", wf + "@refs/tags/v2.5.1", "2.5.1", false},
+		{"scoped npm tag", wf + "@refs/tags/@scope/x@2.5.1", "2.5.1", false},
+		{"go submodule tag", wf + "@refs/tags/sub/v1.2.3", "v1.2.3", false},
+		{"go checksum db", "sum.golang.org", "v1.2.3", false},
+		{"empty builder", "", "2.5.1", false},
+		{"non-numeric version", wf + "@refs/tags/setup-files-v1", "latest", false},
+	}
+	sig := Registry[SignalSCBuilderRefVersionMismatch]
+	if sig.Fires == nil {
+		t.Fatalf("%s not registered", SignalSCBuilderRefVersionMismatch)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, ev := sig.Fires(Input{BuilderID: tc.builder, Version: tc.version})
+			if got != tc.want {
+				t.Fatalf("fires = %v, want %v (builder %q, version %q)", got, tc.want, tc.builder, tc.version)
+			}
+			if got && (ev["tag"] != "setup-files-v1" || ev["versionCore"] != tc.version) {
+				t.Errorf("evidence = %v, want tag=setup-files-v1 versionCore=%s", ev, tc.version)
+			}
+		})
+	}
+}
+
+// TestBuilderRefMismatchIsNeverScored: recall is unmeasured (no malicious
+// corpus row carries a builderId), so the signal is an observation only.
+// Giving it a weight, a ceiling or a severity is a decision that needs
+// that measurement first.
+func TestBuilderRefMismatchIsNeverScored(t *testing.T) {
+	sig := Registry[SignalSCBuilderRefVersionMismatch]
+	if sig.Weight != 0 || sig.MaxImpact != 0 || sig.Severity != SevInfo {
+		t.Errorf("%s: Weight=%v MaxImpact=%d Severity=%q, want 0/0/info",
+			sig.ID, sig.Weight, sig.MaxImpact, sig.Severity)
+	}
+}
+
+// TestDeletedSignalsStayDeleted: each of these was registered, advertised
+// by GET /api/v1/intel/signals with a weight, and could never fire in
+// production (docs/PLANS_INTELLIGENCE.md#plan-signal-repair, Wave 2).
+// Re-registering one needs a writer for its input first.
+func TestDeletedSignalsStayDeleted(t *testing.T) {
+	deleted := map[string]string{
+		"sc.reserved_namespace_violation": "no provider ever wrote SupplyChain.ReservedNamespaceViolation " +
+			"(provider_reservedns is a documented no-op); reserved namespaces are enforced by the " +
+			"policy condition ReservedNamespaces, which matches the operator's own patterns",
+		"sc.first_time_collaborator": "its provider is gated off by wave4Enabled everywhere; the fact " +
+			"stays on Report.Scan for the policy condition FirstTimeCollaborator",
+		"sc.suspicious_repo_stars": "same wave4Enabled gate; the fact stays on Report.Scan for the " +
+			"policy condition SuspiciousRepoStars",
+	}
+	for id, why := range deleted {
+		if _, ok := Registry[id]; ok {
+			t.Errorf("%s is registered again. It was deleted because %s.", id, why)
 		}
 	}
 }

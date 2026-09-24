@@ -801,11 +801,12 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 		// Skipped for Ephemeral for the same reason as the sticky read: that
 		// path must not touch the shared coordinate-keyed rows.
 		diffCtx, cancelDiff := context.WithTimeout(context.WithoutCancel(ctx), stickyPriorLookupTimeout)
-		priorScan, priorVer, derr := s.store.PriorVersionScan(diffCtx, req.Key)
+		priorScan, priorVer, priorLic, derr := s.store.PriorVersionScan(diffCtx, req.Key)
 		cancelDiff()
 		if derr == nil && priorScan != nil {
 			report.priorScan = priorScan
 			report.priorVersion = priorVer
+			report.priorLicense = priorLic
 		}
 	}
 
@@ -1490,12 +1491,6 @@ func mergeSupplyChain(dst *SupplyChainSection, src SupplyChainSection) {
 	}
 	if src.RepoArchived != nil {
 		dst.RepoArchived = src.RepoArchived
-	}
-	if src.ReservedNamespaceViolation != nil {
-		dst.ReservedNamespaceViolation = src.ReservedNamespaceViolation
-	}
-	if src.ReservedNamespaceReason != "" {
-		dst.ReservedNamespaceReason = src.ReservedNamespaceReason
 	}
 }
 

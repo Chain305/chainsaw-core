@@ -2,6 +2,8 @@ package risk
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/chain305/chainsaw-core/hiddenunicode"
 )
@@ -31,10 +33,12 @@ const (
 	SignalSCRepoArchived            = "sc.repo_archived"
 	SignalSCRepoMissing             = "sc.repo_missing"
 	SignalSCProvenanceVerified      = "sc.provenance_verified"
-	SignalSCReservedNamespace       = "sc.reserved_namespace_violation"
-	SignalSCPublishVelocity         = "sc.publish_velocity_anomaly"
-	SignalSCSLSALevelBonus          = "sc.slsa_level_bonus"
-	SignalSCSignatureVerified       = "sc.signature_verified"
+	// SignalSCBuilderRefVersionMismatch: the attestation was built from a
+	// tag that does not name this version. Observed at weight 0 (S-3).
+	SignalSCBuilderRefVersionMismatch = "sc.builder_ref_version_mismatch"
+	SignalSCPublishVelocity           = "sc.publish_velocity_anomaly"
+	SignalSCSLSALevelBonus            = "sc.slsa_level_bonus"
+	SignalSCSignatureVerified         = "sc.signature_verified"
 
 	// URL-dependency signals — fire when package.json deps resolve to
 	// git or raw HTTP(S) URLs, bypassing the registry hash chain.
@@ -43,8 +47,6 @@ const (
 	SignalSCHTTPURLDependency = "sc.http_url_dependency"
 
 	// Wave-4 RTT signals projected from r.Scan.* into risk.Input.
-	SignalSCSuspiciousRepoStars            = "sc.suspicious_repo_stars"
-	SignalSCFirstTimeCollaborator          = "sc.first_time_collaborator"
 	SignalSCMaintainerAccountVeryYoung     = "sc.maintainer_account_very_young"
 	SignalSCMaintainerAccountYoung         = "sc.maintainer_account_young"
 	SignalSCMaintainerAccountSomewhatYoung = "sc.maintainer_account_somewhat_young"
@@ -499,32 +501,29 @@ func init() {
 		},
 	})
 
-	// MaxImpact tier: HIGH-confidence harmful (30-40). Dependency-confusion
-	// bait is an attack pattern, not a hygiene problem — a public name that
-	// shadows a private namespace exists to be resolved by mistake.
-	//
-	// The ceiling was MISSING, which is not the same as a deliberate
-	// no-ceiling call: a signal that declares no MaxImpact contributes no
-	// cap at all, so this scored strictly more leniently than its own exact
-	// peers — sc.publisher_changed, sc.install_script_network,
-	// sc.suspicious_repo_stars and sc.maintainer_account_very_young all sit
-	// at the same severity and the same -25 weight with MaxImpact 40, and
-	// sc.repo_ownership_mismatch is LIGHTER (-20) and still ceilings at 40.
-	// Same omission shape as the vuln.cvss_critical bug: see
-	// TestVulnSeverityLadderIsMonotonic for how that one inverted the ladder.
+	// S-3, OBSERVED AT WEIGHT 0 — see docs/PLANS_INTELLIGENCE.md#plan-signal-repair.
+	// The 2026-08-04 keyv/cacheable releases attested
+	// `release.yml@refs/tags/setup-files-v1`: built from a tag that names
+	// no version of the package at all. A legitimate tag build names the
+	// version it publishes (`v2.5.1`, `@scope/x@2.5.1`, `sub/v1.2.3`).
+	// Measured in prod 2026-09-24: fires on 0 of 398 clean packages (0 of
+	// 422 tag-built reports). Recall is unmeasured — no malicious row in the
+	// corpus carries a builderId — so it scores nothing until it is priced.
+	// Branch builds (refs/heads) and non-GitHub builders never fire.
 	register(Signal{
-		ID:          SignalSCReservedNamespace,
+		ID:          SignalSCBuilderRefVersionMismatch,
 		Category:    CategorySupplyChain,
-		Severity:    SevHigh,
-		Weight:      -25,
-		MaxImpact:   40,
-		Title:       "Reserved namespace violation",
-		Description: "Package name shadows an internal/private namespace — possible dependency-confusion bait.",
+		Severity:    SevInfo,
+		Weight:      0,
+		Title:       "Built from a tag that does not name this version",
+		Description: "The provenance builder ref is a git tag that does not contain this package version — the shape of the 2026-08-04 keyv/cacheable attestations.",
 		Fires: func(in Input) (bool, string, map[string]any) {
-			if !in.ReservedNamespaceViolation {
+			tag, vcore, fires := builderRefVersionMismatch(in.BuilderID, in.Version)
+			if !fires {
 				return false, "", nil
 			}
-			return true, "Package name squats a reserved namespace.", nil
+			return true, "Provenance was built from a tag that does not name this version.",
+				map[string]any{"tag": tag, "versionCore": vcore}
 		},
 	})
 
@@ -590,70 +589,6 @@ func init() {
 	})
 
 	// --- Wave-4 RTT signals ---------------------------------------------
-	// SuspiciousRepoStars is a composite-AND result (low stars + young
-	// repo + young maintainer all true). High confidence by construction,
-	// so a heavy weight is justified.
-	// MaxImpact tier: HIGH-confidence harmful (30-40). The composite-AND
-	// evidence (low stars + young repo + young maintainer) is high
-	// confidence by construction.
-	register(Signal{
-		ID:          SignalSCSuspiciousRepoStars,
-		Category:    CategorySupplyChain,
-		Severity:    SevHigh,
-		Weight:      -25,
-		MaxImpact:   40,
-		Title:       "Suspicious repo: low stars + young repo + young maintainer",
-		Description: "All three of: repo star count below threshold, repo created recently, maintainer account very young.",
-		Fires: func(in Input) (bool, string, map[string]any) {
-			if !in.SuspiciousRepoStars {
-				return false, "", nil
-			}
-			return true, "Repo and maintainer composite checks all flagged.", nil
-		},
-	})
-
-	register(Signal{
-		ID:          SignalSCFirstTimeCollaborator,
-		Category:    CategorySupplyChain,
-		Severity:    SevMedium,
-		Weight:      -15,
-		Title:       "First-time collaborator on this package",
-		Description: "Publisher has never previously contributed to this package.",
-		Fires: func(in Input) (bool, string, map[string]any) {
-			// Three-state: only &true fires; nil and &false stay dormant.
-			if in.FirstTimeCollaborator == nil || !*in.FirstTimeCollaborator {
-				return false, "", nil
-			}
-			// P8-70, same root cause as sc.publisher_changed above and
-			// P8-11's maint.single_maintainer. This signal is computed by
-			// firstTimeCollaboratorProvider from exactly the same two
-			// fields — prior publisher_set vs Report.People.PublisherIDs —
-			// and on maven/gradle both are the POM `<developers>` roster.
-			// The sentence it renders ("publisher has never previously
-			// CONTRIBUTED to this package") is false by construction there:
-			// a name appearing in <developers> for the first time means the
-			// project edited a documentation block, not that a new account
-			// pushed the artifact. Whatever a new POM name is, it is not a
-			// first-time PUBLISHER, so the signal has nothing to measure.
-			//
-			// The fact that the declared list moved is still reported —
-			// SignalSCPOMDeveloperListChanged above carries it once. Firing
-			// both would double-count one POM edit.
-			//
-			// This is belt-and-braces today: maven/gradle sit in
-			// firstTimeCollabSupportedEcosystems
-			// (internal/intelligence/premium/provider_wave4_rtt.go) but the
-			// provider is env-gated off for them in prod, so the field is
-			// nil and the guard above already returns. It exists so that
-			// turning CHAINSAW_WAVE4_FIRST_TIME_COLLABORATOR on cannot
-			// silently reintroduce the class.
-			if IsPOMMaintainerEco(in.Ecosystem) {
-				return false, "", nil
-			}
-			return true, "Publisher has not previously contributed to this package.", nil
-		},
-	})
-
 	// Account-age tiers — only one fires (the most-young matching tier),
 	// gated by 0 = unknown.
 	// MaxImpact tier: HIGH-confidence harmful (30-40). Brand-new
@@ -900,4 +835,22 @@ func init() {
 		},
 	})
 
+}
+
+var (
+	builderTagRe  = regexp.MustCompile(`@refs/tags/(.+)$`)
+	versionCoreRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*`)
+)
+
+// builderRefVersionMismatch reports whether builderID was built from a git
+// tag that does not contain the numeric core of version. It returns the
+// tag and version core for evidence. Empty tag (branch build, empty
+// builder, sum.golang.org) or a non-numeric version never fires.
+func builderRefVersionMismatch(builderID, version string) (tag, vcore string, fires bool) {
+	if m := builderTagRe.FindStringSubmatch(builderID); m != nil {
+		tag = m[1]
+	}
+	vcore = versionCoreRe.FindString(strings.TrimPrefix(version, "v"))
+	fires = tag != "" && vcore != "" && !strings.Contains(strings.ToLower(tag), strings.ToLower(vcore))
+	return tag, vcore, fires
 }

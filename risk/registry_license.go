@@ -53,23 +53,29 @@ func init() {
 		},
 	})
 
-	// Policy-driven — the upstream caller (intelligence package) is
-	// responsible for setting LicensePolicyBlocked based on its org's
-	// allow/deny list. Deferred per-org weight overrides are v2 work;
-	// this signal just fires on the pre-computed bool.
+	// Observed at WEIGHT 0. The projection (intelligence.projectLicenseDiff)
+	// fires only when this version adds a copyleft / non-permissive class
+	// the prior version we hold lacked. "Prior" is the most recently
+	// COLLECTED other version, not the semver predecessor, which is why the
+	// title says "a version we hold". It earns a weight once it has been
+	// priced against the corpus, not before.
 	register(Signal{
 		ID:          SignalLicChangedFromPrev,
 		Category:    CategoryLicense,
 		Severity:    SevMedium,
-		Weight:      -15,
-		Title:       "License changed from previous version",
-		Description: "This version declares a different license than the previous version — often benign but worth review.",
+		Weight:      0,
+		Title:       "Licence became more restrictive than a version we hold",
+		Description: "This version declares a copyleft or non-permissive licence that the previously scanned version did not.",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if !in.LicenseChangedFromPrev {
 				return false, "", nil
 			}
-			return true, "License differs from the previous version.",
-				map[string]any{"license": in.LicenseSPDX}
+			return true, "Licence is more restrictive than a version we hold.",
+				map[string]any{
+					"license":      in.LicenseSPDX,
+					"priorLicense": in.LicensePriorSPDX,
+					"priorVersion": in.LicensePriorVersion,
+				}
 		},
 	})
 

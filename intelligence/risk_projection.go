@@ -15,6 +15,7 @@ package intelligence
 // under-fires because legacy remains authoritative.
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/chain305/chainsaw-core/capability"
@@ -285,9 +286,9 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		ProvenanceStatus: r.Provenance.Status,
 		// SLSALevel feeds the per-level supply-chain bonus signal.
 		SLSALevel: r.Provenance.SLSALevel,
-		// Carried, not scored — see the note on risk.Input.BuilderID.
-		// The campaign discriminator was stored and unreadable; this is
-		// the line that makes it readable.
+		// Observed at weight 0 (sc.builder_ref_version_mismatch) — see
+		// the note on risk.Input.BuilderID. The campaign discriminator was
+		// stored and unreadable; this is the line that makes it readable.
 		BuilderID: r.Provenance.BuilderID,
 		// SignatureVerified comes from the upstream sigstore/PGP probe.
 		// nil = not run (treat as false); &true = verified; &false =
@@ -297,12 +298,6 @@ func ProjectToRiskInput(r *Report) risk.Input {
 
 		HasSourceRepo:  r.URLs.SourceRepoURL != "",
 		RepoLinkStatus: r.SupplyChain.RepoLinkStatus,
-
-		// ReservedNamespaceViolation is a *bool on the Report so the
-		// evaluator can distinguish "not evaluated" from "evaluated
-		// clean". deref collapses both nil and &false to false — the
-		// risk signal stays dormant until an enricher sets &true.
-		ReservedNamespaceViolation: deref(r.SupplyChain.ReservedNamespaceViolation),
 
 		// --- Maintenance ---
 		PublishedAt:      r.Release.PublishedAt,
@@ -352,13 +347,10 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		// --- License ---
 		LicenseSPDX: r.Metadata.LicenseExpression,
 		LicenseTags: risk.Classify(r.Metadata.LicenseExpression),
-		// TODO(risk-engine-v2): LicenseChangedFromPrev requires the
-		// previous version's licence, i.e. cross-version comparison,
-		// which nothing does yet. Default false for now.
+		// LicenseChangedFromPrev is set by projectLicenseDiff below.
 		// (LicensePolicyBlocked was removed with its signal — there was
 		// no licence allow/deny config to wire it to, and the policy
 		// DSL's ConditionLicense* already covers the capability.)
-		LicenseChangedFromPrev: false,
 
 		// --- Socket-gap Wave 1 ---
 		DeprecatedByMaintainer:  deref(r.Release.Yanked) || r.Release.Deprecated != "",
@@ -389,8 +381,6 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		WeeklyDownloads: r.Maintenance.WeeklyDownloads,
 
 		// --- Wave-4 RTT signals (now projected; previously decorative) ---
-		SuspiciousRepoStars:      r.Scan.SuspiciousRepoStars,
-		FirstTimeCollaborator:    r.Scan.FirstTimeCollaborator,
 		MaintainerAccountAgeDays: r.Scan.MaintainerAccountAgeDays,
 		NonExistentAuthor:        r.Scan.NonExistentAuthor,
 
@@ -435,6 +425,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// ever turns a false into a true.
 	projectCodeSmellCapabilities(&r.Scan, &in)
 	projectVersionDiff(&r.Scan, r.priorScan, r.priorVersion, &in)
+	projectLicenseDiff(r.Metadata.LicenseExpression, r.priorLicense, r.priorVersion, &in)
 
 	// --- Gap 4a: git/http URL dependencies ---
 	// Classify each dependency's version string across all four manifest
@@ -443,12 +434,10 @@ func ProjectToRiskInput(r *Report) risk.Input {
 
 	// --- GitHub Actions ---
 	// Project ActionsSection.Findings into the flat ActionRef* fields the
-	// Wave 4 risk-engine signals consume. ActionsSection is populated
-	// upstream; today the scan-actions CLI and evaluate-actions API don't
-	// yet build a Report — they emit findings directly. Closing that
-	// loop is a follow-up. Until then this branch stays inert (Actions
-	// is nil for every existing call site) and the projection is purely
-	// additive.
+	// Wave 4 risk-engine signals consume. The Actions section is built by
+	// githubactions.BuildReport for the scan-actions CLI and the
+	// evaluate-actions API (via githubactions.EvaluateRisk); package
+	// reports never carry one, so on that path this is a no-op.
 	projectActionsSection(r.Actions, &in)
 
 	// --- Transitive severity counts ---
@@ -1180,6 +1169,32 @@ func projectVersionDiff(cur, prior *ArtifactScanSection, priorVersion string, in
 	}
 	if cur.EnvVarAccess && !prior.EnvVarAccess {
 		in.EnvVarAccessAppeared = true
+	}
+}
+
+// projectLicenseDiff sets LicenseChangedFromPrev when this version's
+// licence carries a restrictive class (copyleft / non-permissive) that the
+// prior version we hold did not. Only the restrictive direction counts:
+// GPL -> MIT, or MIT -> Apache-2.0, is not a risk to a consumer.
+//
+// Either expression empty is a no-op — an unknown licence is not a change,
+// and a missing prior row is not a diff result. "Prior" is by collected_at,
+// not semver (see Store.PriorVersionScan).
+func projectLicenseDiff(cur, prior, priorVersion string, in *risk.Input) {
+	if in == nil || cur == "" || prior == "" {
+		return
+	}
+	priorTags := risk.Classify(prior)
+	for _, tag := range risk.Classify(cur) {
+		if tag != risk.LicenseTagCopyleft && tag != risk.LicenseTagNonPermissive {
+			continue
+		}
+		if !slices.Contains(priorTags, tag) {
+			in.LicenseChangedFromPrev = true
+			in.LicensePriorSPDX = prior
+			in.LicensePriorVersion = priorVersion
+			return
+		}
 	}
 }
 

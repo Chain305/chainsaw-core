@@ -144,24 +144,18 @@ type Input struct {
 	// workflow reference, e.g.
 	// "https://github.com/acme/app/.github/workflows/release.yml@refs/heads/main".
 	//
-	// NOTHING SCORES OFF IT YET, DELIBERATELY. It is carried here
-	// because the 2026-08-04 cacheable/keyv campaign's single cleanest
-	// discriminator lives in this field and was unreadable: the
-	// malicious releases attested
-	// `release.yml@refs/tags/setup-files-v1` while the clean ones
-	// attested `release.yml@refs/heads/main`. We parse it, we persist
-	// it, and until now the risk engine could not see it at all — so an
-	// analyst could not even ask the question, let alone act on it.
+	// OBSERVED AT WEIGHT 0. sc.builder_ref_version_mismatch reads it:
+	// the 2026-08-04 cacheable/keyv campaign's malicious releases attested
+	// `release.yml@refs/tags/setup-files-v1` — a tag naming no version —
+	// while the clean ones attested `release.yml@refs/heads/main`.
 	//
-	// The negative signal that reads it (an attestation whose builder
-	// identity is anomalous for that package's own history) is GATED on
-	// measuring its false-positive rate against the clean corpus, per
-	// docs/PLANS_INTELLIGENCE.md#plan-signal-repair S-3. Plenty of legitimate projects
-	// release from tags. Given this repo's history with FP rates, an
-	// unmeasured behavioural signal is how the guard incident happened.
-	//
-	// So: make the data readable first, ship the scoring second. This
-	// field blocks the claim, not the code.
+	// The broader "builder is anomalous for this package's history" rule
+	// was measured and REJECTED (docs/PLANS_INTELLIGENCE.md#plan-signal-repair
+	// S-3): a refs/tags vs refs/heads flip fires on 10.2% of clean
+	// packages. The tag-does-not-name-the-version rule fires on 0 of 398
+	// clean packages, but recall is unmeasured, so it carries no weight.
+	// Two inputs differing only in BuilderID must still score identically
+	// (TestBuilderIDIsObservedNotScored) until it is priced.
 	//
 	// Empty when provenance is absent, unverified, or the format
 	// carries no builder identity (presence-only formats like APT/YUM
@@ -178,20 +172,12 @@ type Input struct {
 	HasSourceRepo  bool
 	RepoLinkStatus string // "ok"|"archived"|"missing"|"ownership_mismatch"|"unknown"|""
 
-	ReservedNamespaceViolation bool
-	PublishVelocityAnomaly     bool
+	PublishVelocityAnomaly bool
 
 	// --- Wave-4 RTT (return-trip-time) signals ---
-	// SuspiciousRepoStars fires when the repo star/age/maintainer-age
-	// composite triggers all-three-of-three (low stars + young repo + young
-	// maintainer). High-confidence by construction, so the projected risk
-	// signal carries a heavy negative weight.
-	SuspiciousRepoStars bool
-	// FirstTimeCollaborator is three-state — &true: confirmed first-publish
-	// from this maintainer for the package, &false: known repeat collaborator,
-	// nil: unknown. Only &true fires the risk signal; nil and &false stay
-	// dormant so sparse data does not penalise.
-	FirstTimeCollaborator *bool
+	// SuspiciousRepoStars and FirstTimeCollaborator are NOT here on
+	// purpose: their risk signals were deleted (TestDeletedSignalsStayDeleted).
+	// The facts still live on Report.Scan, where policy conditions read them.
 	// MaintainerAccountAgeDays is the oldest maintainer's account age in
 	// days. 0 means unknown — no signal fires. Tiered penalties under 180
 	// days approximate the legacy "very-young account" scoring band.
@@ -241,8 +227,14 @@ type Input struct {
 	RepoArchived *bool
 
 	// --- License ---
-	LicenseSPDX            string
+	LicenseSPDX string
+	// LicenseChangedFromPrev: this version's licence adds a restrictive
+	// class (copyleft / non-permissive) the prior version we hold lacked.
+	// LicensePriorSPDX / LicensePriorVersion are that prior row, for
+	// evidence; all three are zero when there is no prior to compare.
 	LicenseChangedFromPrev bool
+	LicensePriorSPDX       string
+	LicensePriorVersion    string
 	// LicenseTags is the Classify() output over LicenseSPDX. Populated by
 	// the risk projection so both the risk engine and policy evaluator
 	// share one SPDX parse. A nil slice means "not yet classified" and

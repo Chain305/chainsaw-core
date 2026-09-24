@@ -303,9 +303,6 @@ func TestDiffSupplyChain_UndiffedFieldsStaySilent(t *testing.T) {
 	commit := mustTime(t, time.RFC3339, "2026-09-01T00:00:00Z")
 	prior := &Report{}
 	next := &Report{SupplyChain: SupplyChainSection{
-		// No provider writes ReservedNamespaceViolation (report.go).
-		ReservedNamespaceViolation: ptr(true),
-		ReservedNamespaceReason:    "reserved",
 		// In-memory mirrors the persistence layer never stores, so a
 		// loaded prior never has them and every refresh would look like
 		// a flip.
