@@ -320,6 +320,7 @@ var sourceExts = map[string]struct{}{
 	".py": {}, ".rb": {}, ".rs": {}, ".go": {}, ".java": {}, ".php": {},
 	".cs": {}, ".cr": {}, ".coffee": {},
 	".swift": {}, ".kt": {}, ".kts": {}, ".gradle": {}, ".scala": {},
+	".dart": {},
 }
 
 // textExts is the documentation / config extension set. hiddenunicode
@@ -371,7 +372,8 @@ func WantsHiddenUnicodeText(name string) bool {
 	case ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs",
 		".py", ".rb", ".rs", ".go", ".java", ".php", ".cs", ".cr", ".coffee",
 		".md", ".txt", ".json", ".yaml", ".yml", ".toml",
-		".xml", ".gemspec", ".nuspec", ".swift", ".kt", ".kts", ".gradle", ".scala":
+		".xml", ".gemspec", ".nuspec", ".swift", ".kt", ".kts", ".gradle", ".scala",
+		".dart":
 		return true
 	}
 	return false

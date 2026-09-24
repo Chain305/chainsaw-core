@@ -62,6 +62,12 @@ var supportedHiddenUnicodeEcosystems = map[string]struct{}{
 	"swift":       {},
 	"cocoapods":   {},
 	"huggingface": {},
+	// pub: the install path already scanned pub archives for hidden unicode
+	// (internal/server/artifact_inspection.go), but the intelligence report
+	// did not — pub was absent here and ".dart" was not in the artifact map's
+	// text set — so a pub report's artifact section stayed empty even when
+	// the refresher fetched the archive. Added 2026-09-24 with the pub fetch.
+	"pub": {},
 }
 
 func (p *hiddenUnicodeProvider) Supports(ecosystem string) bool {

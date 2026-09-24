@@ -107,14 +107,6 @@ type matrixCell struct {
 // cells SupportNone as the findings proposed would have been a real fail-open
 // on working signals.
 var advertisedElsewhere = map[matrixCell]string{
-	{policy.ConditionHasHiddenUnicode, policy.EcoPub}: "" +
-		"P8-61 is a false finding. supportsHiddenUnicodeInspection " +
-		"(internal/server/artifact_inspection.go:108-134) includes " +
-		"repository.FormatPub with an explicit rationale, and the path is " +
-		"covered end-to-end by " +
-		"TestInspectArtifactSignalsPubHiddenUnicode. pub .tar.gz archives " +
-		"route through Tier-2 inspection and .dart is in both the " +
-		"inspection and hiddenunicode source-extension allowlists.",
 	{policy.ConditionPackageAge, policy.EcoSwift}: reasonReleaseDateFetcher("FormatSwift", "fetchSwiftReleaseDate (internal/server/package_metadata_swift.go:90)"),
 	{policy.ConditionCooldown, policy.EcoSwift}:   reasonReleaseDateFetcher("FormatSwift", "fetchSwiftReleaseDate (internal/server/package_metadata_swift.go:90)"),
 	{policy.ConditionPackageAge, policy.EcoYum}:   reasonReleaseDateFetcher("FormatYum", "fetchRPMReleaseDate (internal/server/package_metadata.go:1050)"),
