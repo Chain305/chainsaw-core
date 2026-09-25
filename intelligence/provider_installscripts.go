@@ -179,11 +179,9 @@ func (p *installScriptsProvider) run(ctx context.Context, req Request, prior *Re
 		if len(files) == 0 {
 			return PartialReport{}, nil
 		}
-		buildRs := FirstMatch(files, "build.rs")
-		result = installscripts.Cargo(
-			FirstMatch(files, "Cargo.toml"),
-			buildRs,
-		)
+		cargoToml := FirstMatch(files, "Cargo.toml")
+		buildRs := cargoBuildScript(files, cargoToml)
+		result = installscripts.Cargo(cargoToml, buildRs)
 		if len(buildRs) > 0 {
 			if hits := scanBuildRs(buildRs); len(hits) > 0 {
 				extraScript = true
@@ -512,6 +510,40 @@ func FirstMatch(files map[string][]byte, basename string) []byte {
 	return shallowestMatch(files, func(name string) bool {
 		return strings.ToLower(path.Base(name)) == lower
 	})
+}
+
+// cargoBuildScript returns the body of the build script cargo would
+// actually run: none when [package] says `build = false`, the declared
+// path when it names one, otherwise build.rs beside the crate's root
+// Cargo.toml. A build.rs anywhere else (a vendored crate, an example) is
+// not this crate's build script and must not be scanned as one.
+func cargoBuildScript(files map[string][]byte, cargoToml []byte) []byte {
+	disabled, declared := installscripts.CargoBuildScript(cargoToml)
+	if disabled {
+		return nil
+	}
+	root, rootDepth := "", -1
+	for name := range files {
+		if !strings.EqualFold(path.Base(name), "Cargo.toml") {
+			continue
+		}
+		d := path.Dir(name)
+		depth := strings.Count(d, "/")
+		if rootDepth < 0 || depth < rootDepth || (depth == rootDepth && d < root) {
+			root, rootDepth = d, depth
+		}
+	}
+	rel := "build.rs"
+	if declared != "" {
+		rel = declared
+	}
+	want := path.Clean(path.Join(root, rel))
+	for name, body := range files {
+		if strings.EqualFold(path.Clean(name), want) {
+			return body
+		}
+	}
+	return nil
 }
 
 // firstGemspec returns the body of the shallowest *.gemspec entry.

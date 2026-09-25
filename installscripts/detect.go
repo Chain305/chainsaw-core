@@ -512,19 +512,25 @@ func RubyGems(gemspec []byte) Result {
 	return finish("rubygems", hasScript, body)
 }
 
-// Cargo inspects the [package] table of Cargo.toml. A `build = "foo.rs"`
-// entry, or any `build-dependencies` section, marks HasInstallScript.
-// If buildRs is provided and non-empty, its body is scanned for
-// remote-fetch primitives.
+// Cargo reports whether a crate has a build script, following cargo's own
+// rule: `build = false` in [package] means none; `build = "path"` names
+// one; with no key, a build.rs at the crate root is one. buildRs is the
+// body of that script (the caller resolves it; see CargoBuildScript) and
+// is scanned for remote-fetch primitives.
+//
+// The old test was "any line starting with `build`, or a
+// [build-dependencies] table". crates.io writes an explicit `build = false`
+// into every published manifest without a build script, so that matched
+// cfg-if, pkg-config and wasm-bindgen-macro — crates with no build script
+// at all — and raised install_script_appeared recalls on them.
+// Build-dependencies alone run nothing: they only feed a build script.
 func Cargo(cargoToml, buildRs []byte) Result {
-	body := string(cargoToml)
-	hasScript := false
-	if strings.Contains(body, "[package.build]") ||
-		// common `build = "build.rs"` key under [package]
-		hasKey(body, "build") ||
-		strings.Contains(body, "[build-dependencies]") {
-		hasScript = true
+	disabled, declared := CargoBuildScript(cargoToml)
+	if disabled {
+		return finish("cargo", false, "")
 	}
+	body := string(cargoToml)
+	hasScript := declared != ""
 	// build.rs is Rust that rustc compiles and runs at build time; its
 	// body is in-scope for the remote-fetch scan.
 	if len(buildRs) > 0 {
@@ -532,6 +538,41 @@ func Cargo(cargoToml, buildRs []byte) Result {
 		body += "\n" + string(buildRs)
 	}
 	return finish("cargo", hasScript, body)
+}
+
+// CargoBuildScript reads the `build` key of the [package] table. disabled
+// is true for `build = false`; declared is the path for `build = "path"`
+// (empty when the key is absent, i.e. cargo's default of a root build.rs).
+func CargoBuildScript(cargoToml []byte) (disabled bool, declared string) {
+	inPackage := false
+	for _, line := range strings.Split(string(cargoToml), "\n") {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "[") {
+			inPackage = trim == "[package]"
+			continue
+		}
+		if !inPackage || !strings.HasPrefix(trim, "build") {
+			continue
+		}
+		key, val, ok := strings.Cut(trim, "=")
+		if !ok || strings.TrimSpace(key) != "build" {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		if i := strings.Index(val, "#"); i >= 0 && !strings.HasPrefix(val, "\"") {
+			val = strings.TrimSpace(val[:i])
+		}
+		switch {
+		case val == "false":
+			return true, ""
+		case strings.HasPrefix(val, "\""):
+			if end := strings.Index(val[1:], "\""); end >= 0 {
+				return false, val[1 : 1+end]
+			}
+		}
+		return false, ""
+	}
+	return false, ""
 }
 
 // Composer inspects the "scripts" object in a composer.json. Only
@@ -614,19 +655,6 @@ func isEvalEncoded(body string) bool {
 	}
 	if longBase64RE.MatchString(body) {
 		return true
-	}
-	return false
-}
-
-// hasKey reports whether a line-oriented TOML body contains a top-level
-// key assignment like `build = "build.rs"`. Kept intentionally naive —
-// we don't want to pull a TOML parser in for a pattern this simple.
-func hasKey(body, key string) bool {
-	for _, line := range strings.Split(body, "\n") {
-		trim := strings.TrimSpace(line)
-		if strings.HasPrefix(trim, key+" ") || strings.HasPrefix(trim, key+"=") {
-			return true
-		}
 	}
 	return false
 }
