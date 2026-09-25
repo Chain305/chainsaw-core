@@ -127,6 +127,13 @@ func TestLicenseUnavailableEmission(t *testing.T) {
 			t.Fatalf("deps.dev 503: no license_unavailable in %+v", pr.Warnings)
 		}
 	})
+	// deps.dev 404 = "version not indexed yet" (seen on prometheus v0.315.0
+	// an hour after release), never "no licence" — that is a 200 with [].
+	t.Run("deps.dev 404 emits", func(t *testing.T) {
+		if pr := goCase(t, http.NotFound); !hasLicenseUnavailable(pr.Warnings) {
+			t.Fatalf("deps.dev 404: no license_unavailable in %+v", pr.Warnings)
+		}
+	})
 	t.Run("deps.dev 200 with no licences stays silent", func(t *testing.T) {
 		pr := goCase(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -141,12 +148,18 @@ func TestLicenseUnavailableEmission(t *testing.T) {
 // -- end to end --------------------------------------------------------
 
 // The go-cmp shape: the module proxy answers, deps.dev (the only Go licence
-// source) fails. Through the real evaluate path, neither licence claim fires.
+// source) fails or has not indexed the version yet. Through the real evaluate path, neither licence claim fires.
 func TestGoDepsDevFailureDoesNotClaimMissingLicence(t *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusNotFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) { goDepsDevE2E(t, status) })
+	}
+}
+
+func goDepsDevE2E(t *testing.T, status int) {
 	mux := http.NewServeMux()
 	registerGoBaseRoutes(mux, "github.com/google/go-cmp")
 	mux.HandleFunc("/v3/systems/go/packages/", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "down", http.StatusServiceUnavailable)
+		http.Error(w, "x", status)
 	})
 	p, _ := newStubProvider(t, mux)
 	key := Key{Ecosystem: "go", Package: "github.com/google/go-cmp", Version: "v1.2.3"}

@@ -3979,12 +3979,19 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	// not silent: deps.dev is the ONLY Go licence source, so a failed
 	// fetch (timeout, transport, 5xx) must say so or lic.missing reads the
 	// empty expression as "declares no licence" (go-cmp v0.7.0 flipped
-	// -30 between two identical FP-eval runs on a deps.dev timeout). A
-	// 404 stays silent: deps.dev answered, it just does not index it.
+	// -30 between two identical FP-eval runs on a deps.dev timeout).
+	//
+	// A 404 is unavailable too, NOT "no licence": deps.dev says "no
+	// licence" as a 200 with an empty `licenses` array, and 404 only means
+	// it has no record of this version. Measured 2026-09-25: 0 of 40
+	// canonical module versions sampled across 0h..2y 404ed, the one
+	// canonical 404 found was prometheus v0.315.0 an hour after release
+	// (package known, version not yet indexed), and every other 404 was a
+	// path whose go.mod declares a different module.
 	lic, licWarn := p.fetchDepsDevGoLicense(ctx, pkg, ver)
 	metadata.LicenseExpression = lic
-	if licWarn != nil && !isDefiniteAbsence(licWarn) {
-		pr.Warnings = append(pr.Warnings, licenseUnavailableWarning("deps.dev licence fetch failed: "+licWarn.Code, p.now()))
+	if licWarn != nil {
+		pr.Warnings = append(pr.Warnings, licenseUnavailableWarning("deps.dev licence not read: "+licWarn.Code, p.now()))
 	}
 
 	// Populate Dependencies.Direct from the module's go.mod file. We

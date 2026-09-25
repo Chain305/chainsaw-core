@@ -41,6 +41,7 @@ package intelligence
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -298,6 +299,9 @@ func (r *Refresher) refreshStaleReportRow(ctx context.Context, row StaleReportRo
 		handle, err := r.cfg.StaleReportArtifactFetcher(fetchCtx, row.Ecosystem, row.Package, row.Version)
 		cancel()
 		if err != nil {
+			// Recorded on the report, and it takes the row out of the
+			// never-scanned half of the scope (StaleReportScope).
+			req.ArtifactTooLarge = errors.Is(err, ErrArtifactTooLarge)
 			r.cfg.Logger.Debug("stale-report artifact fetch failed",
 				"ecosystem", row.Ecosystem, "package", row.Package,
 				"version", row.Version, "error", err)

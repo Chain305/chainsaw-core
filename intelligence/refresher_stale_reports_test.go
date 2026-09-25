@@ -308,6 +308,45 @@ func TestStaleReportSweepRefreshesEvenWhenTheArtifactFetchFails(t *testing.T) {
 	}
 }
 
+// Only an over-cap refusal marks the Request: it is what the report records and
+// what takes the row out of the never-scanned half. Any other failure (a 404, a
+// timeout) may succeed next time and must keep being retried.
+func TestStaleReportSweepMarksAnOversizeArtifact(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{fmt.Errorf("%w: 52428800 byte cap", ErrArtifactTooLarge), true},
+		{fmt.Errorf("registry returned 404"), false},
+	} {
+		resetStaleReportMetrics()
+		svc := &fakeService{}
+		ref := NewRefresher(RefresherConfig{
+			Service:                   svc,
+			Metadata:                  &fakeMetadataSource{},
+			MaxStaleness:              24 * time.Hour,
+			Concurrency:               1,
+			PageSize:                  50,
+			StaleReportRefreshEnabled: true,
+			StaleReportSource:         &fakeStaleSource{rows: staleRows(1)},
+			ArtifactEnabled:           true,
+			EcosystemResolver:         func(string) string { return "go" },
+			StaleReportArtifactFetcher: func(context.Context, string, string, string) (*ArtifactHandle, error) {
+				return nil, tc.err
+			},
+		})
+		ref.now = func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) }
+		ref.RunOnce(context.Background())
+		if len(svc.seen) != 1 {
+			t.Fatalf("%v: %d scans, want 1", tc.err, len(svc.seen))
+		}
+		if got := svc.seen[0].ArtifactTooLarge; got != tc.want {
+			t.Errorf("%v: ArtifactTooLarge=%v, want %v", tc.err, got, tc.want)
+		}
+	}
+	resetStaleReportMetrics()
+}
+
 // ArtifactEnabled=false must skip the download entirely — it is the same knob
 // the walk uses, and an operator who turned it off there means it here too.
 func TestStaleReportSweepHonoursArtifactEnabled(t *testing.T) {

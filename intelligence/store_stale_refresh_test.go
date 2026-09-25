@@ -40,6 +40,9 @@ func TestStaleReportScopeSelectsNeverScannedReports(t *testing.T) {
 	// row pins that the JSON, not the projection, decides "never scanned".
 	insert(listed, "column-drifted", `{"artifactScan":{"performed":true}}`, false, 15*time.Hour)
 	insert(listed, "inside-cooldown", `{}`, false, 1*time.Hour)
+	// Refused for size: a published version never shrinks, so retrying it
+	// every cool-down re-downloads up to the cap for nothing.
+	insert(listed, "too-large", `{"observation":{"warnings":[{"provider":"artifact","code":"artifact_too_large"}]}}`, false, 16*time.Hour)
 	insert(unlisted, "unlisted-ecosystem", `{}`, false, 13*time.Hour)
 
 	scope := StaleReportScope{

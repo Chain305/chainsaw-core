@@ -1,6 +1,7 @@
 package intelligence
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -137,7 +138,17 @@ type Request struct {
 	// model/dataset/space). The scanner stamps this onto the Report's
 	// IdentitySection so AI-artifact providers can vary behaviour.
 	ArtifactSubtype string
+
+	// ArtifactTooLarge says the caller tried to fetch the bytes and the
+	// artifact exceeded its size cap (ErrArtifactTooLarge). Scan records it
+	// as WarnArtifactTooLarge so the report says why the byte providers did
+	// not run, instead of a needs_artifact that reads as "nobody tried".
+	ArtifactTooLarge bool
 }
+
+// ErrArtifactTooLarge is wrapped by artifact fetchers that refuse an artifact
+// over their size cap. Callers test it with errors.Is.
+var ErrArtifactTooLarge = errors.New("artifact exceeds the fetch size cap")
 
 // ArtifactHandle gives Tier 2 providers (install scripts, hidden unicode,
 // checksum extraction) access to the bytes without pulling them into the

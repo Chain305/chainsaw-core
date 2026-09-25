@@ -455,6 +455,7 @@ func TestRunGo(t *testing.T) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("v1.0.0\nv1.2.3\nv1.2.4\n"))
 	})
+	registerDepsDevGoLicense(mux)
 	p, _ := newStubProvider(t, mux)
 	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "go", Package: "github.com/foo/Bar", Version: "v1.2.3"}}, nil)
 	if err != nil {
@@ -505,6 +506,15 @@ func TestRunGoNotFound(t *testing.T) {
 	}
 }
 
+// registerDepsDevGoLicense answers deps.dev (the only Go licence source)
+// with a licence. Without it deps.dev 404s, which is license_unavailable.
+func registerDepsDevGoLicense(mux *http.ServeMux) {
+	mux.HandleFunc("/v3/systems/go/packages/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"licenses":["MIT"]}`))
+	})
+}
+
 // registerGoBaseRoutes registers the .info + @latest endpoints reused by
 // the dependency-extraction tests below so they only need to wire the
 // per-test .mod handler.
@@ -529,6 +539,7 @@ func TestRegistryMetadataProvider_GoDependencies(t *testing.T) {
 	mux := http.NewServeMux()
 	const encModule = "github.com/foo/!bar"
 	registerGoBaseRoutes(mux, encModule)
+	registerDepsDevGoLicense(mux)
 	mux.HandleFunc("/"+encModule+"/@v/v1.2.3.mod", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte(`module github.com/foo/Bar
@@ -575,6 +586,7 @@ func TestRegistryMetadataProvider_GoDependencies_PseudoVersion(t *testing.T) {
 	mux := http.NewServeMux()
 	const encModule = "github.com/foo/!bar"
 	registerGoBaseRoutes(mux, encModule)
+	registerDepsDevGoLicense(mux)
 	mux.HandleFunc("/"+encModule+"/@v/v1.2.3.mod", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte(`module github.com/foo/Bar
@@ -608,6 +620,7 @@ func TestRegistryMetadataProvider_GoDependencies_FetchFailSoft(t *testing.T) {
 	mux := http.NewServeMux()
 	const encModule = "github.com/foo/!bar"
 	registerGoBaseRoutes(mux, encModule)
+	registerDepsDevGoLicense(mux)
 	mux.HandleFunc("/"+encModule+"/@v/v1.2.3.mod", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	})
@@ -642,6 +655,7 @@ func TestRegistryMetadataProvider_GoDependencies_ParseFailSoft(t *testing.T) {
 	mux := http.NewServeMux()
 	const encModule = "github.com/foo/!bar"
 	registerGoBaseRoutes(mux, encModule)
+	registerDepsDevGoLicense(mux)
 	mux.HandleFunc("/"+encModule+"/@v/v1.2.3.mod", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		// Garbage that modfile.Parse cannot interpret.

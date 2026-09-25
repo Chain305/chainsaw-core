@@ -43,6 +43,14 @@ import (
 // absence", never as a finding in its own right.
 const WarnArtifactTruncated = "artifact_truncated"
 
+// WarnArtifactTooLarge (provider "artifact") marks a report whose bytes were
+// fetched and refused for exceeding the fetcher's size cap, so no Tier-2
+// provider ran. It sits beside the per-provider needs_artifact warnings rather
+// than replacing them, so coverage (which ignores the "artifact" provider) is
+// unchanged. The stale-report sweep's never-scanned half skips rows carrying
+// it: the size of a published version does not change.
+const WarnArtifactTooLarge = "artifact_too_large"
+
 // artifactTruncationMessage is the operator-facing sentence. Deliberately says
 // what was NOT done rather than naming a risk — the provider found nothing and
 // this explains why that may mean nothing.

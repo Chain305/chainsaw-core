@@ -1455,8 +1455,10 @@ const (
 	// risk.Input.LicenseDataUnavailable (only when no licence was read
 	// anyway), which makes the licence signals dormant and drops the
 	// License category from the rollup. Every other category still
-	// scores. A definite absence (404) never produces it — a parent POM
-	// or deps.dev 404 stays silent, as does a 200 with no licence.
+	// scores. A definite absence never produces it — a parent POM 404
+	// stays silent, as does a deps.dev 200 with no licence. A deps.dev
+	// 404 DOES produce it: that is "version not indexed yet", never "no
+	// licence" (deps.dev reports no licence as a 200 with an empty list).
 	//
 	// Keyed on this code, never on `transport`: GitHub/forge enrichment
 	// emits `transport` AFTER a successful primary fetch, so that code

@@ -456,6 +456,15 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	report.Observation.TierTotal = tierTotal
 	maxTier := req.Options.MaxTier // 0 = unbounded; >=1 caps the highest tier that runs
 
+	if req.ArtifactTooLarge && req.Artifact == nil {
+		report.Observation.Warnings = append(report.Observation.Warnings, Warning{
+			Provider: "artifact",
+			Code:     WarnArtifactTooLarge,
+			Message:  "artifact exceeds the fetch size cap; byte providers did not run",
+			At:       now,
+		})
+	}
+
 	var phase1 []Provider
 	// postMergeTiers[N] holds providers whose Tier() == N+3 (so index 0
 	// is Tier-3, index 1 is Tier-4, etc.). The slice grows on demand.

@@ -47,7 +47,10 @@ func (c StaleReportCursor) IsZero() bool { return c.CollectedAt.IsZero() && c.Ec
 //
 // ArtifactOlderThan is the retry cool-down for a package whose bytes cannot be
 // fetched at all (a Maven `pom` packaging, a 404, a gated model): each such row
-// costs one extra refresh per cool-down, not one per tick.
+// costs one extra refresh per cool-down, not one per tick. A row whose report
+// carries WarnArtifactTooLarge is excluded outright: an over-cap artifact stays
+// over the cap, so retrying it every cool-down would re-download up to the cap
+// for nothing. The plain staleness half still refreshes it.
 //
 // "Never scanned" reads the merged report JSON — what the report itself says —
 // rather than the has_artifact_scan projection. The upsert ORs that column with
@@ -74,7 +77,8 @@ func (sc StaleReportScope) where() (string, []any) {
 	}
 	return fmt.Sprintf(`(collected_at < $1 OR (collected_at < $2
 		AND NOT COALESCE((report->'artifactScan'->>'performed')::boolean, false)
-		AND ecosystem IN (%s)))`, strings.Join(in, ", ")), args
+		AND NOT COALESCE(report->'observation'->'warnings' @> '[{"code":"%s"}]'::jsonb, false)
+		AND ecosystem IN (%s)))`, WarnArtifactTooLarge, strings.Join(in, ", ")), args
 }
 
 // CountStaleReports sizes the backlog. Producer for the

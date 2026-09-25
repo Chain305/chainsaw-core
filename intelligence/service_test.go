@@ -108,6 +108,35 @@ func TestScan_SkipsProvidersForUnsupportedEcosystem(t *testing.T) {
 	}
 }
 
+// An artifact refused for size must say so on the report: needs_artifact alone
+// is indistinguishable from "nobody fetched the bytes".
+func TestScan_RecordsArtifactTooLarge(t *testing.T) {
+	p := &fakeProvider{name: "artifact-only", signal: SignalHiddenUnicode, needsArt: true}
+	svc := New(Config{Providers: []Provider{p}})
+	count := func(req Request) int {
+		t.Helper()
+		report, err := svc.Scan(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Scan err: %v", err)
+		}
+		n := 0
+		for _, w := range report.Observation.Warnings {
+			if w.Provider == "artifact" && w.Code == WarnArtifactTooLarge {
+				n++
+			}
+		}
+		return n
+	}
+	key := Key{Ecosystem: "go", Package: "modernc.org/tcl", Version: "v1.15.2"}
+	if n := count(Request{Key: key, ArtifactTooLarge: true, Options: Options{AllowStale: false, MaxStaleness: time.Nanosecond}}); n != 1 {
+		t.Errorf("ArtifactTooLarge: %d artifact_too_large warnings, want 1", n)
+	}
+	key.Version = "v1.15.3"
+	if n := count(Request{Key: key, Options: Options{MaxStaleness: time.Nanosecond}}); n != 0 {
+		t.Errorf("no ArtifactTooLarge: %d artifact_too_large warnings, want 0", n)
+	}
+}
+
 func TestScan_EmitsWarningForArtifactProviderWithoutBytes(t *testing.T) {
 	p := &fakeProvider{
 		name:     "artifact-only",
