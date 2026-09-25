@@ -135,6 +135,11 @@ func init() {
 	rootCmd.AddCommand(guardCmd)
 }
 
+// syncGuardDataset is the one network call guard update makes. A var so the
+// BUG-04 regression test can see the context that actually reaches the
+// syncer; production never reassigns it.
+var syncGuardDataset = (*malware.Syncer).Sync
+
 func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 	// Offline umbrella. The escape hatch is not polish: CHAINSAW_OFFLINE is also
 	// documented as a telemetry kill switch, so someone who set it for THAT
@@ -159,12 +164,19 @@ func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 	metaPath := guardUpdateMetaPath(dst)
 	prevMeta := readGuardUpdateMeta(metaPath)
 
+	// No whole-command deadline. There used to be a 5-minute WithTimeout here,
+	// and it was BUG-04 all over again one layer up: it flowed into
+	// syncer.Sync and capped the malware package's own 1h refresh ceiling, so
+	// a ~46 MB tarball that was downloading and extracting perfectly well on a
+	// slow link (or a slow disk — Defender scanning each of ~239k files) died
+	// with a bare "context deadline exceeded". The syncer bounds every phase
+	// itself: response headers (ResponseHeaderTimeout), body silence
+	// (downloadStallWindow, 90s) and the whole refresh (maxRefreshDuration,
+	// 1h). Ctrl-C still cancels via cmd.Context().
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
 
 	syncDir, err := os.MkdirTemp("", "chainsaw-malware-*")
 	if err != nil {
@@ -183,8 +195,8 @@ func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 	inner := newGuardUpdateProgress(os.Stderr, stderrTTY)
 
 	// The byte counter only fires once data flows. If the server stalls before
-	// the first byte (DNS, TLS, a slow upstream), nothing would print for up to
-	// the 5-minute timeout and the run would look wedged. A watchdog ticks a
+	// the first byte (DNS, TLS, a slow upstream), nothing would print until the
+	// syncer's response-header timeout and the run would look wedged. A watchdog ticks a
 	// heartbeat until the first byte arrives, then goes quiet and lets the
 	// counter take over. `gotByte` gates the two so they never interleave.
 	var gotByte atomic.Bool
@@ -211,13 +223,13 @@ func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 	idx := malware.NewIndex(guardLogger)
 	opts := []malware.SyncerOption{malware.WithProgress(progress)}
 	// Conditional fetch: unless --force, send the ETag from the last update so
-	// an unchanged dataset returns 304 and we skip the ~32 MB download + the
+	// an unchanged dataset returns 304 and we skip the ~46 MB download + the
 	// minute-long re-index entirely.
 	if !force && prevMeta.ETag != "" {
 		opts = append(opts, malware.WithIfNoneMatch(prevMeta.ETag))
 	}
 	syncer := malware.NewSyncer(idx, syncDir, guardLogger, opts...)
-	err = syncer.Sync(ctx)
+	err = syncGuardDataset(syncer, ctx)
 	close(watchdogDone)
 	if errors.Is(err, malware.ErrNotModified) {
 		if stderrTTY && gotByte.Load() {

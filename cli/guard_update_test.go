@@ -1,13 +1,19 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chain305/chainsaw-core/malware"
 	"github.com/spf13/cobra"
 )
 
@@ -189,4 +195,112 @@ func newGuardUpdateTestCmd(allowNetwork bool) *cobra.Command {
 	cancel()
 	cmd.SetContext(ctx)
 	return cmd
+}
+
+// TestRunGuardUpdate_SlowLinkIsNotKilledByACommandDeadline is BUG-04 at the
+// CLI entry point. The first fix (v0.22.1) repaired core/malware and tested
+// the Syncer directly, so it never saw the 5-minute context.WithTimeout that
+// runGuardUpdate wrapped around the whole command — which capped the syncer's
+// own 1h ceiling and killed a progressing ~46 MB download on a slow link.
+//
+// Two halves, because a real 5-minute deadline cannot be waited out in a unit
+// test:
+//   - the context that reaches the syncer must carry no deadline of its own
+//     (cmd.Context() has none here) — this catches the literal 5-minute
+//     WithTimeout coming back, instantly;
+//   - a valid tarball streamed slowly but steadily must still produce a cache
+//     file. With a scaled-down stand-in deadline (shorter than the ~450ms
+//     drip) restored in runGuardUpdate, this half fails the same way the
+//     vendor's run did.
+func TestRunGuardUpdate_SlowLinkIsNotKilledByACommandDeadline(t *testing.T) {
+	withIsolatedConfigHome(t)
+	withFileCredStore(t)
+	t.Setenv(guardUpdateOfflineEnv, "")
+	dst := filepath.Join(t.TempDir(), "known_malicious.json")
+	t.Setenv(guardDBEnv, dst)
+
+	body := slowLinkTarball(t)
+	const chunks = 10
+	const interval = 50 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-gzip")
+		step := (len(body) + chunks - 1) / chunks
+		for off := 0; off < len(body); off += step {
+			time.Sleep(interval)
+			_, _ = w.Write(body[off:min(off+step, len(body))])
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+	oldURL := malware.TarballURL
+	malware.TarballURL = srv.URL
+	defer func() { malware.TarballURL = oldURL }()
+
+	oldSync := syncGuardDataset
+	syncGuardDataset = func(s *malware.Syncer, ctx context.Context) error {
+		if dl, ok := ctx.Deadline(); ok {
+			t.Errorf("guard update handed the syncer a context with its own deadline (%v from now); "+
+				"that caps the syncer's 1h refresh ceiling and is BUG-04", time.Until(dl).Round(time.Second))
+		}
+		return oldSync(s, ctx)
+	}
+	defer func() { syncGuardDataset = oldSync }()
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	var stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() { _, _ = stderr.ReadFrom(r); close(done) }()
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Bool("allow-network", false, "")
+	cmd.SetContext(context.Background())
+	start := time.Now()
+	err := runGuardUpdate(cmd, nil)
+	elapsed := time.Since(start)
+	_ = w.Close()
+	os.Stderr = oldStderr
+	<-done
+
+	if err != nil {
+		t.Fatalf("slow-but-steady download failed after %v: %v\nstderr:\n%s", elapsed, err, stderr.String())
+	}
+	if elapsed < chunks*interval {
+		t.Fatalf("finished in %v, faster than the %v drip: the test no longer exercises a slow link", elapsed, chunks*interval)
+	}
+	if fi, statErr := os.Stat(dst); statErr != nil || fi.Size() == 0 {
+		t.Fatalf("cache not written: %v", statErr)
+	}
+}
+
+// slowLinkTarball is a minimal OpenSSF-shaped dataset: one npm advisory.
+func slowLinkTarball(t *testing.T) []byte {
+	t.Helper()
+	const entry = `{"id":"MAL-2024-0002","summary":"malicious npm package","modified":"2024-01-01T00:00:00Z",` +
+		`"affected":[{"package":{"name":"evil-pkg","ecosystem":"npm"}}]}`
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	root := "malicious-packages-abc1234/"
+	for _, d := range []string{"", "osv/", "osv/malicious/", "osv/malicious/npm/", "osv/malicious/npm/evil-pkg/"} {
+		if err := tw.WriteHeader(&tar.Header{Name: root + d, Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	name := root + "osv/malicious/npm/evil-pkg/MAL-2024-0002.json"
+	if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(entry))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(entry)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
