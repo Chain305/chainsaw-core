@@ -127,7 +127,10 @@ func openReadOnlyWithPool(dsn string, pool PoolConfig) (*sql.DB, error) {
 	config.RuntimeParams["statement_timeout"] = fmt.Sprintf("%d", pool.StatementTimeout.Milliseconds())
 
 	connector := stdlib.GetConnector(*config)
-	db := sql.OpenDB(connector)
+	// rewriteConnector, as on the primary pool: every query here is written
+	// with `?` placeholders. Without it, every ReadDB() query was a Postgres
+	// syntax error the moment CHAINSAW_DATABASE_READ_URL was set.
+	db := sql.OpenDB(&rewriteConnector{base: connector})
 	db.SetMaxOpenConns(pool.MaxOpenConns)
 	db.SetMaxIdleConns(pool.MaxIdleConns)
 	db.SetConnMaxLifetime(pool.ConnMaxLifetime)
