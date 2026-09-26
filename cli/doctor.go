@@ -44,7 +44,11 @@ ladder below is different.
 
 With --attest, additionally POST the strict report to the configured
 Chainsaw server at /api/attestations so the org compliance dashboard
-sees this endpoint.
+sees this endpoint. --bundle-id=<id> implies --attest and reports the
+server's answer for that hardening bundle: whether it is recorded as
+applied on this machine, and attestation_seen_at. The exit code stays the
+strict compliance code; a failed or unmatched attestation is reported,
+not turned into an exit code.
 
 With --upgrade-check, diagnose the local chainsaw-proxy server install
 before upgrading. Scope: self-hosted chainsaw-proxy server preflight;
@@ -70,7 +74,7 @@ acknowledge.`,
 	cmd.Flags().Bool("bypass-check", false, "Compare host package-manager config files (.npmrc, pip.conf, ~/.gemrc, cargo config) against the configured chainsaw URL. Reports drift; exits 0 even when a config is missing.")
 	cmd.Flags().Bool("attest", false, "POST the strict report to /api/attestations on the configured server. Implies --strict.")
 	cmd.Flags().String("device-id", "", "Override the derived device identifier (default: hostname/USER). MDM provisioning scripts use this to assign stable device IDs.")
-	cmd.Flags().String("bundle-id", "", "W11 phone-home channel: when set together with --attest, the attest POST body includes bundle_id. The proxy stamps applied_at on the matching hardening_bundles row, closing the MDM-installed bundle loop. MDM-rendered install scripts pre-fill this from the bundle emitted by the admin hardening wizard at /admin/hardening (POST /api/hardening/bundle).")
+	cmd.Flags().String("bundle-id", "", "W11 phone-home channel: report that this hardening bundle is applied on this machine. Implies --attest (and so --strict): the attest POST body includes bundle_id, the proxy stamps applied_at on the matching hardening_bundles row, and doctor prints the server's answer (applied / attestation_seen_at). MDM-rendered install scripts pre-fill this from the bundle emitted by the admin hardening wizard at /admin/hardening (POST /api/hardening/bundle).")
 	cmd.Flags().Bool("upgrade-check", false, "Run server-upgrade-safety diagnostics: compare running schema, flag deprecated flags, check data-dir/TLS/ports. Exit 0=safe, 1=warn, 2=breaking. See MIGRATIONS.md.")
 	cmd.Flags().Bool("fix", false, "Apply auto-fixable remediations from --upgrade-check (e.g. chmod 0400 on generated_* files, generate JWT secret). Breaking findings are never auto-fixed.")
 	cmd.Flags().String("config", "", "Path to chainsaw-proxy YAML config (for --upgrade-check). Defaults to $CHAINSAW_CONFIG.")
@@ -159,6 +163,12 @@ func resolveDoctorMode(cmd *cobra.Command) (doctorMode, error) {
 	bypassCheck := getBool("bypass-check")
 	offline := getBool("offline")
 	strict, attest := getBool("strict"), getBool("attest")
+	// --bundle-id means nothing outside the attest POST (it is a field of
+	// that body and nothing else reads it), so it implies --attest rather
+	// than being silently dropped by the default manager table — which is
+	// what `chainsaw doctor --bundle-id=<sha256>` used to do.
+	bundleID, _ := cmd.Flags().GetString("bundle-id")
+	bundleOnly := strings.TrimSpace(bundleID) != "" && !strict && !attest
 
 	var requested []doctorMode
 	if upgradeCheck || fix {
@@ -170,7 +180,9 @@ func resolveDoctorMode(cmd *cobra.Command) (doctorMode, error) {
 	if offline {
 		requested = append(requested, doctorMode{"--offline", runDoctorOffline})
 	}
-	if strict || attest {
+	if bundleOnly {
+		requested = append(requested, doctorMode{"--bundle-id (implies --attest)", runDoctorStrict})
+	} else if strict || attest {
 		requested = append(requested, doctorMode{"--strict/--attest", runDoctorStrict})
 	}
 

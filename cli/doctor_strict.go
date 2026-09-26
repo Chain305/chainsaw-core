@@ -85,6 +85,10 @@ type doctorStrictReport struct {
 	// Omitted from the JSON payload when empty so older servers (which
 	// don't know the field) keep parsing the body unchanged.
 	BundleID string `json:"bundle_id,omitempty"`
+	// BundleAttestation is the server's answer to the bundle_id above. It
+	// is filled in AFTER the POST, so it is never part of the request
+	// body; it exists so --json and the human report can show it.
+	BundleAttestation *bundleAttestResult `json:"bundle_attestation,omitempty"`
 	// strict-only — not in the server payload but printed by the CLI.
 	EnvOverrides map[string]string `json:"env_overrides,omitempty"`
 	LockfileHits []string          `json:"lockfile_hits,omitempty"`
@@ -215,12 +219,18 @@ func runDoctorStrict(cmd *cobra.Command, _ []string) error {
 	report, exit := buildStrictReport(ctx, cmd)
 
 	attest, _ := cmd.Flags().GetBool("attest")
-	if attest {
-		if err := postAttestation(ctx, cmd, report); err != nil {
+	// --bundle-id implies --attest: the id is only ever a field of the POST,
+	// so honouring --strict --bundle-id without POSTing would drop it.
+	if attest || report.BundleID != "" {
+		resp, err := postAttestation(ctx, cmd, report)
+		if err != nil {
 			fmt.Fprintln(cmd.ErrOrStderr(), "attestation POST failed:", err)
 			// Attestation failure doesn't change the compliance exit code
 			// — the doctor check itself succeeded. Ops will surface the
 			// POST error separately.
+		}
+		if report.BundleID != "" {
+			report.BundleAttestation = interpretBundleAttest(report.BundleID, resp, err)
 		}
 	}
 
@@ -774,6 +784,13 @@ func printStrictReport(cmd *cobra.Command, r doctorStrictReport, exit int) {
 			fmt.Fprintf(out, "  %s\n", h)
 		}
 	}
+	if b := r.BundleAttestation; b != nil {
+		fmt.Fprintf(out, "\nhardening bundle %s: %s\n", b.BundleID, b.Status)
+		if b.AttestationSeenAt != nil {
+			fmt.Fprintf(out, "  attestation_seen_at: %s\n", b.AttestationSeenAt.UTC().Format(time.RFC3339))
+		}
+		fmt.Fprintf(out, "  %s\n", b.Detail)
+	}
 	fmt.Fprintf(out, "\nexit-code: %d\n", exit)
 }
 
@@ -781,21 +798,25 @@ func printStrictReport(cmd *cobra.Command, r doctorStrictReport, exit int) {
 // configured server. Fails open on network error so CI can decide
 // separately whether to block on attestation delivery vs compliance
 // state itself.
-func postAttestation(ctx context.Context, cmd *cobra.Command, r doctorStrictReport) error {
+//
+// On success it returns the decoded response body so the caller can read
+// the bundle phone-home outcome instead of assuming one.
+func postAttestation(ctx context.Context, cmd *cobra.Command, r doctorStrictReport) (attestResponse, error) {
+	var out attestResponse
 	server := cfgServerURL()
 	if flag, _ := cmd.Flags().GetString("server"); strings.TrimSpace(flag) != "" {
 		server = strings.TrimSpace(flag)
 	}
 	if server == "" {
-		return errors.New("no chainsaw server configured (set --server or CHAINSAW_SERVER)")
+		return out, errors.New("no chainsaw server configured (set --server or CHAINSAW_SERVER)")
 	}
 	body, err := json.Marshal(r)
 	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
+		return out, fmt.Errorf("marshal: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(server, "/")+"/api/attestations", strings.NewReader(string(body)))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return out, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if tok := strings.TrimSpace(os.Getenv("CHAINSAW_TOKEN")); tok != "" {
@@ -803,13 +824,66 @@ func postAttestation(ctx context.Context, cmd *cobra.Command, r doctorStrictRepo
 	}
 	resp, err := httpclient.New().Do(req)
 	if err != nil {
-		return err
+		return out, err
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("attestation rejected: %s", resp.Status)
+		if msg := strings.TrimSpace(string(raw)); msg != "" {
+			return out, fmt.Errorf("attestation rejected: %s: %s", resp.Status, msg)
+		}
+		return out, fmt.Errorf("attestation rejected: %s", resp.Status)
 	}
-	return nil
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, fmt.Errorf("attestation accepted (%s) but the response was unreadable: %w", resp.Status, err)
+	}
+	return out, nil
+}
+
+// attestResponse is the part of the POST /api/attestations response the CLI
+// reads (internal/server/compliance.go handleAttestations). Applied is a
+// pointer because the server only echoes it when bundle_id was sent; an
+// absent key must not read as "not applied".
+type attestResponse struct {
+	Applied           *bool      `json:"applied"`
+	AttestationSeenAt *time.Time `json:"attestation_seen_at"`
+}
+
+// bundleAttestResult is what doctor reports about --bundle-id.
+type bundleAttestResult struct {
+	BundleID          string     `json:"bundle_id"`
+	Status            string     `json:"status"`   // applied | already_applied | not_matched | unconfirmed | failed
+	Recorded          bool       `json:"recorded"` // server holds this bundle as applied for this org
+	AttestationSeenAt *time.Time `json:"attestation_seen_at,omitempty"`
+	Detail            string     `json:"detail"`
+}
+
+// interpretBundleAttest maps the server's answer onto a status, per the
+// server contract in stampHardeningBundleAttest: applied=true only on the
+// FIRST stamp; attestation_seen_at is present whenever the id matched a
+// bundle of this org; neither means no match (unknown id, another org's
+// bundle, or a server without a hardening store — indistinguishable by
+// design).
+func interpretBundleAttest(bundleID string, resp attestResponse, postErr error) *bundleAttestResult {
+	r := &bundleAttestResult{BundleID: bundleID, AttestationSeenAt: resp.AttestationSeenAt}
+	switch {
+	case postErr != nil:
+		r.Status = "failed"
+		r.Detail = "NOT recorded: attestation POST failed: " + postErr.Error()
+	case resp.Applied == nil:
+		r.Status = "unconfirmed"
+		r.Detail = "server accepted the attestation but did not report the bundle outcome (server predates bundle phone-home?); cannot confirm the bundle is recorded"
+	case *resp.Applied:
+		r.Status, r.Recorded = "applied", true
+		r.Detail = "server recorded this bundle as applied on this machine (applied_at stamped by this run)"
+	case resp.AttestationSeenAt != nil:
+		r.Status, r.Recorded = "already_applied", true
+		r.Detail = "server matched this bundle and refreshed attestation_seen_at; applied_at was not newly stamped (normally because an earlier attestation already stamped it)"
+	default:
+		r.Status = "not_matched"
+		r.Detail = "NOT recorded: server found no hardening bundle with this id for your org (unknown id, another org's bundle, or no hardening store on the server)"
+	}
+	return r
 }
 
 // readLines is a small helper for future scanners that need line-by-line

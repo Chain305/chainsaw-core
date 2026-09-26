@@ -65,7 +65,7 @@ func captureAttestBody(t *testing.T, bundleID string) map[string]any {
 
 	ctx := context.Background()
 	report, _ := buildStrictReport(ctx, cmd)
-	if err := postAttestation(ctx, cmd, report); err != nil {
+	if _, err := postAttestation(ctx, cmd, report); err != nil {
 		t.Fatalf("postAttestation: %v", err)
 	}
 	if seen == nil {
