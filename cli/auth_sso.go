@@ -101,21 +101,27 @@ var openBrowser = openBrowserReal
 
 // openBrowserReal is the production browser launcher.
 func openBrowserReal(url string) error {
-	var cmd string
-	var args []string
-	switch runtime.GOOS {
+	cmd, args := browserCommand(runtime.GOOS, url)
+	return exec.Command(cmd, args...).Start()
+}
+
+// browserCommand picks the launcher for goos. Split out of openBrowserReal so
+// the argv can be asserted without starting a process.
+func browserCommand(goos, url string) (string, []string) {
+	switch goos {
 	case "darwin":
-		cmd, args = "open", []string{url}
+		return "open", []string{url}
 	case "windows":
-		cmd, args = "cmd", []string{"/c", "start", "", escapeCmdMeta(url)}
+		// No shell: rundll32 hands the URL straight to the default browser,
+		// so `&` and `%` never meet cmd.exe's parser (BUG-02 was cmd.exe
+		// splitting the URL at its first `&`). escapeCmdMeta stays for WSL.
+		return "rundll32", []string{"url.dll,FileProtocolHandler", url}
 	default:
 		if isWSL() {
-			cmd, args = "cmd.exe", []string{"/c", "start", "", escapeCmdMeta(url)}
-		} else {
-			cmd, args = "xdg-open", []string{url}
+			return "cmd.exe", []string{"/c", "start", "", escapeCmdMeta(url)}
 		}
+		return "xdg-open", []string{url}
 	}
-	return exec.Command(cmd, args...).Start()
 }
 
 // escapeCmdMeta protects a URL from cmd.exe's own parser.

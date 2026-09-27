@@ -140,7 +140,10 @@ func pricingPlanSeeds() []pricingPlanSeed {
 			// tax for a security product. `scim` is NOT listed here: it is
 			// derived from `sso` by deriveBundledFeatures below, because SSO and
 			// SCIM travel together by founder ruling.
-			features:           map[string]bool{"sso": true, "billy": true},
+			// The Hardening Wizard is sold on Pro and Enterprise, never Free
+			// (owner ruling, BUG-5 — it replaced a PostHog flag that gated a
+			// paid surface on a per-user rollout bucket).
+			features:           map[string]bool{"sso": true, "billy": true, "hardening_wizard": true},
 			paddlePriceMonthly: strings.TrimSpace(os.Getenv("PADDLE_PRICE_PRO_MONTHLY")),
 			paddlePriceAnnual:  strings.TrimSpace(os.Getenv("PADDLE_PRICE_PRO_ANNUAL")),
 		},
@@ -160,7 +163,7 @@ func pricingPlanSeeds() []pricingPlanSeed {
 			// on top of everything in Pro. SSO/SCIM are no longer exclusive here
 			// — they moved to Pro (see the pro plan's `sso` flag above). `scim`
 			// is derived from `sso`, not listed.
-			features:           map[string]bool{"integrations_external": true, "onprem": true, "sso": true, "billy": true},
+			features:           map[string]bool{"integrations_external": true, "onprem": true, "sso": true, "billy": true, "hardening_wizard": true},
 			paddlePriceMonthly: strings.TrimSpace(os.Getenv("PADDLE_PRICE_UNLIMITED_MONTHLY")),
 			paddlePriceAnnual:  strings.TrimSpace(os.Getenv("PADDLE_PRICE_UNLIMITED_ANNUAL")),
 		},

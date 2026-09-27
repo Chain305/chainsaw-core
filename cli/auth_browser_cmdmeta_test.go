@@ -252,3 +252,18 @@ func TestEscapedURLNeverSplitsACommand(t *testing.T) {
 			"model cannot distinguish escaped from unescaped and the assertions above are vacuous")
 	}
 }
+
+// TestBrowserCommandWindowsBypassesTheShell (BUG-01 RC4): on Windows the URL
+// goes to rundll32's FileProtocolHandler as ONE argv element, byte-identical
+// to the input. No cmd.exe parses it, so `&` and `%` are inert rather than
+// escaped — there is nothing for a crafted login_url to break out of.
+func TestBrowserCommandWindowsBypassesTheShell(t *testing.T) {
+	u := realCLIAuthURL() + "&x=%25PATH%25&y=a^b"
+	cmd, args := browserCommand("windows", u)
+	if cmd != "rundll32" {
+		t.Fatalf("windows launcher = %q %q, want rundll32 (no shell)", cmd, args)
+	}
+	if len(args) != 2 || args[0] != "url.dll,FileProtocolHandler" || args[1] != u {
+		t.Fatalf("windows argv = %q, want [url.dll,FileProtocolHandler %q]", args, u)
+	}
+}

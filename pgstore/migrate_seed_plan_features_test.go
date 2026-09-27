@@ -97,3 +97,27 @@ func TestDeriveBundledFeaturesDoesNotGrantUnasked(t *testing.T) {
 		t.Error("deriveBundledFeatures mutated its argument; it must return a copy")
 	}
 }
+
+// TestSeededHardeningWizardIsProAndEnterpriseOnly pins the owner ruling
+// (BUG-5): the Hardening Wizard is sold on Pro and Enterprise (plan ids
+// "pro" and "unlimited") and never on Free. The hardening API reads this
+// key through billingapi.PlanFeature, so the seed IS the entitlement.
+func TestSeededHardeningWizardIsProAndEnterpriseOnly(t *testing.T) {
+	want := map[string]bool{"free": false, "pro": true, "unlimited": true}
+	seen := map[string]bool{}
+	for _, p := range pricingPlanSeeds() {
+		exp, ok := want[p.id]
+		if !ok {
+			continue
+		}
+		seen[p.id] = true
+		if got := deriveBundledFeatures(p.features)["hardening_wizard"]; got != exp {
+			t.Errorf("plan %q: hardening_wizard=%v, want %v", p.id, got, exp)
+		}
+	}
+	for id := range want {
+		if !seen[id] {
+			t.Errorf("plan %q is not seeded; the hardening_wizard assertion for it never ran", id)
+		}
+	}
+}
