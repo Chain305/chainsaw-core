@@ -333,3 +333,43 @@ func TestClassify_GitHub_MissingPushedAtStaysNil(t *testing.T) {
 		t.Errorf("Archived: got %v, want &false", got.Archived)
 	}
 }
+
+// The GitHub probe carries CHAINSAW_GITHUB_TOKEN; GitLab and Bitbucket never
+// receive it. Anonymous, the refresh path exhausts GitHub's 60/hour per-IP
+// budget and 62% of GitHub-hosted reports lost their repo-link status to 403s
+// (2026-09-27).
+func TestClassify_GitHubSendsTheTokenOthersDoNot(t *testing.T) {
+	t.Setenv("CHAINSAW_GITHUB_TOKEN", "ghp_test_token")
+	got := map[string]string{}
+	stub := func(name string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got[name] = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"archived": false}`))
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	gh, gl, bb := stub("github"), stub("gitlab"), stub("bitbucket")
+	c := NewRepoLivenessChecker(&http.Client{Timeout: 5 * time.Second}, nil,
+		WithAPIBaseOverride("github", gh.URL),
+		WithAPIBaseOverride("gitlab", gl.URL),
+		WithAPIBaseOverride("bitbucket", bb.URL))
+	for _, u := range []string{
+		"https://github.com/lodash/lodash",
+		"https://gitlab.com/group/project",
+		"https://bitbucket.org/team/repo",
+	} {
+		c.Classify(context.Background(), u, nil)
+	}
+	if got["github"] != "Bearer ghp_test_token" {
+		t.Errorf("GitHub Authorization = %q, want the bearer token", got["github"])
+	}
+	for _, name := range []string{"gitlab", "bitbucket"} {
+		if v, ok := got[name]; !ok {
+			t.Errorf("%s stub was never called", name)
+		} else if v != "" {
+			t.Errorf("%s received Authorization %q; the GitHub token must not leave GitHub", name, v)
+		}
+	}
+}

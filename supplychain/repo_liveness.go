@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -47,11 +48,18 @@ type RepoLivenessResult struct {
 
 // RepoLivenessChecker classifies repository URLs as ok / archived /
 // missing / ownership_mismatch / unknown. It uses a bounded outbound
-// HTTP client and intentionally never authenticates — private repos
-// correctly fall back to `unknown`.
+// HTTP client. GitLab and Bitbucket are called anonymously; GitHub carries
+// CHAINSAW_GITHUB_TOKEN when it is set (see githubToken).
 type RepoLivenessChecker struct {
 	client *http.Client
 	logger *slog.Logger
+	// githubToken is CHAINSAW_GITHUB_TOKEN, read at construction. The GitHub
+	// probe ran anonymously until 2026-09-27, on an IP whose 60/hour
+	// anonymous budget the refresh path exhausts: 5,516 of ~14,000 refresher
+	// calls to api.github.com a day came back 403, and 6,574 of 10,588
+	// GitHub-hosted reports refreshed in two days carried no repo-link status
+	// at all — the archived / missing signals silently off for 62% of them.
+	githubToken string
 	// apiBaseOverride, when non-nil, rewrites outbound API hostnames
 	// (github.com / gitlab.com / bitbucket.org) to a test URL. Tests
 	// use httptest.Server and inject a fixed base; production always
@@ -87,7 +95,11 @@ func NewRepoLivenessChecker(httpClient *http.Client, logger *slog.Logger, opts .
 	if logger == nil {
 		logger = slog.Default()
 	}
-	c := &RepoLivenessChecker{client: httpClient, logger: logger}
+	c := &RepoLivenessChecker{
+		client:      httpClient,
+		logger:      logger,
+		githubToken: strings.TrimSpace(os.Getenv("CHAINSAW_GITHUB_TOKEN")),
+	}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -232,7 +244,7 @@ func (c *RepoLivenessChecker) Classify(ctx context.Context, repoURL string, publ
 func (c *RepoLivenessChecker) classifyGitHub(ctx context.Context, owner, repo string, publisherIDs []string, now time.Time) RepoLivenessResult {
 	base := c.baseURL("github", "https://api.github.com")
 	apiURL := fmt.Sprintf("%s/repos/%s/%s", base, url.PathEscape(owner), url.PathEscape(repo))
-	body, status, err := c.fetchJSON(ctx, apiURL)
+	body, status, err := c.fetchJSON(ctx, apiURL, c.githubToken)
 	if err != nil {
 		if isDNSError(err) {
 			return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
@@ -277,7 +289,7 @@ func (c *RepoLivenessChecker) classifyGitLab(ctx context.Context, host, owner, r
 	projectPath := url.PathEscape(owner + "/" + repo)
 	base := c.baseURL("gitlab", "https://gitlab.com")
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s", base, projectPath)
-	body, status, err := c.fetchJSON(ctx, apiURL)
+	body, status, err := c.fetchJSON(ctx, apiURL, "")
 	if err != nil {
 		if isDNSError(err) {
 			return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
@@ -317,7 +329,7 @@ func (c *RepoLivenessChecker) classifyBitbucket(ctx context.Context, owner, repo
 	base := c.baseURL("bitbucket", "https://api.bitbucket.org")
 	apiURL := fmt.Sprintf("%s/2.0/repositories/%s/%s",
 		base, url.PathEscape(owner), url.PathEscape(repo))
-	_, status, err := c.fetchJSON(ctx, apiURL)
+	_, status, err := c.fetchJSON(ctx, apiURL, "")
 	if err != nil {
 		if isDNSError(err) {
 			return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
@@ -351,13 +363,18 @@ func (c *RepoLivenessChecker) baseURL(provider, production string) string {
 // fetchJSON performs a GET and parses the body as JSON. It returns the
 // decoded body, the HTTP status, and any transport error. Non-2xx
 // statuses are NOT returned as errors — callers branch on status.
-func (c *RepoLivenessChecker) fetchJSON(ctx context.Context, u string) (map[string]any, int, error) {
+// fetchJSON GETs u. bearer, when non-empty, is sent as the Authorization
+// header; only the GitHub probe passes one.
+func (c *RepoLivenessChecker) fetchJSON(ctx context.Context, u, bearer string) (map[string]any, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "chainsaw-repo-liveness/1.0")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, 0, err
