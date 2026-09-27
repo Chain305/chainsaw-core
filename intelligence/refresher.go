@@ -123,8 +123,9 @@ type RefresherConfig struct {
 	// operator opts into that rather than discovering it.
 	StaleReportRefreshEnabled bool
 
-	// StaleReportMaxRows caps how many stale reports one tick refreshes.
-	// Zero means DefaultStaleReportMaxRows.
+	// StaleReportMaxRows caps how many stale reports one tick refreshes,
+	// exactly. Zero means adaptive: the backlog spread over one MaxStaleness
+	// window, between DefaultStaleReportMaxRows and 4x it (staleReportBudget).
 	StaleReportMaxRows int
 
 	// StaleReportSource overrides the store for the stale-report sweep, so the

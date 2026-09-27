@@ -34,10 +34,13 @@ package intelligence
 // rate-limit us, so the polarity is deliberately inverted relative to
 // RecomputeDisabled and CoverageRecomputeDisabled.
 //
-// PACING. StaleReportMaxRows bounds one tick (default 200). The backlog drains
-// over successive ticks; at the default hourly interval 11,754 rows take about
-// two and a half days, after which the sweep only sees rows that have genuinely
-// aged past the bound.
+// PACING. An explicit StaleReportMaxRows is an exact per-tick cap. Unset, the
+// budget adapts (staleReportBudget): enough to clear the sampled backlog within
+// one MaxStaleness window, never below DefaultStaleReportMaxRows and never
+// above staleReportBudgetCeilingFactor times it. A fixed 200 could not absorb
+// a cohort of reports aging out together: measured 2026-09-25/26, the backlog
+// grew 4,605 -> 7,392 in a day at exactly 200 rows per hourly tick, while
+// each tick finished in ~9 minutes of its hour.
 
 import (
 	"context"
@@ -52,6 +55,13 @@ import (
 // expected to be bursty, whereas this one is continuous and competes with the
 // primary walk for the same upstream budget.
 const DefaultStaleReportMaxRows = 200
+
+// staleReportBudgetCeilingFactor bounds the adaptive budget at 4x the default
+// (800 rows per tick): at the measured ~8.7 upstream requests per refreshed
+// coordinate, ~7,000 requests an hour, about 2.4x the refresher's measured
+// 24h average. The ceiling exists because the budget is all that stands
+// between a 15,000-row backlog and one tick fetching all of it.
+const staleReportBudgetCeilingFactor = 4
 
 // RefreshReasonStaleReport is stamped on Observation.RefreshReason for every
 // Report this sweep produces, so a row can be attributed to it rather than to
@@ -154,10 +164,7 @@ func (r *Refresher) refreshStaleReportsOnce(ctx context.Context) StaleReportSumm
 		r.cfg.Logger.Warn("intelligence stale-report backlog count failed", "error", err)
 	}
 
-	budget := r.cfg.StaleReportMaxRows
-	if budget <= 0 {
-		budget = DefaultStaleReportMaxRows
-	}
+	budget := r.staleReportBudget(summary.Backlog)
 
 	var examined, refreshed, failed atomic.Int64
 	sem := make(chan struct{}, r.cfg.Concurrency)
@@ -227,6 +234,24 @@ walk:
 			"truncated", summary.Truncated)
 	}
 	return summary
+}
+
+// staleReportBudget is how many rows one sweep may refresh. An operator's
+// StaleReportMaxRows is honoured exactly. Otherwise it is the backlog spread
+// over the ticks in one MaxStaleness window, clamped to
+// [DefaultStaleReportMaxRows, DefaultStaleReportMaxRows*ceilingFactor]: quiet
+// ticks cost what they always did, and a wave drains within a day instead of
+// piling up behind a fixed 200.
+func (r *Refresher) staleReportBudget(backlog int) int {
+	if r.cfg.StaleReportMaxRows > 0 {
+		return r.cfg.StaleReportMaxRows
+	}
+	ticks := 1
+	if r.cfg.Interval > 0 && r.cfg.MaxStaleness > r.cfg.Interval {
+		ticks = int(r.cfg.MaxStaleness / r.cfg.Interval)
+	}
+	need := (backlog + ticks - 1) / ticks
+	return min(max(need, DefaultStaleReportMaxRows), DefaultStaleReportMaxRows*staleReportBudgetCeilingFactor)
 }
 
 // staleReportScope is the population one sweep draws from. The artifact half is

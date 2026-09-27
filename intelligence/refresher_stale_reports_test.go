@@ -491,3 +491,33 @@ func TestStaleReportArtifactHalfNeedsAFetcherAndArtifactEnabled(t *testing.T) {
 		})
 	}
 }
+
+// Unset, the budget follows the backlog. A fixed 200 let a cohort of reports
+// aging out together grow the backlog 4,605 -> 7,392 in a day (2026-09-25/26)
+// while every tick finished in ~9 minutes of its hour.
+func TestStaleReportSweepBudgetAdaptsToTheBacklog(t *testing.T) {
+	cases := []struct {
+		name    string
+		backlog int
+		want    int
+	}{
+		{"quiet tick keeps the default floor", 900, DefaultStaleReportMaxRows},
+		{"a wave drains within one 24h window", 7392, 308},
+		{"a huge backlog stops at the ceiling", 50000, DefaultStaleReportMaxRows * staleReportBudgetCeilingFactor},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetStaleReportMetrics()
+			t.Cleanup(resetStaleReportMetrics)
+
+			src := &fakeStaleSource{rows: staleRows(tc.backlog)}
+			ref, svc := staleSweepRefresher(t, src, true, 0)
+			summary := ref.RunOnce(context.Background())
+
+			if summary.StaleReports.Examined != tc.want || len(svc.seen) != tc.want {
+				t.Errorf("backlog %d: examined %d, scanned %d, want %d",
+					tc.backlog, summary.StaleReports.Examined, len(svc.seen), tc.want)
+			}
+		})
+	}
+}
