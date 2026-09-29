@@ -152,10 +152,12 @@ var settingsBackedFields = map[string]string{
 	"Repositories[].APT.Label":                "repositories.format_options",
 	"Repositories[].APT.Codename":             "repositories.format_options",
 	"Repositories[].APT.Description":          "repositories.format_options",
+	"Repositories[].APT.SigningKey":           "repositories.format_options",
 	"Repositories[].Yum.Origin":               "repositories.format_options",
 	"Repositories[].Yum.Label":                "repositories.format_options",
 	"Repositories[].Yum.Description":          "repositories.format_options",
 	"Repositories[].Yum.Revision":             "repositories.format_options",
+	"Repositories[].Yum.SigningKey":           "repositories.format_options",
 }
 
 // ephemeralFields names the Config leaves that deliberately do NOT

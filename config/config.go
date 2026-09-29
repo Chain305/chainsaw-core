@@ -626,6 +626,12 @@ type APTRepoConfig struct {
 	Label         string   `yaml:"label"`
 	Codename      string   `yaml:"codename"`
 	Description   string   `yaml:"description"`
+	// SigningKey is the signer reference that signs this repository's
+	// index (InRelease, Release.gpg) with OpenPGP: a KMS URI
+	// (awskms://, gcpkms://, azurekms://, hashivault://) or a path to a
+	// PEM private key the operator mounts. Empty publishes an unsigned
+	// index, as before. It is a reference, never key material.
+	SigningKey string `yaml:"signing_key"`
 }
 
 // YumRepoConfig is the YAML schema for a hosted-yum/dnf repository's
@@ -637,6 +643,10 @@ type YumRepoConfig struct {
 	Label       string `yaml:"label"`
 	Description string `yaml:"description"`
 	Revision    string `yaml:"revision"`
+	// SigningKey signs repodata/repomd.xml (repomd.xml.asc) for clients
+	// running repo_gpgcheck=1. Same reference forms as
+	// APTRepoConfig.SigningKey; empty publishes unsigned repodata.
+	SigningKey string `yaml:"signing_key"`
 }
 
 // RemoteConfig defines the upstream remote repository.

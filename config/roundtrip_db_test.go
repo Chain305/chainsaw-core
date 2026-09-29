@@ -119,6 +119,7 @@ repositories:
       architectures: [amd64, arm64]
       origin: Example Corp
       label: internal
+      signing_key: /etc/chainsaw/keys/apt-index.pem
   - name: internal-yum
     format: yum
     type: hosted
@@ -127,6 +128,7 @@ repositories:
       label: rpm-internal
       description: internal rpms
       revision: "7"
+      signing_key: awskms:///arn:aws:kms:eu-west-1:1:key/yum
 `
 	cfg := loadYAML(t, yaml)
 
@@ -237,14 +239,18 @@ repositories:
 	if apt.APT == nil {
 		t.Fatalf("repositories[].apt did not survive: a hosted-apt repo silently reverts to apt.Default()")
 	}
-	if strings.Join(apt.APT.Components, ",") != "main,contrib" || apt.APT.Origin != "Example Corp" {
+	// signing_key is the Wave A2 index signer: losing it on boot would turn
+	// a signing repository back into an unsigned one without a word.
+	if strings.Join(apt.APT.Components, ",") != "main,contrib" || apt.APT.Origin != "Example Corp" ||
+		apt.APT.SigningKey != "/etc/chainsaw/keys/apt-index.pem" {
 		t.Errorf("repositories[].apt lost content: %+v", *apt.APT)
 	}
 	yum, ok := byName["internal-yum"]
 	if !ok {
 		t.Fatalf("internal-yum repository missing after round trip")
 	}
-	if yum.Yum == nil || yum.Yum.Revision != "7" || yum.Yum.Label != "rpm-internal" {
+	if yum.Yum == nil || yum.Yum.Revision != "7" || yum.Yum.Label != "rpm-internal" ||
+		yum.Yum.SigningKey != "awskms:///arn:aws:kms:eu-west-1:1:key/yum" {
 		t.Errorf("repositories[].yum did not survive: %+v", yum.Yum)
 	}
 }
