@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 
@@ -278,7 +279,11 @@ func (c *ociChecker) checkGitHubAttestation(ctx context.Context, repo, digest st
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/attestations/%s",
 		owner, image, digest)
 
-	body, status, err := fetchBytes(ctx, c.client, apiURL, 5<<20)
+	// Authenticated when CHAINSAW_GITHUB_TOKEN is set. Anonymous, this was the
+	// last GitHub call on the refresh path without the token, drawing on the
+	// server IP's 60/hour budget that other anonymous callers also spend.
+	body, status, err := fetchBytesBearer(ctx, c.client, apiURL, 5<<20,
+		strings.TrimSpace(os.Getenv("CHAINSAW_GITHUB_TOKEN")))
 	if err != nil {
 		if isNotFound(status) {
 			return Result{Status: StatusMissing, Ecosystem: "docker"}

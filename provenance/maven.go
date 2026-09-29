@@ -351,9 +351,17 @@ func isNotFound(status int) bool {
 }
 
 func fetchBytes(ctx context.Context, client *http.Client, url string, limit int64) ([]byte, int, error) {
+	return fetchBytesBearer(ctx, client, url, limit, "")
+}
+
+// fetchBytesBearer is fetchBytes with an optional bearer token.
+func fetchBytesBearer(ctx context.Context, client *http.Client, url string, limit int64, bearer string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, 0, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

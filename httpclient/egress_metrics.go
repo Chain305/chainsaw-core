@@ -109,7 +109,15 @@ func SetEgressRecorder(f func(host, caller string, outcome EgressOutcome)) {
 type countingTransport struct{ next http.RoundTripper }
 
 func (t countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// A paused GitHub pair is answered here, before the network and before
+	// the egress count: nothing went upstream (github_backoff.go).
+	if paused := githubPausedResponse(req); paused != nil {
+		return paused, nil
+	}
 	resp, err := t.next.RoundTrip(req)
+	if err == nil {
+		observeGitHubResponse(req, resp)
+	}
 
 	fp := egressRecorder.Load()
 	if fp == nil {

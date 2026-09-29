@@ -1770,6 +1770,22 @@ func (s *Store) migrateSchema() error {
 			consumed_at TIMESTAMPTZ
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cli_exchange_codes_expires_at ON cli_exchange_codes(expires_at)`,
+		// cli_login_links lets the web UI recover a CLI login link that
+		// arrived truncated. cmd.exe cuts `cmd /c start <url>` at the first
+		// `&`, so Windows CLIs before v0.22.52 open /login?cli=<nonce> with
+		// the port and host gone. /api/auth/cli/init stores the full query
+		// here and GET /api/auth/cli/link/<nonce> returns it.
+		//
+		// Keyed by sha256(nonce), never the nonce: the nonce is half of what
+		// redeems a cli_exchange_codes row. Rows live as long as the CLI
+		// waits (5 minutes) and are swept with the exchange codes.
+		`CREATE TABLE IF NOT EXISTS cli_login_links (
+			nonce_hash TEXT PRIMARY KEY,
+			query TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cli_login_links_expires_at ON cli_login_links(expires_at)`,
 		// Repo→Team routing (opt-in). Default OFF: an empty table means
 		// the violation pipeline records team='' exactly as before. The
 		// admin maintains rows via the /api/repo-team-mappings CRUD
