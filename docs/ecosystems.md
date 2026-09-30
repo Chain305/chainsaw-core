@@ -63,8 +63,10 @@ This table is compiled into the binary
 prose, and a drift test asserts it matches the published matrix
 (`TestEcosystemsDocMatchesSupportMatrix` in `policy/proxy_matrix_test.go` reads
 this file directly and recounts every cell; `TestSupportMatrixMatchesMarkdown`
-does the same for [`docs/POLICY_PROXY_MATRIX.md`](../../docs/POLICY_PROXY_MATRIX.md)). It is queryable
-at `GET /api/policies/support-matrix`, the UI warns inline when you build a rule
+does the same for the full per-condition matrix, which is kept in the private
+monorepo and so skips here). The full matrix is queryable
+at `GET /api/policies/support-matrix` (`chainsaw policy preflight` prints it),
+the UI warns inline when you build a rule
 on an unsupported condition, and at evaluation time a rule skipped for this
 reason emits a `policy.rule.skipped` audit event — so an inert rule is visible
 rather than silent.
