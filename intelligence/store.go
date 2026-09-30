@@ -30,21 +30,28 @@ import (
 // v0.22.53, then four-plus 1h cycles on v0.22.55, with 361 foreign-read
 // (org, coordinate) pairs standing. The decision is NOT to partition; a
 // non-zero reading reopens it (docs/ARCHIVE.md#plan-intel-cache-tenancy has
-// the decision gate). What follows is still true of the mechanics — the
-// paragraph above states the INTENT, not the whole behaviour. Two values
-// written to this table are tenant-derived, so the row is not strictly
-// universal:
+// the decision gate). What follows records the mechanics — the paragraph
+// above states the INTENT, not the whole behaviour. Two values
+// on this row WERE tenant-derived before the federation change 5b997392
+// (2026-09-13); that change removed the mechanism for both except where
+// noted, so the row is now universal apart from the docker residual below:
 //
 //  1. Vulnerabilities. cveProvider (provider_cve.go) reads the ORG-SCOPED
-//     vulnerability_metadata table — metadata/store.go queries
-//     `WHERE org_id=? AND repository=? AND package=? AND version=?` — and
-//     the resulting VulnSection is merged into the report this Upsert
-//     persists. mergeReportPayload then lists report.vulnerabilities as a
-//     PRESERVED subtree, so the value is sticky.
-//  2. SupplyChain.TrustScore. scanner.go calls
-//     ComputeTrustScoreForOrg(report, req.OrgID), which applies the
-//     REQUESTING org's private risk-weight overrides, and the merge rules
-//     below always take TrustScore from the incoming report.
+//     vulnerability_metadata table, and mergeReportPayload lists
+//     report.vulnerabilities as a PRESERVED subtree, so anything it writes
+//     here is sticky. Since 5b997392 the provider runs on the WRITE path
+//     only for scanner-advised ecosystems (docker, advisory_coverage.go),
+//     where Trivy is the only vulnerability source; there the scanning
+//     org's rows still reach this table — an accepted, documented residual.
+//     For every other ecosystem OSV is the persisted source and each
+//     reader's own Trivy rows are overlaid at READ time by personalize(),
+//     which never mutates the shared row. That overlay is scoped to the
+//     coordinate's ecosystem (Wave I, I-1), so it cannot cross registries.
+//  2. SupplyChain.TrustScore. Before 5b997392, scanner.go called
+//     ComputeTrustScoreForOrg(report, req.OrgID) and persisted a score
+//     tuned by the scanning org's private risk weights. It now persists
+//     ComputeTrustScore(report) — no org weights — and the reader's
+//     overrides are applied at read time in personalize().
 //
 // Severity, stated deliberately and not inflated: what crosses the tenant
 // boundary is a verdict about a PUBLIC package coordinate derived from a

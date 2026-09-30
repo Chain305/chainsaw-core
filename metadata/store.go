@@ -1149,7 +1149,8 @@ func (s *Store) GetVulnerabilityMetadata(repository, packageName, version string
 
 // GetVulnerabilityMetadataAnyRepo retrieves this org's vulnerability
 // metadata for a coordinate WITHOUT requiring the proxy repository name,
-// returning the most recently scanned row when several repos carry one.
+// returning the most recently scanned row in the requested ecosystem when
+// several repos carry one.
 //
 // It exists for the federated read path. GetVulnerabilityMetadata needs the
 // full PK including `repository`, but the federated overlay
@@ -1159,62 +1160,35 @@ func (s *Store) GetVulnerabilityMetadata(repository, packageName, version string
 // events, lockfile scan) and those callers would lose their org's private
 // Trivy findings.
 //
-// Ignoring `repository` is sound rather than merely convenient: the row
+// Ignoring `repository` is sound; ignoring the ECOSYSTEM is not. The row
 // answers "does this org know of vulnerabilities in this package version",
-// and that fact does not change with which proxy repo the artifact was
-// pulled through. Still scoped by org_id, so it is not a tenancy widening.
-func (s *Store) GetVulnerabilityMetadataAnyRepo(packageName, version string) (VulnerabilityMetadata, error) {
+// which does not change with the proxy repo it was pulled through — but a
+// pip `foo@1.0.0` and an npm `foo@1.0.0` are different packages, and an
+// ecosystem-blind read overlaid one's Trivy CVEs onto the other (Wave I,
+// I-1). So the ecosystem is scoped exactly as SearchVulnerabilityInEcosystem
+// scopes it: join repositories for the backing format, and drop a row only
+// on POSITIVE evidence of a different ecosystem. A row whose repository was
+// deleted, or whose format this build cannot map, is KEPT — disclosing a CVE
+// from an unresolvable row beats silently hiding one.
+//
+// The ecosystem test is row-wise in Go (the format→ecosystem folding is not
+// a plain SQL equality), so "latest wins" is applied as ORDER BY scanned_at
+// DESC and the first matching row, rather than as a SQL LIMIT 1 that would
+// run before the filter. An empty ecosystem keeps the historical
+// ecosystem-blind lookup. Still scoped by org_id throughout, so this is not
+// a tenancy widening.
+func (s *Store) GetVulnerabilityMetadataAnyRepo(packageName, version, ecosystem string) (VulnerabilityMetadata, error) {
 	if s == nil || s.sql == nil {
 		return VulnerabilityMetadata{}, ErrUnavailable
 	}
-	orgID := tenancy.NormalizeOrgID(s.orgID)
-
-	var (
-		meta                      VulnerabilityMetadata
-		isVulnerable              int
-		cvssScore, epssScore      sql.NullFloat64
-		cvesJSON, scannerDBDigest sql.NullString
-		cveDetailsJSON            sql.NullString
-		scannedAt                 sql.NullTime
-	)
-
-	row := s.sql.DB().QueryRow(`SELECT repository, package, version, is_vulnerable, cvss_score, epss_score,
-		cves, cve_details, scanner_db_digest, scanned_at, created_at, updated_at
-		FROM vulnerability_metadata WHERE org_id=? AND package=? AND version=?
-		ORDER BY scanned_at IS NULL, scanned_at DESC LIMIT 1`,
-		orgID, packageName, version)
-
-	err := row.Scan(&meta.Repository, &meta.Package, &meta.Version, &isVulnerable, &cvssScore, &epssScore,
-		&cvesJSON, &cveDetailsJSON, &scannerDBDigest, &scannedAt, &meta.CreatedAt, &meta.UpdatedAt)
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return VulnerabilityMetadata{}, ErrNotFound
-	}
+	rows, err := s.searchVulnerability(packageName, version, ecosystem, true)
 	if err != nil {
 		return VulnerabilityMetadata{}, err
 	}
-
-	meta.IsVulnerable = isVulnerable == 1
-	if cvssScore.Valid {
-		meta.CVSSScore = cvssScore.Float64
+	if len(rows) == 0 {
+		return VulnerabilityMetadata{}, ErrNotFound
 	}
-	if epssScore.Valid {
-		meta.EPSSScore = epssScore.Float64
-	}
-	if cvesJSON.Valid && cvesJSON.String != "" {
-		_ = json.Unmarshal([]byte(cvesJSON.String), &meta.CVEs)
-	}
-	if cveDetailsJSON.Valid && cveDetailsJSON.String != "" {
-		_ = json.Unmarshal([]byte(cveDetailsJSON.String), &meta.CVEDetails)
-	}
-	if scannerDBDigest.Valid {
-		meta.ScannerDBDigest = scannerDBDigest.String
-	}
-	if scannedAt.Valid {
-		meta.ScannedAt = scannedAt.Time
-	}
-
-	return meta, nil
+	return rows[0], nil
 }
 
 // SetVulnerabilityMetadata stores or updates vulnerability metadata.
@@ -1353,11 +1327,33 @@ func (s *Store) SearchVulnerabilityInEcosystem(packageName, version, ecosystem s
 	if s == nil || s.sql == nil {
 		return nil, ErrUnavailable
 	}
+	return s.searchVulnerability(packageName, version, ecosystem, false)
+}
+
+// anyRepoLatestOrder is appended to the ecosystem query for
+// GetVulnerabilityMetadataAnyRepo: most recently scanned first, NULL last.
+const anyRepoLatestOrder = `
+		ORDER BY vm.scanned_at IS NULL, vm.scanned_at DESC`
+
+// searchVulnerability is the shared body of SearchVulnerabilityInEcosystem
+// and GetVulnerabilityMetadataAnyRepo. latestOnly orders newest-first and
+// stops at the first row that survives the ecosystem filter.
+func (s *Store) searchVulnerability(packageName, version, ecosystem string, latestOnly bool) ([]VulnerabilityMetadata, error) {
 	orgID := tenancy.NormalizeOrgID(s.orgID)
 	ecosystem = strings.TrimSpace(ecosystem)
 	filterByEcosystem := ecosystem != ""
 
-	rows, err := s.sql.DB().Query(searchVulnerabilityQuery(ecosystem), orgID, packageName, version)
+	query := searchVulnerabilityQuery(ecosystem)
+	if latestOnly {
+		if filterByEcosystem {
+			query += anyRepoLatestOrder
+		} else {
+			// Historical ecosystem-blind AnyRepo lookup, unchanged.
+			query += `
+		ORDER BY scanned_at IS NULL, scanned_at DESC LIMIT 1`
+		}
+	}
+	rows, err := s.sql.DB().Query(query, orgID, packageName, version)
 	if err != nil {
 		return nil, err
 	}
@@ -1405,6 +1401,9 @@ func (s *Store) SearchVulnerabilityInEcosystem(packageName, version, ecosystem s
 			meta.ScannedAt = scannedAt.Time
 		}
 		results = append(results, meta)
+		if latestOnly {
+			break
+		}
 	}
 	return results, rows.Err()
 }

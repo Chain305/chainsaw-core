@@ -464,6 +464,22 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			At:       now,
 		})
 	}
+	if req.Artifact == nil && !req.ArtifactTooLarge && req.ArtifactFetchErr != nil {
+		code := WarnArtifactFetchFailed
+		if errors.Is(req.ArtifactFetchErr, ErrArtifactUpstreamRefused) {
+			code = WarnArtifactUpstreamRefused
+		}
+		msg := req.ArtifactFetchErr.Error()
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		report.Observation.Warnings = append(report.Observation.Warnings, Warning{
+			Provider: "artifact",
+			Code:     code,
+			Message:  "artifact fetch failed; byte providers did not run: " + msg,
+			At:       now,
+		})
+	}
 
 	var phase1 []Provider
 	// postMergeTiers[N] holds providers whose Tier() == N+3 (so index 0

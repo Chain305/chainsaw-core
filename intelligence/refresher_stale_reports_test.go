@@ -8,7 +8,9 @@ package intelligence
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -343,8 +345,44 @@ func TestStaleReportSweepMarksAnOversizeArtifact(t *testing.T) {
 		if got := svc.seen[0].ArtifactTooLarge; got != tc.want {
 			t.Errorf("%v: ArtifactTooLarge=%v, want %v", tc.err, got, tc.want)
 		}
+		// Every failure reaches the report, not only the over-cap one: a
+		// DEBUG-only failure is indistinguishable from needs_artifact (S-6).
+		if got := svc.seen[0].ArtifactFetchErr; got != tc.err {
+			t.Errorf("%v: ArtifactFetchErr=%v, want the fetch error", tc.err, got)
+		}
 	}
 	resetStaleReportMetrics()
+}
+
+// A fetch failure is recorded as its own warning, a registry refusal apart
+// from a broken fetch, and never as a clean scan.
+func TestScanRecordsArtifactFetchFailure(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{errors.New("registry returned 307 for https://huggingface.co/x"), WarnArtifactFetchFailed},
+		{fmt.Errorf("gated: %w", ErrArtifactUpstreamRefused), WarnArtifactUpstreamRefused},
+	} {
+		svc := New(Config{})
+		rep, err := svc.Scan(context.Background(), Request{
+			Key:              Key{Ecosystem: "huggingface", Package: "acme/model", Version: "main"},
+			ArtifactFetchErr: tc.err,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.Scan.Performed {
+			t.Errorf("%v: performed=true after a failed fetch", tc.err)
+		}
+		var codes []string
+		for _, w := range rep.Observation.Warnings {
+			codes = append(codes, w.Code)
+		}
+		if !slices.Contains(codes, tc.want) {
+			t.Errorf("%v: warnings %v, want %s", tc.err, codes, tc.want)
+		}
+	}
 }
 
 // ArtifactEnabled=false must skip the download entirely — it is the same knob

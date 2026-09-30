@@ -19,6 +19,9 @@ func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	dsn := os.Getenv("CHAINSAW_DATABASE_URL")
 	if dsn == "" {
+		if os.Getenv("CHAINSAW_TEST_REQUIRE_DB") != "" {
+			t.Fatal("CHAINSAW_TEST_REQUIRE_DB is set but CHAINSAW_DATABASE_URL is empty")
+		}
 		t.Skip("CHAINSAW_DATABASE_URL not set; skipping metadata DB test")
 	}
 	pg, err := pgstore.Open(dsn)

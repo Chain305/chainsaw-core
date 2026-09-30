@@ -144,11 +144,24 @@ type Request struct {
 	// as WarnArtifactTooLarge so the report says why the byte providers did
 	// not run, instead of a needs_artifact that reads as "nobody tried".
 	ArtifactTooLarge bool
+
+	// ArtifactFetchErr is the caller's failed attempt to fetch the bytes.
+	// Scan records it as WarnArtifactUpstreamRefused or
+	// WarnArtifactFetchFailed (with the error text) so a fetch that was
+	// tried and failed is distinguishable from needs_artifact on the stored
+	// report. Ignored when Artifact is set or ArtifactTooLarge already
+	// explains the absence.
+	ArtifactFetchErr error
 }
 
 // ErrArtifactTooLarge is wrapped by artifact fetchers that refuse an artifact
 // over their size cap. Callers test it with errors.Is.
 var ErrArtifactTooLarge = errors.New("artifact exceeds the fetch size cap")
+
+// ErrArtifactUpstreamRefused is matched (errors.Is) by fetch errors where the
+// registry refused on purpose -- 401, 403, 404, 410 -- as opposed to a fetch
+// that broke.
+var ErrArtifactUpstreamRefused = errors.New("registry refused the artifact")
 
 // ArtifactHandle gives Tier 2 providers (install scripts, hidden unicode,
 // checksum extraction) access to the bytes without pulling them into the

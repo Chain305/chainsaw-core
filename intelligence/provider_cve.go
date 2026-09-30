@@ -130,13 +130,15 @@ func (p *cveProvider) lookup(req Request) (PartialReport, error) {
 	}
 	// Service.Get is addressed by (orgID, Key) with no RepoName, so the
 	// federated read path cannot supply the full PK. Fall back to the
-	// repo-agnostic lookup there — same org scope, most recent row.
+	// repo-agnostic lookup there — same org scope, most recent row, but
+	// scoped to this coordinate's ecosystem so a pip row's CVEs are never
+	// overlaid onto the npm package of the same name (Wave I, I-1).
 	var (
 		row metadata.VulnerabilityMetadata
 		err error
 	)
 	if req.RepoName == "" {
-		row, err = orgStore.GetVulnerabilityMetadataAnyRepo(req.Key.Package, req.Key.Version)
+		row, err = orgStore.GetVulnerabilityMetadataAnyRepo(req.Key.Package, req.Key.Version, req.Key.Ecosystem)
 	} else {
 		row, err = orgStore.GetVulnerabilityMetadata(req.RepoName, req.Key.Package, req.Key.Version)
 	}

@@ -51,6 +51,25 @@ const WarnArtifactTruncated = "artifact_truncated"
 // it: the size of a published version does not change.
 const WarnArtifactTooLarge = "artifact_too_large"
 
+// WarnArtifactFetchFailed and WarnArtifactUpstreamRefused (provider
+// "artifact") mark a report whose caller tried to fetch the bytes and could
+// not, for a reason other than the size cap: a redirect the policy refused, a
+// failed range read, a transport error. Before these existed the failure was
+// logged at DEBUG only, so on the stored report it looked exactly like
+// needs_artifact ("nobody tried") -- which is how 0 of 31 huggingface reports
+// being byte-scanned went unexplained (docs/PLANS_INTELLIGENCE.md S-6).
+//
+// UpstreamRefused is the registry saying no on purpose (401 gated, 403, 404,
+// 410): correct behaviour, not a defect, and kept apart so a count of real
+// fetch failures is not inflated by gated models. Like artifact_too_large
+// they sit beside the needs_artifact warnings, so coverage is unchanged, and
+// unlike it they do NOT exclude the row from the sweep's retry: a failed fetch
+// can succeed next time.
+const (
+	WarnArtifactFetchFailed     = "artifact_fetch_failed"
+	WarnArtifactUpstreamRefused = "artifact_upstream_refused"
+)
+
 // artifactTruncationMessage is the operator-facing sentence. Deliberately says
 // what was NOT done rather than naming a risk — the provider found nothing and
 // this explains why that may mean nothing.

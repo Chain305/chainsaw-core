@@ -327,6 +327,7 @@ func (r *Refresher) refreshStaleReportRow(ctx context.Context, row StaleReportRo
 			// Recorded on the report, and it takes the row out of the
 			// never-scanned half of the scope (StaleReportScope).
 			req.ArtifactTooLarge = errors.Is(err, ErrArtifactTooLarge)
+			req.ArtifactFetchErr = err
 			r.cfg.Logger.Debug("stale-report artifact fetch failed",
 				"ecosystem", row.Ecosystem, "package", row.Package,
 				"version", row.Version, "error", err)
