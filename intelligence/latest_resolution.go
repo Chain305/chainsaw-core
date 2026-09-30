@@ -25,7 +25,7 @@ package intelligence
 // Version (internal/server/admin_intelligence.go) answers from the
 // intelligence cache via a SearchQuery that carries NO OrgID while the
 // Get it feeds does — a filed tenancy asymmetry (L-02,
-// docs/PLANS_INTELLIGENCE.md#plan-intel-cache-tenancy) that is explicitly not fixable in
+// docs/ARCHIVE.md#plan-intel-cache-tenancy) that is explicitly not fixable in
 // isolation because intelligence_reports has no org_id column at all.
 // Reaching it from a public surface would widen that asymmetry's blast
 // radius. The resolvers here are pure outbound registry reads: no DB, no

@@ -24,9 +24,16 @@ import (
 // query. See internal/pgstore/store.go for the migration that strips
 // org_id from the table PKs.
 //
-// KNOWN DEFECT (L-02) — the paragraph above states the INTENT, not the
-// current behaviour. Two values written to this table are tenant-derived
-// today, so the row is not in fact universal:
+// DOCUMENTED CONSTRAINT (L-02) — measured and closed 2026-09-29. Two
+// evidential production readings of the cross-org overwrite counter
+// (GET /api/admin/intel-tenancy) were both 0: one full 24h refresh cycle on
+// v0.22.53, then four-plus 1h cycles on v0.22.55, with 361 foreign-read
+// (org, coordinate) pairs standing. The decision is NOT to partition; a
+// non-zero reading reopens it (docs/ARCHIVE.md#plan-intel-cache-tenancy has
+// the decision gate). What follows is still true of the mechanics — the
+// paragraph above states the INTENT, not the whole behaviour. Two values
+// written to this table are tenant-derived, so the row is not strictly
+// universal:
 //
 //  1. Vulnerabilities. cveProvider (provider_cve.go) reads the ORG-SCOPED
 //     vulnerability_metadata table — metadata/store.go queries
@@ -52,7 +59,8 @@ import (
 // scanner payload can move what other tenants see.
 //
 // Both behaviours are pinned by characterization tests in
-// store_tenancy_test.go; invert those assertions when the fix lands.
+// store_tenancy_test.go; if the plan is ever reopened and a fix lands,
+// invert those assertions.
 //
 // The remedy is NOT to strip the vuln section from this row and resolve it
 // per-org at read time, and it is NOT to persist an OSV-only baseline
