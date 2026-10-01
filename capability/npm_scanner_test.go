@@ -324,7 +324,8 @@ func TestAnalyzeNPMEndToEnd(t *testing.T) {
 func TestAnalyzeUnsupportedEcosystem(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	report, err := capability.Analyze(dir, "pip")
+	// docker has no capability scanner; pip gained one on 2026-09-30.
+	report, err := capability.Analyze(dir, "docker")
 	if err != nil {
 		t.Fatalf("Analyze returned unexpected error: %v", err)
 	}
@@ -332,6 +333,6 @@ func TestAnalyzeUnsupportedEcosystem(t *testing.T) {
 		t.Fatal("Analyze returned nil report")
 	}
 	if !report.Unsupported {
-		t.Error("pip should be Unsupported in v1")
+		t.Error("docker should be Unsupported")
 	}
 }

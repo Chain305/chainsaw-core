@@ -63,6 +63,14 @@ type Input struct {
 	TyposquatSimilarTo   string
 
 	PublisherChanged bool
+	// PublisherChangeEvaluated and VersionAnomalyEvaluated record that the
+	// comparison RAN, whatever it found. PublisherChanged=false alone cannot
+	// tell "same publisher" from "never compared", and that ambiguity hid a
+	// bug that capped lodash at 40: the corpus harness never ran the
+	// comparison, and every row read as "no change". Measurement only; no
+	// signal reads these.
+	PublisherChangeEvaluated bool
+	VersionAnomalyEvaluated  bool
 
 	HasInstallScript           bool
 	InstallScriptFetchesRemote bool
@@ -256,6 +264,15 @@ type Input struct {
 	// PyPI / Cargo yanked bool).
 	DeprecatedByMaintainer bool
 	DeprecationReason      string
+	// RelocatedTo is the Maven relocation target ("group:artifact[:version]")
+	// the POM declares; empty when the coordinate is not relocated.
+	RelocatedTo string
+	// VersionPublishedAt / NewerVersion / NewerVersionAt feed
+	// maint.outdated_version: this version's publish date, and the newest
+	// non-prerelease version published after it (empty when none).
+	VersionPublishedAt *time.Time
+	NewerVersion       string
+	NewerVersionAt     *time.Time
 	// ShrinkwrapPresent is true when the npm tarball ships a
 	// npm-shrinkwrap.json — an npm-specific lockfile that bypasses the
 	// consumer's review path.
@@ -283,6 +300,12 @@ type Input struct {
 	// the maint.unpopular_package signal; nil leaves the signal dormant so
 	// sparse data never produces a false positive.
 	WeeklyDownloads *int
+	// Downloads is the registry download count over DownloadsWindow
+	// ("week", "month", "90d" or "total"; see intelligence.DownloadCount).
+	// Same nil / -1 / n ladder. When set it is what maint.unpopular_package
+	// reads; WeeklyDownloads is the fallback for reports written before it.
+	Downloads       *int
+	DownloadsWindow string
 
 	// --- AI artifact ---
 	// ArtifactSubtype mirrors PackageCoordinate.Subtype. Empty for traditional
@@ -403,6 +426,16 @@ type Input struct {
 
 	CapDynamicEval         bool
 	CapDynamicEvalEvidence []CapEvidenceEntry
+
+	// CapURLStrings is set when source files (outside README/LICENSE and
+	// manifests) contain http(s) URLs. The count in CapCounts is per file.
+	CapURLStrings         bool
+	CapURLStringsEvidence []CapEvidenceEntry
+
+	// CapCounts is the total number of matching lines per cap.* signal ID.
+	// The *Evidence slices above keep at most three locations; this is how
+	// the page can say "3 of 41" instead of implying there were only three.
+	CapCounts map[string]int
 
 	// CapDynamicEvalObserved is the WEAKER sibling of CapDynamicEval, set
 	// by the codesmell regex detector rather than the npm AST scanner.

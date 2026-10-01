@@ -7,6 +7,7 @@ package intelligence
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -70,28 +71,156 @@ func newReport(eco, pkg, ver string) *Report {
 }
 
 // TestTransitiveRisk_CandidateVersions covers the constraint→probe
-// list generation directly.
+// list generation directly. Only an exact pin is probed as a key; a
+// range goes through the enumerate-and-pick step instead.
 func TestTransitiveRisk_CandidateVersions(t *testing.T) {
 	cases := []struct {
 		name       string
+		eco        string
 		constraint string
 		want       []string
 	}{
-		{"empty falls back to latest", "", []string{"latest"}},
-		{"exact pin probed verbatim then latest", "1.2.3", []string{"1.2.3", "latest"}},
-		{"caret strips operator", "^1.2.3", []string{"^1.2.3", "1.2.3", "latest"}},
-		{"tilde strips operator", "~1.2.3", []string{"~1.2.3", "1.2.3", "latest"}},
-		{"gte strips operator", ">=1.2.3", []string{">=1.2.3", "1.2.3", "latest"}},
-		{"range takes lower bound", ">=1.2.3, <2.0.0", []string{">=1.2.3, <2.0.0", "1.2.3", "latest"}},
-		{"non-semver constraint falls through", "git+https://x", []string{"git+https://x", "latest"}},
+		{"empty falls back to latest", "npm", "", []string{"latest"}},
+		{"exact pin probed verbatim then latest", "npm", "1.2.3", []string{"1.2.3", "latest"}},
+		{"equality operator is a pin", "pypi", "==1.2.3", []string{"1.2.3", "latest"}},
+		{"caret is a range, not a probe", "npm", "^1.2.3", []string{"latest"}},
+		{"tilde is a range, not a probe", "npm", "~1.2.3", []string{"latest"}},
+		{"gte is a range, not a probe", "npm", ">=1.2.3", []string{"latest"}},
+		{"range is not a probe", "npm", ">=1.2.3, <2.0.0", []string{"latest"}},
+		{"npm bare major is a range", "npm", "4", []string{"latest"}},
+		{"npm bare minor is a range", "npm", "4.4", []string{"latest"}},
+		{"pypi bare partial is a pin", "pypi", "3.19", []string{"3.19", "latest"}},
+		{"maven bare version is probed", "maven", "1.27", []string{"1.27", "latest"}},
+		{"non-semver constraint falls through", "npm", "git+https://x", []string{"latest"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := candidateVersions(tc.constraint)
+			got := candidateVersions(tc.eco, tc.constraint)
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("candidateVersions(%q) = %v, want %v", tc.constraint, got, tc.want)
+				t.Fatalf("candidateVersions(%q, %q) = %v, want %v", tc.eco, tc.constraint, got, tc.want)
 			}
 		})
+	}
+}
+
+// debugTree is nodemon@3.1.14's `debug: "^4"` edge against a cache shaped
+// like prod on 2026-09-30: debug@4.4.3 (latest, clean), debug@4.4.2 (the
+// Sept 2025 phishing release, MAL-2025-46974), and a row keyed on the
+// bare string "4" — written by a scan of the install spec `debug@4`,
+// which the malware index reads as the range 4.x and so flags.
+func debugTree(constraint string, withConcrete bool) (*fakeStore, *Report) {
+	store := newFakeStore()
+	store.put("npm", "debug", "4", maliciousReport("npm", "debug", "4", "MAL-2025-46974"))
+	if withConcrete {
+		store.put("npm", "debug", "4.4.2", maliciousReport("npm", "debug", "4.4.2", "MAL-2025-46974"))
+		store.put("npm", "debug", "4.4.3", newReport("npm", "debug", "4.4.3"))
+	}
+	root := makeReportWithDirect("npm", "nodemon", "3.1.14",
+		DependencyRef{Name: "debug", Constraint: constraint},
+	)
+	return store, root
+}
+
+func blamed(root *Report, pkg string) []string {
+	var out []string
+	for _, k := range root.Risk.Resolution.TransitiveBlame {
+		if k.Package == pkg {
+			out = append(out, k.Version)
+		}
+	}
+	return out
+}
+
+// TestTransitiveRisk_RangeResolvesToConcreteVersion is the nodemon
+// regression: "^4" must resolve to the highest concrete cached 4.x
+// (4.4.3), never to the range-keyed row "4", so no malware is reported.
+func TestTransitiveRisk_RangeResolvesToConcreteVersion(t *testing.T) {
+	for _, c := range []string{"^4", "4", "4.x"} {
+		t.Run(c, func(t *testing.T) {
+			store, root := debugTree(c, true)
+			evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+			if got := root.Risk.Resolution.TransitiveSeverity.MalwareCount; got != 0 {
+				t.Fatalf("MalwareCount = %d, want 0: %q installs debug@4.4.3; blame=%v", got, c, root.Risk.Resolution.TransitiveBlame)
+			}
+			if root.Risk.Verdict == risk.VerdictQuarantine {
+				t.Fatalf("verdict = quarantine; a clean resolved dep must not quarantine the root")
+			}
+			if b := blamed(root, "debug"); len(b) != 0 {
+				t.Fatalf("debug blamed at %v, want not blamed", b)
+			}
+			for _, call := range store.calls {
+				if call.Package == "debug" && call.Version == "4" {
+					t.Fatalf("probed the range-keyed row debug@4; calls=%+v", store.calls)
+				}
+			}
+		})
+	}
+}
+
+// TestTransitiveRisk_RangeWithOnlyRangeKeyedRowIsUnresolved: when the
+// only cached row for the name is keyed on the range itself, resolution
+// is impossible — the dep must read as a coverage gap, never as malware.
+func TestTransitiveRisk_RangeWithOnlyRangeKeyedRowIsUnresolved(t *testing.T) {
+	store, root := debugTree("^4", false)
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if got := root.Risk.Resolution.TransitiveSeverity.MalwareCount; got != 0 {
+		t.Fatalf("MalwareCount = %d, want 0", got)
+	}
+	if cov := root.SupplyChain.TransitiveCoverage; cov == nil || cov.Resolved != 0 || cov.Total != 1 {
+		t.Fatalf("coverage = %+v, want 0/1 resolved", cov)
+	}
+	found := false
+	for _, w := range root.Observation.Warnings {
+		if w.Code == WarnTransitiveDepNotCached && strings.Contains(w.Message, "debug") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want a %s warning for debug; got %+v", WarnTransitiveDepNotCached, root.Observation.Warnings)
+	}
+}
+
+// TestTransitiveRisk_ExactMaliciousPinStillFlags keeps recall: a spec
+// that resolves to a genuinely malicious release is still malware.
+func TestTransitiveRisk_ExactMaliciousPinStillFlags(t *testing.T) {
+	for _, c := range []string{"4.4.2", "=4.4.2"} {
+		t.Run(c, func(t *testing.T) {
+			store, root := debugTree(c, true)
+			evaluateTransitiveRisk(context.Background(), store, "org", root)
+			if got := root.Risk.Resolution.TransitiveSeverity.MalwareCount; got != 1 {
+				t.Fatalf("MalwareCount = %d, want 1", got)
+			}
+			if root.Risk.Verdict != risk.VerdictQuarantine {
+				t.Fatalf("verdict = %q, want quarantine", root.Risk.Verdict)
+			}
+			if b := blamed(root, "debug"); !reflect.DeepEqual(b, []string{"4.4.2"}) {
+				t.Fatalf("debug blamed at %v, want [4.4.2]", b)
+			}
+		})
+	}
+}
+
+// TestTransitiveRisk_CaretResolvesToMaxNotLowerBound: minimatch@10.2.6
+// declares `brace-expansion: "^5.0.8"`; 5.0.8 carries a CVSS 7.5 CVE
+// fixed in 5.0.9, and 5.0.12 is latest. The operator-stripped lower
+// bound used to be probed first, so the edge resolved to 5.0.8 and
+// raised sc.transitive_high_vuln. It must take the max cached (J-2).
+func TestTransitiveRisk_CaretResolvesToMaxNotLowerBound(t *testing.T) {
+	store := newFakeStore()
+	store.put("npm", "brace-expansion", "5.0.8", vulnReport("npm", "brace-expansion", "5.0.8", 7.5, "CVE-2026-69152"))
+	store.put("npm", "brace-expansion", "5.0.12", newReport("npm", "brace-expansion", "5.0.12"))
+	root := makeReportWithDirect("npm", "minimatch", "10.2.6",
+		DependencyRef{Name: "brace-expansion", Constraint: "^5.0.8"},
+	)
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if got := root.Risk.Resolution.TransitiveSeverity.HighCount; got != 0 {
+		t.Fatalf("HighCount = %d, want 0: ^5.0.8 installs 5.0.12", got)
+	}
+	if b := blamed(root, "brace-expansion"); len(b) != 0 {
+		t.Fatalf("brace-expansion blamed at %v", b)
 	}
 }
 
@@ -1136,5 +1265,273 @@ func TestTransitiveRisk_TransitiveSeverity_NoIssues(t *testing.T) {
 	}
 	if fired, _, _ := risk.Registry[risk.SignalSCTransitiveMalware].Fires(in); fired {
 		t.Error("sc.transitive_malware must stay dormant on a clean tree")
+	}
+}
+
+// ginTree is gin v1.12.0's shape: gin requires x/net v0.51.0 itself, and
+// validator's go.mod requires a 2022 x/net pseudo-version and an old
+// x/text, both carrying critical CVEs. rootNet is gin's own x/net require.
+func ginTree(rootNet string) (*fakeStore, *Report) {
+	const oldNet = "0.0.0-20220722155237-a158d28d115b"
+	store := newFakeStore()
+	store.put("go", "golang.org/x/net", "0.51.0", newReport("go", "golang.org/x/net", "0.51.0"))
+	store.put("go", "golang.org/x/net", oldNet, vulnReport("go", "golang.org/x/net", oldNet, 9.8, "CVE-OLD-NET"))
+	store.put("go", "golang.org/x/text", "0.3.8", vulnReport("go", "golang.org/x/text", "0.3.8", 9.1, "CVE-OLD-TEXT"))
+	validator := makeReportWithDirect("go", "github.com/go-playground/validator/v10", "10.30.1",
+		DependencyRef{Name: "golang.org/x/net", Constraint: "v" + oldNet},
+		DependencyRef{Name: "golang.org/x/text", Constraint: "v0.3.8"},
+	)
+	store.put("go", "github.com/go-playground/validator/v10", "10.30.1", validator)
+	root := makeReportWithDirect("go", "github.com/gin-gonic/gin", "1.12.0",
+		DependencyRef{Name: "github.com/go-playground/validator/v10", Constraint: "v10.30.1"},
+		DependencyRef{Name: "golang.org/x/net", Constraint: rootNet},
+	)
+	return store, root
+}
+
+// TestTransitiveRisk_GoRootRequireIsMVSFloor: a transitive x/net below
+// the version gin itself requires is not in the build (MVS takes the
+// max), so its CVE must not count. x/text, which gin does not constrain,
+// keeps today's behaviour and still counts.
+func TestTransitiveRisk_GoRootRequireIsMVSFloor(t *testing.T) {
+	store, root := ginTree("v0.51.0")
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if b := blamed(root, "golang.org/x/net"); len(b) != 0 {
+		t.Fatalf("x/net blamed at %v; gin requires v0.51.0, so the 2022 pseudo-version is not in the build", b)
+	}
+	if got := root.Risk.Resolution.TransitiveSeverity.CriticalCount; got != 1 {
+		t.Fatalf("CriticalCount = %d, want 1 (x/text only, which gin does not constrain)", got)
+	}
+	if b := blamed(root, "golang.org/x/text"); !reflect.DeepEqual(b, []string{"0.3.8"}) {
+		t.Fatalf("x/text blamed at %v, want [0.3.8] (unconstrained by the root: unchanged)", b)
+	}
+	found := false
+	for _, w := range root.Observation.Warnings {
+		if w.Code == WarnTransitiveDepConstraintConflict && strings.Contains(w.Message, "golang.org/x/net") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want a %s warning naming x/net; got %+v", WarnTransitiveDepConstraintConflict, root.Observation.Warnings)
+	}
+}
+
+// TestTransitiveRisk_GoRootRequiringVulnerableVersionStillFlags: when the
+// root's own floor is the vulnerable version, nothing is removed.
+func TestTransitiveRisk_GoRootRequiringVulnerableVersionStillFlags(t *testing.T) {
+	store, root := ginTree("v0.0.0-20220722155237-a158d28d115b")
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if got := root.Risk.Resolution.TransitiveSeverity.CriticalCount; got != 2 {
+		t.Fatalf("CriticalCount = %d, want 2 (x/net at the root's own floor, plus x/text)", got)
+	}
+	if b := blamed(root, "golang.org/x/net"); len(b) != 1 {
+		t.Fatalf("x/net blamed at %v, want the root-required pseudo-version", b)
+	}
+}
+
+// TestGoFloorViolated pins the comparison: Go semver precedence on the
+// proxy-canonical form, pre-releases and pseudo-versions included, and
+// "no" for anything that does not parse.
+func TestGoFloorViolated(t *testing.T) {
+	cases := []struct {
+		floors  []string
+		version string
+		want    bool
+	}{
+		{[]string{"v0.51.0"}, "0.0.0-20220722155237-a158d28d115b", true},
+		{[]string{"v0.51.0"}, "0.51.0", false},
+		{[]string{"v0.51.0"}, "0.52.0", false},
+		{[]string{"v1.2.3"}, "1.5.0-rc.1", false}, // above the floor in Go order
+		{[]string{"v1.2.3"}, "1.2.3-rc.1", true},
+		{[]string{"v2.0.0+incompatible"}, "1.9.9", true},
+		{[]string{"master"}, "0.1.0", false},
+		{[]string{"v1.0.0"}, "latest", false},
+	}
+	for _, tc := range cases {
+		if _, got := goFloorViolated(tc.floors, tc.version); got != tc.want {
+			t.Errorf("goFloorViolated(%v, %q) = %v, want %v", tc.floors, tc.version, got, tc.want)
+		}
+	}
+}
+
+// TestTransitiveRisk_GoFloorKeepsVersionsAboveIt: a floor is not a pin.
+// A deeper require ABOVE the root's own version may be what MVS selects,
+// so it stays in the tree and its CVE still counts. Reading the root's
+// bare require as an exact pin would delete it — the misreading that
+// constraintIsActionable exists to refuse.
+func TestTransitiveRisk_GoFloorKeepsVersionsAboveIt(t *testing.T) {
+	store := newFakeStore()
+	store.put("go", "golang.org/x/net", "0.51.0", newReport("go", "golang.org/x/net", "0.51.0"))
+	store.put("go", "golang.org/x/net", "0.52.0", vulnReport("go", "golang.org/x/net", "0.52.0", 9.8, "CVE-NEWER-NET"))
+	store.put("go", "example.com/mid", "1.0.0", makeReportWithDirect("go", "example.com/mid", "1.0.0",
+		DependencyRef{Name: "golang.org/x/net", Constraint: "v0.52.0"},
+	))
+	root := makeReportWithDirect("go", "example.com/root", "1.0.0",
+		DependencyRef{Name: "example.com/mid", Constraint: "v1.0.0"},
+		DependencyRef{Name: "golang.org/x/net", Constraint: "v0.51.0"},
+	)
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if got := root.Risk.Resolution.TransitiveSeverity.CriticalCount; got != 1 {
+		t.Fatalf("CriticalCount = %d, want 1: x/net v0.52.0 is above the root's floor and may be selected", got)
+	}
+}
+
+// TestTransitiveRisk_GoIndirectFloorIsNotWalkedButRefuses: gin lists
+// x/crypto v0.48.0 only as `// indirect`, so it arrives as a Floor. It
+// must refuse validator's older x/crypto and must not itself become a
+// node (Floors are never walked).
+func TestTransitiveRisk_GoIndirectFloorIsNotWalkedButRefuses(t *testing.T) {
+	store := newFakeStore()
+	store.put("go", "golang.org/x/crypto", "0.33.0", vulnReport("go", "golang.org/x/crypto", "0.33.0", 9.1, "CVE-OLD-CRYPTO"))
+	store.put("go", "golang.org/x/crypto", "0.48.0", vulnReport("go", "golang.org/x/crypto", "0.48.0", 9.9, "CVE-FLOOR-WALKED"))
+	store.put("go", "github.com/go-playground/validator/v10", "10.30.1",
+		makeReportWithDirect("go", "github.com/go-playground/validator/v10", "10.30.1",
+			DependencyRef{Name: "golang.org/x/crypto", Constraint: "v0.33.0"},
+		))
+	root := makeReportWithDirect("go", "github.com/gin-gonic/gin", "1.12.0",
+		DependencyRef{Name: "github.com/go-playground/validator/v10", Constraint: "v10.30.1"},
+	)
+	root.Dependencies.Floors = []DependencyRef{{Name: "golang.org/x/crypto", Constraint: "v0.48.0"}}
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+
+	if got := root.Risk.Resolution.TransitiveSeverity.CriticalCount; got != 0 {
+		t.Fatalf("CriticalCount = %d, want 0: old x/crypto is under gin's floor, and the floor itself is not walked", got)
+	}
+	if cov := root.SupplyChain.TransitiveCoverage; cov == nil || cov.Total != 1 {
+		t.Fatalf("coverage = %+v, want Total 1 (floors are not direct deps)", cov)
+	}
+}
+
+// TestFetchGoMod_IndirectRequiresBecomeFloors: the extractor keeps Direct
+// as before and carries `// indirect` requires as Floors.
+func TestFetchGoMod_IndirectRequiresBecomeFloors(t *testing.T) {
+	mux := http.NewServeMux()
+	const encModule = "github.com/foo/!bar"
+	registerGoBaseRoutes(mux, encModule)
+	registerDepsDevGoLicense(mux)
+	mux.HandleFunc("/"+encModule+"/@v/v1.2.3.mod", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(`module github.com/foo/Bar
+
+go 1.24
+
+require golang.org/x/net v0.51.0
+
+require (
+	golang.org/x/crypto v0.48.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
+)
+`))
+	})
+	p, _ := newStubProvider(t, mux)
+	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "go", Package: "github.com/foo/Bar", Version: "v1.2.3"}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if pr.Dependencies == nil {
+		t.Fatalf("no dependencies extracted")
+	}
+	if want := []DependencyRef{{Name: "golang.org/x/net", Constraint: "v0.51.0"}}; !reflect.DeepEqual(pr.Dependencies.Direct, want) {
+		t.Fatalf("Direct = %+v, want %+v", pr.Dependencies.Direct, want)
+	}
+	wantFloors := []DependencyRef{
+		{Name: "golang.org/x/crypto", Constraint: "v0.48.0"},
+		{Name: "golang.org/x/text", Constraint: "v0.34.0"},
+	}
+	if !reflect.DeepEqual(pr.Dependencies.Floors, wantFloors) {
+		t.Fatalf("Floors = %+v, want %+v", pr.Dependencies.Floors, wantFloors)
+	}
+
+	// And the scanner's merge must not drop them.
+	var merged DependenciesSection
+	mergeDependencies(&merged, *pr.Dependencies)
+	if !reflect.DeepEqual(merged.Floors, wantFloors) {
+		t.Fatalf("mergeDependencies dropped Floors: %+v", merged.Floors)
+	}
+}
+
+// newtonsoftNuspec is Newtonsoft.Json 13.0.4's real dependency block: only
+// the .NETStandard1.x groups carry dependencies, and NETStandard.Library
+// 1.6.1 is what pulls System.Net.Http 4.3.0 (CVE-2018-8292).
+const newtonsoftNuspec = `<?xml version="1.0"?><package><metadata><id>Newtonsoft.Json</id><version>13.0.4</version><authors>James Newton-King</authors>
+<dependencies>
+  <group targetFramework=".NETFramework2.0" />
+  <group targetFramework=".NETFramework4.5" />
+  <group targetFramework=".NETStandard1.0">
+    <dependency id="Microsoft.CSharp" version="4.3.0" exclude="Build,Analyzers" />
+    <dependency id="NETStandard.Library" version="1.6.1" exclude="Build,Analyzers" />
+  </group>
+  <group targetFramework=".NETStandard1.3">
+    <dependency id="NETStandard.Library" version="1.6.1" exclude="Build,Analyzers" />
+    <dependency id="System.Xml.XmlDocument" version="4.3.0" exclude="Build,Analyzers" />
+  </group>
+  <group targetFramework="net6.0" />
+  <group targetFramework="%s" />
+</dependencies></metadata></package>`
+
+func nugetDeps(t *testing.T, nuspec string) []DependencyRef {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/newtonsoft.json/13.0.4/newtonsoft.json.nuspec", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(nuspec))
+	})
+	p, _ := newStubProvider(t, mux)
+	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "nuget", Package: "Newtonsoft.Json", Version: "13.0.4"}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if pr.Dependencies == nil {
+		return nil
+	}
+	return pr.Dependencies.Direct
+}
+
+// TestNuGet_LegacyGroupsDroppedWhenNetStandard2Exists: Newtonsoft.Json
+// 13.0.4 ships a netstandard2.0 group, so its netstandard1.x groups are
+// unreachable from any supported consumer and contribute nothing.
+func TestNuGet_LegacyGroupsDroppedWhenNetStandard2Exists(t *testing.T) {
+	got := nugetDeps(t, strings.Replace(newtonsoftNuspec, "%s", ".NETStandard2.0", 1))
+	if len(got) != 0 {
+		t.Fatalf("Direct = %+v, want none: every modern group is empty", got)
+	}
+}
+
+// TestNuGet_LegacyOnlyKeepsEverything: without a netstandard2.x group a
+// supported net48 consumer can land on a netstandard1.x group, so nothing
+// is dropped and recall is unchanged.
+func TestNuGet_LegacyOnlyKeepsEverything(t *testing.T) {
+	got := nugetDeps(t, strings.Replace(newtonsoftNuspec, "%s", "net8.0", 1))
+	want := []DependencyRef{
+		{Name: "Microsoft.CSharp", Constraint: "4.3.0"},
+		{Name: "NETStandard.Library", Constraint: "1.6.1"},
+		{Name: "System.Xml.XmlDocument", Constraint: "4.3.0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Direct = %+v, want %+v", got, want)
+	}
+}
+
+// TestNuGet_NetFrameworkGroupsKept: .NETFramework groups are what a
+// supported net462+ app installs (NuGet prefers its own framework family),
+// so they survive even when netstandard2.0 exists — Serilog 4.4.0's shape.
+func TestNuGet_NetFrameworkGroupsKept(t *testing.T) {
+	nuspec := `<?xml version="1.0"?><package><metadata><id>Newtonsoft.Json</id><version>13.0.4</version><authors>x</authors>
+<dependencies>
+  <group targetFramework=".NETFramework4.6.2"><dependency id="System.ValueTuple" version="4.5.0" /></group>
+  <group targetFramework=".NETStandard1.0"><dependency id="NETStandard.Library" version="1.6.1" /></group>
+  <group targetFramework=".NETPortable4.5-Profile259"><dependency id="Legacy.Portable" version="1.0.0" /></group>
+  <group targetFramework=".NETStandard2.0"><dependency id="System.Threading.Channels" version="8.0.0" /></group>
+</dependencies></metadata></package>`
+	got := nugetDeps(t, nuspec)
+	want := []DependencyRef{
+		{Name: "System.ValueTuple", Constraint: "4.5.0"},
+		{Name: "System.Threading.Channels", Constraint: "8.0.0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Direct = %+v, want %+v", got, want)
 	}
 }

@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **81 risk signals**. Each is scored, not merely
+Chainsaw registers **84 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,15 +23,15 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 53 |
+| Supply chain | 54 |
 | Vulnerability | 8 |
 | Licence | 8 |
-| Maintenance | 6 |
+| Maintenance | 8 |
 | Quality | 6 |
-| **Total** | **81** |
+| **Total** | **84** |
 
 
-## Supply chain (53)
+## Supply chain (54)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -54,6 +54,7 @@ a configured server.
 | `cap.native_code` | info | 0.00 | Package uses native (C/C++) bindings |
 | `cap.network` | info | 0.00 | Package can open network connections |
 | `cap.shell` | info | 0.00 | Package can execute shell commands |
+| `cap.url_strings` | info | 0.00 | Package source contains URLs |
 | `sc.builder_ref_version_mismatch` | info | 0.00 | Built from a tag that does not name this version |
 | `sc.deprecated_by_maintainer` | medium | -15.00 | Deprecated by maintainer |
 | `sc.git_url_dependency` | low | -8.00 | Git URL dependency |
@@ -115,13 +116,15 @@ a configured server.
 | `license.non_permissive` | medium | -20.00 | Non-permissive license |
 | `license.unidentified` | medium | -15.00 | Unidentified license |
 
-## Maintenance (6)
+## Maintenance (8)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
 | `maint.abandoned_repo` | high | -25.00 | Source repository looks abandoned |
 | `maint.healthy_cadence` | info | 10.00 | Healthy release cadence |
 | `maint.no_recent_release` | medium | -15.00 | No recent releases |
+| `maint.outdated_version` | info | 0.00 | Outdated version |
+| `maint.relocated` | low | 0.00 | Coordinate relocated |
 | `maint.single_maintainer` | low | -5.00 | Single maintainer |
 | `maint.unpopular_package` | info | 0.00 | Very low download count |
 | `maint.very_new_package` | medium | -10.00 | Very new package |

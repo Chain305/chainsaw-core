@@ -118,6 +118,14 @@ type DependenciesSection struct {
 	Dev      []DependencyRef `json:"dev,omitempty"`
 	Peer     []DependencyRef `json:"peer,omitempty"`
 	Optional []DependencyRef `json:"optional,omitempty"`
+	// Floors are versions the package's manifest requires but that are
+	// NOT walked: today the `// indirect` requires of a Go module. Since
+	// Go 1.17 a go.mod lists every module in its build, and MVS never
+	// selects below any of them, so the transitive walk uses them only to
+	// refuse closure nodes older than the build allows
+	// (goFloorViolated). Kept out of Direct so no consumer walks or counts
+	// them by accident.
+	Floors []DependencyRef `json:"floors,omitempty"`
 }
 
 // DependencyRef is one outbound dep declaration. Ecosystem may be set
@@ -155,6 +163,18 @@ type ReleaseSection struct {
 	// Deprecated is the npm-style maintainer deprecation string
 	// (populated by the deprecation provider; empty when absent).
 	Deprecated string `json:"deprecated,omitempty"`
+	// RelocatedTo is the coordinate a Maven POM's
+	// <distributionManagement><relocation> points at. Kept apart from
+	// Deprecated on purpose: a relocation names its replacement and Maven
+	// follows it automatically, so it is a maintenance fact, not a "do not
+	// use" — see maint.relocated.
+	RelocatedTo string `json:"relocatedTo,omitempty"`
+	// VersionDate is THIS version's publish date from a secondary registry
+	// source (Maven POM Last-Modified, a NuGet registration leaf) where
+	// PublishedAt is not populated. Kept apart from PublishedAt on purpose:
+	// PublishedAt feeds maint.very_new_package and the policy cooldown
+	// path, and this date is read only by maint.outdated_version.
+	VersionDate *time.Time `json:"versionDate,omitempty"`
 }
 
 // URLSection records registry-advertised URLs for human follow-up.
@@ -220,6 +240,39 @@ type PeopleSection struct {
 	Maintainers      []string `json:"maintainers,omitempty"`
 	PublisherIDs     []string `json:"publisherIds,omitempty"`
 	TrustedPublisher *bool    `json:"trustedPublisher,omitempty"`
+
+	// PublisherBaseline is the registry's own answer to "who published the
+	// version before this one". Scan-time only (json:"-"): the metadiff
+	// provider reads it in the same scan and it is never persisted.
+	//
+	// It exists because the store baseline was wrong. LatestPublisherSet
+	// returns the most recently TOUCHED row, not the previous version, and
+	// the refresher touches old versions constantly — so lodash 4.18.1
+	// (jdalton, same as 4.18.0) was diffed against 4.17.21 (bnjmnt4n) and
+	// capped at 40. chalk, debug and express scored 40 the same way
+	// (2026-09-30).
+	//
+	// nil means the registry provider did not compute one; callers fall back
+	// to the store. A non-nil value with Version == "" means the incoming
+	// version is the package's first.
+	PublisherBaseline *PublisherBaseline `json:"-"`
+}
+
+// PublisherBaseline is the previous version's publisher and maintainer set,
+// taken from that version's own manifest — never the package-level
+// maintainers list, which an attacker can add themselves to before
+// publishing.
+type PublisherBaseline struct {
+	Version     string
+	Publishers  []string
+	Maintainers []string
+}
+
+// ScanLocation is one place in a package's files where a scanner matched.
+type ScanLocation struct {
+	File    string `json:"file"`
+	Line    int    `json:"line,omitempty"`
+	Snippet string `json:"snippet,omitempty"`
 }
 
 // MetadataSection carries registry-advertised descriptive metadata.
@@ -340,7 +393,12 @@ type ArtifactScanSection struct {
 	NativeBinaryPresent bool `json:"nativeBinaryPresent,omitempty"`
 	HighEntropyStrings  bool `json:"highEntropyStrings,omitempty"`
 	URLStrings          bool `json:"urlStrings,omitempty"`
-	MinifiedCode        bool `json:"minifiedCode,omitempty"`
+	// URLStringsFiles is how many source files contain a URL, and
+	// URLStringsSamples the first few, so a report can show where
+	// rather than only that.
+	URLStringsFiles   int            `json:"urlStringsFiles,omitempty"`
+	URLStringsSamples []ScanLocation `json:"urlStringsSamples,omitempty"`
+	MinifiedCode      bool           `json:"minifiedCode,omitempty"`
 
 	// Socket-gap Wave 4. TrivialPackage + TooManyFiles ride the shared
 	// Wave-0 artifact map. The three RTT signals (NonExistentAuthor,
@@ -485,6 +543,21 @@ type TransitiveCoverage struct {
 	ClosureSize int  `json:"closureSize,omitempty"`
 }
 
+// DownloadCount is a registry download count and the window it covers.
+// Count is -1 when the fetch failed.
+type DownloadCount struct {
+	Count  int    `json:"count"`
+	Window string `json:"window"`
+}
+
+// DownloadCount.Window values.
+const (
+	DownloadWindowWeek   = "week"  // npm, PyPI
+	DownloadWindowMonth  = "month" // Packagist
+	DownloadWindow90Days = "90d"   // crates.io recent_downloads
+	DownloadWindowTotal  = "total" // RubyGems, NuGet: all time
+)
+
 // MaintenanceSection carries release-cadence and repo-liveness facts
 // that feed the risk engine's maintenance category. Populated by a
 // post-merge enricher from data registry providers already fetched —
@@ -524,6 +597,14 @@ type MaintenanceSection struct {
 	//          SevUnknown from the maint.unpopular_package signal.
 	// &n    → actual count. Triggers low-download signal when below threshold.
 	WeeklyDownloads *int `json:"weeklyDownloads,omitempty"`
+
+	// Downloads is the registry download count together with the window it
+	// covers, because registries do not agree on one: npm and PyPI publish
+	// a week, Packagist a month, crates.io 90 days, RubyGems and NuGet only
+	// an all-time total. Same nil / -1 / n ladder as WeeklyDownloads, which
+	// keeps carrying the weekly figure (npm, PyPI) for API compatibility
+	// and stays nil for every other window.
+	Downloads *DownloadCount `json:"downloads,omitempty"`
 
 	// VersionTimeline is the full set of (version, publishedAt) tuples
 	// the registry-metadata provider extracted from the upstream packument
@@ -1268,7 +1349,26 @@ type ObservationSection struct {
 // lookups served fell 92,046 → 11,744. The epoch-14 drain (2026-09-13) took
 // ~4,900 coordinates and about 95 minutes of sweep time at 1500 rows/20min
 // with failed=0 throughout, so the same pacing is the starting point here.
-const CurrentMatcherEpoch = 15
+//
+// Epoch 16 (2026-09-30) — FACTS CORRECTED ON TOP PACKAGES. Three detector
+// fixes change stored FACTS, not only scores, so a re-score from stored facts
+// cannot pick them up:
+//
+//   - publisherChanged was diffed against the most recently TOUCHED store row,
+//     not the previous version. lodash 4.18.1, chalk 6.0.1, debug 4.4.3 and
+//     express 5.2.1 were all capped at 40 on a publisher who had not changed
+//     (or had rotated within the listed maintainers). npm now resolves the
+//     previous version from the packument itself.
+//   - cap.shell fired on RegExp `.exec(`, cap.filesystem_write on JSDoc
+//     comments, cap.dynamic_eval on the `Function('return this')` idiom, and
+//     any line over 64 KiB silently stopped the scan of its file.
+//   - weekly downloads treated HTTP 429 as final, so a rate limit during a
+//     sweep persisted as "Download count unavailable".
+//
+// DEPLOY NOTE: same as epoch 15 — ship with
+// CHAINSAW_INTELLIGENCE_MIN_SERVEABLE_EPOCH=15, let the recompute sweep drain,
+// then remove the env and redeploy.
+const CurrentMatcherEpoch = 16
 
 // MinServeableEpoch is the floor a cached row must meet to be SERVED. It
 // normally equals CurrentMatcherEpoch and MUST be returned to that value

@@ -20,6 +20,7 @@ const (
 	SignalCapNativeCode      = "cap.native_code"
 	SignalCapDynamicEval     = "cap.dynamic_eval"
 	SignalCapDynamicEvalObs  = "cap.dynamic_eval_observed"
+	SignalCapURLStrings      = "cap.url_strings"
 )
 
 func init() {
@@ -35,7 +36,7 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Package source imports network primitives (net/http/https/dgram/tls/fetch).",
-				capEvidence(in.CapNetworkEvidence)
+				capEvidence(in.CapNetworkEvidence, in.CapCounts[SignalCapNetwork])
 		},
 	})
 
@@ -51,7 +52,7 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Package source imports child_process or calls exec/spawn.",
-				capEvidence(in.CapShellEvidence)
+				capEvidence(in.CapShellEvidence, in.CapCounts[SignalCapShell])
 		},
 	})
 
@@ -67,7 +68,7 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Package source calls filesystem write APIs.",
-				capEvidence(in.CapFilesystemWriteEvidence)
+				capEvidence(in.CapFilesystemWriteEvidence, in.CapCounts[SignalCapFilesystemWrite])
 		},
 	})
 
@@ -83,7 +84,7 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Package source calls filesystem read APIs.",
-				capEvidence(in.CapFilesystemReadEvidence)
+				capEvidence(in.CapFilesystemReadEvidence, in.CapCounts[SignalCapFilesystemRead])
 		},
 	})
 
@@ -99,7 +100,7 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Package source reads process.env.",
-				capEvidence(in.CapEnvAccessEvidence)
+				capEvidence(in.CapEnvAccessEvidence, in.CapCounts[SignalCapEnvAccess])
 		},
 	})
 
@@ -115,7 +116,7 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Package ships native addon or build descriptor.",
-				capEvidence(in.CapNativeCodeEvidence)
+				capEvidence(in.CapNativeCodeEvidence, in.CapCounts[SignalCapNativeCode])
 		},
 	})
 
@@ -133,7 +134,7 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Package source uses eval() or dynamic code construction.",
-				capEvidence(in.CapDynamicEvalEvidence)
+				capEvidence(in.CapDynamicEvalEvidence, in.CapCounts[SignalCapDynamicEval])
 		},
 	})
 
@@ -173,12 +174,33 @@ func init() {
 			return true, "Source scan matched dynamic code evaluation.", nil
 		},
 	})
+
+	// cap.url_strings says where a package's code names a remote host. It is
+	// what socket.dev shows as "URL strings", and it is informational in the
+	// same way: most packages that fire it link to their own docs or an API
+	// they wrap. Weight 0 until it is priced against the corpus.
+	register(Signal{
+		ID:          SignalCapURLStrings,
+		Category:    CategorySupplyChain,
+		Severity:    SevInfo,
+		Weight:      0,
+		Title:       "Package source contains URLs",
+		Description: "Source files outside the README, licence and manifest contain http(s) URLs — hosts the package may contact at runtime.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if !in.CapURLStrings {
+				return false, "", nil
+			}
+			return true, "Source files contain http(s) URLs.",
+				capEvidence(in.CapURLStringsEvidence, in.CapCounts[SignalCapURLStrings])
+		},
+	})
 }
 
 // capEvidence converts a slice of capability evidence structs to a
 // map[string]any for the FiredSignal.Evidence field. Returns nil when
-// there is no evidence to report.
-func capEvidence(ev []CapEvidenceEntry) map[string]any {
+// there is no evidence to report. count, when larger than the number of
+// locations kept, is reported as "count" so readers know the list is a sample.
+func capEvidence(ev []CapEvidenceEntry, count int) map[string]any {
 	if len(ev) == 0 {
 		return nil
 	}
@@ -193,7 +215,11 @@ func capEvidence(ev []CapEvidenceEntry) map[string]any {
 		}
 		entries = append(entries, entry)
 	}
-	return map[string]any{"locations": entries}
+	out := map[string]any{"locations": entries}
+	if count > len(entries) {
+		out["count"] = count
+	}
+	return out
 }
 
 // CapEvidenceEntry is the risk-package-internal representation of a

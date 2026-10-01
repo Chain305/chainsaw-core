@@ -1062,6 +1062,12 @@ func mergeRelease(dst *ReleaseSection, src ReleaseSection) {
 	if src.Deprecated != "" {
 		dst.Deprecated = src.Deprecated
 	}
+	if src.RelocatedTo != "" {
+		dst.RelocatedTo = src.RelocatedTo
+	}
+	if src.VersionDate != nil {
+		dst.VersionDate = src.VersionDate
+	}
 }
 
 func mergeURLs(dst *URLSection, src URLSection) {
@@ -1153,6 +1159,9 @@ func mergePeople(dst *PeopleSection, src PeopleSection) {
 	}
 	if src.TrustedPublisher != nil {
 		dst.TrustedPublisher = src.TrustedPublisher
+	}
+	if src.PublisherBaseline != nil {
+		dst.PublisherBaseline = src.PublisherBaseline
 	}
 }
 
@@ -1347,6 +1356,10 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 	}
 	if src.URLStrings {
 		dst.URLStrings = true
+	}
+	if src.URLStringsFiles > dst.URLStringsFiles {
+		dst.URLStringsFiles = src.URLStringsFiles
+		dst.URLStringsSamples = src.URLStringsSamples
 	}
 	if src.MinifiedCode {
 		dst.MinifiedCode = true
@@ -1808,6 +1821,9 @@ func mergeMaintenance(dst *MaintenanceSection, src MaintenanceSection) {
 	if src.WeeklyDownloads != nil {
 		dst.WeeklyDownloads = src.WeeklyDownloads
 	}
+	if src.Downloads != nil {
+		dst.Downloads = src.Downloads
+	}
 	// VersionTimeline: a non-empty slice always wins. The registry
 	// provider populates this whole-cloth from the upstream packument,
 	// so an incoming non-empty slice is authoritative.
@@ -1854,6 +1870,9 @@ func mergeDependencies(dst *DependenciesSection, src DependenciesSection) {
 	}
 	if len(src.Optional) > 0 {
 		dst.Optional = src.Optional
+	}
+	if len(src.Floors) > 0 {
+		dst.Floors = src.Floors
 	}
 }
 

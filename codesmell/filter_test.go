@@ -43,6 +43,12 @@ func TestIsLikelyTestOrVendor(t *testing.T) {
 		// Edge: substring of a segment is NOT enough — must match boundaries.
 		{"src/contest/foo.js", false},
 		{"src/manifesto/foo.js", false},
+		// Go ignores _ and . directories and files; other languages do not.
+		{"github.com/stretchr/testify@v1.12.1/_readme-gofmt/main.go", true},
+		{"mod@v1.0.0/.github/gen/main.go", true},
+		{"mod@v1.0.0/internal/_gen.go", true},
+		{"mod@v1.0.0/internal/run.go", false},
+		{"pkg/_internal/run.py", false},
 	}
 	for _, tc := range cases {
 		got := IsLikelyTestOrVendor(tc.path)

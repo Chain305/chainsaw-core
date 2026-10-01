@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -18,10 +19,63 @@ const (
 // Download-count thresholds for maint.unpopular_package.
 // Packages below these counts have very low community adoption;
 // the signal is informational only (SevInfo, weight 0).
+//
+// Registries publish different windows, so each threshold is per ecosystem
+// AND per window (risk.Input.DownloadsWindow); a count in a window with no
+// threshold never fires. npm and PyPI are the original rules, unchanged.
+// The rest were set 2026-09-30 against real counts for the 1,885-row
+// corpus-v1-rev4, where the "benign" stratum is deliberately obscure (npm
+// benign median: 6 a week; the npm rule fires on 176 of 205). Each new rule
+// was held to fire on no larger a share of benign packages than npm's:
+//
+//   - crates.io, 90 days  < 100 — about 8 a week, an order below npm's
+//     floor. Fires on 51/104 benign crates.
+//   - Packagist, month    < 50 — about 12 a week. Fires on 75/108 benign
+//     packages; Packagist volumes are small and most corpus packages
+//     reported 0 for the month.
+//   - RubyGems, all time  < 500 — every published gem accrues a few hundred
+//     downloads from mirrors alone (corpus minimum 537), so under 500 means
+//     nobody beyond the mirrors. Fires on 0/111 benign gems.
+//   - NuGet, all time     < 500 — corpus benign minimum 247. Fires on 1/112.
+//
+// An all-time total cannot be scaled to a week (it depends on age), which
+// is why those two are floors rather than conversions.
 const (
-	UnpopularNPMWeeklyThreshold  = 100 // npm downloads/week
-	UnpopularPyPIWeeklyThreshold = 50  // PyPI downloads/week
+	UnpopularNPMWeeklyThreshold     = 100 // npm downloads/week
+	UnpopularPyPIWeeklyThreshold    = 50  // PyPI downloads/week
+	UnpopularCargo90DayThreshold    = 100 // crates.io recent_downloads (90 days)
+	UnpopularComposerMonthThreshold = 50  // Packagist downloads/month
+	UnpopularRubyGemsTotalThreshold = 500 // RubyGems all-time downloads
+	UnpopularNuGetTotalThreshold    = 500 // NuGet all-time downloads
 )
+
+// unpopularThreshold returns the threshold and registry label for a count
+// in window on eco; ok=false when there is no rule for that pair.
+func unpopularThreshold(eco, window string) (threshold int, registry string, ok bool) {
+	switch {
+	case isNPMEco(eco) && window == "week":
+		return UnpopularNPMWeeklyThreshold, "npm", true
+	case isPyPIEco(eco) && window == "week":
+		return UnpopularPyPIWeeklyThreshold, "PyPI", true
+	case eco == "cargo" && window == "90d":
+		return UnpopularCargo90DayThreshold, "crates.io", true
+	case eco == "composer" && window == "month":
+		return UnpopularComposerMonthThreshold, "Packagist", true
+	case eco == "rubygems" && window == "total":
+		return UnpopularRubyGemsTotalThreshold, "RubyGems", true
+	case eco == "nuget" && window == "total":
+		return UnpopularNuGetTotalThreshold, "NuGet", true
+	}
+	return 0, "", false
+}
+
+// downloadsWindowPhrase renders a window for the alert text.
+var downloadsWindowPhrase = map[string]string{
+	"week":  "weekly downloads",
+	"month": "downloads in the last month",
+	"90d":   "downloads in the last 90 days",
+	"total": "downloads in total",
+}
 
 // Thresholds — exported so tests and docs can reference the exact cutoffs
 // rather than hardcoding durations in two places.
@@ -226,17 +280,26 @@ func init() {
 		Severity: SevInfo, // the unknown arm overrides this to SevUnknown via evidence; see applySignalOverrides
 		Weight:   0,
 		Title:    "Very low download count",
-		Description: "The package receives very few weekly downloads (npm <100/wk, PyPI <50/wk), " +
-			"suggesting minimal community adoption. " +
+		Description: "The package has very few downloads (npm <100/wk, PyPI <50/wk, crates.io <100 in 90 days, " +
+			"Packagist <50/month, RubyGems and NuGet <500 in total), suggesting minimal community adoption. " +
 			"When download data is unavailable the signal fires with severity 'unknown'.",
 		Fires: func(in Input) (bool, string, map[string]any) {
-			if in.WeeklyDownloads == nil {
+			// Downloads carries its window; WeeklyDownloads is the
+			// fallback for reports written before it existed.
+			counted, window := in.Downloads, in.DownloadsWindow
+			if counted == nil {
+				counted, window = in.WeeklyDownloads, "week"
+			}
+			if counted == nil {
 				return false, "", nil
 			}
-			dl := *in.WeeklyDownloads
+			dl := *counted
 			// Sentinel value -1 means "fetch failed / air-gap" — emit unknown.
 			if dl == unknownDownloadsSentinel {
 				msg := "Weekly download count unavailable (air-gap or fetch error)."
+				if window != "week" {
+					msg = "Download count unavailable (air-gap or fetch error)."
+				}
 				// When CHAINSAW_OFFLINE=1 is set, the operator intentionally
 				// disabled upstream fetches — distinguish that from a real
 				// fetch failure so the message isn't misleading.
@@ -255,16 +318,15 @@ func init() {
 					"title_override":    "Download count unavailable",
 				}
 			}
-			eco := in.Ecosystem
-			switch {
-			case isNPMEco(eco) && dl < UnpopularNPMWeeklyThreshold:
-				return true, "Package has very few weekly downloads on npm.",
-					map[string]any{"weekly_downloads": dl, "threshold": UnpopularNPMWeeklyThreshold}
-			case isPyPIEco(eco) && dl < UnpopularPyPIWeeklyThreshold:
-				return true, "Package has very few weekly downloads on PyPI.",
-					map[string]any{"weekly_downloads": dl, "threshold": UnpopularPyPIWeeklyThreshold}
+			threshold, registry, ok := unpopularThreshold(in.Ecosystem, window)
+			if !ok || dl >= threshold {
+				return false, "", nil
 			}
-			return false, "", nil
+			ev := map[string]any{"downloads": dl, "window": window, "threshold": threshold}
+			if window == "week" {
+				ev["weekly_downloads"] = dl // the key this signal has always carried
+			}
+			return true, fmt.Sprintf("Package has very few %s on %s.", downloadsWindowPhrase[window], registry), ev
 		},
 	})
 }

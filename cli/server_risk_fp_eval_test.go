@@ -229,10 +229,27 @@ var serverRiskInputProbes = []inputProbe{
 			"does not reach risk.Input.",
 	},
 	{
-		Field:   "WeeklyDownloads",
-		HasData: func(in risk.Input) bool { return in.WeeklyDownloads != nil },
+		Field: "WeeklyDownloads",
+		// A real count only. The -1 sentinel means the fetch FAILED; counting
+		// it as data is how 673 of 1,885 failed fetches read as observed in
+		// the rev4 comparison.
+		HasData: func(in risk.Input) bool { return in.WeeklyDownloads != nil && *in.WeeklyDownloads >= 0 },
 		Feeds:   []string{"maint.unpopular_package"},
-		Why:     "Written only by premium/provider_weekly_downloads.go.",
+		Why:     "Written only by premium/provider_weekly_downloads.go; -1 is a failed fetch, not data.",
+	},
+	{
+		Field:   "PublisherChangeEvaluated",
+		HasData: func(in risk.Input) bool { return in.PublisherChangeEvaluated },
+		Feeds:   []string{"sc.publisher_changed"},
+		Why: "Written by premium/provider_metadiff.go. Until 2026-09-30 it needed a " +
+			"metadata store, which no corpus harness wires, so publisherChanged was nil " +
+			"on every corpus row and the bug that capped lodash at 40 was invisible.",
+	},
+	{
+		Field:   "VersionAnomalyEvaluated",
+		HasData: func(in risk.Input) bool { return in.VersionAnomalyEvaluated },
+		Feeds:   []string{"qual.version_anomaly"},
+		Why:     "Written by premium/provider_metadiff.go from the packument version timeline.",
 	},
 	{
 		Field:   "MaintainerAccountAgeDays",

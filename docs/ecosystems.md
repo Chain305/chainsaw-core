@@ -44,7 +44,7 @@ cannot produce a maintainer signal.
 | Composer | 34 | 4 | 15 |
 | RubyGems | 36 | 5 | 12 |
 | NuGet | 24 | 12 | 17 |
-| Go | 28 | 2 | 23 |
+| Go | 29 | 2 | 22 |
 | Hugging Face | 20 | 3 | 30 |
 | CocoaPods | 25 | 3 | 25 |
 | Swift | 20 | 9 | 24 |

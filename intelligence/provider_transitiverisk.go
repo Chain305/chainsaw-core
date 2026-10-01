@@ -101,6 +101,7 @@ import (
 	gem "github.com/aquasecurity/go-gem-version"
 	pep440 "github.com/aquasecurity/go-pep440-version"
 	mvn "github.com/masahiro331/go-mvn-version"
+	gosemver "golang.org/x/mod/semver"
 
 	"github.com/chain305/chainsaw-core/depgraph"
 	"github.com/chain305/chainsaw-core/risk"
@@ -249,7 +250,11 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 	// manifest forbids. Empty for every ecosystem outside
 	// singleVersionEcosystems, which makes the check free for npm roots.
 	// See the J-1 block above violatesDeclaredRootConstraint.
-	rootConstraints := buildRootConstraintIndex(deps, report.Identity.Ecosystem)
+	// Floors (Go `// indirect` requires) join the index but are never
+	// walked: they only refuse closure nodes older than the build allows.
+	rootConstraints := buildRootConstraintIndex(
+		append(append([]DependencyRef(nil), deps...), report.Dependencies.Floors...),
+		report.Identity.Ecosystem)
 	conflictsRefused := 0
 	conflictWarnings := 0
 
@@ -699,7 +704,10 @@ func buildRootConstraintIndex(deps []DependencyRef, fallbackEco string) map[stri
 			continue
 		}
 		c := strings.TrimSpace(ref.Constraint)
-		if c == "" || !constraintIsActionable(c) {
+		// A Go require is always a bare version, and in Go a bare version
+		// is not the soft requirement constraintIsActionable refuses: it
+		// is a FLOOR that MVS honours exactly. See goFloorViolated.
+		if c == "" || (!constraintIsActionable(c) && !isGoEcosystem(eco)) {
 			continue
 		}
 		name := strings.TrimSpace(ref.Name)
@@ -747,6 +755,11 @@ func buildRootConstraintIndex(deps []DependencyRef, fallbackEco string) map[stri
 // this rule reaches RubyGems, PyPI, Composer and the operator-bearing
 // tail. Reconciling a soft requirement needs a mediation algorithm, not
 // a satisfier, and that is not built.
+//
+// Go is the one exception, and it bypasses this function rather than
+// loosening it: a Go require is a minimum MVS honours exactly, so it is
+// applied as a floor (`>= v`), never as the pin the measured flips above
+// came from. See goFloorViolated.
 func constraintIsActionable(c string) bool {
 	c = strings.TrimSpace(c)
 	if c == "" {
@@ -778,6 +791,9 @@ func violatesDeclaredRootConstraint(idx map[string][]string, eco, name, version 
 		return "", false
 	}
 	constraints := idx[strings.ToLower(strings.TrimSpace(eco))+"|"+strings.ToLower(strings.TrimSpace(name))]
+	if isGoEcosystem(eco) {
+		return goFloorViolated(constraints, v)
+	}
 	for _, c := range constraints {
 		sat, err := parseEcosystemConstraint(eco, c)
 		if err != nil || sat == nil {
@@ -794,6 +810,62 @@ func violatesDeclaredRootConstraint(idx map[string][]string, eco, name, version 
 		}
 		if !sat.Check(v) {
 			return c, true
+		}
+	}
+	return "", false
+}
+
+// isGoEcosystem reports whether eco is one of the Go module aliases.
+func isGoEcosystem(eco string) bool {
+	switch strings.ToLower(strings.TrimSpace(eco)) {
+	case "go", "gomod", "golang":
+		return true
+	}
+	return false
+}
+
+// goFloorViolated applies the root's go.mod requires as MVS floors: a
+// closure node at a version BELOW a version the root itself requires is
+// provably not in the build, because minimal version selection picks,
+// per module path, the maximum of every requirement in the build — and
+// the root's own requirements are always in it.
+//
+// This is why Go gets the J-1 rule on bare versions that
+// constraintIsActionable otherwise refuses. The refusal there is about
+// reading a MINIMUM as a PIN, which would delete the higher version the
+// resolver really selects. Here the minimum is read as exactly what it
+// is, and only a version under it is removed; a version at or above the
+// floor stays whether or not MVS would pick it (that half is J-3's
+// unfixed bias, not this rule's business).
+//
+// gin v1.12.0 is the worked case: its go.mod requires x/net v0.51.0, but
+// locales, validator and mongo-driver require far older x/net, x/text
+// and x/crypto in their own go.mod files, and the walk reached those
+// pseudo-versions and blamed their critical CVEs on gin.
+//
+// Soundness limits, both deliberate. (1) `replace` in the root's go.mod
+// could pin LOWER, but replace directives apply only when the module is
+// the main module, and this verdict is about gin installed as somebody's
+// dependency, where they are ignored. (2) Comparison is x/mod/semver on
+// the proxy-canonical form, not Masterminds, because Go orders
+// pre-releases and pseudo-versions by plain semver precedence — a
+// Masterminds range check would call v1.5.0-rc.1 outside `>= v1.2.3` and
+// wrongly delete it. Anything that does not parse answers "no".
+//
+// Direction: this only ever REMOVES closure nodes, so it can only lower
+// transitive counts and move verdicts toward allow.
+func goFloorViolated(floors []string, version string) (string, bool) {
+	nv := goProxyVersion(version)
+	if !gosemver.IsValid(nv) {
+		return "", false
+	}
+	for _, f := range floors {
+		fv := goProxyVersion(f)
+		if !gosemver.IsValid(fv) {
+			continue
+		}
+		if gosemver.Compare(nv, fv) < 0 {
+			return f, true
 		}
 	}
 	return "", false
@@ -816,17 +888,32 @@ func visitedKey(eco, name, version string) string {
 // lookupDepReport tries to resolve a dependency name to a cached
 // intelligence Report. The store is keyed on (ecosystem, package,
 // version) but we only have a constraint string for the dep — so we
-// probe the constraint verbatim, then the operator-stripped lower
-// bound (when it parses as semver), then fall back to enumerating
-// every cached version of (eco, name) and picking the highest one
-// that satisfies the constraint, then finally the "latest" sentinel
-// for back-compat.
+// probe the constraint directly only when it is an EXACT PIN, then
+// enumerate every cached version of (eco, name) and pick the highest
+// concrete one that satisfies the constraint, then finally the
+// "latest" sentinel for back-compat.
 //
 // The enumerate-and-match step is what fixes the most common cause
 // of empty Dependency Alerts: a dep declared as "^1.2.0" with the
-// cache holding "1.5.3". Probing "^1.2.0" / "1.2.0" / "latest" all
-// miss; iterating cached versions and parsing the constraint via
-// Masterminds/semver finds 1.5.3.
+// cache holding "1.5.3". Iterating cached versions and parsing the
+// constraint via the ecosystem's grammar finds 1.5.3.
+//
+// A RANGE IS NEVER PROBED AS A KEY. Until 2026-09-30 this probed the
+// constraint verbatim and then its operator-stripped lower bound, and
+// both were wrong for a range. nodemon@3.1.14 declares `debug: "^4"`;
+// the lower-bound probe turned that into the key debug@"4", and the
+// cache held a row at exactly that key — written by a scan of the
+// install SPEC `debug@4`, which the malware index correctly reads as
+// the range 4.x and so matches MAL-2025-46974 (debug@4.4.2). The walk
+// took that range-keyed row as the resolved node and quarantined
+// nodemon with sc.transitive_malware, although `^4` installs 4.4.3.
+// The same probe resolved minimatch's `brace-expansion: "^5.0.8"` to
+// the vulnerable 5.0.8 while 5.0.12 was cached — the MINIMUM of the
+// range, contradicting the take-the-max rule J-2 documents above. A
+// key that is not a concrete version is a statement about a range,
+// not a node in anybody's install, so it is neither probed nor picked
+// (isConcreteVersion); a range that nothing concrete satisfies reads
+// as not cached, which is a coverage gap, never a verdict.
 func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, name, constraint string) (depgraph.Key, *Report, lookupOutcome, error) {
 	var firstStoreErr error
 	// Epoch of the first superseded row we saw, 0 if none. Recorded so
@@ -839,20 +926,28 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 			supersededEpoch = r.Observation.MatcherEpoch
 		}
 	}
-	for _, candidate := range candidateVersions(constraint) {
-		k := Key{Ecosystem: eco, Package: name, Version: candidate}
-		r, err := store.Get(ctx, orgID, k)
-		// A superseded-matcher row is skipped like a miss so the next
-		// candidate version gets a chance; a transitive alert built on a
-		// retracted verdict is worse than no alert.
+	// probe reads one concrete key. A superseded-matcher row is skipped
+	// like a miss so the next candidate gets a chance; a transitive alert
+	// built on a retracted verdict is worse than no alert.
+	probe := func(v string) *Report {
+		r, err := store.Get(ctx, orgID, Key{Ecosystem: eco, Package: name, Version: v})
 		if err == nil && !r.MatcherStale() {
-			return depgraph.Key{Ecosystem: eco, Name: name, Version: candidate}, r, lookupResolved, nil
+			return r
 		}
 		if err == nil {
 			noteSuperseded(r)
 		}
 		if err != nil && !errors.Is(err, ErrNotFound) && firstStoreErr == nil {
 			firstStoreErr = err
+		}
+		return nil
+	}
+	resolved := func(v string, r *Report) (depgraph.Key, *Report, lookupOutcome, error) {
+		return depgraph.Key{Ecosystem: eco, Name: name, Version: v}, r, lookupResolved, nil
+	}
+	if pin := exactPinVersion(eco, constraint); pin != "" {
+		if r := probe(pin); r != nil {
+			return resolved(pin, r)
 		}
 	}
 	v, parseErr, listErr := pickConstraintMatchDetailed(ctx, store, orgID, eco, name, constraint)
@@ -860,17 +955,12 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 		firstStoreErr = listErr
 	}
 	if v != "" {
-		k := Key{Ecosystem: eco, Package: name, Version: v}
-		r, err := store.Get(ctx, orgID, k)
-		if err == nil && !r.MatcherStale() {
-			return depgraph.Key{Ecosystem: eco, Name: name, Version: v}, r, lookupResolved, nil
+		if r := probe(v); r != nil {
+			return resolved(v, r)
 		}
-		if err == nil {
-			noteSuperseded(r)
-		}
-		if err != nil && !errors.Is(err, ErrNotFound) && firstStoreErr == nil {
-			firstStoreErr = err
-		}
+	}
+	if r := probe(transitiveLatestVersionSentinel); r != nil {
+		return resolved(transitiveLatestVersionSentinel, r)
 	}
 	if firstStoreErr != nil {
 		return depgraph.Key{}, nil, lookupStoreError, firstStoreErr
@@ -895,7 +985,7 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 // other caller of that function wants the report, not the epoch, and
 // this path runs at most once per direct dep on a cold tree.
 func supersededDepEpoch(ctx context.Context, store transitiveLookup, orgID, eco, name, constraint string) int {
-	for _, candidate := range candidateVersions(constraint) {
+	for _, candidate := range candidateVersions(eco, constraint) {
 		// matcher-epoch-exempt: this read exists BECAUSE the row is
 		// superseded — lookupDepReport has already refused it, and the
 		// only thing taken from it is Observation.MatcherEpoch, an
@@ -959,7 +1049,11 @@ func pickConstraintMatchDetailed(ctx context.Context, store transitiveLookup, or
 	// only consulted on entries that passed Check.
 	var bestRaw string
 	for _, v := range versions {
-		if !sat.Check(v) {
+		// A cached key that is not one concrete release (a row written
+		// by scanning an install spec like `debug@4`) is not a
+		// candidate: semver.NewVersion reads "4" as 4.0.0, so without
+		// this it satisfies "^4" and becomes the node.
+		if !isConcreteVersion(eco, v) || !sat.Check(v) {
 			continue
 		}
 		if bestRaw == "" || sat.Greater(v, bestRaw) {
@@ -1415,32 +1509,73 @@ func displayConstraint(c string) string {
 	return c
 }
 
-// candidateVersions builds the small ordered probe list a constraint
-// string maps to:
-//  1. The constraint verbatim — handles exact pins like "1.2.3" or
-//     "==1.2.3" already keyed by version in the cache.
-//  2. The operator-stripped lower bound — handles "^1.2.3", "~1.2.3",
-//     ">=1.2.3", or range tails like ">=1.2.3, <2.0.0" → "1.2.3".
-//     Validated via Masterminds/semver so non-semver junk like
-//     "git+https://…" doesn't generate a noisy probe.
-//  3. The "latest" sentinel as a back-compat fallback.
-//
-// The verbatim form is always emitted first (even for non-semver
-// constraints) because cache writers may have stored a row under
-// exactly that string.
-func candidateVersions(constraint string) []string {
-	c := strings.TrimSpace(constraint)
-	if c == "" {
-		return []string{"latest"}
+// candidateVersions is the direct-key probe list for a constraint: its
+// exact pin when it is one, then the "latest" sentinel. It is the
+// lookupDepReport order minus the enumerate-and-pick step, which sits
+// between the two there.
+func candidateVersions(eco, constraint string) []string {
+	if pin := exactPinVersion(eco, constraint); pin != "" {
+		return []string{pin, transitiveLatestVersionSentinel}
 	}
-	out := []string{c}
-	if lb := stripLowerBound(c); lb != "" && lb != c {
-		if _, err := semver.NewVersion(lb); err == nil {
-			out = append(out, lb)
+	return []string{transitiveLatestVersionSentinel}
+}
+
+// exactPinVersion returns the version a constraint pins EXACTLY — "1.2.3",
+// "=1.2.3", "==1.2.3" — or "" when the constraint admits more than one
+// version. The version must be concrete under the ecosystem's grammar,
+// so npm's "4" (a range: 4.x) is not a pin.
+func exactPinVersion(eco, constraint string) string {
+	c := strings.TrimSpace(constraint)
+	for _, op := range []string{"===", "==", "="} {
+		if strings.HasPrefix(c, op) {
+			c = strings.TrimSpace(c[len(op):])
+			break
 		}
 	}
-	out = append(out, "latest")
-	return out
+	if !isConcreteVersion(eco, c) {
+		return ""
+	}
+	return c
+}
+
+// bareRangeEcosystems read a bare PARTIAL version as a range: npm
+// resolves `debug@4` to 4.x and cargo reads `serde = "1.2"` as ^1.2. In
+// these a version is concrete only when it is full strict semver.
+// Mirrors the set of the same name in core/malware/index.go, which is
+// the reason a row keyed "4" matched a 4.4.2 malware record there.
+var bareRangeEcosystems = map[string]bool{
+	"npm": true, "yarn": true, "pnpm": true, "bun": true, "cargo": true,
+}
+
+// isConcreteVersion reports whether v names ONE release under the
+// ecosystem's grammar, as opposed to a range, a partial that the
+// ecosystem reads as a range, a dist-tag, or junk. A cache row keyed on
+// anything else is the scan of an install spec, not a node in a
+// dependency tree.
+func isConcreteVersion(eco, v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.ContainsAny(v, "^~<>=!|*,[]() ") {
+		return false
+	}
+	for _, part := range strings.Split(v, ".") {
+		if part == "x" || part == "X" {
+			return false
+		}
+	}
+	if bareRangeEcosystems[strings.ToLower(strings.TrimSpace(eco))] {
+		_, err := semver.StrictNewVersion(strings.TrimPrefix(v, "v"))
+		return err == nil
+	}
+	switch normalizeEcosystem(eco) {
+	case "pypi":
+		return pep440Satisfier{}.Valid(v)
+	case "rubygems":
+		return gemSatisfier{}.Valid(v)
+	case "maven", "nuget", "packagist":
+		return mvnSatisfier{}.Valid(v)
+	default:
+		return semverSatisfier{}.Valid(v)
+	}
 }
 
 // computeTransitiveSeverity walks every non-root node in the
@@ -1630,25 +1765,4 @@ func verdictRank(v risk.Verdict) int {
 		return 4
 	}
 	return 0
-}
-
-// stripLowerBound takes a constraint string and returns the lower-bound
-// version with operator characters removed. For ranges like
-// ">=1.2.3, <2.0.0" it splits on comma/space and uses the first token.
-// Returns "" if no plausible version remains.
-func stripLowerBound(c string) string {
-	// Take the first comma-separated clause for ranges.
-	first := c
-	if idx := strings.Index(first, ","); idx >= 0 {
-		first = first[:idx]
-	}
-	first = strings.TrimSpace(first)
-	// Strip a leading operator. Order matters: longer operators first.
-	for _, op := range []string{">=", "<=", "==", "!=", "~>", ">", "<", "=", "^", "~"} {
-		if strings.HasPrefix(first, op) {
-			first = strings.TrimSpace(first[len(op):])
-			break
-		}
-	}
-	return first
 }

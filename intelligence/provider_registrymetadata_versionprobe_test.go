@@ -405,11 +405,11 @@ func TestGroupAProbeSuppressedWithoutPositiveEvidence(t *testing.T) {
 // probe is behind the 404 branch, so a healthy scan issues exactly the
 // requests it issued before the probe existed.
 //
-// For PyPI that is two, both of which predate this change: the
-// per-version document, and the project-level document runPyPI has always
-// fetched to build the version timeline. If a future edit hoists the
-// probe out of the 404 branch this count goes to three and the test says
-// so.
+// For PyPI that is three: the per-version document, the simple-index head
+// read for the PEP 792 project status (fetchPyPIProjectStatus, added
+// 2026-09-30), and the project-level document runPyPI has always fetched
+// to build the version timeline. If a future edit hoists the probe out of
+// the 404 branch this count goes to four and the test says so.
 func TestGroupAProbeDoesNotFireOnSuccessPath(t *testing.T) {
 	routes := http.NewServeMux()
 	routes.HandleFunc("/pypi/leftpad/1.0.0/json", func(w http.ResponseWriter, _ *http.Request) {
@@ -433,7 +433,7 @@ func TestGroupAProbeDoesNotFireOnSuccessPath(t *testing.T) {
 	}
 
 	got := counter.seen()
-	want := []string{"/pypi/leftpad/1.0.0/json", "/pypi/leftpad/json"}
+	want := []string{"/pypi/leftpad/1.0.0/json", "/simple/leftpad/", "/pypi/leftpad/json"}
 	if len(got) != len(want) {
 		t.Fatalf("success path issued %d requests %v, want %d %v — the probe must not fire when the version resolves",
 			len(got), got, len(want), want)

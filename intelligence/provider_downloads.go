@@ -65,9 +65,25 @@ var (
 
 func getDownloadsClient() *upstreamhttp.Client {
 	downloadsClientOnce.Do(func() {
-		downloadsClient = upstreamhttp.New(upstreamhttp.FromEnv(), upstreamhttp.WithMaxRetries(0))
+		cfg := upstreamhttp.FromEnv()
+		for host, rps := range downloadsHostLimits {
+			if _, set := cfg.HostLimits[host]; !set { // an env override wins
+				cfg.HostLimits[host] = rps
+			}
+		}
+		downloadsClient = upstreamhttp.New(cfg, upstreamhttp.WithMaxRetries(0))
 	})
 	return downloadsClient
+}
+
+// downloadsHostLimits paces the stats hosts only this client talks to.
+// pypistats.org answered one request in five with a bare 429 (no
+// Retry-After) at ~10/s sequential on 2026-09-30, and 7 of 350 corpus
+// packages came back -1 from it at the 30/s default. api.npmjs.org is not
+// here: its limit is far below any per-request rate, so the npm path
+// batches and paces itself (premium/provider_weekly_downloads.go).
+var downloadsHostLimits = map[string]float64{
+	"pypistats.org": 4,
 }
 
 // --- shared outbound HTTP doer seam --------------------------------------

@@ -445,7 +445,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseExceptionPresent:    SupportFull,
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
-		ConditionDeprecatedByMaintainer:     SupportFull, // yanked
+		ConditionDeprecatedByMaintainer:     SupportFull, // yanked + PEP 792 project-status (simple-index <meta>)
 		// P8-39 rail finding (same class as P8-58/P8-59, found by
 		// TestSupportMatrixMatchesProviderCoverage rather than by hand):
 		// shrinkwrapProvider is ecosystem-generic. ecosystemLockfiles
@@ -927,7 +927,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseExceptionPresent:    SupportFull,
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
-		ConditionDeprecatedByMaintainer:     SupportFull, // registration5-gz-semver2 catalogEntry.deprecation (per-version)
+		ConditionDeprecatedByMaintainer:     SupportFull, // registration5-gz-semver2 catalogEntry.deprecation (per-version) + registration `listed:false` (unlisted)
 		ConditionShrinkwrapPresent:          SupportNone,
 		ConditionManifestConfusion:          SupportNone,
 		// Wave 2: NuGet .csproj / packages.config parsing deferred.
@@ -992,7 +992,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionLicenseExceptionPresent:    SupportFull,
 		ConditionLicenseAmbiguousClassifier: SupportFull,
 		ConditionLicenseUnidentified:        SupportFull,
-		ConditionDeprecatedByMaintainer:     SupportNone,
+		ConditionDeprecatedByMaintainer:     SupportFull, // latest go.mod `retract` covering the version → Release.Yanked; module `// Deprecated:` → Release.Deprecated
 		ConditionShrinkwrapPresent:          SupportNone,
 		ConditionManifestConfusion:          SupportNone,
 		// Wave 2: go.mod requires always pin an exact version

@@ -47,7 +47,7 @@ func init() {
 		// tail, and a finished library is not suspicious.
 		MaxImpact:   maxImpactWarnTop,
 		Title:       "Deprecated by maintainer",
-		Description: "Registry reports this version is deprecated (npm) or yanked (PyPI/Cargo).",
+		Description: "Registry reports this version is deprecated, yanked, retracted (Go), unlisted (NuGet) or abandoned/archived (Packagist, PyPI project status, Go module Deprecated:).",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if !in.DeprecatedByMaintainer {
 				return false, "", nil

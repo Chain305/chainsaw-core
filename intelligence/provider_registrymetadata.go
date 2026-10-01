@@ -29,12 +29,14 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -47,6 +49,7 @@ import (
 	"github.com/chain305/chainsaw-core/provenance"
 	"github.com/chain305/chainsaw-core/upstreamhttp"
 	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/semver"
 )
 
 // Default public registry base URLs. Overridable for tests.
@@ -659,7 +662,19 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 		}
 		return &Warning{Provider: "registrymetadata", Code: code, Message: msg, At: p.now()}, false, resp.StatusCode, err
 	}
+	if hc, ok := ctx.Value(headerCaptureKey{}).(*http.Header); ok && hc != nil {
+		*hc = resp.Header.Clone()
+	}
 	return nil, false, resp.StatusCode, nil
+}
+
+// headerCaptureKey lets a caller read the response headers of a successful
+// fetch without a second request: withHeaderCapture(ctx, &h) and fetchOnce
+// fills h. runMaven uses it for the POM's Last-Modified.
+type headerCaptureKey struct{}
+
+func withHeaderCapture(ctx context.Context, h *http.Header) context.Context {
+	return context.WithValue(ctx, headerCaptureKey{}, h)
 }
 
 // isTransientErr classifies a transport error as retryable. Per-attempt
@@ -906,6 +921,50 @@ func npmWithdrawn(ver string, unpublishedVersions []string, liveVersions int) bo
 	return liveVersions == 0
 }
 
+// npmPublisherBaseline returns the publisher and maintainers of the version
+// published immediately before ver, by the packument's own publish times.
+//
+// Returns nil when ver has no publish time (the caller then falls back to the
+// store), and a baseline with Version == "" when nothing was published before
+// ver. Maintainers come from THAT version's manifest only: the package-level
+// list is what an attacker edits before publishing, so reading it would let a
+// takeover vouch for itself.
+func npmPublisherBaseline(versions map[string]npmVersionMeta, stamps map[string]string, ver string) *PublisherBaseline {
+	at, ok := parseTime(stamps[ver])
+	if !ok {
+		return nil
+	}
+	prev, prevAt := "", time.Time{}
+	for v := range versions {
+		if v == ver {
+			continue
+		}
+		t, ok := parseTime(stamps[v])
+		if !ok || !t.Before(at) {
+			continue
+		}
+		if prev == "" || t.After(prevAt) || (t.Equal(prevAt) && v > prev) {
+			prev, prevAt = v, t
+		}
+	}
+	b := &PublisherBaseline{Version: prev}
+	if prev == "" {
+		return b
+	}
+	meta := versions[prev]
+	if meta.NpmUser != nil {
+		if s := meta.NpmUser.String(); s != "" {
+			b.Publishers = []string{s}
+		}
+	}
+	for _, m := range meta.Maintainers {
+		if s := m.String(); s != "" {
+			b.Maintainers = append(b.Maintainers, s)
+		}
+	}
+	return b
+}
+
 // appendUniqueString appends s to xs unless already present.
 func appendUniqueString(xs []string, s string) []string {
 	for _, x := range xs {
@@ -981,6 +1040,9 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 		if s := entry.NpmUser.String(); s != "" {
 			people.PublisherIDs = []string{s}
 		}
+	}
+	if hasEntry {
+		people.PublisherBaseline = npmPublisherBaseline(pack.Versions, pack.Time.Stamps, ver)
 	}
 	var maintainers []npmHuman
 	if hasEntry && len(entry.Maintainers) > 0 {
@@ -1447,8 +1509,17 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 
 	yanked, yankReason := normalisePyPIYanked(pack.Info.Yanked, pack.Info.YankedReason)
 	release.Yanked = &yanked
-	if yanked && yankReason != "" {
-		release.Deprecated = "yanked: " + yankReason
+	if yanked {
+		release.Deprecated = "yanked"
+		if yankReason != "" {
+			release.Deprecated = "yanked: " + yankReason
+		}
+	}
+	// PEP 792 project status is project-wide and applies to every version:
+	// archived (no further releases), deprecated, quarantined (PyPI staff).
+	// Routed onto Deprecated like Packagist's package-level `abandoned`.
+	if status := p.fetchPyPIProjectStatus(ctx, pkg); status != "" && release.Deprecated == "" {
+		release.Deprecated = status
 	}
 
 	pr.Release = release
@@ -1586,6 +1657,47 @@ func splitPyPIRequirement(req string) (name, constraint string) {
 		}
 	}
 	return strings.TrimSpace(req), ""
+}
+
+var (
+	pypiStatusMeta = regexp.MustCompile(`<meta\s+name="pypi:project-status"\s+content="([^"]*)"`)
+	pypiReasonMeta = regexp.MustCompile(`<meta\s+name="pypi:project-status-reason"\s+content="([^"]*)"`)
+)
+
+// fetchPyPIProjectStatus returns "project status: <status>[: <reason>]" for a
+// PEP 792 status other than active, or "" (active, absent, or not read).
+//
+// PyPI exposes the status only on the simple index, not the JSON API. The
+// JSON form puts it AFTER the file list (2.2 MB for boto3); the HTML form
+// puts it in <head>, so only the first 8 KiB is read. Best-effort like
+// fetchPubOptions: a miss is not a fact about the project and adds no
+// warning.
+func (p *registryMetadataProvider) fetchPyPIProjectStatus(ctx context.Context, pkg string) string {
+	endpoint := fmt.Sprintf("%s/simple/%s/", p.endpoints.pypi, url.PathEscape(pkg))
+	var head []byte
+	warn, err := p.fetchDecoded(ctx, endpoint, "text/html", func(r io.Reader) error {
+		b, rerr := io.ReadAll(io.LimitReader(r, 8<<10))
+		head = b
+		return rerr
+	})
+	if err != nil || warn != nil {
+		return ""
+	}
+	m := pypiStatusMeta.FindSubmatch(head)
+	if m == nil {
+		return ""
+	}
+	status := strings.ToLower(strings.TrimSpace(html.UnescapeString(string(m[1]))))
+	if status == "" || status == "active" {
+		return ""
+	}
+	out := "project status: " + status
+	if r := pypiReasonMeta.FindSubmatch(head); r != nil {
+		if reason := strings.TrimSpace(html.UnescapeString(string(r[1]))); reason != "" {
+			out += ": " + reason
+		}
+	}
+	return out
 }
 
 // normalisePyPIYanked accepts a yanked value that may be a bool or a
@@ -1726,6 +1838,36 @@ type mavenPOM struct {
 	Properties struct {
 		Entries []mavenPOMProperty `xml:",any"`
 	} `xml:"properties"`
+	// Relocation is <distributionManagement><relocation>: the maintainer's
+	// statement that this coordinate moved. Any omitted child defaults to
+	// this POM's own value (Maven's rule), which mavenRelocationTarget
+	// applies.
+	DistributionManagement struct {
+		Relocation *struct {
+			GroupID    string `xml:"groupId"`
+			ArtifactID string `xml:"artifactId"`
+			Version    string `xml:"version"`
+			Message    string `xml:"message"`
+		} `xml:"relocation"`
+	} `xml:"distributionManagement"`
+}
+
+// mavenRelocationTarget renders the POM's relocation as
+// "group:artifact:version", filling omitted parts from the relocated
+// coordinate itself. Empty when the POM declares no relocation.
+func mavenRelocationTarget(pom *mavenPOM, group, artifact, ver string) string {
+	r := pom.DistributionManagement.Relocation
+	if r == nil {
+		return ""
+	}
+	g := firstNonEmpty(strings.TrimSpace(r.GroupID), group)
+	a := firstNonEmpty(strings.TrimSpace(r.ArtifactID), artifact)
+	v := firstNonEmpty(strings.TrimSpace(r.Version), ver)
+	out := g + ":" + a + ":" + v
+	if m := strings.TrimSpace(r.Message); m != "" {
+		out += " (" + m + ")"
+	}
+	return out
 }
 
 // mavenPOMProperty is one <properties> child: the element name is the
@@ -2264,7 +2406,10 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 	pomURL := fmt.Sprintf("%s/%s/%s/%s/%s-%s.pom", p.endpoints.maven, groupPath, artifact, ver, artifact, ver)
 
 	var pom mavenPOM
-	warn, err := p.fetchXML(ctx, pomURL, &pom)
+	// The POM response's Last-Modified is this version's deploy time — the
+	// only per-version date Maven publishes. Captured from the same GET.
+	var pomHeader http.Header
+	warn, err := p.fetchXML(withHeaderCapture(ctx, &pomHeader), pomURL, &pom)
 	if err != nil {
 		return PartialReport{}, err
 	}
@@ -2401,6 +2546,30 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 	if !lastUpdated.IsZero() && pr.Maintenance != nil && pr.Maintenance.FirstPublishedAt == nil {
 		t := lastUpdated
 		pr.Maintenance.FirstPublishedAt = &t
+	}
+	// `<lastUpdated>` is rewritten on every deploy of the artifact, so it
+	// dates the latest release — the one timestamp maint.no_recent_release
+	// needs, and it costs no extra request. It is only an upper bound on
+	// staleness (a re-index can bump it), which is the safe direction for a
+	// signal that must not fire on a maintained package. Before this, 0 of
+	// 13 corpus-v1 maven D rows carried LatestReleaseAt.
+	if !lastUpdated.IsZero() && pr.Maintenance != nil && pr.Maintenance.LatestReleaseAt == nil {
+		t := lastUpdated
+		pr.Maintenance.LatestReleaseAt = &t
+	}
+	if reloc := mavenRelocationTarget(&pom, group, artifact, ver); reloc != "" {
+		if pr.Release == nil {
+			pr.Release = &ReleaseSection{}
+		}
+		pr.Release.RelocatedTo = reloc
+	}
+	// Read only by maint.outdated_version (see ReleaseSection.VersionDate).
+	if t, terr := http.ParseTime(pomHeader.Get("Last-Modified")); terr == nil {
+		t = t.UTC()
+		if pr.Release == nil {
+			pr.Release = &ReleaseSection{}
+		}
+		pr.Release.VersionDate = &t
 	}
 	// Apache projects publish their POM with `<scm><url>` pointing at
 	// gitbox.apache.org (the canonical authoritative mirror) even though
@@ -2716,6 +2885,7 @@ func (p *registryMetadataProvider) runCargo(ctx context.Context, pkg, ver string
 			CrateSize   *int64 `json:"crate_size"`
 			Checksum    string `json:"checksum"`
 			Yanked      bool   `json:"yanked"`
+			YankMessage string `json:"yank_message"`
 			PublishedBy *struct {
 				Login string `json:"login"`
 				Name  string `json:"name"`
@@ -2752,6 +2922,14 @@ func (p *registryMetadataProvider) runCargo(ctx context.Context, pkg, ver string
 	}
 	yanked := pack.Version.Yanked
 	release.Yanked = &yanked
+	if yanked {
+		// The reason is the evidence line sc.deprecated_by_maintainer prints;
+		// without it a yank reads as "Maintainer has deprecated this version".
+		release.Deprecated = "yanked"
+		if m := strings.TrimSpace(pack.Version.YankMessage); m != "" {
+			release.Deprecated = "yanked: " + m
+		}
+	}
 
 	urls := &URLSection{MetadataURL: endpoint}
 	if pack.Crate.Homepage != "" {
@@ -2982,6 +3160,9 @@ func (p *registryMetadataProvider) runRubyGems(ctx context.Context, pkg, ver str
 		// missing gem from a missing version; /api/v1/versions/{gem}.json
 		// can.
 		warn = p.promoteVersionNotFound(ctx, "rubygems", warn, endpoint, pkg, ver, p.probeRubyGemsPackage(pkg))
+		if warn.Code == WarnVersionNotFound && p.rubyGemsVersionPageSaysYanked(ctx, pkg, ver) {
+			return rubyGemsYankedReport(p, endpoint, pkg, ver), nil
+		}
 		pr.Warnings = append(pr.Warnings, *warn)
 		return pr, nil
 	}
@@ -3114,6 +3295,48 @@ func (p *registryMetadataProvider) fetchRubyGemsTimelineDoc(ctx context.Context,
 		timeline = append(timeline, rel)
 	}
 	return timelineDoc{timeline: timeline, latest: latest, endpoint: endpoint}
+}
+
+// rubyGemsYankedBanner is the sentence rubygems.org prints on the version page
+// of a yanked version. A never-published version's page is a 404 instead.
+const rubyGemsYankedBanner = "This version has been yanked"
+
+// rubyGemsVersionPageSaysYanked distinguishes a YANKED version from one that
+// was never published, which the API cannot: both are absent from
+// /api/v1/versions and both 404 on the v2 version endpoint, and the .gem
+// download answers 403 for both (measured 2026-09-30 on rest-client 1.6.10,
+// yanked, and 1.6.99, never published). Only the HTML version page differs —
+// 200 with the banner vs 404. Called only on the version_not_found path, so
+// a healthy scan never pays for it. Best-effort: anything but a 200 carrying
+// the banner is "not shown to be yanked", and the caller keeps
+// version_not_found.
+func (p *registryMetadataProvider) rubyGemsVersionPageSaysYanked(ctx context.Context, pkg, ver string) bool {
+	endpoint := fmt.Sprintf("%s/gems/%s/versions/%s", p.endpoints.rubygems, url.PathEscape(pkg), url.PathEscape(ver))
+	var page []byte
+	warn, err := p.fetchDecoded(ctx, endpoint, "text/html", func(r io.Reader) error {
+		b, rerr := io.ReadAll(io.LimitReader(r, 256<<10))
+		page = b
+		return rerr
+	})
+	return err == nil && warn == nil && strings.Contains(string(page), rubyGemsYankedBanner)
+}
+
+// rubyGemsYankedReport is the report for a version rubygems.org shows as
+// yanked. The version existed, so it is NOT version_not_found (which routes
+// to verdict unknown); it is a registry withdrawal, scored like a Cargo or
+// PyPI yank. The API serves no metadata for it, so the licence is marked
+// unavailable rather than left to read as "declares none".
+func rubyGemsYankedReport(p *registryMetadataProvider, endpoint, pkg, ver string) PartialReport {
+	yanked := true
+	return PartialReport{
+		Release: &ReleaseSection{
+			Yanked:     &yanked,
+			Deprecated: "yanked: absent from the registry's version list; rubygems.org version page reports it yanked",
+		},
+		URLs: &URLSection{MetadataURL: endpoint},
+		Warnings: []Warning{licenseUnavailableWarning(
+			"rubygems yanked version: the API serves no metadata for it", p.now())},
+	}
 }
 
 // rubyGemsOwner is the subset of the RubyGems owners.json record we
@@ -3279,7 +3502,43 @@ func (p *registryMetadataProvider) runNuGet(ctx context.Context, pkg, ver string
 	for _, dep := range nuspec.Metadata.Dependencies.Dependency {
 		addDep(dep.ID, dep.Version)
 	}
+	// A consumer installs ONE group: the nearest to its own framework.
+	// Unioning every group blamed Newtonsoft.Json 13.0.4 for the
+	// System.Net.Http 4.3.0 CVE that only its netstandard1.x groups pull
+	// in (via NETStandard.Library 1.6.1); its net6.0 / netstandard2.0 /
+	// net4x groups are empty.
+	//
+	// Rule: when the package ships a netstandard2.0+ group, its
+	// netstandard1.x and portable-* groups are dropped. Every supported
+	// consumer (net462+, netcoreapp2.0+, net5+, current Mono/Xamarin/UWP)
+	// can use netstandard2.x, and NuGet's nearest-match prefers it over
+	// 1.x, so those groups are reachable only from out-of-support
+	// platforms. .NETFramework groups are KEPT, all of them: NuGet prefers
+	// the same framework family, so a supported net48 app picks a net40 or
+	// net45 group over netstandard2.0 — dropping them would hide what that
+	// app installs. Without a netstandard2.x group nothing is dropped
+	// (e.g. {netstandard1.3, net6.0}: a net48 app picks netstandard1.3).
+	//
+	// Recall cost: an app on a platform that cannot use netstandard2.0
+	// (.NET Framework < 4.6.1, pre-16299 UWP) no longer sees the 1.x
+	// group's dependencies. Direction: removes dependencies only, so
+	// transitive counts fall and verdicts move toward allow.
+	nugetTFM := func(tfm string) string {
+		return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(tfm)), ".")
+	}
+	hasNetStandard2 := false
 	for _, group := range nuspec.Metadata.Dependencies.Group {
+		t := nugetTFM(group.TargetFramework)
+		if n := len("netstandard"); strings.HasPrefix(t, "netstandard") && len(t) > n && t[n] >= '2' && t[n] <= '9' {
+			hasNetStandard2 = true
+		}
+	}
+	for _, group := range nuspec.Metadata.Dependencies.Group {
+		t := nugetTFM(group.TargetFramework)
+		// "portable-net45+win8" (short) or ".NETPortable4.5-Profile259".
+		if hasNetStandard2 && (strings.HasPrefix(t, "netstandard1") || strings.HasPrefix(t, "portable") || strings.HasPrefix(t, "netportable")) {
+			continue
+		}
 		for _, dep := range group.Dependency {
 			addDep(dep.ID, dep.Version)
 		}
@@ -3295,11 +3554,47 @@ func (p *registryMetadataProvider) runNuGet(ctx context.Context, pkg, ver string
 	// history. NuGet's registration5-semver1 nests entries under
 	// items[].items[].catalogEntry — most popular packages fit in a
 	// single page; large packages (>64 entries) paginate with a
-	// downstream `@id` we DO NOT follow here (deliberate: keeps the
-	// timeline call to one request and avoids the rabbit hole of catalog
-	// chasing). Fail-soft: a transient error surfaces as a Warning.
-	timeline, latest, listed, tlWarn := p.fetchNuGetTimeline(ctx, pkg)
+	// downstream `@id`. Only the LAST remote page is followed (see
+	// fetchNuGetTimeline). Fail-soft: a transient error surfaces as a
+	// Warning.
+	timeline, latest, listed, latestAt, tlWarn := p.fetchNuGetTimeline(ctx, pkg)
 	applyTimeline(&pr, timeline, latest, tlWarn)
+	if len(timeline) == 0 && !latestAt.IsZero() {
+		// Paged registration: the timeline stays empty (a partial one would
+		// undercount VersionCount), but the newest page still dates the
+		// latest release, which is what maint.no_recent_release reads.
+		if pr.Maintenance == nil {
+			pr.Maintenance = &MaintenanceSection{}
+		}
+		pr.Maintenance.LatestReleaseAt = &latestAt
+		if pr.Release == nil {
+			pr.Release = &ReleaseSection{}
+		}
+		if pr.Release.LatestVersion == "" {
+			pr.Release.LatestVersion = latest
+		}
+	}
+	// The requested version is absent from the inline pages when the
+	// registration is paged, and from semver1 altogether when it is a
+	// SemVer-2 version (5.0.0-dev.1530). Its registration LEAF still says
+	// whether it is listed — one request, only on that path. Corpus v1
+	// had two unlisted D rows (Ikon.Sdk.DotNet, Uno.UI.WebAssembly) that
+	// scored allow for exactly this reason.
+	isUnlisted := listed[strings.ToLower(ver)]
+	if !isUnlisted && !nugetTimelineHas(timeline, ver) {
+		l, published := p.fetchNuGetLeaf(ctx, pkg, ver)
+		if l != nil && !*l {
+			isUnlisted = true
+		}
+		// The leaf is also the only place this version is dated when the
+		// index is paged (unlisted leaves carry the 1900 sentinel).
+		if !published.IsZero() {
+			if pr.Release == nil {
+				pr.Release = &ReleaseSection{}
+			}
+			pr.Release.VersionDate = &published
+		}
+	}
 	// NuGet has no per-version "yanked" boolean; the registry instead
 	// flips `catalogEntry.listed=false` when an owner unlists a version
 	// (the closest analogue to a yank on this registry). Promote that
@@ -3308,12 +3603,17 @@ func (p *registryMetadataProvider) runNuGet(ctx context.Context, pkg, ver string
 	// publishes on npm / PyPI / rubygems. The map is keyed by the
 	// lower-cased catalogEntry.version because NuGet treats the version
 	// string case-insensitively.
-	if isUnlisted, ok := listed[strings.ToLower(ver)]; ok && isUnlisted {
+	if isUnlisted {
 		if pr.Release == nil {
 			pr.Release = &ReleaseSection{}
 		}
 		yanked := true
 		pr.Release.Yanked = &yanked
+		listedFalse := false
+		pr.Release.Listed = &listedFalse
+		if pr.Release.Deprecated == "" {
+			pr.Release.Deprecated = "unlisted"
+		}
 	}
 	// Gallery deprecation. Neither the .nuspec (package content) nor the
 	// SemVer-1 registration read above carries it, so this is a separate
@@ -3437,28 +3737,36 @@ func (p *registryMetadataProvider) fetchNuGetDeprecation(ctx context.Context, pk
 	return ""
 }
 
-func (p *registryMetadataProvider) fetchNuGetTimeline(ctx context.Context, pkg string) ([]VersionRelease, string, map[string]bool, *Warning) {
+func (p *registryMetadataProvider) fetchNuGetTimeline(ctx context.Context, pkg string) ([]VersionRelease, string, map[string]bool, time.Time, *Warning) {
 	lower := strings.ToLower(pkg)
 	endpoint := fmt.Sprintf("%s/%s/index.json", p.endpoints.nugetRegistration, url.PathEscape(lower))
 	var idx struct {
-		Items []struct {
-			Items []struct {
-				CatalogEntry struct {
-					Version   string `json:"version"`
-					Published string `json:"published"`
-					Listed    *bool  `json:"listed,omitempty"`
-				} `json:"catalogEntry"`
-			} `json:"items"`
-		} `json:"items"`
+		Items []nugetRegistrationPage `json:"items"`
 	}
 	warn, err := p.fetchJSON(ctx, endpoint, "application/json", &idx)
 	if err != nil || warn != nil {
-		return nil, "", nil, timelineFetchFailedWarning(p, endpoint, err, warn)
+		return nil, "", nil, time.Time{}, timelineFetchFailedWarning(p, endpoint, err, warn)
 	}
 	timeline := []VersionRelease{}
 	unlisted := map[string]bool{}
 	var latest string
 	var latestT time.Time
+	// A paged registration inlines no leaves; its pages are `@id`
+	// references in ascending version order. Following all of them costs
+	// one request per 64 versions (Uno.UI.WebAssembly has thousands), so
+	// only the last page is read, and only for the latest version and its
+	// date. Its leaves are NOT added to the timeline: a partial timeline
+	// would be read downstream as the whole version count.
+	if n := len(idx.Items); n > 0 && len(idx.Items[n-1].Items) == 0 && idx.Items[n-1].ID != "" {
+		var last nugetRegistrationPage
+		if w, e := p.fetchJSON(ctx, idx.Items[n-1].ID, "application/json", &last); e == nil && w == nil {
+			for _, leaf := range last.Items {
+				if t, ok := parseTime(leaf.CatalogEntry.Published); ok && t.Year() > 1901 && t.After(latestT) {
+					latest, latestT = leaf.CatalogEntry.Version, t
+				}
+			}
+		}
+	}
 	for _, page := range idx.Items {
 		for _, leaf := range page.Items {
 			ce := leaf.CatalogEntry
@@ -3485,7 +3793,54 @@ func (p *registryMetadataProvider) fetchNuGetTimeline(ctx context.Context, pkg s
 			timeline = append(timeline, rel)
 		}
 	}
-	return timeline, latest, unlisted, nil
+	return timeline, latest, unlisted, latestT, nil
+}
+
+// nugetRegistrationPage is one page of a NuGet registration index: leaves
+// inline, or only an `@id` to fetch them from when the index is paged.
+type nugetRegistrationPage struct {
+	ID    string `json:"@id"`
+	Items []struct {
+		CatalogEntry struct {
+			Version   string `json:"version"`
+			Published string `json:"published"`
+			Listed    *bool  `json:"listed,omitempty"`
+		} `json:"catalogEntry"`
+	} `json:"items"`
+}
+
+func nugetTimelineHas(timeline []VersionRelease, ver string) bool {
+	for _, r := range timeline {
+		if strings.EqualFold(r.Version, ver) {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchNuGetLeaf reads one version's registration leaf from the SemVer-2
+// resource (a superset of semver1) and returns its `listed` (nil when the leaf
+// could not be read) and its publish date (zero when absent or the 1900
+// unlisted sentinel). Best-effort like fetchNuGetDeprecation: a miss is not a
+// fact about the package and adds no warning.
+func (p *registryMetadataProvider) fetchNuGetLeaf(ctx context.Context, pkg, ver string) (*bool, time.Time) {
+	base := strings.TrimSpace(p.endpoints.nugetRegistrationV2)
+	if base == "" || ver == "" {
+		return nil, time.Time{}
+	}
+	endpoint := fmt.Sprintf("%s/%s/%s.json", base, url.PathEscape(strings.ToLower(pkg)), url.PathEscape(strings.ToLower(ver)))
+	var leaf struct {
+		Listed    *bool  `json:"listed"`
+		Published string `json:"published"`
+	}
+	if w, e := p.fetchJSON(ctx, endpoint, "application/json", &leaf); e != nil || w != nil {
+		return nil, time.Time{}
+	}
+	t, ok := parseTime(leaf.Published)
+	if !ok || t.Year() <= 1901 {
+		t = time.Time{}
+	}
+	return leaf.Listed, t
 }
 
 // -- Composer / Packagist ---------------------------------------------
@@ -3948,6 +4303,7 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	// (pseudo-versions and forks may not have a @latest pointer).
 	var latest struct {
 		Version string `json:"Version"`
+		Time    string `json:"Time"`
 	}
 	latestURL := fmt.Sprintf("%s/%s/@latest", p.endpoints.goproxy, module)
 	_, _ = p.fetchJSON(ctx, latestURL, "application/json", &latest)
@@ -3958,6 +4314,22 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	}
 	if latest.Version != "" {
 		release.LatestVersion = latest.Version
+		// @v/list carries no dates, so this is the only place a Go module's
+		// latest release is dated. Without it maint.no_recent_release could
+		// never fire on Go (0 of 12 corpus-v1 D rows had the field).
+		if t, ok := parseTime(latest.Time); ok {
+			pr.Maintenance = &MaintenanceSection{LatestReleaseAt: &t}
+		}
+		// Retractions and the module deprecation live in the go.mod of the
+		// LATEST version — that is where the go command reads them, so a
+		// retraction is a fact a user of `go get` is already shown.
+		if yanked, why := p.fetchGoModState(ctx, module, latest.Version, ver); yanked || why != "" {
+			if yanked {
+				y := true
+				release.Yanked = &y
+			}
+			release.Deprecated = why
+		}
 	}
 
 	urls := &URLSection{
@@ -4081,6 +4453,56 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	return pr, nil
 }
 
+// fetchGoModState reads the go.mod of the module's latest version and
+// reports whether ver is retracted there, plus the evidence string: the
+// retraction rationale and/or the module's `// Deprecated:` comment.
+// Best-effort: a failed fetch or parse is not a fact about the module and
+// returns the zero value without a warning (fetchGoMod already reports
+// go.mod fetch failures for the requested version).
+//
+// One extra GET, and a duplicate one when ver IS the latest version —
+// accepted rather than threading the parsed file out of fetchGoMod.
+func (p *registryMetadataProvider) fetchGoModState(ctx context.Context, module, latest, ver string) (retracted bool, why string) {
+	modURL := fmt.Sprintf("%s/%s/@v/%s.mod", p.endpoints.goproxy, module, url.PathEscape(goProxyVersion(latest)))
+	var body []byte
+	warn, err := p.fetchDecoded(ctx, modURL, "text/plain", func(r io.Reader) error {
+		b, rerr := io.ReadAll(io.LimitReader(r, 1<<20))
+		body = b
+		return rerr
+	})
+	if err != nil || warn != nil {
+		return false, ""
+	}
+	f, perr := modfile.ParseLax("go.mod", body, nil)
+	if perr != nil || f == nil {
+		return false, ""
+	}
+	return goModState(f, goProxyVersion(ver))
+}
+
+// goModState is the pure half of fetchGoModState.
+func goModState(f *modfile.File, ver string) (retracted bool, why string) {
+	var parts []string
+	for _, r := range f.Retract {
+		if r == nil || !semver.IsValid(ver) {
+			continue
+		}
+		if semver.Compare(r.Low, ver) <= 0 && semver.Compare(ver, r.High) <= 0 {
+			retracted = true
+			if r.Rationale != "" {
+				parts = append(parts, "retracted: "+r.Rationale)
+			} else {
+				parts = append(parts, "retracted")
+			}
+			break
+		}
+	}
+	if f.Module != nil && strings.TrimSpace(f.Module.Deprecated) != "" {
+		parts = append(parts, "deprecated: "+strings.TrimSpace(f.Module.Deprecated))
+	}
+	return retracted, strings.Join(parts, "; ")
+}
+
 // fetchGoMod retrieves and parses the per-version go.mod from the
 // goproxy and returns a DependenciesSection populated from the
 // `require (...)` block. Fail-soft: any fetch / parse error appends a
@@ -4131,25 +4553,33 @@ func (p *registryMetadataProvider) fetchGoMod(ctx context.Context, module, ver s
 		return nil
 	}
 	out := make([]DependencyRef, 0, len(f.Require))
+	var floors []DependencyRef
 	for _, r := range f.Require {
-		if r == nil || r.Indirect {
-			// Skip indirects: MVS-derived, resolved by walking direct
-			// deps' own go.mod files (the transitive resolver's job).
+		if r == nil {
 			continue
 		}
 		name := strings.TrimSpace(r.Mod.Path)
 		if name == "" {
 			continue
 		}
-		out = append(out, DependencyRef{
+		ref := DependencyRef{
 			Name:       name,
 			Constraint: strings.TrimSpace(r.Mod.Version),
-		})
+		}
+		if r.Indirect {
+			// Not walked: MVS-derived, resolved by walking direct deps'
+			// own go.mod files (the transitive resolver's job). Kept as a
+			// floor so that walk can refuse anything older — see
+			// DependenciesSection.Floors.
+			floors = append(floors, ref)
+			continue
+		}
+		out = append(out, ref)
 	}
 	if len(out) == 0 {
 		return nil
 	}
-	return &DependenciesSection{Direct: out}
+	return &DependenciesSection{Direct: out, Floors: floors}
 }
 
 // fetchDepsDevGoLicense queries the deps.dev v3 API for license data

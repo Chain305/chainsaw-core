@@ -51,9 +51,12 @@ var testFileSuffixes = []string{
 }
 
 // npmCapPattern associates a compiled regexp with the Capability it detects.
+// ignore, when set, is stripped from the line before re runs: it names a
+// benign idiom that re would otherwise match.
 type npmCapPattern struct {
-	re  *regexp.Regexp
-	cap Capability
+	re     *regexp.Regexp
+	cap    Capability
+	ignore *regexp.Regexp
 }
 
 // npmCapPatterns is the ordered list of per-capability patterns evaluated
@@ -65,9 +68,12 @@ var npmCapPatterns = []*npmCapPattern{
 	mkNPMPat(CapNetwork,
 		`require\s*\(\s*['"]net['"]\s*\)|require\s*\(\s*['"]http['"]\s*\)|require\s*\(\s*['"]https['"]\s*\)|require\s*\(\s*['"]dgram['"]\s*\)|require\s*\(\s*['"]tls['"]\s*\)|\bfetch\s*\(|XMLHttpRequest`),
 
-	// Shell — child_process import or common exec/spawn variants.
+	// Shell — child_process import or common exec/spawn variants. A bare
+	// `exec(`/`spawn(` call only: a method call such as `re.exec(` is
+	// RegExp.prototype.exec in the overwhelming majority of shipped code,
+	// and is handled by npmShellMethodCall below instead.
 	mkNPMPat(CapShell,
-		`require\s*\(\s*['"]child_process['"]\s*\)|\bexecSync\s*\(|\bspawnSync\s*\(|\bexec\s*\(|\bspawn\s*\(`),
+		`require\s*\(\s*['"]child_process['"]\s*\)|\bexecSync\s*\(|\bspawnSync\s*\(|(?:^|[^.\w$])(?:exec|spawn)\s*\(`),
 
 	// Filesystem write.
 	mkNPMPat(CapFilesystemWrite,
@@ -81,9 +87,24 @@ var npmCapPatterns = []*npmCapPattern{
 	mkNPMPat(CapEnvAccess, `process\.env\b`),
 
 	// Dynamic eval — rarely benign in shipped libraries.
-	mkNPMPat(CapDynamicEval,
-		`\beval\s*\(|\bFunction\s*\(|vm\.runInThisContext\b|vm\.runInNewContext\b`),
+	// `Function('return this')()` is the standard pre-globalThis way to reach
+	// the global object (lodash _root.js, core-js, most UMD wrappers). It
+	// compiles a constant, so it is not dynamic code.
+	{
+		re:     regexp.MustCompile(`\beval\s*\(|\bFunction\s*\(|vm\.runInThisContext\b|vm\.runInNewContext\b`),
+		cap:    CapDynamicEval,
+		ignore: regexp.MustCompile(`\bFunction\s*\(\s*['"]return this['"]\s*\)`),
+	},
 }
+
+// npmShellMethodCall is `x.exec(` / `x.spawn(`. It counts as shell access only
+// in a file that also references child_process: otherwise it is RegExp exec
+// (lodash _cloneRegExp.js fired cap.shell this way, 2026-09-30).
+var npmShellMethodCall = regexp.MustCompile(`\.(?:exec|spawn)\s*\(`)
+
+// npmChildProcessRef is any mention of the module in code: require, import,
+// or the node: specifier.
+var npmChildProcessRef = regexp.MustCompile(`child_process`)
 
 func mkNPMPat(cap Capability, pattern string) *npmCapPattern {
 	return &npmCapPattern{re: regexp.MustCompile(pattern), cap: cap}
@@ -96,11 +117,20 @@ func mkNPMPat(cap Capability, pattern string) *npmCapPattern {
 //
 // This is called by Analyze() in scanner.go for npm/yarn/bun ecosystems.
 func ScanNPM(pkgDir string) (map[Capability][]Evidence, error) {
+	caps, _, err := scanNPMCounted(pkgDir)
+	return caps, err
+}
+
+// scanNPMCounted is ScanNPM plus the number of matching lines per capability.
+// Evidence stops at MaxEvidencePerCap; the count does not, so a report can say
+// "3 of 41 locations" instead of implying there were only three.
+func scanNPMCounted(pkgDir string) (map[Capability][]Evidence, map[Capability]int, error) {
 	if _, err := os.Stat(pkgDir); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	caps := make(map[Capability][]Evidence)
+	counts := make(map[Capability]int)
 
 	err := filepath.WalkDir(pkgDir, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -156,24 +186,32 @@ func ScanNPM(pkgDir string) (map[Capability][]Evidence, error) {
 
 		// Scan line by line.
 		rel, _ := filepath.Rel(pkgDir, p)
-		scanNPMFile(rel, p, caps)
+		scanNPMFile(rel, p, caps, counts)
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	checkNPMNativeMarkers(pkgDir, caps)
 
 	if len(caps) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return caps, nil
+	return caps, counts, nil
 }
 
 // scanNPMFile scans a single source file line by line, matching all
-// npmCapPatterns and accumulating evidence in caps.
-func scanNPMFile(rel, absPath string, caps map[Capability][]Evidence) {
+// npmCapPatterns and accumulating evidence in caps and match counts in counts.
+//
+// Comment lines are skipped: lodash's JSDoc example `* fs.writeFileSync(...)`
+// fired cap.filesystem_write. Only comments that START a line are masked. A
+// mid-line `/*` is left alone, because glob strings such as "src/**/*.js" would
+// otherwise swallow real code until the next `*/`.
+// ponytail: line-level masking, not a lexer. A full JS lexer has to decide
+// regex-vs-division, and one wrong guess on a minified file masks the rest of
+// it — a fail-open. Upgrade only with a real parser.
+func scanNPMFile(rel, absPath string, caps map[Capability][]Evidence, counts map[Capability]int) {
 	f, err := os.Open(absPath)
 	if err != nil {
 		return
@@ -181,21 +219,79 @@ func scanNPMFile(rel, absPath string, caps map[Capability][]Evidence) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
+	// Files up to MaxFileScanBytes are scanned, so one line may be that long.
+	// With bufio's default 64 KiB limit, any longer line (minified or
+	// obfuscated code) stopped the scan with an error nobody checked.
+	scanner.Buffer(make([]byte, 64*1024), MaxFileScanBytes+1)
+
+	var pendingShell []Evidence
+	sawChildProcess := false
+	inBlock := false
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Bytes()
+		code, stillInBlock := stripLeadingComment(line, inBlock)
+		inBlock = stillInBlock
+		if len(bytes.TrimSpace(code)) == 0 {
+			continue
+		}
+		snippet := func() string { return truncateBytes(bytes.TrimSpace(line), MaxSnippetLen) }
+		if npmChildProcessRef.Match(code) {
+			sawChildProcess = true
+		}
+		shellHit := false
 		for _, pat := range npmCapPatterns {
-			if pat.re.Match(line) {
-				snippet := truncateBytes(bytes.TrimSpace(line), MaxSnippetLen)
-				addNPMEvidence(caps, pat.cap, Evidence{
-					File:    rel,
-					Line:    lineNum,
-					Snippet: snippet,
-				})
+			target := code
+			if pat.ignore != nil {
+				target = pat.ignore.ReplaceAll(code, nil)
+			}
+			if pat.re.Match(target) {
+				counts[pat.cap]++
+				if pat.cap == CapShell {
+					shellHit = true
+				}
+				addNPMEvidence(caps, pat.cap, Evidence{File: rel, Line: lineNum, Snippet: snippet()})
 			}
 		}
+		if !shellHit && npmShellMethodCall.Match(code) {
+			pendingShell = append(pendingShell, Evidence{File: rel, Line: lineNum, Snippet: snippet()})
+		}
 	}
+	if err := scanner.Err(); err != nil {
+		// Unreadable past this point: say so rather than report a clean file.
+		addNPMEvidence(caps, CapMinifiedOrBundled, Evidence{File: rel, Line: lineNum, Snippet: "scan stopped: " + err.Error()})
+	}
+	if sawChildProcess {
+		for _, ev := range pendingShell {
+			counts[CapShell]++
+			addNPMEvidence(caps, CapShell, ev)
+		}
+	}
+}
+
+// stripLeadingComment returns the part of line that is code, given whether
+// the previous line ended inside a block comment that started a line.
+func stripLeadingComment(line []byte, inBlock bool) ([]byte, bool) {
+	if inBlock {
+		end := bytes.Index(line, []byte("*/"))
+		if end < 0 {
+			return nil, true
+		}
+		line = line[end+2:]
+	}
+	trimmed := bytes.TrimLeft(line, " \t")
+	if bytes.HasPrefix(trimmed, []byte("//")) {
+		return nil, false
+	}
+	if bytes.HasPrefix(trimmed, []byte("/*")) {
+		end := bytes.Index(trimmed[2:], []byte("*/"))
+		if end < 0 {
+			return nil, true
+		}
+		return stripLeadingComment(trimmed[2+end+2:], false)
+	}
+	return line, false
 }
 
 // checkNPMNativeMarkers checks for file-level native-code indicators:

@@ -135,8 +135,12 @@ var unconsumedInputFields = map[string]string{
 		"High/Malware counts, which ARE read. Only the Medium/Low/Blocked tallies have no " +
 		"signal — a deliberate severity floor, or three forgotten fields; the registration " +
 		"comment does not say which.",
-	"TransitiveLowCount":     "See TransitiveMediumCount.",
-	"TransitiveBlockedCount": "See TransitiveMediumCount.",
+	"PublisherChangeEvaluated": "Measurement only, by design: the corpus observability probe " +
+		"(core/cli/server_risk_fp_eval_test.go) reads it to tell \"compared, no change\" from " +
+		"\"never compared\". That ambiguity hid the bug that capped lodash at 40 (2026-09-30).",
+	"VersionAnomalyEvaluated": "See PublisherChangeEvaluated; same probe, for qual.version_anomaly.",
+	"TransitiveLowCount":      "See TransitiveMediumCount.",
+	"TransitiveBlockedCount":  "See TransitiveMediumCount.",
 }
 
 // inputFieldRe matches an exported field declaration inside `type Input struct`.

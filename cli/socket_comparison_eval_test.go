@@ -182,7 +182,9 @@ var socketConceptMap = map[string]conceptMapping{
 	// The weight-0 sibling fed by the codesmell regex detector. Mapped to
 	// the same Socket concepts: it is the same observation, reached with
 	// weaker evidence, and the harness grades the CONCEPT not the weight.
-	"cap.dynamic_eval_observed":      {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.dynamic_eval_observed": {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
+	// Socket's own "URL strings" alert; the same codesmell URL scan feeds it.
+	"cap.url_strings":                {Socket: []string{"urlStrings"}, Bucket: bucketArtifact, Grade: gradeExact},
 	"sc.install_script_eval_encoded": {Socket: []string{"installScripts", "obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradeExact},
 	"cap.filesystem_read":            {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert"},
 	"cap.filesystem_write":           {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia},
@@ -210,6 +212,8 @@ var socketConceptMap = map[string]conceptMapping{
 	"maint.abandoned_repo":    {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert"},
 	"maint.no_recent_release": {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia},
 	"maint.very_new_package":  {Socket: []string{"recentlyPublished"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
+	"maint.relocated":         {Socket: nil, Grade: gradeNone, Note: "Maven <relocation>; Socket has no relocation alert"},
+	"maint.outdated_version":  {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "version age; Socket's unmaintained is package-level"},
 	"maint.single_maintainer": {Socket: nil, Grade: gradeNone},
 	"maint.healthy_cadence":   {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
 
@@ -594,6 +598,37 @@ func (o sideOutcome) String() string {
 
 // socketDetected applies a severity threshold to Socket's alert list. Socket
 // publishes no verdict, so this IS the judgement call — hence the sweep.
+// maintenanceStateExtra lists maintenance-state signals the concept map
+// cannot name, because Socket has no alert for them.
+var maintenanceStateExtra = map[string]bool{"maint.relocated": true}
+
+// csMaintenanceConcept reports whether any maintenance-state signal fired:
+// every signal the concept map pairs with Socket's deprecated/unmaintained,
+// plus maintenanceStateExtra. Derived from the map so a new mapping counts
+// without a second list to keep in step.
+func csMaintenanceConcept(signals []string) bool {
+	for _, id := range signals {
+		if maintenanceStateExtra[id] {
+			return true
+		}
+		for _, sk := range socketConceptMap[id].Socket {
+			if sk == "deprecated" || sk == "unmaintained" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func skMaintenanceConcept(r socketRow) bool {
+	for _, a := range r.Alerts {
+		if a.Type == "deprecated" || a.Type == "unmaintained" {
+			return true
+		}
+	}
+	return false
+}
+
 func socketDetected(r socketRow, minSev int) sideOutcome {
 	if r.Status != "indexed" && r.Status != "revalidate" {
 		return outNotEvaluated
@@ -1179,6 +1214,56 @@ func TestSocketComparison(t *testing.T) {
 	}
 	t.Log("")
 
+	// ─── 4b. D AT CONCEPT LEVEL ──────────────────────────────────────────
+	// discrimination_D above is verdict-based, and by design a maintenance
+	// fact that is our inference (staleness, version age) never moves a
+	// verdict. So D is ALSO reported as "did the maintenance-state concept
+	// fire", on both sides: a maintenance-state signal for us, a
+	// deprecated/unmaintained alert for Socket. The verdict metric is
+	// unchanged; this sits next to it.
+	t.Log("D CONCEPT COVERAGE — maintenance state surfaced (any severity), next to the verdict count")
+	t.Logf("  %-10s %5s | %10s %10s | %10s %10s", "ecosystem", "n", "cs_concept", "cs_verdict", "sk_concept", "sk_det")
+	dConcept := map[string][5]int{}
+	for _, l := range ledger {
+		if l.Stratum != "D" {
+			continue
+		}
+		v := dConcept[l.Eco]
+		v[0]++
+		if csMaintenanceConcept(l.CSSignals) {
+			v[1]++
+		}
+		if l.CSOut == outDetected {
+			v[2]++
+		}
+		if skMaintenanceConcept(l.SK) {
+			v[3]++
+		}
+		if socketDetected(l.SK, headlineFloor) == outDetected {
+			v[4]++
+		}
+		dConcept[l.Eco] = v
+	}
+	var dEcos []string
+	for e := range dConcept {
+		dEcos = append(dEcos, e)
+	}
+	sort.Strings(dEcos)
+	var dTot [5]int
+	for _, e := range dEcos {
+		v := dConcept[e]
+		for i := range v {
+			dTot[i] += v[i]
+		}
+		t.Logf("  %-10s %5d | %10d %10d | %10d %10d", e, v[0], v[1], v[2], v[3], v[4])
+	}
+	if dTot[0] > 0 {
+		t.Logf("  %-10s %5d | %10d %10d | %10d %10d", "TOTAL", dTot[0], dTot[1], dTot[2], dTot[3], dTot[4])
+		stratTotals["maintenance_concept_D"] = map[string]int{"n": dTot[0], "cs_concept": dTot[1],
+			"cs_verdict_detected": dTot[2], "sk_concept": dTot[3], "sk_detected": dTot[4]}
+	}
+	t.Log("")
+
 	// ─── 5. AGREEMENT (kappa, not raw) ───────────────────────────────────
 	bothY, bothN, csOnly, skOnly := 0, 0, 0, 0
 	for _, l := range ledger {
@@ -1503,4 +1588,21 @@ func jsonNum(f float64) any {
 		return nil
 	}
 	return f
+}
+
+// TestMaintenanceConceptCoversRegistryStateSignals pins the D concept-level
+// count to the signals that express a maintenance fact. A signal dropped
+// from the concept map would silently stop counting.
+func TestMaintenanceConceptCoversRegistryStateSignals(t *testing.T) {
+	for _, id := range []string{"sc.deprecated_by_maintainer", "maint.no_recent_release", "maint.abandoned_repo",
+		"sc.repo_archived", "maint.relocated", "maint.outdated_version"} {
+		if !csMaintenanceConcept([]string{id}) {
+			t.Errorf("%s does not count toward D concept coverage", id)
+		}
+	}
+	for _, id := range []string{"maint.single_maintainer", "maint.unpopular_package", "cap.network"} {
+		if csMaintenanceConcept([]string{id}) {
+			t.Errorf("%s is not a maintenance-state fact but counts toward D", id)
+		}
+	}
 }

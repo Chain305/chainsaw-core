@@ -118,6 +118,10 @@ type Report struct {
 	// Absent key means the capability was not detected (not that it was
 	// ruled out — the scanner is conservative, not exhaustive).
 	Capabilities map[Capability][]Evidence `json:"capabilities,omitempty"`
+	// Counts is the number of matching lines per capability. Capabilities
+	// keeps at most MaxEvidencePerCap locations; Counts says how many there
+	// were in total.
+	Counts map[Capability]int `json:"counts,omitempty"`
 }
 
 // Has reports whether the Report detected a given capability.

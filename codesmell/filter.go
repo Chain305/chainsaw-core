@@ -46,6 +46,17 @@ func IsLikelyTestOrVendor(p string) bool {
 			return true
 		}
 	}
+	// The go tool never compiles a file, or anything under a directory, whose
+	// name starts with "_" or ".". testify v1.12.1 ships os/exec only in
+	// _readme-gofmt/main.go, and that alone fired sc.shell_access_appeared
+	// (-20) on the public page. Keyed on .go so Python's _internal/ stays in.
+	if strings.HasSuffix(low, ".go") {
+		for seg := range strings.SplitSeq(norm, "/") {
+			if seg != "." && seg != ".." && (strings.HasPrefix(seg, "_") || strings.HasPrefix(seg, ".")) {
+				return true
+			}
+		}
+	}
 	return false
 }
 

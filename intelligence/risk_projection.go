@@ -250,6 +250,8 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		// backfill, because the projection runs on every read.
 		PublisherChanged: deref(r.SupplyChain.PublisherChanged) &&
 			(len(r.SupplyChain.PublisherAdded) > 0 || len(r.SupplyChain.PublisherRemoved) > 0),
+		PublisherChangeEvaluated: r.SupplyChain.PublisherChanged != nil,
+		VersionAnomalyEvaluated:  r.SupplyChain.VersionAnomaly != nil,
 
 		HasInstallScript:           r.Scan.HasInstallScript,
 		InstallScriptFetchesRemote: r.Scan.InstallScriptFetches,
@@ -359,6 +361,8 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		// --- Socket-gap Wave 1 ---
 		DeprecatedByMaintainer:  deref(r.Release.Yanked) || r.Release.Deprecated != "",
 		DeprecationReason:       r.Release.Deprecated,
+		RelocatedTo:             r.Release.RelocatedTo,
+		VersionPublishedAt:      versionPublishedAt(r),
 		ShrinkwrapPresent:       r.Scan.ShrinkwrapPresent,
 		ManifestConfusion:       r.Scan.ManifestConfusion,
 		ManifestConfusionFields: r.Scan.ManifestConfusionFields,
@@ -383,6 +387,8 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		// &-1  → fetch failed → SevUnknown fires.
 		// &n   → actual count → low-download signal may fire.
 		WeeklyDownloads: r.Maintenance.WeeklyDownloads,
+		Downloads:       downloadsCount(r.Maintenance.Downloads),
+		DownloadsWindow: downloadsWindow(r.Maintenance.Downloads),
 
 		// --- Wave-4 RTT signals (now projected; previously decorative) ---
 		MaintainerAccountAgeDays: r.Scan.MaintainerAccountAgeDays,
@@ -435,6 +441,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// output (which carries file/line evidence) always wins; this only
 	// ever turns a false into a true.
 	projectCodeSmellCapabilities(&r.Scan, &in)
+	projectURLStrings(&r.Scan, &in)
 	projectVersionDiff(&r.Scan, r.priorScan, r.priorVersion, &in)
 	projectLicenseDiff(r.Metadata.LicenseExpression, r.priorLicense, r.priorVersion, &in)
 
@@ -478,6 +485,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		in.TransitiveMalwareCount = ts.MalwareCount
 		in.TransitiveBlockedCount = ts.BlockedCount
 	}
+	in.NewerVersion, in.NewerVersionAt = newerStableVersion(r, in.VersionPublishedAt)
 
 	return in
 }
@@ -1057,6 +1065,13 @@ func projectCapabilityReport(rep *capability.Report, in *risk.Input) {
 		return out
 	}
 
+	if len(rep.Counts) > 0 {
+		in.CapCounts = make(map[string]int, len(rep.Counts))
+		for c, n := range rep.Counts {
+			in.CapCounts[string(c)] = n
+		}
+	}
+
 	if ev, ok := rep.Capabilities[capability.CapNetwork]; ok {
 		in.CapNetwork = true
 		in.CapNetworkEvidence = mapEvidence(ev)
@@ -1084,6 +1099,24 @@ func projectCapabilityReport(rep *capability.Report, in *risk.Input) {
 	if ev, ok := rep.Capabilities[capability.CapDynamicEval]; ok {
 		in.CapDynamicEval = true
 		in.CapDynamicEvalEvidence = mapEvidence(ev)
+	}
+}
+
+// projectURLStrings lights cap.url_strings from the codesmell URL scanner,
+// its only producer.
+func projectURLStrings(s *ArtifactScanSection, in *risk.Input) {
+	if !s.URLStrings {
+		return
+	}
+	in.CapURLStrings = true
+	for _, l := range s.URLStringsSamples {
+		in.CapURLStringsEvidence = append(in.CapURLStringsEvidence, risk.CapEvidenceEntry{File: l.File, Line: l.Line, Snippet: l.Snippet})
+	}
+	if s.URLStringsFiles > 0 {
+		if in.CapCounts == nil {
+			in.CapCounts = map[string]int{}
+		}
+		in.CapCounts[risk.SignalCapURLStrings] = s.URLStringsFiles
 	}
 }
 
@@ -1245,4 +1278,20 @@ func projectURLDeps(r *Report, in *risk.Input) {
 			}
 		}
 	}
+}
+
+// downloadsCount and downloadsWindow unpack a nil-able DownloadCount.
+func downloadsCount(d *DownloadCount) *int {
+	if d == nil {
+		return nil
+	}
+	n := d.Count
+	return &n
+}
+
+func downloadsWindow(d *DownloadCount) string {
+	if d == nil {
+		return ""
+	}
+	return d.Window
 }
