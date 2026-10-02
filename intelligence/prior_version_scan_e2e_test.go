@@ -62,7 +62,7 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 	seed(pkg, "2.0.0", now.Add(-24*time.Hour), false)
 	seed(other, "9.9.9", now.Add(-1*time.Hour), true)
 
-	scan, version, license, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "2.0.0"})
+	scan, version, license, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "2.0.0"}, "")
 	if err != nil {
 		t.Fatalf("PriorVersionScan: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 	}
 
 	// Must never return the version being scanned.
-	if _, v, _, _ := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "1.1.0"}); v == "1.1.0" {
+	if _, v, _, _ := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "1.1.0"}, ""); v == "1.1.0" {
 		t.Error("returned the version being scanned as its own prior version")
 	}
 
@@ -90,7 +90,7 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 	single := "pvs-single-" + uniq
 	t.Cleanup(func() { _, _ = db.DB().Exec(`DELETE FROM intelligence_reports WHERE package_name=$1`, single) })
 	seed(single, "1.0.0", now, true)
-	s2, v2, _, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: single, Version: "1.0.0"})
+	s2, v2, _, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: single, Version: "1.0.0"}, "")
 	if err != nil {
 		t.Fatalf("single-version lookup errored: %v", err)
 	}
@@ -99,7 +99,43 @@ func TestPriorVersionScan_ReadsTheRightRow(t *testing.T) {
 	}
 
 	// Ecosystem must be part of the key.
-	if _, v, _, _ := store.PriorVersionScan(ctx, Key{Ecosystem: "pypi", Package: pkg, Version: "2.0.0"}); v != "" {
+	if _, v, _, _ := store.PriorVersionScan(ctx, Key{Ecosystem: "pypi", Package: pkg, Version: "2.0.0"}, ""); v != "" {
 		t.Errorf("crossed an ecosystem boundary: got prior %q for pypi/%s", v, pkg)
+	}
+}
+
+// TestPriorVersionScan_PreviousReleaseOnly: with a named previous release,
+// only that row is read, and a previous release we never scanned is no diff
+// rather than whatever was collected last.
+func TestPriorVersionScan_PreviousReleaseOnly(t *testing.T) {
+	dsn := os.Getenv("CHAINSAW_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("CHAINSAW_DATABASE_URL not set; skipping database test")
+	}
+	db, err := pgstore.Open(dsn)
+	if err != nil {
+		t.Fatalf("open pgstore: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := NewStore(db)
+	ctx := context.Background()
+	uniq := strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+	pkg := "pvs-prev-" + uniq
+	t.Cleanup(func() { _, _ = db.DB().Exec(`DELETE FROM intelligence_reports WHERE package_name=$1`, pkg) })
+	now := time.Now()
+	for i, v := range []string{"1.0.0", "1.7.2"} {
+		r := &Report{Identity: IdentitySection{Ecosystem: "npm", Package: pkg, Version: v}}
+		r.Scan.Performed = true
+		r.Observation.CollectedAt = now.Add(time.Duration(i) * time.Minute)
+		r.Observation.FreshUntil = r.Observation.CollectedAt.Add(24 * time.Hour)
+		if err := store.Upsert(ctx, "", r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, v, _, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "1.12.1"}, "1.0.0"); err != nil || v != "1.0.0" {
+		t.Fatalf("named previous: got %q err %v, want 1.0.0", v, err)
+	}
+	if s, v, _, err := store.PriorVersionScan(ctx, Key{Ecosystem: "npm", Package: pkg, Version: "1.12.1"}, "1.12.0"); err != nil || s != nil || v != "" {
+		t.Fatalf("unscanned previous must be no diff, got %q", v)
 	}
 }

@@ -324,3 +324,26 @@ func TestStickyIsAppliedBeforeTheEvaluation(t *testing.T) {
 			"That is the P8-71 defect: the fact reaches the row and not the verdict.")
 	}
 }
+
+// TestStickyVersionAnomaly_NotRevivedOnUndatedTimeline: a scan that fetched a
+// timeline with no dates (Maven/Gradle) cannot evaluate the sequence, so a
+// stored flag from the removed store-history algorithm must not be revived.
+// A scan with NO timeline (fetch failed) still revives it.
+func TestStickyVersionAnomaly_NotRevivedOnUndatedTimeline(t *testing.T) {
+	prior := &Report{}
+	prior.SupplyChain.VersionAnomaly = boolp(true)
+	prior.SupplyChain.VersionAnomalyFlags = []string{"timestamp_regression"}
+
+	undated := &Report{}
+	undated.Maintenance.VersionTimeline = []VersionRelease{{Version: "1.0.0"}, {Version: "1.1.0"}}
+	applyStickySupplyChain(undated, prior)
+	if undated.SupplyChain.VersionAnomaly != nil || len(undated.SupplyChain.VersionAnomalyFlags) != 0 {
+		t.Fatalf("revived onto an undated timeline: %+v", undated.SupplyChain)
+	}
+
+	notFetched := &Report{}
+	applyStickySupplyChain(notFetched, prior)
+	if notFetched.SupplyChain.VersionAnomaly == nil || len(notFetched.SupplyChain.VersionAnomalyFlags) == 0 {
+		t.Fatalf("a failed timeline fetch must still revive the prior flag: %+v", notFetched.SupplyChain)
+	}
+}

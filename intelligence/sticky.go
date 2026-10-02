@@ -156,7 +156,15 @@ func applyStickySupplyChain(next *Report, prior *Report) {
 	// the 1,157 rows carrying versionAnomaly=true had an empty flag list.
 	// A FALSE still carries freely; an observation of absence has no
 	// evidence to lose.
-	if sc.VersionAnomaly == nil && ps.VersionAnomaly != nil {
+	//
+	// Not revived when this scan FETCHED a timeline that carries no dates at
+	// all (Maven/Gradle): the sequence check needs dates, so nothing current
+	// can ever produce or refresh the flag, and a stored one came from the
+	// removed store-history algorithm. 481 Maven/Gradle rows kept such flags
+	// on every rescan (2026-10-02). A timeline that failed to fetch is empty,
+	// not undated, and still revives — that is the transient case this rule
+	// exists for.
+	if sc.VersionAnomaly == nil && ps.VersionAnomaly != nil && !timelineUndated(next.Maintenance.VersionTimeline) {
 		v := *ps.VersionAnomaly
 		if !v || len(ps.VersionAnomalyFlags) > 0 {
 			sc.VersionAnomaly = &v
@@ -176,4 +184,18 @@ func applyStickySupplyChain(next *Report, prior *Report) {
 	// whole-section swap rather than a field-level carry-forward, so it is
 	// not part of this function; if it is ever narrowed to per-field
 	// rules, those fields belong here.
+}
+
+// timelineUndated reports a fetched timeline none of whose entries carries a
+// publish date. An empty timeline is "not fetched" and returns false.
+func timelineUndated(tl []VersionRelease) bool {
+	if len(tl) == 0 {
+		return false
+	}
+	for _, v := range tl {
+		if !v.PublishedAt.IsZero() {
+			return false
+		}
+	}
+	return true
 }

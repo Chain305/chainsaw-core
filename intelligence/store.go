@@ -239,18 +239,33 @@ func (s *Store) ListVersions(ctx context.Context, orgID, ecosystem, name string)
 //
 // Returns (nil, "", "", nil) when we hold no other version — absence of a prior
 // row is NOT a diff result and callers must not treat it as one.
-func (s *Store) PriorVersionScan(ctx context.Context, key Key) (*ArtifactScanSection, string, string, error) {
+//
+// previous, when non-empty, names the release published immediately before
+// key.Version (previousRelease), and only that row is read: absent means no
+// diff. Diffing against whatever was collected last compared testify
+// v1.12.1 with 1.7.2 on the public page (2026-10-02). An empty previous
+// (no dated timeline: Maven, Gradle) keeps the collected_at order.
+func (s *Store) PriorVersionScan(ctx context.Context, key Key, previous string) (*ArtifactScanSection, string, string, error) {
 	if s == nil || s.sql == nil || s.sql.DB() == nil {
 		return nil, "", "", nil
 	}
 	var version string
 	var payload []byte
-	err := s.sql.DB().QueryRowContext(ctx, `
-		SELECT version, report FROM intelligence_reports
-		WHERE ecosystem=$1 AND package_name=$2 AND version<>$3
-		ORDER BY collected_at DESC
-		LIMIT 1
-	`, key.Ecosystem, key.Package, key.Version).Scan(&version, &payload)
+	var row *sql.Row
+	if previous != "" {
+		row = s.sql.DB().QueryRowContext(ctx, `
+			SELECT version, report FROM intelligence_reports
+			WHERE ecosystem=$1 AND package_name=$2 AND version=$3
+		`, key.Ecosystem, key.Package, previous)
+	} else {
+		row = s.sql.DB().QueryRowContext(ctx, `
+			SELECT version, report FROM intelligence_reports
+			WHERE ecosystem=$1 AND package_name=$2 AND version<>$3
+			ORDER BY collected_at DESC
+			LIMIT 1
+		`, key.Ecosystem, key.Package, key.Version)
+	}
+	err := row.Scan(&version, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", "", nil
 	}

@@ -908,7 +908,8 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 		// Skipped for Ephemeral for the same reason as the sticky read: that
 		// path must not touch the shared coordinate-keyed rows.
 		diffCtx, cancelDiff := context.WithTimeout(context.WithoutCancel(ctx), stickyPriorLookupTimeout)
-		priorScan, priorVer, priorLic, derr := s.store.PriorVersionScan(diffCtx, req.Key)
+		priorScan, priorVer, priorLic, derr := s.store.PriorVersionScan(diffCtx, req.Key,
+			previousRelease(report.Maintenance.VersionTimeline, req.Key.Version, report.Release.PublishedAt))
 		cancelDiff()
 		if derr == nil && priorScan != nil {
 			report.priorScan = priorScan
@@ -1972,3 +1973,35 @@ func mergeDependencies(dst *DependenciesSection, src DependenciesSection) {
 }
 
 var _ Service = (*DefaultService)(nil)
+
+// previousRelease returns the version published immediately before version,
+// from a dated timeline, or "" when that cannot be placed (no dated timeline,
+// or version itself undated). version's own date comes from publishedAt, else
+// from its timeline entry.
+func previousRelease(tl []VersionRelease, version string, publishedAt *time.Time) string {
+	var at time.Time
+	if publishedAt != nil {
+		at = *publishedAt
+	}
+	if at.IsZero() {
+		for _, v := range tl {
+			if v.Version == version {
+				at = v.PublishedAt
+				break
+			}
+		}
+	}
+	if at.IsZero() {
+		return ""
+	}
+	best, bestAt := "", time.Time{}
+	for _, v := range tl {
+		if v.Version == version || v.PublishedAt.IsZero() || !v.PublishedAt.Before(at) {
+			continue
+		}
+		if v.PublishedAt.After(bestAt) {
+			best, bestAt = v.Version, v.PublishedAt
+		}
+	}
+	return best
+}
