@@ -122,7 +122,7 @@ a configured server.
 |---|---|---:|---|
 | `maint.abandoned_repo` | high | -25.00 | Source repository looks abandoned |
 | `maint.healthy_cadence` | info | 10.00 | Healthy release cadence |
-| `maint.no_recent_release` | medium | -15.00 | No recent releases |
+| `maint.no_recent_release` | info | 0.00 | No recent releases |
 | `maint.outdated_version` | info | 0.00 | Outdated version |
 | `maint.relocated` | low | 0.00 | Coordinate relocated |
 | `maint.single_maintainer` | low | -5.00 | Single maintainer |

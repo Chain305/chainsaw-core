@@ -431,6 +431,24 @@ var maxFireRate = map[sigEco]fireCeiling{
 	// licence"), and sc.install_script_only on npm (weight 0; the npm parser
 	// no longer counts prepare/prepublish*/uninstall hooks, which no package
 	// manager runs on a registry install).
+
+	// ── NEW 2026-10-02: Go and Maven maintenance state is now observable ─
+	//
+	// Wave 2 of plan_public_package_lookup gave Go (proxy @latest / .info
+	// times, `retract`, `// Deprecated:`) and Maven (version dates) the same
+	// maintenance facts npm and PyPI already had. These fires are the signal
+	// becoming VISIBLE, not a reader bug: every example was checked against
+	// the registry on 2026-10-02.
+	{"maint.no_recent_release", "go"}: {30, "True claims. Latest tags: go-spew v1.1.1 " +
+		"2018-02-21, perks v1.0.1 2019-07-31, xxhash/v2 v2.3.0 2024-04-04 — all past the " +
+		"24-month rule. Mature Go modules often stay finished, which is why the signal went " +
+		"to info / weight 0 on 2026-10-02: shown as a fact, no longer scored."},
+	{"maint.no_recent_release", "maven"}: {3, "True claim: com.google.code.findbugs:jsr305 " +
+		"has not released since 3.0.2 (2017)."},
+	{"sc.deprecated_by_maintainer", "go"}: {4, "True claims: github.com/golang/protobuf and " +
+		"go.mongodb.org/mongo-driver (v1) both carry the module's own `// Deprecated:` " +
+		"pointing at a successor. Whether a deprecation that names a replacement should " +
+		"keep warning is plan_public_package_lookup Open 7."},
 }
 
 // ─── ASSERTION 3: ACCEPTED (SIGNAL, COORDINATE) SET ─────────────────────────

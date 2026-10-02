@@ -148,11 +148,21 @@ func init() {
 		},
 	})
 
+	// Info, weight 0 since 2026-10-02 (was medium, -15). Re-scored at -15,
+	// -10, -5 and 0 over 18,309 rows (corpus-v1, the top-400 stratum, 16,024
+	// prod reports): 0 verdict changes, 0 of 600 malicious rows fired, 55% of
+	// benign rows did — finished libraries, now including 20 of the top 70 Go
+	// modules once Go release dates became observable. A takeover publish
+	// resets LatestReleaseAt, so staleness cannot precede one. socket.dev's
+	// "unmaintained" is 5 years, low, off by default. Still shown as a fact;
+	// archived repos (sc.repo_archived), stale commits (maint.abandoned_repo)
+	// and maintainer deprecations keep the penalty. NoRecentReleaseThreshold
+	// is shared with maint.outdated_version and is deliberately unchanged.
 	register(Signal{
 		ID:          SignalMaintNoRecentRelease,
 		Category:    CategoryMaintenance,
-		Severity:    SevMedium,
-		Weight:      -15,
+		Severity:    SevInfo,
+		Weight:      0,
 		Title:       "No recent releases",
 		Description: "Latest release is over 24 months old.",
 		Fires: func(in Input) (bool, string, map[string]any) {
