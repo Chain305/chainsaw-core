@@ -47,6 +47,8 @@ package intelligence
 // The nil-returning closures reproduce the old `if cfg.X != nil` guards: a
 // nil result is skipped order-preservingly by buildRegisteredProviders.
 
+import "github.com/chain305/chainsaw-core/supplychain"
+
 func init() { registerCoreProvidersInOrder() }
 
 // registerCoreProvidersInOrder registers every TierCore provider with its
@@ -182,10 +184,14 @@ func registerCoreProvidersInOrder() {
 		Name: "repolink", Tier: TierCore, Order: 36,
 		Factory: func(cfg BootstrapConfig) Provider {
 			var checker repoLivenessClassifier
+			recheck := supplychain.DefaultRepoLivenessInterval
 			if cfg.RepoLiveness != nil {
 				checker = cfg.RepoLiveness
+				if iv := cfg.RepoLiveness.RecheckInterval(); iv > 0 {
+					recheck = iv
+				}
 			}
-			return newRepolinkProvider(checker)
+			return newRepolinkProvider(checker, recheck)
 		},
 	})
 	// (Order 37 agenttool_verify — PREMIUM, see premium pkg.)

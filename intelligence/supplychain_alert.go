@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -170,14 +171,36 @@ func DiffSupplyChain(row metadata.PackageMetadataRow, ecosystem string, prior, n
 	// contribute (no manifest reached it, or it did not run), and it reads
 	// as "none" in the alert text. cpu-features@0.0.10 raised
 	// install_script_appeared that way on an immutable version.
+	//
+	// The two sides must also come from the same DETECTOR. The
+	// `installscript_ast` flag swaps npm/pip between a regex and an AST
+	// detector, and they disagree on some manifests, so the first rescan
+	// after a flip would report an install script "appearing" on an
+	// immutable version whose bytes never changed. A script the new
+	// detector finds was always there; if it matters, the verdict moves
+	// and verdict_degraded below reports it.
+	//
+	// Skipped ONLY when both stamps are set and differ. An empty stamp is
+	// a row written before the ledger existed (or an ecosystem with one
+	// detector), and treating it as a mismatch would silence this trigger
+	// across the whole corpus on the first rescan after deploy.
 	if prior.Scan.Performed && next.Scan.Performed &&
 		prior.Scan.InstallScriptKind != "" && next.Scan.InstallScriptKind != "" {
+		var detail string
 		switch {
 		case !prior.Scan.InstallScriptFetches && next.Scan.InstallScriptFetches:
-			add(AlertInstallScriptAppeared, "install script fetches remote code",
-				scanText(prior.Scan.InstallScriptKind), scanText(next.Scan.InstallScriptKind))
+			detail = "install script fetches remote code"
 		case !prior.Scan.HasInstallScript && next.Scan.HasInstallScript:
-			add(AlertInstallScriptAppeared, "install script added",
+			detail = "install script added"
+		}
+		pd, nd := prior.Scan.InstallScriptDetector, next.Scan.InstallScriptDetector
+		switch {
+		case detail != "" && pd != "" && nd != "" && pd != nd:
+			slog.Default().Info("recall: install-script comparison skipped across a detector change",
+				"org", row.OrgID, "ecosystem", ecosystem, "package", row.Package, "version", row.Version,
+				"prior_detector", pd, "next_detector", nd, "suppressed", detail)
+		case detail != "":
+			add(AlertInstallScriptAppeared, detail,
 				scanText(prior.Scan.InstallScriptKind), scanText(next.Scan.InstallScriptKind))
 		}
 	}

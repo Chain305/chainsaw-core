@@ -195,3 +195,73 @@ func TestMergeScan_PreservesShrinkwrapSuppressed(t *testing.T) {
 		}
 	})
 }
+
+// T-4 fetch 3: RepoCreatedAt must survive BOTH merges, or
+// suspicious_repo_stars keeps making its own third GET of
+// /repos/{owner}/{repo} per scan.
+//
+// Two different merges, two different failure modes, so both are pinned:
+//   - mergeMaintenance (scanner.go) folds the repolink PATCH into the
+//     in-scan report. Drop it and the value never reaches the report at all.
+//   - carryRepoStats (store.go) keeps it on a tick that did not probe. Drop
+//     it and the value survives exactly one scan, which is the scan that
+//     cannot use it — repolink and the consumer are both Tier 3 and run in
+//     parallel, so the consumer only ever reads it from the STORED row.
+func TestRepoCreatedAtSurvivesBothMerges(t *testing.T) {
+	created := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	t.Run("mergeMaintenance takes the patch", func(t *testing.T) {
+		dst := MaintenanceSection{}
+		mergeMaintenance(&dst, MaintenanceSection{RepoCreatedAt: &created})
+		if dst.RepoCreatedAt == nil {
+			t.Fatal("repolink's RepoCreatedAt patch was dropped by mergeMaintenance; the field " +
+				"never reaches the report and the provider keeps fetching")
+		}
+		if !dst.RepoCreatedAt.Equal(created) {
+			t.Errorf("RepoCreatedAt = %v, want %v", dst.RepoCreatedAt, created)
+		}
+	})
+
+	// The zero-counts case is the one that matters: a fresh empty repo has
+	// zero stars AND is exactly what the signal hunts, so the creation date
+	// must not be gated on a non-zero count.
+	t.Run("mergeMaintenance takes it with all counts zero", func(t *testing.T) {
+		dst := MaintenanceSection{}
+		mergeMaintenance(&dst, MaintenanceSection{RepoCreatedAt: &created})
+		if dst.RepoCreatedAt == nil {
+			t.Fatal("RepoCreatedAt was gated on a non-zero star/fork/issue/subscriber count; a " +
+				"brand-new empty repo is precisely the shape suspicious_repo_stars looks for")
+		}
+	})
+
+	t.Run("mergeMaintenance does not wipe it with a nil patch", func(t *testing.T) {
+		dst := MaintenanceSection{RepoCreatedAt: &created}
+		mergeMaintenance(&dst, MaintenanceSection{})
+		if dst.RepoCreatedAt == nil {
+			t.Fatal("a later provider's empty Maintenance wiped RepoCreatedAt")
+		}
+	})
+
+	t.Run("carryRepoStats keeps it when this scan did not probe", func(t *testing.T) {
+		dst := MaintenanceSection{}
+		carryRepoStats(&dst, MaintenanceSection{Stars: 7, RepoCreatedAt: &created})
+		if dst.RepoCreatedAt == nil {
+			t.Fatal("carryRepoStats dropped RepoCreatedAt; it then survives only the scan that " +
+				"probed, and that is the one scan whose consumer cannot see it — repolink and " +
+				"suspicious_repo_stars are both Tier 3 and run in parallel")
+		}
+		if !dst.RepoCreatedAt.Equal(created) {
+			t.Errorf("carried RepoCreatedAt = %v, want %v", dst.RepoCreatedAt, created)
+		}
+	})
+
+	t.Run("carryRepoStats prefers this scan's own observation", func(t *testing.T) {
+		fresh := created.Add(24 * time.Hour)
+		dst := MaintenanceSection{RepoCreatedAt: &fresh}
+		carryRepoStats(&dst, MaintenanceSection{RepoCreatedAt: &created})
+		if !dst.RepoCreatedAt.Equal(fresh) {
+			t.Errorf("carry overwrote a fresh observation with the prior row's (%v); nil is this "+
+				"field's silence, the same convention the counts use", dst.RepoCreatedAt)
+		}
+	})
+}

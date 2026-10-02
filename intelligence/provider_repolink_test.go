@@ -31,7 +31,7 @@ func (f *fakeRepoLivenessChecker) Classify(_ context.Context, repoURL string, pu
 // drift to Tier-4 here would silently break that handoff.
 func TestRepolinkProvider_Tier(t *testing.T) {
 	t.Parallel()
-	if got := newRepolinkProvider(nil).Tier(); got != 3 {
+	if got := newRepolinkProvider(nil, 0).Tier(); got != 3 {
 		t.Fatalf("Tier() = %d, want 3 (Tier-3 probe whose output Tier-4 maintenance reads)", got)
 	}
 }
@@ -57,7 +57,7 @@ func TestRepolinkProvider_WiresFields(t *testing.T) {
 		URLs:     URLSection{SourceRepoURL: "https://github.com/foo/bar"},
 		People:   PeopleSection{PublisherIDs: []string{"alice@example.com"}},
 	}
-	p := newRepolinkProvider(fake)
+	p := newRepolinkProvider(fake, 0)
 	patch, err := p.Run(context.Background(), Request{}, prior)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -106,7 +106,7 @@ func TestRepolinkProvider_SkippedWhenNoURL(t *testing.T) {
 		People:   PeopleSection{Maintainers: []string{"alice"}},
 		// URLs intentionally empty.
 	}
-	p := newRepolinkProvider(fake)
+	p := newRepolinkProvider(fake, 0)
 	patch, err := p.Run(context.Background(), Request{}, prior)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -129,7 +129,7 @@ func TestRepolinkProvider_NilCheckerNoPanic(t *testing.T) {
 		URLs:     URLSection{SourceRepoURL: "https://github.com/foo/bar"},
 		People:   PeopleSection{Maintainers: []string{"alice", "bob"}},
 	}
-	p := newRepolinkProvider(nil)
+	p := newRepolinkProvider(nil, 0)
 	patch, err := p.Run(context.Background(), Request{}, prior)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -154,7 +154,7 @@ func TestRepolinkProvider_HomepageURLFallback(t *testing.T) {
 		Identity: IdentitySection{Package: "left-pad", Version: "1.0.0"},
 		URLs:     URLSection{HomepageURL: "https://github.com/foo/bar"},
 	}
-	p := newRepolinkProvider(fake)
+	p := newRepolinkProvider(fake, 0)
 	if _, err := p.Run(context.Background(), Request{}, prior); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

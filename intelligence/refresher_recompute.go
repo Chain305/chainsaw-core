@@ -2,6 +2,37 @@ package intelligence
 
 // The matcher-epoch recompute sweep — the second walk source on the Refresher.
 //
+// IT DISPATCHES NO ALERTS, AND THAT IS A DECISION (owner ruling, 2026-10-02).
+//
+// This file contains no reference to r.alerter or OnRefreshedReport, and no
+// call to the cross-surface fan-out in shared_change_fanout.go. It therefore
+// refreshes the one shared intelligence_reports row and tells nobody — the
+// same shape as the defect C-6 fixed for the stale-report sweep, and it was
+// found the same way: the first run of
+// internal/monitorsweep/declared_window_db_test.go failed with the C-6
+// anti-join working perfectly, logging `recomputed=2` next to
+// `stale_reports_refreshed=0`.
+//
+// It is NOT fixed the way the stale sweep was, and the reason is what this
+// sweep means rather than what it costs. This sweep recomputes for a MATCHER
+// change — a new engine generation re-scoring facts that did not move — not
+// for a change in the world. On the proxy surface an epoch bump alerts nobody
+// today, by design. Making declared inventory alert on every bump would turn a
+// deploy into an alert storm for one surface and silence for the other, which
+// is a worse product than either.
+//
+// THE RESIDUAL, named rather than buried: a REAL change that happens to
+// coincide with a drain window on a declared or proxied coordinate is lost. Its
+// bound is the drain, not the clock — the population is rows below
+// CurrentMatcherEpoch, which is empty in steady state and non-empty only
+// between an epoch bump and the end of the sweep that drains it. Inside that
+// window, a coordinate this sweep reaches before the walk or the declared
+// sweep do has its diff consumed with no audience. If that ever needs closing,
+// the fix is to make this sweep call SharedChangeFanout.Notify ONLY when the
+// recomputed report differs from the stored one by more than the epoch stamp —
+// not to exclude coordinates from it, which would leave them permanently
+// superseded against scanFederated's refusal to serve a stale-matcher row.
+//
 // WHY A SECOND WALK
 //
 // The primary walk iterates package_metadata (refresher.go, RunOnce). That

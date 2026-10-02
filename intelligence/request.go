@@ -152,6 +152,27 @@ type Request struct {
 	// report. Ignored when Artifact is set or ArtifactTooLarge already
 	// explains the absence.
 	ArtifactFetchErr error
+
+	// storedRow is this coordinate's persisted report, read by runFanout
+	// before any provider runs. See StoredRow.
+	storedRow *Report
+}
+
+// StoredRow is the coordinate's persisted report as it stood before this
+// scan, for providers that reuse a recent fetch instead of repeating it
+// (per-facet TTLs, T-3). It is a different thing from a provider's `prior`
+// argument, which is the in-scan merge of earlier tiers (nil in Tier 1).
+//
+// READ-ONLY: it is shared by every provider in the fan-out. Nil on an
+// Ephemeral scan, a fresh coordinate, or a failed read — each of which
+// must be read as "fetch", never as "nothing to fetch".
+func (r Request) StoredRow() *Report { return r.storedRow }
+
+// WithStoredRowForTest returns r with StoredRow set, for provider tests in
+// other packages. Production sets it only in runFanout.
+func (r Request) WithStoredRowForTest(row *Report) Request {
+	r.storedRow = row
+	return r
 }
 
 // ErrArtifactTooLarge is wrapped by artifact fetchers that refuse an artifact

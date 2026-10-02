@@ -1,0 +1,590 @@
+{
+"3": {
+"id": 3,
+"type": "badSemverDependency",
+"cat": "quality",
+"sev": 1
+},
+"7": {
+"id": 7,
+"type": "criticalCVE",
+"cat": "vulnerability",
+"sev": 3
+},
+"8": {
+"id": 8,
+"type": "cve",
+"cat": "vulnerability",
+"sev": 2
+},
+"9": {
+"id": 9,
+"type": "debugAccess",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"10": {
+"id": 10,
+"type": "deprecated",
+"cat": "maintenance",
+"sev": 1
+},
+"13": {
+"id": 13,
+"type": "didYouMean",
+"cat": "supplyChainRisk",
+"sev": 3
+},
+"14": {
+"id": 14,
+"type": "dynamicRequire",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"16": {
+"id": 16,
+"type": "envVars",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"19": {
+"id": 19,
+"type": "filesystemAccess",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"20": {
+"id": 20,
+"type": "floatingDependency",
+"cat": "quality",
+"sev": 1
+},
+"21": {
+"id": 21,
+"type": "gitDependency",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"22": {
+"id": 22,
+"type": "gitHubDependency",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"23": {
+"id": 23,
+"type": "gptAnomaly",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"24": {
+"id": 24,
+"type": "gptSecurity",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"25": {
+"id": 25,
+"type": "hasNativeCode",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"26": {
+"id": 26,
+"type": "highEntropyStrings",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"28": {
+"id": 28,
+"type": "httpDependency",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"29": {
+"id": 29,
+"type": "installScripts",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"33": {
+"id": 33,
+"type": "licenseException",
+"cat": "license",
+"sev": 0
+},
+"36": {
+"id": 36,
+"type": "malware",
+"cat": "supplyChainRisk",
+"sev": 3
+},
+"37": {
+"id": 37,
+"type": "manifestConfusion",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"38": {
+"id": 38,
+"type": "mildCVE",
+"cat": "vulnerability",
+"sev": 0
+},
+"39": {
+"id": 39,
+"type": "minifiedFile",
+"cat": "quality",
+"sev": 0
+},
+"40": {
+"id": 40,
+"type": "missingAuthor",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"47": {
+"id": 47,
+"type": "networkAccess",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"48": {
+"id": 48,
+"type": "newAuthor",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"59": {
+"id": 59,
+"type": "obfuscatedFile",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"63": {
+"id": 63,
+"type": "shellAccess",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"65": {
+"id": 65,
+"type": "shrinkwrap",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"67": {
+"id": 67,
+"type": "telemetry",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"68": {
+"id": 68,
+"type": "trivialPackage",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"69": {
+"id": 69,
+"type": "troll",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"73": {
+"id": 73,
+"type": "unmaintained",
+"cat": "maintenance",
+"sev": 0
+},
+"74": {
+"id": 74,
+"type": "unpopularPackage",
+"cat": "quality",
+"sev": 1
+},
+"78": {
+"id": 78,
+"type": "unstableOwnership",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"80": {
+"id": 80,
+"type": "urlStrings",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"81": {
+"id": 81,
+"type": "usesEval",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"2854280": {
+"id": 2854280,
+"type": "gptMalware",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"3937054": {
+"id": 3937054,
+"type": "potentialVulnerability",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"15586118": {
+"id": 15586118,
+"type": "copyleftLicense",
+"cat": "license",
+"sev": 0
+},
+"15586129": {
+"id": 15586129,
+"type": "explicitlyUnlicensedItem",
+"cat": "license",
+"sev": 2
+},
+"15586154": {
+"id": 15586154,
+"type": "miscLicenseIssues",
+"cat": "license",
+"sev": 1
+},
+"15586166": {
+"id": 15586166,
+"type": "noLicenseFound",
+"cat": "license",
+"sev": 0
+},
+"15586174": {
+"id": 15586174,
+"type": "nonpermissiveLicense",
+"cat": "license",
+"sev": 0
+},
+"15586191": {
+"id": 15586191,
+"type": "unidentifiedLicense",
+"cat": "license",
+"sev": 0
+},
+"17405382": {
+"id": 17405382,
+"type": "mediumCVE",
+"cat": "vulnerability",
+"sev": 1
+},
+"20887002": {
+"id": 20887002,
+"type": "ambiguousClassifier",
+"cat": "license",
+"sev": 0
+},
+"44555781": {
+"id": 44555781,
+"type": "licenseSpdxDisj",
+"cat": "license",
+"sev": 2
+},
+"77901473": {
+"id": 77901473,
+"type": "suspiciousStarActivity",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81167193": {
+"id": 81167193,
+"type": "socketUpgradeAvailable",
+"cat": "maintenance",
+"sev": 2
+},
+"81170792": {
+"id": 81170792,
+"type": "gptDidYouMean",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81176300": {
+"id": 81176300,
+"type": "chromeContentScript",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81176301": {
+"id": 81176301,
+"type": "chromeHostPermission",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81176302": {
+"id": 81176302,
+"type": "chromePermission",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81176303": {
+"id": 81176303,
+"type": "chromeWildcardHostPermission",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81177635": {
+"id": 81177635,
+"type": "generic",
+"cat": "other",
+"sev": 0
+},
+"81178422": {
+"id": 81178422,
+"type": "vsxActivationWildcard",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81178423": {
+"id": 81178423,
+"type": "vsxDebuggerContribution",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81178424": {
+"id": 81178424,
+"type": "vsxExtensionDependency",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81178425": {
+"id": 81178425,
+"type": "vsxExtensionPack",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81178426": {
+"id": 81178426,
+"type": "vsxProposedApiUsage",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81178427": {
+"id": 81178427,
+"type": "vsxUntrustedWorkspaceSupported",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"81178428": {
+"id": 81178428,
+"type": "vsxVirtualWorkspaceSupported",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"81178429": {
+"id": 81178429,
+"type": "vsxWebviewContribution",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81178430": {
+"id": 81178430,
+"type": "vsxWorkspaceContainsActivation",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81178794": {
+"id": 81178794,
+"type": "ghaArgToEnv",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"81178795": {
+"id": 81178795,
+"type": "ghaArgToOutput",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"81178796": {
+"id": 81178796,
+"type": "ghaArgToSink",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81178797": {
+"id": 81178797,
+"type": "ghaContextToEnv",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81178798": {
+"id": 81178798,
+"type": "ghaContextToOutput",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81178799": {
+"id": 81178799,
+"type": "ghaContextToSink",
+"cat": "supplyChainRisk",
+"sev": 3
+},
+"81178800": {
+"id": 81178800,
+"type": "ghaEnvToSink",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81204574": {
+"id": 81204574,
+"type": "recentlyPublished",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81206368": {
+"id": 81206368,
+"type": "tooManyFiles",
+"cat": "other",
+"sev": 0
+},
+"81209004": {
+"id": 81209004,
+"type": "skillAutonomyAbuse",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"81209005": {
+"id": 81209005,
+"type": "skillCommandInjection",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81209006": {
+"id": 81209006,
+"type": "skillDataExfiltration",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81209007": {
+"id": 81209007,
+"type": "skillDiscoveryAbuse",
+"cat": "supplyChainRisk",
+"sev": 0
+},
+"81209008": {
+"id": 81209008,
+"type": "skillHardcodedSecrets",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81209009": {
+"id": 81209009,
+"type": "skillObfuscation",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81209010": {
+"id": 81209010,
+"type": "skillPromptInjection",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81209011": {
+"id": 81209011,
+"type": "skillResourceAbuse",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81209012": {
+"id": 81209012,
+"type": "skillSupplyChain",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81209013": {
+"id": 81209013,
+"type": "skillToolAbuse",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81209014": {
+"id": 81209014,
+"type": "skillToolChaining",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81209015": {
+"id": 81209015,
+"type": "skillTransitiveTrust",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81210337": {
+"id": 81210337,
+"type": "skillPreExecution",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81211382": {
+"id": 81211382,
+"type": "policy",
+"cat": "other",
+"sev": 0
+},
+"81211780": {
+"id": 81211780,
+"type": "notFound",
+"cat": "other",
+"sev": 0
+},
+"81211785": {
+"id": 81211785,
+"type": "pendingScan",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81212307": {
+"id": 81212307,
+"type": "missingLockfile",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81212466": {
+"id": 81212466,
+"type": "oversizedManifest",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81212939": {
+"id": 81212939,
+"type": "browserExtensionContentScript",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81212940": {
+"id": 81212940,
+"type": "browserExtensionHostPermission",
+"cat": "supplyChainRisk",
+"sev": 1
+},
+"81212941": {
+"id": 81212941,
+"type": "browserExtensionPermission",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81212942": {
+"id": 81212942,
+"type": "browserExtensionWildcardHostPermission",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81215048": {
+"id": 81215048,
+"type": "unresolvedYarnDependency",
+"cat": "supplyChainRisk",
+"sev": 2
+},
+"81216479": {
+"id": 81216479,
+"type": "unresolvedPomReference",
+"cat": "supplyChainRisk",
+"sev": 2
+}
+}

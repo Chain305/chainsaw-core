@@ -47,6 +47,7 @@ import (
 	"github.com/chain305/chainsaw-core/coverage"
 	"github.com/chain305/chainsaw-core/httpclient"
 	"github.com/chain305/chainsaw-core/provenance"
+	"github.com/chain305/chainsaw-core/supplychain"
 	"github.com/chain305/chainsaw-core/upstreamhttp"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
@@ -357,6 +358,12 @@ func (p *registryMetadataProvider) Run(ctx context.Context, req Request, _ *Repo
 	// gate would vouch for a lane that fell through this switch.
 	eco := normalizeEcosystemKey(req.Key.Ecosystem)
 	ctx = withEcosystem(ctx, eco)
+	// T-1: everything this provider fetches is a registry package document —
+	// a packument, a PyPI JSON, a POM, a maven-metadata.xml — at ~1.5
+	// req/coordinate. The one exception is the GitHub /repos read, which
+	// re-refines to EgressCallerRefreshRepo in doGitHubFetch; nesting is
+	// allowed and the innermost tag wins.
+	ctx = httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshDocument)
 	pr, err := p.runEcosystem(ctx, eco, pkg, ver)
 	if err == nil {
 		markPrimaryLicenseUnavailable(&pr, p.now())
@@ -2287,11 +2294,12 @@ func mavenDeclaredLicense(pom *mavenPOM, requestedVersion string) string {
 // absence (a 404: "it said nothing") from a fetch that failed ("could not
 // read it") — the latter leaves the licence unknown, not absent.
 //
-// Base-URL selection mirrors fetchMavenTimelineDoc exactly: repo1 first,
-// and for the namespaces Google hosts, maven.google.com on a DEFINITE
-// absence only. A parent hosted on maven.google.com (every androidx
-// artifact inherits from `androidx:androidx-*`) therefore resolves, and a
-// repo1 outage still costs one request, not two.
+// Both repositories are tried, with the one that publishes the namespace
+// asked first, and the other on a DEFINITE absence only. A parent hosted on
+// maven.google.com (every androidx artifact inherits from `androidx:androidx-*`)
+// therefore resolves, and an outage on the first host still costs one
+// request, not two. The ORDER differs from fetchMavenTimelineDoc, which
+// still asks repo1 first; see the comment at the selection below for why.
 func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, artifact, version string) (*mavenPOM, *Warning) {
 	// Cache-first. Parent POMs are the highest-multiplier immutable re-fetch in
 	// the product — every Apache Commons artifact walks to commons-parent — and
@@ -2308,13 +2316,33 @@ func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, art
 		return cached, nil
 	}
 	groupPath := strings.ReplaceAll(group, ".", "/")
-	pom, warn, err := p.fetchMavenPOMFrom(ctx, p.endpoints.maven, groupPath, artifact, version)
+	// Ask the host that actually publishes the namespace FIRST. Google hosts
+	// androidx, com.android, com.google.android and com.google.firebase and
+	// Central does not, so asking repo1 first for those is a guaranteed 404
+	// against the one upstream already refusing most of our requests — 1,405
+	// of 1,699 production `not_found` rows were real androidx coordinates
+	// (federated_absence.go). Both hosts are still tried and the fallback
+	// still fires only on a DEFINITE absence, so no coordinate becomes
+	// unresolvable and a repo1 outage still costs one request, not two.
+	//
+	// Safe to reorder because a POM for one GAV is immutable: which host
+	// serves it is not a semantic choice. fetchMavenTimelineDoc is
+	// deliberately NOT reordered — a maven-metadata.xml version LIST
+	// legitimately differs between the two hosts, so flipping its order
+	// could move `recentlyPublished` for any coordinate present on both.
+	// That needs a verdict-flip count, not a reorder.
+	googleGroup := groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != ""
+	primary, fallback := p.endpoints.maven, p.endpoints.mavenGoogle
+	if googleGroup {
+		primary, fallback = p.endpoints.mavenGoogle, p.endpoints.maven
+	}
+	pom, warn, err := p.fetchMavenPOMFrom(ctx, primary, groupPath, artifact, version)
 	if err == nil && warn == nil {
 		storeMavenPOM(base, group, artifact, version, pom)
 		return pom, nil
 	}
-	if isDefiniteAbsence(warn) && groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != "" {
-		alt, w, e := p.fetchMavenPOMFrom(ctx, p.endpoints.mavenGoogle, groupPath, artifact, version)
+	if isDefiniteAbsence(warn) && googleGroup {
+		alt, w, e := p.fetchMavenPOMFrom(ctx, fallback, groupPath, artifact, version)
 		if e == nil && w == nil {
 			storeMavenPOM(base, group, artifact, version, alt)
 			return alt, nil
@@ -6194,7 +6222,9 @@ func applyTimeline(pr *PartialReport, timeline []VersionRelease, latest string, 
 // can tell the difference between "no data" and "fetch errored").
 //
 // Supported forges:
-//   - github.com    → fetchGitHubRepoMeta (stars, forks, issues, subscribers)
+//   - github.com    → none here: repolinkProvider decodes the counts off
+//     its own /repos fetch (T-4). fetchGitHubRepoMeta survives only for
+//     the Apache gitbox rewrite in runMaven.
 //   - gitlab.com    → fetchGitLabRepoMeta (stars, forks, issues; no subscribers)
 //   - bitbucket.org → fetchBitbucketRepoMeta (forks + watchers proxy for
 //     subscribers; Bitbucket Cloud has no public star count, so Stars
@@ -6212,9 +6242,12 @@ func enrichRepoStars(ctx context.Context, p *registryMetadataProvider, pr *Parti
 	if raw == "" {
 		return
 	}
-	if owner, repo, ok := parseGitHubRepo(raw); ok {
-		meta, warn := p.fetchGitHubRepoMeta(ctx, owner, repo)
-		applyRepoMeta(pr, meta, warn)
+	if _, _, ok := parseGitHubRepo(raw); ok {
+		// GitHub stars come from repolinkProvider, which already GETs
+		// /repos/{owner}/{repo} for liveness and decodes the counts off
+		// the same body — once per recheck window, in every ecosystem.
+		// Fetching here too doubled the largest upstream line for a
+		// display-only value.
 		return
 	}
 	forge, owner, repo, ok := parseForgeRepo(raw)
@@ -6291,31 +6324,25 @@ func parseForgeRepo(raw string) (forge, owner, repo string, ok bool) {
 	default:
 		return "", "", "", false
 	}
-	path := strings.TrimPrefix(u.Path, "/")
 	if f == "gitlab" {
-		if i := strings.Index(path, "/-/"); i >= 0 {
-			path = path[:i]
+		// Shared with the liveness probe so both name the same project.
+		if owner, repo, ok = supplychain.GitLabProjectPath(u.Path); !ok {
+			return "", "", "", false
 		}
+		return f, owner, repo, true
 	}
+	path := strings.TrimPrefix(u.Path, "/")
 	path = strings.TrimSuffix(path, "/")
 	path = strings.TrimSuffix(path, ".git")
 	if path == "" {
 		return "", "", "", false
 	}
 	parts := strings.Split(path, "/")
-	if f == "gitlab" {
-		if len(parts) < 2 {
-			return "", "", "", false
-		}
-		repo = strings.TrimSuffix(parts[len(parts)-1], ".git")
-		owner = strings.Join(parts[:len(parts)-1], "/")
-	} else {
-		if len(parts) < 2 {
-			return "", "", "", false
-		}
-		owner = parts[0]
-		repo = strings.TrimSuffix(parts[1], ".git")
+	if len(parts) < 2 {
+		return "", "", "", false
 	}
+	owner = parts[0]
+	repo = strings.TrimSuffix(parts[1], ".git")
 	if owner == "" || repo == "" {
 		return "", "", "", false
 	}
@@ -6427,6 +6454,11 @@ func (p *registryMetadataProvider) fetchGitHubRepoMeta(ctx context.Context, owne
 // short backoff) so a hard rate-limit doesn't double our latency
 // budget.
 func (p *registryMetadataProvider) doGitHubFetch(ctx context.Context, endpoint string, out any) *Warning {
+	// T-1: repo metadata, not a package document — this is reached from
+	// inside Run, which has already tagged the context `refresh_document`.
+	// Tagged in the shared helper rather than at its caller so a second
+	// GitHub read added later is classified without anyone remembering.
+	ctx = httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshRepo)
 	token := strings.TrimSpace(os.Getenv("CHAINSAW_GITHUB_TOKEN"))
 	var lastWarn *Warning
 	for attempt := 0; attempt < 2; attempt++ {

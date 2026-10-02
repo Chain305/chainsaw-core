@@ -521,7 +521,66 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			phase1 = append(phase1, p)
 		}
 	}
-	eligible := phase1
+	// A-3: reuse artifact analyses already derived from these exact bytes.
+	//
+	// phase1 is the set that WOULD run; eligible below is what still has to.
+	// Reuse happens here — before the fan-out and therefore before
+	// ComputeTrustScoreForOrg — so the facts a reused analysis contributes are
+	// in the report that the evaluation reads. Splicing after the evaluation
+	// would recreate P8-71 exactly: a fact preserved for display and discarded
+	// for enforcement.
+	//
+	// phase1All is kept because TierComplete must count a tier that completed
+	// FROM CACHE. Computing it over the post-filter set would report
+	// TierComplete=1 for a scan whose every Tier-2 analyzer was reused, and
+	// the UI reads that as "still scanning".
+	//
+	// Gated on a store because planning HASHES the artifact, and with nowhere
+	// to read from or write to that is pure cost. A store-less service is the
+	// CLI and every corpus-eval harness, where this would add a sha256 pass
+	// over up to 50 MiB per package for an answer nothing can use.
+	var analysisPlan artifactAnalysisPlan
+	if s.store != nil {
+		analysisPlan = planArtifactAnalyses(ctx, req, phase1)
+	}
+	phase1All := phase1
+	eligible := s.reuseArtifactAnalyses(ctx, analysisPlan, report, phase1)
+
+	// Read this coordinate's stored row ONCE, before any provider runs.
+	// Consumers: the per-facet TTL gates (T-3) — repolinkProvider through
+	// report.priorRow, the Tier-1 downloads and Tier-3 maintainer-age
+	// providers through req.StoredRow(), none of which can see the stored
+	// row any other way — and the P8-71 sticky revival further down.
+	// Reading here rather than after the fan-out changes nothing for the
+	// latter: it is the same row, and the store-side merge re-reads it
+	// under FOR UPDATE regardless.
+	//
+	// The Ephemeral skip and the detached short-budget context are the
+	// sticky read's, unchanged; their reasons are at the revival site. A
+	// failed read leaves both nil, which makes every gate fetch.
+	if s.store != nil && !req.Options.Ephemeral {
+		priorCtx, cancelPrior := context.WithTimeout(context.WithoutCancel(ctx), stickyPriorLookupTimeout)
+		// matcher-epoch-exempt: this read takes FACTS, never a verdict. Every
+		// field applyStickySupplyChain copies is an observation about the
+		// coordinate — an index verdict, a repo-link probe result, a metadiff
+		// outcome — and none of them is derived from the matcher, so a
+		// superseded epoch says nothing about whether they are still true. The
+		// same holds for the fetch times the TTL gates read. The row's own
+		// risk_evaluation is not read here and is not served; it is about to
+		// be REPLACED by the evaluation this scan is computing.
+		//
+		// Suppressing a matcher-stale row here would also be actively wrong:
+		// Store.Upsert's merge reads the same row with no epoch check at all
+		// (it cannot — it is the write path), so the fact would still land in
+		// the persisted report while the verdict beside it went without. That
+		// is P8-71 exactly, reintroduced through the fix for it.
+		prior, err := s.store.Get(priorCtx, req.OrgID, req.Key)
+		cancelPrior()
+		if err == nil {
+			report.priorRow = prior
+			req.storedRow = prior
+		}
+	}
 
 	// Phase 1 workers don't read the shared `report` — they receive nil
 	// as the `prior` argument so the main goroutine's merge can never
@@ -656,15 +715,29 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	// Phase-1 mixes Tier-1 and Tier-2 providers. Once they all settle
 	// the highest completed tier is the max of what was eligible —
 	// either 1 (no Tier-2 was selected) or 2 (the common case).
-	for _, p := range eligible {
+	// phase1All, not eligible: a tier whose analyzers were all reused from
+	// cache did complete. See the A-3 comment at the reuse site.
+	for _, p := range phase1All {
 		if t := p.Tier(); t > report.Observation.TierComplete {
 			report.Observation.TierComplete = t
 		}
 	}
 
 	// Merge partials.
+	//
+	// ranAnalyzers collects the per-provider partials of the cacheable
+	// analyzers that actually ran, so they can be persisted after the merge.
+	// It has to be captured HERE: mergePartial folds every contribution into
+	// one report and MergeScan flattens the Scan section, so after this loop
+	// there is no way to recover which provider produced which fact.
+	var ranAnalyzers []analyzerResult
 	for msg := range ch {
 		mergePartial(report, msg.partial)
+		if msg.err == nil && analysisPlan.enabled() {
+			if _, ok := analysisPlan.accept[msg.name]; ok {
+				ranAnalyzers = append(ranAnalyzers, analyzerResult{analyzer: msg.name, partial: msg.partial})
+			}
+		}
 		report.Observation.ProviderTimings = append(report.Observation.ProviderTimings, ProviderTiming{
 			Provider: msg.name,
 			Duration: msg.elapsed,
@@ -679,6 +752,20 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 				At:       s.now(),
 			})
 		}
+	}
+
+	// A-3: record what ran, keyed by the bytes, so the next scan of the same
+	// artifact reuses it. Refuses an errored provider and refuses everything
+	// when the archive walk was truncated — see persistArtifactAnalyses.
+	//
+	// On a detached short-budget context, for the same reason the sticky read
+	// uses one: this write must not be abandoned halfway because the fan-out
+	// ran out of deadline, and it must not extend the caller's deadline
+	// either. A failure is logged and loses a saving, never a fact.
+	if len(ranAnalyzers) > 0 {
+		saveCtx, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), stickyPriorLookupTimeout)
+		s.persistArtifactAnalyses(saveCtx, analysisPlan, req, ranAnalyzers)
+		cancelSave()
 	}
 
 	// Post-merge tiers (Tier 3, 4, ...). Each tier runs to completion
@@ -789,25 +876,20 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	// prior row, or an unreachable store, leaves the report exactly as the
 	// providers built it.
 	if s.store != nil && !req.Options.Ephemeral {
-		priorCtx, cancelPrior := context.WithTimeout(context.WithoutCancel(ctx), stickyPriorLookupTimeout)
-		// matcher-epoch-exempt: this read takes FACTS, never a verdict. Every
-		// field applyStickySupplyChain copies is an observation about the
-		// coordinate — an index verdict, a repo-link probe result, a metadiff
-		// outcome — and none of them is derived from the matcher, so a
-		// superseded epoch says nothing about whether they are still true. The
-		// row's own risk_evaluation is not read here and is not served; it is
-		// about to be REPLACED by the evaluation this scan is computing.
-		//
-		// Suppressing a matcher-stale row here would also be actively wrong:
-		// Store.Upsert's merge reads the same row with no epoch check at all
-		// (it cannot — it is the write path), so the fact would still land in
-		// the persisted report while the verdict beside it went without. That
-		// is P8-71 exactly, reintroduced through the fix for it.
-		prior, err := s.store.Get(priorCtx, req.OrgID, req.Key)
-		cancelPrior()
-		if err == nil && prior != nil {
-			applyStickySupplyChain(report, prior)
+		// The row was read before the fan-out (see the read above phase 1).
+		// Nil — no row, or a failed read — is a no-op.
+		prior := report.priorRow
+		applyStickySupplyChain(report, prior)
+		// Repo stats are fetched only when the repo is probed, so most
+		// scans carry them from the row; without this the report Scan
+		// returns would show 0 stars that the stored row does not. They
+		// feed no signal, so this is display parity, not P8-71.
+		if prior != nil {
+			carryRepoStats(&report.Maintenance, prior.Maintenance)
 		}
+		// Nothing reads it past here; don't pin a second full report on
+		// every caller that retains this one.
+		report.priorRow = nil
 
 		// Cross-version diff facts. ONE extra indexed query on the same
 		// detached, short-budget context as the sticky read above.
@@ -1281,6 +1363,9 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 	if src.InstallScriptFetches {
 		dst.InstallScriptFetches = true
 	}
+	if src.InstallScriptDetector != "" {
+		dst.InstallScriptDetector = src.InstallScriptDetector
+	}
 	if src.ImportTimeExecution {
 		dst.ImportTimeExecution = true
 		dst.ImportTimeKind = src.ImportTimeKind
@@ -1411,6 +1496,7 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 	if src.MaintainerAccountAgeDays > 0 {
 		if dst.MaintainerAccountAgeDays == 0 || src.MaintainerAccountAgeDays < dst.MaintainerAccountAgeDays {
 			dst.MaintainerAccountAgeDays = src.MaintainerAccountAgeDays
+			dst.MaintainerAge = src.MaintainerAge
 		}
 	}
 
@@ -1851,6 +1937,15 @@ func mergeMaintenance(dst *MaintenanceSection, src MaintenanceSection) {
 		dst.Forks = src.Forks
 		dst.OpenIssues = src.OpenIssues
 		dst.Subscribers = src.Subscribers
+	}
+	// RepoCreatedAt rides the same /repos response but is merged
+	// SEPARATELY, as non-nil-wins, rather than inside the block above. A
+	// repo with zero stars, forks, issues and subscribers is real (a fresh
+	// empty repo is exactly the shape suspicious_repo_stars hunts), and
+	// folding this into that condition would drop the creation date for
+	// precisely those rows — the ones the signal cares about most.
+	if src.RepoCreatedAt != nil {
+		dst.RepoCreatedAt = src.RepoCreatedAt
 	}
 }
 

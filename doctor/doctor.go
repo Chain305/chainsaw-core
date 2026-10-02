@@ -31,6 +31,7 @@ import (
 
 	"github.com/chain305/chainsaw-core/httpclient"
 	"github.com/chain305/chainsaw-core/redact"
+	"gopkg.in/yaml.v3"
 )
 
 // Severity ranks a finding. Higher is worse. Worst severity across
@@ -562,19 +563,57 @@ func checkPorts(ports []int) []Finding {
 	return out
 }
 
+// tlsPaths resolves the in-process TLS cert and key paths the way the
+// server does (applyTLSEnvOverrides in cmd/chainsaw-proxy):
+// CHAINSAW_TLS_CERT_FILE / CHAINSAW_TLS_KEY_FILE win, per field, over the
+// YAML server.tls block.
+//
+// This used to read CHAINSAW_TLS_CERT / CHAINSAW_TLS_KEY, names the server
+// has never read, so a server configured the documented way was reported
+// as having no TLS at all.
+//
+// One layer is NOT visible here: the server overlays DB-stored
+// server.tls.* settings between the YAML and the env, and doctor has no
+// settings store. A path that lives only in the DB reads as unset.
+func tlsPaths(configPath string, getenv func(string) string) (cert, key string) {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = strings.TrimSpace(getenv("CHAINSAW_CONFIG"))
+	}
+	if configPath != "" {
+		// A malformed file is checkConfig's finding to report; here it
+		// just contributes nothing.
+		if data, err := os.ReadFile(configPath); err == nil {
+			var y struct {
+				Server struct {
+					TLS struct {
+						CertFile string `yaml:"cert_file"`
+						KeyFile  string `yaml:"key_file"`
+					} `yaml:"tls"`
+				} `yaml:"server"`
+			}
+			if yaml.Unmarshal(data, &y) == nil {
+				cert = strings.TrimSpace(y.Server.TLS.CertFile)
+				key = strings.TrimSpace(y.Server.TLS.KeyFile)
+			}
+		}
+	}
+	if v := strings.TrimSpace(getenv("CHAINSAW_TLS_CERT_FILE")); v != "" {
+		cert = v
+	}
+	if v := strings.TrimSpace(getenv("CHAINSAW_TLS_KEY_FILE")); v != "" {
+		key = v
+	}
+	return cert, key
+}
+
 func checkTLS(configPath string, getenv func(string) string) []Finding {
-	// We don't parse the YAML here (to stay out of internal/config);
-	// instead we look for the conventional CHAINSAW_TLS_CERT /
-	// CHAINSAW_TLS_KEY env vars that operators typically set when
-	// terminating TLS in-process. Absence is OK (plaintext listener
-	// is a valid deployment shape).
-	cert := strings.TrimSpace(getenv("CHAINSAW_TLS_CERT"))
-	key := strings.TrimSpace(getenv("CHAINSAW_TLS_KEY"))
+	// Absence is OK (plaintext listener is a valid deployment shape).
+	cert, key := tlsPaths(configPath, getenv)
 	if cert == "" && key == "" {
 		return []Finding{{
 			Check:    "tls",
 			Severity: SeverityOK,
-			Message:  "no in-process TLS configured (plaintext listener)",
+			Message:  "no in-process TLS configured in env or YAML (plaintext listener; a DB-stored server.tls setting is not visible to doctor)",
 		}}
 	}
 	if cert == "" || key == "" {
@@ -634,7 +673,6 @@ func checkTLS(configPath string, getenv func(string) string) []Finding {
 			}
 		}
 	}
-	_ = configPath // reserved for future YAML-level validation
 	return []Finding{{
 		Check:    "tls",
 		Severity: SeverityOK,

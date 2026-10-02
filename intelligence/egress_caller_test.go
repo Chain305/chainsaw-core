@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -70,6 +71,12 @@ func TestCacheWarmKeepsTheEgressCaller(t *testing.T) {
 
 // The refresher is the one caller that tags itself: every Scan a tick issues
 // must arrive tagged, or none of its egress is attributed to refresh at all.
+//
+// Asserted as FAMILY membership since T-1, not as the bare "refresh" string.
+// Sub-paths now narrow the tag (this fixture's artifact fetch arrives as
+// "refresh_artifact"), and what every deployed query actually depends on is
+// that the value is still matched by `caller=~"refresh.*"`. The specific
+// sub-tag per path is pinned in egress_subcaller_test.go.
 func TestRefresherTagsItsEgress(t *testing.T) {
 	resetStaleReportMetrics()
 	t.Cleanup(resetStaleReportMetrics)
@@ -101,8 +108,11 @@ func TestRefresherTagsItsEgress(t *testing.T) {
 		t.Fatalf("artifact fetcher called %d times, want 3", len(callers))
 	}
 	for _, c := range callers {
-		if c != httpclient.EgressCallerRefresh {
-			t.Errorf("refresher egress tagged %q, want %q", c, httpclient.EgressCallerRefresh)
+		if !strings.HasPrefix(c, httpclient.EgressCallerRefresh) {
+			t.Errorf("refresher egress tagged %q, which is outside the %q family — every "+
+				"deployed query selects this traffic as caller=~\"refresh.*\", so the "+
+				"refresher's requests would vanish from D-2's numerator",
+				c, httpclient.EgressCallerRefresh)
 		}
 	}
 }

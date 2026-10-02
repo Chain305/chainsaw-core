@@ -30,6 +30,29 @@ func (f *fakeMetadataSource) IteratePackageMetadata(ctx context.Context, after m
 	return out, metadata.PackageMetadataCursor{}, nil
 }
 
+// PackageMetadataHolders answers from the same in-memory rows the walk pages,
+// so a test that seeds two orgs' rows gets a fan-out audience for free.
+func (f *fakeMetadataSource) PackageMetadataHolders(_ context.Context, pkg, version string, limit int) ([]metadata.PackageHolder, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []metadata.PackageHolder
+	for _, row := range f.rows {
+		if row.Package != pkg || row.Version != version {
+			continue
+		}
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		out = append(out, metadata.PackageHolder{
+			OrgID:      row.OrgID,
+			Repository: row.Repository,
+			Package:    row.Package,
+			Version:    row.Version,
+		})
+	}
+	return out, nil
+}
+
 func (f *fakeMetadataSource) PackageVersionExists(ctx context.Context, orgID, repo, pkg, version string) (bool, error) {
 	if f.existsFn != nil {
 		return f.existsFn(orgID, repo, pkg, version), nil

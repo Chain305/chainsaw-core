@@ -48,6 +48,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/chain305/chainsaw-core/httpclient"
 )
 
 // DefaultStaleReportMaxRows is the per-tick budget. Deliberately well below
@@ -320,7 +322,12 @@ func (r *Refresher) refreshStaleReportRow(ctx context.Context, row StaleReportRo
 	// does. Refusing to refresh the other signals because the bytes were
 	// unavailable would trade a partial improvement for none.
 	if r.cfg.ArtifactEnabled && r.cfg.StaleReportArtifactFetcher != nil {
-		fetchCtx, cancel := context.WithTimeout(ctx, staleReportArtifactTimeout)
+		// T-1: same class as the walk's artifact fetch, and the sweep is
+		// the larger half of refreshes — tagging only the walk would
+		// undercount the artifact row by most of it.
+		fetchCtx, cancel := context.WithTimeout(
+			httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshArtifact),
+			staleReportArtifactTimeout)
 		handle, err := r.cfg.StaleReportArtifactFetcher(fetchCtx, row.Ecosystem, row.Package, row.Version)
 		cancel()
 		if err != nil {

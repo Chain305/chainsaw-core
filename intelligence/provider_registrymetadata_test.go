@@ -1045,9 +1045,11 @@ func TestRegistryMetadataProvider_ComposerTimeline(t *testing.T) {
 
 // -- GitHub stars enrichment -----------------------------------------
 
-func TestRegistryMetadataProvider_GitHubStars(t *testing.T) {
+func TestRegistryMetadataProvider_LeavesGitHubStarsToRepolink(t *testing.T) {
 	mux := http.NewServeMux()
+	githubHits := 0
 	mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+		githubHits++
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"stargazers_count":1234,"forks_count":56,"open_issues_count":7,"subscribers_count":89}`))
 	})
@@ -1066,20 +1068,13 @@ func TestRegistryMetadataProvider_GitHubStars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if pr.Maintenance == nil {
-		t.Fatalf("Maintenance: nil")
+	// repolinkProvider decodes stars off its own /repos fetch; a second
+	// fetch here doubles the largest upstream line (T-4).
+	if githubHits != 0 {
+		t.Fatalf("registry metadata fetched /repos/owner/repo %d time(s); stars belong to repolink", githubHits)
 	}
-	if pr.Maintenance.Stars != 1234 {
-		t.Errorf("Stars: got %d, want 1234", pr.Maintenance.Stars)
-	}
-	if pr.Maintenance.Forks != 56 {
-		t.Errorf("Forks: got %d, want 56", pr.Maintenance.Forks)
-	}
-	if pr.Maintenance.OpenIssues != 7 {
-		t.Errorf("OpenIssues: got %d, want 7", pr.Maintenance.OpenIssues)
-	}
-	if pr.Maintenance.Subscribers != 89 {
-		t.Errorf("Subscribers: got %d, want 89", pr.Maintenance.Subscribers)
+	if pr.Maintenance != nil && pr.Maintenance.Stars != 0 {
+		t.Errorf("Stars: got %d, want 0 from Tier 1", pr.Maintenance.Stars)
 	}
 }
 
@@ -1091,19 +1086,11 @@ func TestRegistryMetadataProvider_GitHubStarsTokenSent(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"stargazers_count":1}`))
 	})
-	mux.HandleFunc("/api/v1/crates/p/1.0.0", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"crate":{"repository":"https://github.com/o/r"},"version":{"created_at":"2024-01-01T00:00:00Z"}}`))
-	})
-	mux.HandleFunc("/api/v1/crates/p", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"crate":{"max_version":"1.0.0"},"versions":[{"num":"1.0.0","created_at":"2024-01-01T00:00:00Z"}]}`))
-	})
 	t.Setenv("CHAINSAW_GITHUB_TOKEN", "ghp_testtoken")
 	p, _ := newStubProvider(t, mux)
-	_, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "cargo", Package: "p", Version: "1.0.0"}}, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	// Called directly: the Apache gitbox rewrite is its only caller now.
+	if _, w := p.fetchGitHubRepoMeta(context.Background(), "o", "r"); w != nil {
+		t.Fatalf("fetchGitHubRepoMeta: %+v", w)
 	}
 	if !strings.HasPrefix(seenAuth, "Bearer ghp_") {
 		t.Fatalf("Authorization header: got %q, want Bearer ghp_…", seenAuth)
@@ -1329,24 +1316,17 @@ func TestRegistryMetadataProvider_PyPIGitHubStars(t *testing.T) {
 	if pr.URLs == nil || pr.URLs.SourceRepoURL != "https://github.com/kjd/idna" {
 		t.Fatalf("SourceRepoURL not populated from project_urls.Source: %+v", pr.URLs)
 	}
-	if pr.Maintenance == nil {
-		t.Fatalf("Maintenance: nil — stars enrichment didn't fire from runPyPI")
-	}
-	if pr.Maintenance.Stars == 0 {
-		t.Errorf("Stars: got 0, want 234 (runPyPI did not call enrichGitHubStars)")
-	}
-	if pr.Maintenance.Forks == 0 {
-		t.Errorf("Forks: got 0, want 12")
-	}
-	if pr.Maintenance.OpenIssues == 0 {
-		t.Errorf("OpenIssues: got 0, want 5")
+	// The stars themselves now come from repolinkProvider, which probes
+	// this same SourceRepoURL; resolving it is what this guard still owns.
+	if pr.Maintenance != nil && pr.Maintenance.Stars != 0 {
+		t.Errorf("Stars: got %d from Tier 1, want 0 — repolink owns the GitHub fetch", pr.Maintenance.Stars)
 	}
 }
 
 // TestRegistryMetadataProvider_GitHubRateLimitRetry locks in the
 // retry-once-on-403 path: an anonymous GitHub fetch that returns 403
 // (rate limit) on the first attempt and 200 on the second must end up
-// with Stars populated and no warning surfaced.
+// with counts and no warning.
 func TestRegistryMetadataProvider_GitHubRateLimitRetry(t *testing.T) {
 	var calls int
 	mux := http.NewServeMux()
@@ -1360,30 +1340,17 @@ func TestRegistryMetadataProvider_GitHubRateLimitRetry(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"stargazers_count":42}`))
 	})
-	mux.HandleFunc("/api/v1/crates/p/1.0.0", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"crate":{"repository":"https://github.com/o/r"},"version":{"created_at":"2024-01-01T00:00:00Z"}}`))
-	})
-	mux.HandleFunc("/api/v1/crates/p", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"crate":{"max_version":"1.0.0"},"versions":[{"num":"1.0.0","created_at":"2024-01-01T00:00:00Z"}]}`))
-	})
 	_ = os.Unsetenv("CHAINSAW_GITHUB_TOKEN")
 	p, _ := newStubProvider(t, mux)
-	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "cargo", Package: "p", Version: "1.0.0"}}, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	meta, warn := p.fetchGitHubRepoMeta(context.Background(), "o", "r")
 	if calls < 2 {
 		t.Fatalf("expected retry on 403, got %d call(s)", calls)
 	}
-	if pr.Maintenance == nil || pr.Maintenance.Stars != 42 {
-		t.Fatalf("Stars: got %+v, want 42 after retry", pr.Maintenance)
+	if warn != nil {
+		t.Errorf("unexpected warning after successful retry: %+v", warn)
 	}
-	for _, w := range pr.Warnings {
-		if w.Code == "github_meta_fetch_failed" {
-			t.Errorf("unexpected github_meta_fetch_failed warning after successful retry: %+v", w)
-		}
+	if meta == nil || meta.Stars != 42 {
+		t.Fatalf("Stars: got %+v, want 42 after retry", meta)
 	}
 }
 
@@ -1445,39 +1412,23 @@ func TestParseGitHubRepo(t *testing.T) {
 }
 
 // TestRegistryMetadataProvider_GitHubFetchFailSoft confirms a 500 from
-// GitHub leaves fields at zero and surfaces a `github_meta_fetch_failed`
-// warning rather than erroring out the Run.
+// GitHub returns no counts and a `github_meta_fetch_failed` warning
+// rather than an error (fetchGitHubRepoMeta's caller is now the Apache
+// gitbox rewrite).
 func TestRegistryMetadataProvider_GitHubFetchFailSoft(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/o/r", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	mux.HandleFunc("/api/v1/crates/p/1.0.0", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"crate":{"repository":"https://github.com/o/r"},"version":{"created_at":"2024-01-01T00:00:00Z"}}`))
-	})
-	mux.HandleFunc("/api/v1/crates/p", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"crate":{"max_version":"1.0.0"},"versions":[{"num":"1.0.0","created_at":"2024-01-01T00:00:00Z"}]}`))
-	})
 	// Make sure no token is sent so we exercise the unauthenticated path.
 	_ = os.Unsetenv("CHAINSAW_GITHUB_TOKEN")
 	p, _ := newStubProvider(t, mux)
-	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "cargo", Package: "p", Version: "1.0.0"}}, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	meta, warn := p.fetchGitHubRepoMeta(context.Background(), "o", "r")
+	if meta != nil {
+		t.Errorf("meta should be nil on GitHub 500: got %+v", meta)
 	}
-	if pr.Maintenance != nil && pr.Maintenance.Stars != 0 {
-		t.Errorf("Stars should stay zero on GitHub 500: got %d", pr.Maintenance.Stars)
-	}
-	hasWarn := false
-	for _, w := range pr.Warnings {
-		if w.Code == "github_meta_fetch_failed" {
-			hasWarn = true
-		}
-	}
-	if !hasWarn {
-		t.Fatalf("expected github_meta_fetch_failed warning, got: %+v", pr.Warnings)
+	if warn == nil || warn.Code != "github_meta_fetch_failed" {
+		t.Fatalf("expected github_meta_fetch_failed warning, got: %+v", warn)
 	}
 }
 
@@ -1775,6 +1726,9 @@ func TestParseForgeRepo(t *testing.T) {
 		{"https://gitlab.com/group/sub/project", "gitlab", "group/sub", "project", true},
 		{"https://gitlab.com/group/project/-/tree/main", "gitlab", "group", "project", true},
 		{"https://gitlab.com/group/project.git", "gitlab", "group", "project", true},
+		// Pre-"/-/" route: shares supplychain.GitLabProjectPath with the
+		// liveness probe. Before, this fetched project "main".
+		{"https://gitlab.com/group/project/tree/main", "gitlab", "group", "project", true},
 		{"https://bitbucket.org/ws/repo", "bitbucket", "ws", "repo", true},
 		{"https://bitbucket.org/ws/repo.git", "bitbucket", "ws", "repo", true},
 		{"https://codeberg.org/owner/repo", "codeberg", "owner", "repo", true},
@@ -1861,9 +1815,9 @@ func TestExtractMavenSourceRepo_Empty(t *testing.T) {
 
 // TestRegistryMetadataProvider_MavenSCMDeveloperConnection drives the
 // fallback through runMaven end-to-end: a POM with ONLY
-// <developerConnection> populated must (a) resolve SourceRepoURL to the
-// normalised https form and (b) trigger enrichRepoStars against the
-// stubbed GitHub endpoint, populating Maintenance.Stars.
+// <developerConnection> populated must resolve SourceRepoURL to the
+// normalised https form — the URL repolinkProvider then probes, and takes
+// stars from — without Tier 1 fetching GitHub itself.
 func TestRegistryMetadataProvider_MavenSCMDeveloperConnection(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/com/foo/bar/1.0.0/bar-1.0.0.pom", func(w http.ResponseWriter, r *http.Request) {
@@ -1895,11 +1849,8 @@ func TestRegistryMetadataProvider_MavenSCMDeveloperConnection(t *testing.T) {
 	if pr.URLs == nil || pr.URLs.SourceRepoURL != "https://github.com/foo/bar" {
 		t.Fatalf("SourceRepoURL: got %+v, want https://github.com/foo/bar", pr.URLs)
 	}
-	if githubHit == 0 {
-		t.Fatalf("enrichRepoStars did not fire: GitHub stub was never hit")
-	}
-	if pr.Maintenance == nil || pr.Maintenance.Stars != 1234 {
-		t.Fatalf("Maintenance.Stars: got %+v, want 1234", pr.Maintenance)
+	if githubHit != 0 {
+		t.Fatalf("Tier 1 fetched GitHub %d time(s); repolink owns that fetch", githubHit)
 	}
 }
 

@@ -41,6 +41,12 @@ func (p *hiddenUnicodeProvider) Tier() int { return 2 }
 // files to inspect.
 func (p *hiddenUnicodeProvider) NeedsArtifact() bool { return true }
 
+// hiddenUnicodeAnalyzerVersion — bump when the codepoint set or the
+// file-selection rule changes what this reports for identical bytes.
+const hiddenUnicodeAnalyzerVersion = 1
+
+func (p *hiddenUnicodeProvider) AnalyzerVersion() int { return hiddenUnicodeAnalyzerVersion }
+
 // supportedHiddenUnicodeEcosystems is the text-file ecosystem whitelist per
 // POLICY_PROXY_MATRIX.md. HuggingFace is warn-tier (text files only) but we
 // include it so a repo config that sends us a model-card .md still lights

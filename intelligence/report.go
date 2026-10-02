@@ -44,6 +44,13 @@ type Report struct {
 	// priorLicense is that same prior row's Metadata.LicenseExpression,
 	// read for projectLicenseDiff. Empty means unknown, not "unlicensed".
 	priorLicense string
+	// priorRow is this coordinate's stored row, read by the scanner BEFORE
+	// the Tier-3 fan-out. repolinkProvider reads its repo-link probe
+	// result to skip a re-probe inside the recheck window: the provider's
+	// own `prior` argument is the in-scan merge, which never holds the
+	// stored timestamp. Nil on Ephemeral scans, a fresh coordinate, or a
+	// failed read — every one of which means "probe".
+	priorRow *Report
 
 	Identity        IdentitySection     `json:"identity"`
 	Release         ReleaseSection      `json:"release"`
@@ -327,6 +334,12 @@ type ProvenanceSection struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+// InstallScriptDetector values. See ArtifactScanSection.InstallScriptDetector.
+const (
+	InstallScriptDetectorAST   = "ast"
+	InstallScriptDetectorRegex = "regex"
+)
+
 // ArtifactScanSection captures everything computed by scanning the bytes
 // of the archive itself (install scripts, hidden unicode, clam/trivy on
 // artifacts). Populated only when the caller passed an Artifact to Scan.
@@ -337,6 +350,23 @@ type ArtifactScanSection struct {
 	InstallScriptKind    string     `json:"installScriptKind,omitempty"` // none|present|fetches_remote|eval_encoded|mutates_dependency
 	HasInstallScript     bool       `json:"hasInstallScript"`
 	InstallScriptFetches bool       `json:"installScriptFetchesRemote"`
+
+	// InstallScriptDetector records which detector produced the three
+	// install-script facts above: InstallScriptDetectorAST or
+	// InstallScriptDetectorRegex. The `installscript_ast` flag switches
+	// npm and pip between the two at scan time, and these facts live on a
+	// row every org reads, so without this a flag flip leaves a corpus
+	// nothing can separate.
+	//
+	// Empty means the ecosystem has no detector choice (rubygems, cargo,
+	// composer, nuget), or the row was written before this field existed.
+	// It is never a third detector.
+	//
+	// Truthful because the installscripts provider is the only writer of
+	// the install-script facts and stamps this in the same call, MergeScan
+	// copies it the same way, and the store merge keeps or replaces the
+	// whole Scan section, never field by field.
+	InstallScriptDetector string `json:"installScriptDetector,omitempty"`
 
 	// ImportTimeExecution is set by the pysource provider when a Python
 	// package runs malicious behavior at IMPORT/INSTALL time (top-level
@@ -424,6 +454,11 @@ type ArtifactScanSection struct {
 	// 0 means the provider was disabled or upstream was unreachable —
 	// downstream policy must treat 0 as "no signal" (fail-open).
 	MaintainerAccountAgeDays int `json:"maintainerAccountAgeDays,omitempty"`
+	// MaintainerAge is what MaintainerAccountAgeDays was computed from, so
+	// a later scan can reuse the lookup (T-3) and still age the number:
+	// the days are re-derived from YoungestAt on every scan, never copied.
+	// Nil when the age came from a lookup that was not fully definitive.
+	MaintainerAge *MaintainerAgeBasis `json:"maintainerAge,omitempty"`
 
 	// AI artifact scan results. Populated by provider_pickle (HuggingFace
 	// + any ecosystem that publishes pickle weights), provider_modelcard
@@ -548,6 +583,31 @@ type TransitiveCoverage struct {
 type DownloadCount struct {
 	Count  int    `json:"count"`
 	Window string `json:"window"`
+	// FetchedAt is when the registry was asked for Count — the ORIGINAL
+	// fetch, carried unchanged by every scan that reuses it, so the reuse
+	// window cannot slide (T-3). Nil on a failed fetch (-1), which is
+	// never reused.
+	FetchedAt *time.Time `json:"fetchedAt,omitempty"`
+}
+
+// MaintainerAgeBasis records one maintainer-age lookup. A later scan may
+// reuse it only for the same Handles — the lookup's whole input — so a
+// new maintainer or publisher, which is how a takeover shows up, changes
+// the key and forces a fresh lookup.
+type MaintainerAgeBasis struct {
+	// Handles is the sorted, lower-cased candidate set the lookup ran
+	// over.
+	Handles []string `json:"handles"`
+	// YoungestAt is when the youngest account (or, for the
+	// responsibility-age path, the latest first-publish) began.
+	YoungestAt time.Time `json:"youngestAt"`
+	// FetchedAt is when the lookup ran — the original one, carried.
+	FetchedAt time.Time `json:"fetchedAt"`
+	// Method is the warning code naming how the number was produced
+	// (responsibility-age, oldest-owned proxy, npm heuristic), re-emitted
+	// on reuse so a carried result reads exactly like a fetched one. ""
+	// for the direct account endpoints.
+	Method string `json:"method,omitempty"`
 }
 
 // DownloadCount.Window values.
@@ -587,6 +647,20 @@ type MaintenanceSection struct {
 	Forks       int `json:"forks,omitempty"`
 	OpenIssues  int `json:"openIssues,omitempty"`
 	Subscribers int `json:"subscribers,omitempty"`
+
+	// RepoCreatedAt is the REPOSITORY's creation timestamp, off the same
+	// /repos response as the counts above. nil means not observed.
+	//
+	// Distinct from FirstPublishedAt, which is the PACKAGE's earliest
+	// release: the two diverge whenever a project migrated repositories or
+	// published before opening its source, so they are not substitutes.
+	//
+	// Exists for T-4 fetch 3. premium's suspicious_repo_stars is an AND of
+	// stars, repo AGE and days-since-last-push; the first two were already
+	// here (Stars, LastRepoCommitAt) and this was the only one missing, so
+	// the provider had to make a THIRD GET of /repos per scan to get it.
+	// With this field the probe's own response supplies all three.
+	RepoCreatedAt *time.Time `json:"repoCreatedAt,omitempty"`
 
 	// WeeklyDownloads is the registry download count for the last 7 days.
 	// nil   → no data (air-gap mode: CHAINSAW_OFFLINE=1, or ecosystem has no
@@ -746,6 +820,18 @@ type ObservationSection struct {
 	// real epoch and therefore always stale — that is deliberate, and is
 	// how the one-time rescan of legacy rows happens.
 	MatcherEpoch int `json:"matcherEpoch,omitempty"`
+	// ReusedAnalyzers names the artifact analyzers whose facts came from
+	// artifact_analyses — already derived from these exact bytes at the
+	// current version of that analyzer — rather than from a fresh parse of
+	// the archive (A-3).
+	//
+	// Diagnostic, never an input to a verdict: the facts themselves reached
+	// the report through mergePartial, the same path a fresh analysis takes,
+	// so a consumer cannot tell them apart and must not try. It is here
+	// because "this provider contributed nothing" and "this provider's facts
+	// were reused" are otherwise indistinguishable from ProviderTimings,
+	// which only records providers that ran.
+	ReusedAnalyzers []string `json:"reusedAnalyzers,omitempty"`
 }
 
 // CurrentMatcherEpoch is the generation number of the advisory matcher and

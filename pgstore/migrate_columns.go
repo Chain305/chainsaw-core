@@ -77,6 +77,14 @@ func (s *Store) ensureEnhancedColumns() error {
 	if err := s.ensureVerdictHistorySchema(); err != nil {
 		return err
 	}
+	// Content-addressed artifact-analysis cache (additive new table, A-3).
+	// Same not-self-registering caveat as every helper above: removing this
+	// line leaves a green build that creates no table, every analysis lookup
+	// and write fails soft, and the only symptom is that no artifact analysis
+	// is ever reused. TestArtifactAnalysesSchemaIsWiredIntoMigrate guards it.
+	if err := s.ensureArtifactAnalysesSchema(); err != nil {
+		return err
+	}
 	// Runs LAST, and must: it UPDATEs package_metadata columns that
 	// ensurePackageRegistryColumns adds above (migrate_packages.go:114-126),
 	// so ordering it before that call would fail on a pre-Phase-5 database.

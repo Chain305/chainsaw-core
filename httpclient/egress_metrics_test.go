@@ -11,6 +11,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 
 	"github.com/chain305/chainsaw-core/config"
@@ -266,5 +267,210 @@ func TestEgressCountsTheCaller(t *testing.T) {
 	defer mu.Unlock()
 	if got[EgressCallerRefresh] != 1 || got[EgressCallerOther] != 1 {
 		t.Errorf("counted %v, want one refresh and one other", got)
+	}
+}
+
+// A FOLLOWED redirect is counted as two attempts: the 3xx on the origin host
+// and the final status on the target. Both are real requests, so counting
+// both is correct — but it means a host that answers every request with a
+// redirect shows up as 100% `other` even when the fetch it starts always
+// succeeds.
+//
+// This is not hypothetical. plugins.gradle.org 303s every /m2 artifact to
+// plugins-artifacts.gradle.org and the gradle provenance checker follows that
+// hop by design (core/provenance/registry_redirect.go, shipped to fix 2,078
+// failed attestations). Its series was then read as "2,233 requests/day at
+// 100% `other` — every single request fails; the series produces no fact"
+// and queued for deletion. The first hop of a working two-hop fetch is
+// exactly what that signature means, so the test is here to be found by
+// whoever reads such a series next: the question to ask is whether the
+// SECOND hop succeeds, not whether the first one is a 2xx.
+func TestFollowedRedirectIsCountedOnBothHosts(t *testing.T) {
+	mu, got := recorded(t)
+	dest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer dest.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, dest.URL, http.StatusSeeOther)
+	}))
+	defer origin.Close()
+
+	// Two distinct hostnames for one logical fetch, so the per-host series
+	// are separable the way they are in production.
+	c := New()
+	originURL := "http://localhost:" + httptestPort(t, origin.URL)
+	resp, err := c.Get(originURL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the redirect was not followed: status=%d", resp.StatusCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got["localhost/other"] != 1 {
+		t.Errorf("the 303 on the origin host was not counted as `other`: %+v", got)
+	}
+	if got["127.0.0.1/ok"] != 1 {
+		t.Errorf("the followed hop's 200 was not counted on the target host: %+v", got)
+	}
+}
+
+// A 3xx that is NOT followed is counted the same way, which is why the
+// outcome alone cannot distinguish the two. Only the target host's series can.
+func TestUnfollowedRedirectIsAlsoOther(t *testing.T) {
+	if got := outcomeForStatus(http.StatusSeeOther); got != EgressOther {
+		t.Errorf("303 classified as %q, want %q — the whole 3xx range lands in `other`, "+
+			"which is what makes a redirecting host look like a failing one", got, EgressOther)
+	}
+	for _, status := range []int{301, 302, 307, 308} {
+		if got := outcomeForStatus(status); got != EgressOther {
+			t.Errorf("%d classified as %q, want %q", status, got, EgressOther)
+		}
+	}
+}
+
+func httptestPort(t *testing.T, raw string) string {
+	t.Helper()
+	i := strings.LastIndex(raw, ":")
+	if i < 0 {
+		t.Fatalf("no port in %q", raw)
+	}
+	return raw[i+1:]
+}
+
+// -- T-1 refresher sub-callers ------------------------------------------
+
+// refreshSubCallers is every sub-caller the refresher threads. Kept here so a
+// new constant that is not added to this list fails the prefix guard below
+// rather than silently dropping out of `caller=~"refresh.*"`.
+var refreshSubCallers = []string{
+	EgressCallerRefreshArtifact,
+	EgressCallerRefreshLatest,
+	EgressCallerRefreshDownloads,
+	EgressCallerRefreshRepo,
+	EgressCallerRefreshDocument,
+	EgressCallerRefreshProvenance,
+	EgressCallerRefreshAccount,
+}
+
+// THE compatibility guard. The deployed D-2 reading and every PromQL in
+// docs/PLANS_INTELLIGENCE.md select the refresher's traffic, and they keep
+// working across this change only because every sub-caller is still matched by
+// `caller=~"refresh.*"`. A sub-caller named "artifact" instead of
+// "refresh_artifact" would silently remove that traffic from the numerator and
+// the per-coordinate cost would drop for no real reason.
+func TestRefreshSubCallersKeepTheQueryablePrefix(t *testing.T) {
+	for _, sub := range refreshSubCallers {
+		if !strings.HasPrefix(sub, EgressCallerRefresh) {
+			t.Errorf("sub-caller %q does not start with %q — it would fall out of every "+
+				"caller=~\"refresh.*\" query, silently shrinking the D-2 numerator",
+				sub, EgressCallerRefresh)
+		}
+	}
+	// And the set is small and fixed: the label is a Prometheus dimension.
+	seen := map[string]bool{}
+	for _, sub := range refreshSubCallers {
+		if seen[sub] {
+			t.Errorf("duplicate sub-caller %q", sub)
+		}
+		seen[sub] = true
+	}
+	if len(refreshSubCallers) > 8 {
+		t.Errorf("%d sub-callers; this is a metric label, keep the set small and fixed",
+			len(refreshSubCallers))
+	}
+}
+
+func TestRefineEgressCallerNarrowsRefreshTraffic(t *testing.T) {
+	for _, sub := range refreshSubCallers {
+		ctx := WithEgressCaller(context.Background(), EgressCallerRefresh)
+		if got := EgressCallerFrom(RefineEgressCaller(ctx, sub)); got != sub {
+			t.Errorf("refining refresh to %q gave %q", sub, got)
+		}
+	}
+}
+
+// The constraint that makes tagging shared code safe. The downloads fetcher,
+// the liveness probe and the registry-metadata provider all run on customer
+// install scans; attribution belongs to whoever STARTED the work.
+func TestRefineEgressCallerLeavesNonRefreshTrafficAlone(t *testing.T) {
+	for _, outer := range []struct{ name, caller string }{
+		{"install traffic", EgressCallerOther},
+		{"untagged", ""},
+		{"some future caller", "project_scan"},
+	} {
+		ctx := context.Background()
+		if outer.caller != "" {
+			ctx = WithEgressCaller(ctx, outer.caller)
+		}
+		got := EgressCallerFrom(RefineEgressCaller(ctx, EgressCallerRefreshDownloads))
+		if got != outer.caller {
+			t.Errorf("%s: caller became %q, want %q left alone — a downloads lookup on an "+
+				"install path must not be counted as refresher cost",
+				outer.name, got, outer.caller)
+		}
+	}
+}
+
+// Nesting: the GitHub /repos read sits inside the registry-metadata provider,
+// which has already tagged the context `refresh_document`. The innermost tag
+// must win or that request is counted as a package document.
+func TestRefineEgressCallerAllowsNestingWithinTheFamily(t *testing.T) {
+	ctx := WithEgressCaller(context.Background(), EgressCallerRefresh)
+	ctx = RefineEgressCaller(ctx, EgressCallerRefreshDocument)
+	ctx = RefineEgressCaller(ctx, EgressCallerRefreshRepo)
+	if got := EgressCallerFrom(ctx); got != EgressCallerRefreshRepo {
+		t.Errorf("caller = %q, want %q — the GitHub read inside the document provider would "+
+			"otherwise be counted as a package document", got, EgressCallerRefreshRepo)
+	}
+}
+
+// A sub without the family prefix is refused rather than applied, so a
+// mistake cannot quietly remove traffic from the refresh.* queries.
+func TestRefineEgressCallerRefusesAnUnprefixedSub(t *testing.T) {
+	ctx := WithEgressCaller(context.Background(), EgressCallerRefresh)
+	if got := EgressCallerFrom(RefineEgressCaller(ctx, "artifact")); got != EgressCallerRefresh {
+		t.Errorf("caller = %q, want %q unchanged", got, EgressCallerRefresh)
+	}
+}
+
+// End to end: the sub-caller must reach the METRIC, not just the context.
+func TestRefinedCallerReachesTheCounter(t *testing.T) {
+	var mu sync.Mutex
+	got := map[string]int{}
+	SetEgressRecorder(func(_, caller string, _ EgressOutcome) {
+		mu.Lock()
+		got[caller]++
+		mu.Unlock()
+	})
+	t.Cleanup(func() { SetEgressRecorder(nil) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New()
+	ctx := RefineEgressCaller(
+		WithEgressCaller(context.Background(), EgressCallerRefresh),
+		EgressCallerRefreshArtifact)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got[EgressCallerRefreshArtifact] != 1 {
+		t.Errorf("counter saw %+v, want one %q", got, EgressCallerRefreshArtifact)
 	}
 }

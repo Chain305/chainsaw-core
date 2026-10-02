@@ -429,8 +429,34 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 		maxCVSS         sql.NullFloat64
 		riskPayload     []byte // nil ⇒ NULL in the risk_evaluation column
 	)
-	if r.Scan.ScannedArtifactSHA != "" {
-		artifactSHA = sql.NullString{String: r.Scan.ScannedArtifactSHA, Valid: true}
+	// artifact_sha256 comes from the COMPUTED digest, Artifact.Digests.SHA256,
+	// which provider_checksum derives by hashing the bytes
+	// (computeArtifactSHA256). It is set once there and never reassigned, in
+	// both the default and the swift paths.
+	//
+	// NOT Scan.ScannedArtifactSHA, which this used to read: that field is
+	// declared by the Report type, copied by MergeScan and NEVER ASSIGNED by
+	// any provider, so this column was NULL for every row in the corpus since
+	// the table was created. Setting the field instead of the column was
+	// rejected — it participates in the Scan-section emptiness predicate
+	// (scanSectionEmpty below, `s.ScannedArtifactSHA != "" || s.ScannedAt !=
+	// nil`), so populating it would reclassify a report carrying nothing but a
+	// digest as having a non-empty artifact scan.
+	//
+	// NOT Digests.Declared or Digests.Actual either. Declared is whatever the
+	// registry asserted and is the value provider_checksum exists to CHECK, so
+	// trusting it here would let an upstream claim name the bytes. Actual is
+	// the digest under the algorithm that was VERIFIED, and on the swift path
+	// `digests.Actual = altHex` replaces it with a sha1/sha512 when the
+	// declared algorithm is not sha256 — so it is not reliably a sha256 and
+	// cannot key anything that compares against one.
+	//
+	// Empty on a metadata-only scan, because no bytes means no checksum
+	// provider run. The upsert's COALESCE then keeps whatever the column
+	// already held, which is why a later Tier-1 refresh cannot erase a digest
+	// once seen.
+	if sha := strings.TrimSpace(r.Artifact.Digests.SHA256); sha != "" {
+		artifactSHA = sql.NullString{String: strings.ToLower(sha), Valid: true}
 	}
 	if r.SupplyChain.TrustScore != 0 {
 		trustScore = sql.NullInt64{Int64: int64(r.SupplyChain.TrustScore), Valid: true}
@@ -580,6 +606,7 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 //   - report.maintenance.versionTimeline
 //   - report.maintenance.firstPublishedAt
 //   - report.maintenance.stars / forks / openIssues / subscribers
+//   - report.maintenance.repoCreatedAt
 //   - report.artifact              — digests.actual / digests.verified /
 //     signatureVerified / signatureKind /
 //     signatureKeyId (Tier-2/3 outputs)
@@ -618,6 +645,36 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 // display and not the verdict (P8-71). VersionAnomalyFlags travels with the
 // VersionAnomaly bool there for the same reason — the bool is what the UI
 // renders, the flags are what the risk signal actually reads.
+// carryRepoStats keeps the prior row's repo activity counts where this
+// scan observed none. Zero is silence: the counts are fetched only when
+// repolinkProvider probes, which is once per recheck window, and never on a
+// scan capped below Tier 3. Called by the store merge and, so the report a
+// Scan RETURNS matches the row it wrote, by runFanout.
+func carryRepoStats(dst *MaintenanceSection, prior MaintenanceSection) {
+	if dst.Stars == 0 && prior.Stars != 0 {
+		dst.Stars = prior.Stars
+	}
+	if dst.Forks == 0 && prior.Forks != 0 {
+		dst.Forks = prior.Forks
+	}
+	if dst.OpenIssues == 0 && prior.OpenIssues != 0 {
+		dst.OpenIssues = prior.OpenIssues
+	}
+	if dst.Subscribers == 0 && prior.Subscribers != 0 {
+		dst.Subscribers = prior.Subscribers
+	}
+	// nil is this field's silence, the pointer equivalent of the zero above.
+	// Load-bearing for T-4 fetch 3: repolinkProvider and
+	// suspicious_repo_stars are BOTH Tier 3 and run in parallel
+	// (scanner.go's fan-out contract), so the consumer never sees this
+	// value in the same scan — it reads it from the STORED row, and this
+	// carry is the only thing that keeps it there across a tick that did
+	// not probe.
+	if dst.RepoCreatedAt == nil && prior.RepoCreatedAt != nil {
+		dst.RepoCreatedAt = prior.RepoCreatedAt
+	}
+}
+
 func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 	if len(priorPayload) == 0 {
 		return json.Marshal(next)
@@ -661,18 +718,7 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 	if merged.Maintenance.FirstPublishedAt == nil && prior.Maintenance.FirstPublishedAt != nil {
 		merged.Maintenance.FirstPublishedAt = prior.Maintenance.FirstPublishedAt
 	}
-	if merged.Maintenance.Stars == 0 && prior.Maintenance.Stars != 0 {
-		merged.Maintenance.Stars = prior.Maintenance.Stars
-	}
-	if merged.Maintenance.Forks == 0 && prior.Maintenance.Forks != 0 {
-		merged.Maintenance.Forks = prior.Maintenance.Forks
-	}
-	if merged.Maintenance.OpenIssues == 0 && prior.Maintenance.OpenIssues != 0 {
-		merged.Maintenance.OpenIssues = prior.Maintenance.OpenIssues
-	}
-	if merged.Maintenance.Subscribers == 0 && prior.Maintenance.Subscribers != 0 {
-		merged.Maintenance.Subscribers = prior.Maintenance.Subscribers
-	}
+	carryRepoStats(&merged.Maintenance, prior.Maintenance)
 
 	// Artifact: per-field preservation. Tier-1 (registrymetadata) is
 	// authoritative for filename/size/declared digests so those always

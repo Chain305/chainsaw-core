@@ -3,10 +3,8 @@ package supplychain
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,11 +24,12 @@ const (
 	RepoLinkStatusUnknown           = "unknown"
 )
 
-// DefaultRepoLivenessInterval is how often the liveness enricher will
-// re-probe a repository that was previously classified. Values older
-// than this in package_metadata.repo_link_last_checked_at trigger a
-// refresh; rows within the window are skipped to bound outbound HTTP
-// load.
+// DefaultRepoLivenessInterval is how often the intelligence repolink
+// provider re-probes a repository it has already classified. A scan whose
+// stored intelligence_reports row carries a classification younger than
+// this (SupplyChain.RepoLinkLastChecked) re-uses it instead of calling the
+// forge API; older, missing or unknown results are probed. Overridden by
+// BootstrapConfig.RepoLivenessCheckInterval.
 const DefaultRepoLivenessInterval = 7 * 24 * time.Hour
 
 // RepoLivenessResult carries the output of a single classification.
@@ -44,6 +43,39 @@ type RepoLivenessResult struct {
 	CheckedAt    time.Time
 	LastCommitAt *time.Time
 	Archived     *bool
+
+	// Stats are the repo's activity counts, decoded from the same GitHub
+	// response the classification reads, so stars cost no request of
+	// their own. Set only from a 2xx GitHub response; zero otherwise,
+	// and zero means "not observed" to every consumer
+	// (intelligence.mergeMaintenance, the store's carry-forward).
+	Stats RepoStats
+}
+
+// RepoStats are display-only repository activity counts.
+type RepoStats struct {
+	Stars, Forks, OpenIssues, Subscribers int
+
+	// CreatedAt is the repository's creation timestamp, nil when the
+	// response omitted it or it did not parse — the same three-state
+	// contract LastCommitAt carries, because "unknown" and "epoch" mean
+	// opposite things to a freshness threshold.
+	//
+	// Decoded here for T-4 fetch 3. premium's suspicious_repo_stars needs
+	// THREE dimensions with AND semantics — stars, repo AGE and days since
+	// last push — and it currently gets them from a third GET of
+	// /repos/{owner}/{repo} per scan. This probe already downloads that
+	// exact body, so reading one more field from it costs nothing and is
+	// the same move T-4 made for the counts below.
+	//
+	// NOT yet reachable by that provider: MaintenanceSection has no
+	// repo-creation field and carryRepoStats cannot carry one, so the loop
+	// is open by two fields in core/intelligence/report.go and
+	// core/intelligence/store.go. Do NOT substitute
+	// Maintenance.FirstPublishedAt for it — that is the package's earliest
+	// RELEASE, not the repo's creation, and the two diverge whenever a
+	// project migrated repositories or published before opening the source.
+	CreatedAt *time.Time
 }
 
 // RepoLivenessChecker classifies repository URLs as ok / archived /
@@ -65,6 +97,20 @@ type RepoLivenessChecker struct {
 	// use httptest.Server and inject a fixed base; production always
 	// leaves this nil so the real upstream is hit.
 	apiBaseOverride map[string]string
+	// recheckInterval is how long a stored classification stands before
+	// the intelligence repolink provider probes the repo again. Set by
+	// Bootstrap from RepoLivenessCheckInterval; zero means the default.
+	recheckInterval time.Duration
+}
+
+// RecheckInterval is how long a stored classification stands before the
+// repo is probed again. Zero when the checker was built outside Bootstrap;
+// callers then use DefaultRepoLivenessInterval.
+func (c *RepoLivenessChecker) RecheckInterval() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.recheckInterval
 }
 
 // RepoLivenessOption customises a checker. Currently the only hook is
@@ -206,6 +252,15 @@ var corporateRepoOwners = map[string]struct{}{
 // The method never returns an error: every non-classifiable path
 // degrades to RepoLinkStatusUnknown so callers can persist a result
 // without branching on failure.
+//
+// missing means the forge ANSWERED that the repository does not exist
+// (404). A transport failure — DNS included — is unknown: every probe
+// goes to a fixed SaaS API host (api.github.com, gitlab.com,
+// api.bitbucket.org), so failing to resolve one is our network, never
+// the repository (C-8). A repository's own domain is never dialled —
+// self-hosted forges are not probed at all — so there is no host whose
+// DNS failure could mean the repository is gone. If that changes, the
+// distinction belongs there, not in a blanket DNS-error rule.
 func (c *RepoLivenessChecker) Classify(ctx context.Context, repoURL string, publisherIDs []string) RepoLivenessResult {
 	now := time.Now().UTC()
 	result := RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
@@ -246,9 +301,6 @@ func (c *RepoLivenessChecker) classifyGitHub(ctx context.Context, owner, repo st
 	apiURL := fmt.Sprintf("%s/repos/%s/%s", base, url.PathEscape(owner), url.PathEscape(repo))
 	body, status, err := c.fetchJSON(ctx, apiURL, c.githubToken)
 	if err != nil {
-		if isDNSError(err) {
-			return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
-		}
 		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
 	}
 	if status == http.StatusNotFound {
@@ -269,13 +321,31 @@ func (c *RepoLivenessChecker) classifyGitHub(ctx context.Context, owner, repo st
 		a := archived
 		archivedPtr = &a
 	}
+	res := RepoLivenessResult{Status: RepoLinkStatusOK, CheckedAt: now, LastCommitAt: lastCommit, Archived: archivedPtr, Stats: githubRepoStats(body)}
 	if archived {
-		return RepoLivenessResult{Status: RepoLinkStatusArchived, CheckedAt: now, LastCommitAt: lastCommit, Archived: archivedPtr}
+		res.Status = RepoLinkStatusArchived
+	} else if ownershipMismatch(owner, publisherIDs) {
+		res.Status = RepoLinkStatusOwnershipMismatch
 	}
-	if ownershipMismatch(owner, publisherIDs) {
-		return RepoLivenessResult{Status: RepoLinkStatusOwnershipMismatch, CheckedAt: now, LastCommitAt: lastCommit, Archived: archivedPtr}
+	return res
+}
+
+// githubRepoStats reads the activity counts off a /repos/{o}/{r} body.
+// subscribers_count is absent on some responses; watchers_count stands in,
+// as the registry-metadata stars fetch this replaced did.
+func githubRepoStats(body map[string]any) RepoStats {
+	n := func(k string) int {
+		f, _ := body[k].(float64)
+		return int(f)
 	}
-	return RepoLivenessResult{Status: RepoLinkStatusOK, CheckedAt: now, LastCommitAt: lastCommit, Archived: archivedPtr}
+	st := RepoStats{Stars: n("stargazers_count"), Forks: n("forks_count"), OpenIssues: n("open_issues_count"), Subscribers: n("subscribers_count")}
+	if st.Subscribers == 0 {
+		st.Subscribers = n("watchers_count")
+	}
+	// Same parser as pushed_at, so a malformed stamp stays nil rather than
+	// collapsing to the zero time and reading as a 2,000-year-old repo.
+	st.CreatedAt = parseRFC3339Pointer(body["created_at"])
+	return st
 }
 
 // classifyGitLab calls the GitLab project API (no auth) with the
@@ -291,9 +361,6 @@ func (c *RepoLivenessChecker) classifyGitLab(ctx context.Context, host, owner, r
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s", base, projectPath)
 	body, status, err := c.fetchJSON(ctx, apiURL, "")
 	if err != nil {
-		if isDNSError(err) {
-			return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
-		}
 		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
 	}
 	if status == http.StatusNotFound {
@@ -331,9 +398,6 @@ func (c *RepoLivenessChecker) classifyBitbucket(ctx context.Context, owner, repo
 		base, url.PathEscape(owner), url.PathEscape(repo))
 	_, status, err := c.fetchJSON(ctx, apiURL, "")
 	if err != nil {
-		if isDNSError(err) {
-			return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
-		}
 		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
 	}
 	if status == http.StatusNotFound {
@@ -406,22 +470,6 @@ func parseRFC3339Pointer(v any) *time.Time {
 	return &t
 }
 
-// isDNSError distinguishes "host does not resolve" from a transient
-// network error so Classify can treat the former as `missing` (the
-// repository URL points at a dead host) and the latter as `unknown`
-// (we'll try again later).
-func isDNSError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return true
-	}
-	s := err.Error()
-	return strings.Contains(s, "no such host") || strings.Contains(s, "NXDOMAIN")
-}
-
 // parseRepoURL extracts (host, owner, repo, kind) from a common
 // repository URL shape. Kind is one of "github", "gitlab",
 // "bitbucket", or "" for unrecognised hosts.
@@ -460,6 +508,15 @@ func parseRepoURL(raw string) (host, owner, repo, kind string) {
 	if o == "" || r == "" {
 		return "", "", "", ""
 	}
+	if h == "gitlab.com" || strings.HasSuffix(h, ".gitlab.com") {
+		// GitLab nests groups; parts[0]/parts[1] would probe a group as
+		// if it were a project (C-9).
+		o, r, ok := GitLabProjectPath(path)
+		if !ok {
+			return "", "", "", ""
+		}
+		return h, o, r, "gitlab"
+	}
 	switch {
 	case h == "github.com" || strings.HasSuffix(h, ".github.com"):
 		return h, o, r, "github"
@@ -469,6 +526,53 @@ func parseRepoURL(raw string) (host, owner, repo, kind string) {
 		return h, o, r, "bitbucket"
 	}
 	return "", "", "", ""
+}
+
+// RepoProbeTarget is where Classify would send repoURL: the forge host,
+// owner (for GitLab, the full namespace) and repo it parses to. Kind is
+// "" when Classify would not probe at all. Exported for read-only tooling
+// that must parse exactly as production does (scripts/c9-flipcount).
+func RepoProbeTarget(repoURL string) (host, owner, repo, kind string) {
+	return parseRepoURL(strings.TrimSpace(repoURL))
+}
+
+// gitLabProjectRoutes are path segments GitLab reserves for project
+// sub-pages (PROJECT_WILDCARD_ROUTES in GitLab's lib/gitlab/path_regex.rb),
+// so no group or project can carry one of these names. They end a project
+// path in pre-"/-/" URLs such as gitlab.com/group/project/tree/main.
+var gitLabProjectRoutes = map[string]struct{}{
+	"-": {}, "badges": {}, "blame": {}, "blob": {}, "builds": {}, "commits": {},
+	"create": {}, "create_dir": {}, "edit": {}, "files": {}, "find_file": {},
+	"new": {}, "preview": {}, "raw": {}, "refs": {}, "tree": {}, "update": {},
+	"update_dir": {},
+}
+
+// GitLabProjectPath splits a gitlab.com URL path into its namespace and
+// project. GitLab nests groups (group/subgroup/project): the project is the
+// last segment before any route, and the namespace is everything before it.
+// The ONE GitLab path rule: the liveness probe and the registry-metadata
+// stars fetch (intelligence.parseForgeRepo) both call it, so they cannot
+// name different projects for the same URL.
+func GitLabProjectPath(path string) (namespace, project string, ok bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i, seg := range parts {
+		// From index 1: route names are illegal for groups as well as
+		// projects, so gitlab.com/group/-/issues is a group page and must
+		// not parse as project "issues" in namespace "group/-".
+		if _, route := gitLabProjectRoutes[seg]; route && i >= 1 {
+			parts = parts[:i]
+			break
+		}
+	}
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	project = strings.TrimSuffix(parts[len(parts)-1], ".git")
+	namespace = strings.Join(parts[:len(parts)-1], "/")
+	if parts[0] == "" || project == "" {
+		return "", "", false
+	}
+	return namespace, project, true
 }
 
 // ownershipMismatch is intentionally conservative. It fires only when:
@@ -482,11 +586,37 @@ func parseRepoURL(raw string) (host, owner, repo, kind string) {
 // deliberate: a -20 trust-score delta needs HIGH-confidence evidence,
 // and the cost of a false positive outweighs the cost of missing a
 // subtle takeover.
+// OwnershipStatus re-derives the ok / ownership_mismatch half of a
+// classification for repoURL against the CURRENT publisher set, with no
+// network: the owner comes from the URL and ownershipMismatch is local.
+// Callers that reuse a stored Classify result must call this rather than
+// trust a stored ok — a publisher change inside the reuse window is the
+// takeover sc.repo_ownership_mismatch exists to catch. ok is false when the
+// URL does not parse to a classifiable owner; the caller must then probe.
+//
+// It does not know whether the repo is archived: Classify ranks archived
+// above ownership, so only re-derive a stored ok or ownership_mismatch.
+func OwnershipStatus(repoURL string, publisherIDs []string) (status string, ok bool) {
+	host, owner, _, kind := parseRepoURL(strings.TrimSpace(repoURL))
+	if host == "" || kind == "" || owner == "" {
+		return "", false
+	}
+	if ownershipMismatch(owner, publisherIDs) {
+		return RepoLinkStatusOwnershipMismatch, true
+	}
+	return RepoLinkStatusOK, true
+}
+
 func ownershipMismatch(repoOwner string, publisherIDs []string) bool {
 	if len(publisherIDs) == 0 {
 		return false
 	}
 	owner := strings.ToLower(strings.TrimSpace(repoOwner))
+	// A GitLab subgroup project is owned by its top-level group; the
+	// corporate list names top-level owners.
+	if i := strings.IndexByte(owner, '/'); i >= 0 {
+		owner = owner[:i]
+	}
 	if _, ok := corporateRepoOwners[owner]; !ok {
 		return false
 	}

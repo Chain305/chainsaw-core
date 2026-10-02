@@ -228,6 +228,20 @@ func TestParseRepoURL(t *testing.T) {
 		{"git@github.com:a/b.git", "github.com", "a", "b", "github"},
 		{"https://gitlab.com/grp/proj", "gitlab.com", "grp", "proj", "gitlab"},
 		{"https://bitbucket.org/team/repo", "bitbucket.org", "team", "repo", "bitbucket"},
+		// C-9: GitLab nests groups. Before, every one of these probed the
+		// group grp/sub as if it were a project.
+		{"https://gitlab.com/grp/sub/proj", "gitlab.com", "grp/sub", "proj", "gitlab"},
+		{"git+https://gitlab.com/grp/sub/deeper/proj.git", "gitlab.com", "grp/sub/deeper", "proj", "gitlab"},
+		{"https://gitlab.com/grp/sub/proj/-/tree/main", "gitlab.com", "grp/sub", "proj", "gitlab"},
+		// Pre-"/-/" route URLs must still end at the project, or the
+		// nested parse would invent project "main" in namespace grp/proj/tree.
+		{"https://gitlab.com/grp/proj/tree/master", "gitlab.com", "grp", "proj", "gitlab"},
+		{"https://gitlab.com/grp/proj/blob/master/README.md", "gitlab.com", "grp", "proj", "gitlab"},
+		// GitHub has no nesting: deep paths still resolve to owner/repo.
+		{"https://github.com/owner/repo/tree/main/packages/x", "github.com", "owner", "repo", "github"},
+		{"https://github.com/owner/repo/a/b/c", "github.com", "owner", "repo", "github"},
+		// A group page is not a project; probing grp/- would 404 into missing.
+		{"https://gitlab.com/grp/-/issues", "", "", "", ""},
 		{"", "", "", "", ""},
 		{"https://github.com/justowner", "", "", "", ""},
 		{"https://internal.example.com/a/b", "", "", "", ""},
@@ -370,6 +384,152 @@ func TestClassify_GitHubSendsTheTokenOthersDoNot(t *testing.T) {
 			t.Errorf("%s stub was never called", name)
 		} else if v != "" {
 			t.Errorf("%s received Authorization %q; the GitHub token must not leave GitHub", name, v)
+		}
+	}
+}
+
+// TestRepoLivenessCheckerDecodesRepoStats: stars come off the liveness
+// response itself (T-4), so registry metadata need not fetch /repos too.
+func TestRepoLivenessCheckerDecodesRepoStats(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/repos/o/r":
+			_, _ = w.Write([]byte(`{"archived":false,"stargazers_count":1234,"forks_count":56,"open_issues_count":7,"subscribers_count":89}`))
+		case "/repos/o/watchers":
+			_, _ = w.Write([]byte(`{"archived":true,"stargazers_count":3,"watchers_count":11}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := NewRepoLivenessChecker(srv.Client(), nil, WithAPIBaseOverride("github", srv.URL))
+
+	if got := c.Classify(context.Background(), "https://github.com/o/r", nil).Stats; got != (RepoStats{Stars: 1234, Forks: 56, OpenIssues: 7, Subscribers: 89}) {
+		t.Errorf("ok repo stats = %+v", got)
+	}
+	archived := c.Classify(context.Background(), "https://github.com/o/watchers", nil)
+	if archived.Status != RepoLinkStatusArchived || archived.Stats != (RepoStats{Stars: 3, Subscribers: 11}) {
+		t.Errorf("archived repo = %+v; want archived with stars 3 and watchers standing in for subscribers", archived)
+	}
+	// A failed fetch observes nothing: unknown, and no counts to write
+	// over the stored ones.
+	failed := c.Classify(context.Background(), "https://github.com/o/broken", nil)
+	if failed.Status != RepoLinkStatusUnknown || failed.Stats != (RepoStats{}) {
+		t.Errorf("failed fetch = %+v; want unknown with zero stats", failed)
+	}
+}
+
+// TestClassify_GitLab_SubgroupProbesTheProject (C-9): the probe must name
+// grp/sub/proj, not the group grp/sub. Before the fix this classified as
+// missing — the API 404s a group path on /projects.
+func TestClassify_GitLab_SubgroupProbesTheProject(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, _ := url.PathUnescape(strings.TrimPrefix(r.URL.EscapedPath(), "/api/v4/projects/"))
+		if p != "gitlab-org/sub/proj" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"archived":false}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewRepoLivenessChecker(srv.Client(), nil, WithAPIBaseOverride("gitlab", srv.URL))
+
+	if got := c.Classify(context.Background(), "https://gitlab.com/gitlab-org/sub/proj", nil); got.Status != RepoLinkStatusOK {
+		t.Errorf("subgroup project: status %q, want ok from gitlab-org/sub/proj", got.Status)
+	}
+	// The newly reachable tightening: a corporate top-level group with a
+	// public-email publisher now reaches the ownership check instead of
+	// stopping at a false missing.
+	got := c.Classify(context.Background(), "https://gitlab.com/gitlab-org/sub/proj", []string{"someone@gmail.com"})
+	if got.Status != RepoLinkStatusOwnershipMismatch {
+		t.Errorf("subgroup of a corporate group, gmail publisher: status %q, want ownership_mismatch", got.Status)
+	}
+	if st, ok := OwnershipStatus("https://gitlab.com/gitlab-org/sub/proj", []string{"someone@gmail.com"}); !ok || st != RepoLinkStatusOwnershipMismatch {
+		t.Errorf("OwnershipStatus on a subgroup = (%q, %v); the owner is the top-level group", st, ok)
+	}
+}
+
+// TestClassify_DNSFailureIsUnknown (C-8): every probe dials a fixed SaaS
+// API host, so a name that does not resolve is our network, not the repo.
+// Before the fix all three returned missing — a false sc.repo_missing.
+func TestClassify_DNSFailureIsUnknown(t *testing.T) {
+	t.Parallel()
+	const dead = "http://chainsaw-c8-test.invalid" // RFC 2606: never resolves
+	for _, tc := range []struct{ forge, repoURL string }{
+		{"github", "https://github.com/o/r"},
+		{"gitlab", "https://gitlab.com/g/p"},
+		{"bitbucket", "https://bitbucket.org/w/r"},
+	} {
+		c := NewRepoLivenessChecker(nil, nil, WithAPIBaseOverride(tc.forge, dead))
+		if got := c.Classify(context.Background(), tc.repoURL, nil); got.Status != RepoLinkStatusUnknown {
+			t.Errorf("%s: DNS failure on the API host classified %q, want unknown", tc.forge, got.Status)
+		}
+	}
+	// The other side of the rule: a self-hosted forge is never dialled, so
+	// its DNS can never be read as the repository's absence.
+	c := NewRepoLivenessChecker(nil, nil, WithAPIBaseOverride("gitlab", dead))
+	if got := c.Classify(context.Background(), "https://gitlab.example-selfhosted.invalid/g/p", nil); got.Status != RepoLinkStatusUnknown {
+		t.Errorf("self-hosted forge: status %q, want unknown without a probe", got.Status)
+	}
+}
+
+// T-4 fetch 3 prerequisite: the probe must decode created_at off the body it
+// already downloads.
+//
+// premium's suspicious_repo_stars is an AND of three dimensions — stars, repo
+// AGE, days since last push — and it gets all three from a THIRD GET of
+// /repos/{owner}/{repo} per scan. The first two are already supplied from this
+// body (Stats.Stars, LastCommitAt); repo age was the only one missing, which
+// is why the fetch could not simply be dropped.
+//
+// Reading it here costs zero requests. The loop is still open by two fields
+// elsewhere — see the CreatedAt doc comment — so this is a prerequisite, not
+// the saving.
+func TestGitHubProbeDecodesRepoCreatedAt(t *testing.T) {
+	created := "2019-03-04T05:06:07Z"
+	body := map[string]any{
+		"stargazers_count": float64(42),
+		"pushed_at":        "2026-09-01T00:00:00Z",
+		"created_at":       created,
+	}
+
+	st := githubRepoStats(body)
+
+	if st.CreatedAt == nil {
+		t.Fatal("created_at was not decoded; suspicious_repo_stars has no source for repo age " +
+			"other than its own third GET of /repos")
+	}
+	want, err := time.Parse(time.RFC3339, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.CreatedAt.Equal(want) {
+		t.Errorf("CreatedAt = %v, want %v", st.CreatedAt, want)
+	}
+	// The counts must keep working — this is an addition, not a rewrite.
+	if st.Stars != 42 {
+		t.Errorf("Stars = %d, want 42", st.Stars)
+	}
+}
+
+// Three-state contract: absent and unparseable both stay nil. A zero time
+// would read as a repo created in year 1, which is "maximally old" to a
+// freshness threshold — the opposite of unknown, and it would silently
+// suppress the signal rather than leave it quiet.
+func TestGitHubProbeLeavesRepoCreatedAtNilWhenUnusable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"absent", map[string]any{"stargazers_count": float64(1)}},
+		{"unparseable", map[string]any{"created_at": "not-a-timestamp"}},
+		{"wrong type", map[string]any{"created_at": float64(12345)}},
+	} {
+		if got := githubRepoStats(tc.body).CreatedAt; got != nil {
+			t.Errorf("%s: CreatedAt = %v, want nil — a zero or guessed time reads as an "+
+				"ancient repo and inverts the freshness test", tc.name, got)
 		}
 	}
 }

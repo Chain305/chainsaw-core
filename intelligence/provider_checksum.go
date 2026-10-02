@@ -72,6 +72,21 @@ func (p *checksumProvider) Tier() int { return 2 }
 // NeedsArtifact is true — the digest is computed over the bytes.
 func (p *checksumProvider) NeedsArtifact() bool { return true }
 
+// AnalyzerVersion: NOT CACHEABLE, and not an oversight.
+//
+// This provider's output is (bytes x DECLARED digest), not bytes alone. It
+// compares the digest it computes against whatever the registry declared,
+// reached through prior.Artifact.Digests / ArtifactHandle.SHA256 (pickDeclared
+// below). The declared value lives in registry metadata and can change while
+// the bytes do not — a re-published .metadata, a corrected integrity field —
+// and verified/mismatch must change with it. Caching the result under the
+// COMPUTED digest would freeze a verification that is no longer the one the
+// registry asserts.
+//
+// The cost of excluding it is one sha256 pass over resident bytes, which is
+// the cheapest thing in the Tier-2 set.
+func (p *checksumProvider) AnalyzerVersion() int { return AnalyzerNotCacheable }
+
 // supportedChecksumEcosystems matches the POLICY_PROXY_MATRIX.md
 // "Checksum fail-closed enforcement" row: every ecosystem we can
 // compare an upstream-declared hash against. Swift is included via its

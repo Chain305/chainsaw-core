@@ -58,6 +58,7 @@ package cli
 import (
 	"bufio"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -83,11 +84,40 @@ const (
 	gradeNone   mapGrade = "NONE" // no Socket equivalent that this repo can name
 )
 
+// cadence is how fresh a signal's underlying fact actually is. Codes are the
+// legend from docs/SIGNAL_CADENCE_MAP.md §1; that document's §3 table is the
+// source for the per-signal assignment below. Typed so a typo is a compile
+// error rather than a cell nobody reads.
+type cadence string
+
+const (
+	cadR24          cadence = "R24"            // 24h report TTL, refreshed by the 1h walk; metadata fetch only
+	cadR24B         cadence = "R24+B"          // the same, plus an artifact byte fetch (50 MiB scheduled cap)
+	cadR24OSV       cadence = "R24+OSV"        // R24 with the 6h OSV bundle behind it
+	cadR24EPSS      cadence = "R24+EPS"        // R24 with the 24h EPSS feed behind it
+	cadR24Feed      cadence = "R24+FEED"       // R24 with the malware feed sync plus the embedded floor behind it
+	cadR24Embed     cadence = "R24+EMB"        // R24 with a build-time embedded corpus behind it — redeploy only
+	cadR24BPrior    cadence = "R24+B+PRI"      // R24+B, and meaningless without a prior scan of another version
+	cadR24Rederived cadence = "R24/re-derived" // stored on R24, but reclassified at every projection
+	cadFrozen       cadence = "FROZEN"         // refetched on R24, but the stored value is a day-count that does not age
+	cadNever        cadence = "NEVER"          // registered and weighted, but its input field is never populated
+	cadWorkflow     cadence = "WORKFLOW"       // not on the package path; fires only on a scanned workflow file
+)
+
+// knownCadences gates the map. A zero Cadence is an undecided signal, which is
+// the thing TestSocketMapCoversRegistry exists to refuse.
+var knownCadences = map[cadence]bool{
+	cadR24: true, cadR24B: true, cadR24OSV: true, cadR24EPSS: true,
+	cadR24Feed: true, cadR24Embed: true, cadR24BPrior: true,
+	cadR24Rederived: true, cadFrozen: true, cadNever: true, cadWorkflow: true,
+}
+
 type conceptMapping struct {
 	Socket   []string // socket alert `type` names, verbatim from /api/ecosystems/alert/alert-types
 	Grade    mapGrade
-	Inferred bool   // true when the pairing is judgement, not something the repo records
-	Bucket   string // "metadata" | "artifact" | "advisory" — see conceptBucket
+	Inferred bool    // true when the pairing is judgement, not something the repo records
+	Bucket   string  // "metadata" | "artifact" | "advisory" — see conceptBucket
+	Cadence  cadence // refresh clock of the underlying fact — see docs/SIGNAL_CADENCE_MAP.md §3
 	Note     string
 }
 
@@ -135,66 +165,66 @@ const (
 // (GitHub Actions, a different product surface with no corpus rows).
 var socketConceptMap = map[string]conceptMapping{
 	// ── supply chain ────────────────────────────────────────────────────
-	"sc.known_malicious":               {Socket: []string{"malware", "gptMalware"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.typosquat_high":                {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "3 Chainsaw tiers vs 2 Socket alerts; no tier correspondence exists — never compare tier to tier"},
-	"sc.typosquat_medium":              {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia},
-	"sc.typosquat_low":                 {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia},
-	"sc.publisher_changed":             {Socket: []string{"unstableOwnership"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
-	"sc.non_existent_author":           {Socket: []string{"missingAuthor"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.install_script_fetches_remote": {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is strictly narrower: theirs fires on scripts EXISTING"},
-	"sc.install_script_only":           {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia},
-	"sc.install_script_only_npm":       {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia},
+	"sc.known_malicious":               {Socket: []string{"malware", "gptMalware"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24Feed},
+	"sc.typosquat_high":                {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "3 Chainsaw tiers vs 2 Socket alerts; no tier correspondence exists — never compare tier to tier", Cadence: cadR24Embed},
+	"sc.typosquat_medium":              {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Cadence: cadR24Embed},
+	"sc.typosquat_low":                 {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Cadence: cadR24Embed},
+	"sc.publisher_changed":             {Socket: []string{"unstableOwnership"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
+	"sc.non_existent_author":           {Socket: []string{"missingAuthor"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
+	"sc.install_script_fetches_remote": {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is strictly narrower: theirs fires on scripts EXISTING", Cadence: cadR24B},
+	"sc.install_script_only":           {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Cadence: cadR24B},
+	"sc.install_script_only_npm":       {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Cadence: cadR24B},
 	// Cross-version diff signals. Socket has no per-version capability-diff
 	// alert, so these are ours-only by construction rather than a gap in
 	// their taxonomy — graded as such so the harness does not read them as
 	// a miss on their side.
-	"sc.shell_access_appeared":             {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert"},
-	"sc.filesystem_access_appeared":        {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert"},
-	"sc.env_access_appeared":               {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert"},
-	"sc.hidden_unicode":                    {Socket: []string{"obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "different detector class; overlapping intent"},
-	"sc.repo_archived":                     {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
-	"sc.git_url_dependency":                {Socket: []string{"gitDependency", "gitHubDependency"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.http_url_dependency":               {Socket: []string{"httpDependency"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.shrinkwrap_present":                {Socket: []string{"shrinkwrap"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.deprecated_by_maintainer":          {Socket: []string{"deprecated"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.manifest_confusion":                {Socket: []string{"manifestConfusion"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"sc.publish_velocity_anomaly":          {Socket: []string{"recentlyPublished"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
-	"sc.repo_missing":                      {Socket: nil, Grade: gradeNone, Note: "the 98-type taxonomy has no missing-repository alert"},
-	"sc.repo_ownership_mismatch":           {Socket: nil, Grade: gradeNone},
-	"sc.pom_developer_list_changed":        {Socket: nil, Grade: gradeNone, Note: "Maven-specific"},
-	"sc.maintainer_account_very_young":     {Socket: nil, Grade: gradeNone},
-	"sc.maintainer_account_young":          {Socket: nil, Grade: gradeNone},
-	"sc.maintainer_account_somewhat_young": {Socket: nil, Grade: gradeNone},
-	"sc.provenance_verified":               {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal; Socket's model is negative-only"},
-	"sc.signature_verified":                {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
-	"sc.builder_ref_version_mismatch":      {Socket: nil, Grade: gradeNone, Note: "weight-0 observation (S-3)"},
-	"sc.slsa_level_bonus":                  {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
-	"sc.transitive_critical_vuln":          {Socket: nil, Grade: gradeNoneSt, Note: "our dependency-tree rollup; Socket surfaces transitive risk elsewhere"},
-	"sc.transitive_high_vuln":              {Socket: nil, Grade: gradeNoneSt},
-	"sc.transitive_malware":                {Socket: nil, Grade: gradeNoneSt},
+	"sc.shell_access_appeared":             {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert", Cadence: cadR24BPrior},
+	"sc.filesystem_access_appeared":        {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert", Cadence: cadR24BPrior},
+	"sc.env_access_appeared":               {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert", Cadence: cadR24BPrior},
+	"sc.hidden_unicode":                    {Socket: []string{"obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "different detector class; overlapping intent", Cadence: cadR24B},
+	"sc.repo_archived":                     {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
+	"sc.git_url_dependency":                {Socket: []string{"gitDependency", "gitHubDependency"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadNever},
+	"sc.http_url_dependency":               {Socket: []string{"httpDependency"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadNever},
+	"sc.shrinkwrap_present":                {Socket: []string{"shrinkwrap"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24B},
+	"sc.deprecated_by_maintainer":          {Socket: []string{"deprecated"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
+	"sc.manifest_confusion":                {Socket: []string{"manifestConfusion"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24B},
+	"sc.publish_velocity_anomaly":          {Socket: []string{"recentlyPublished"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
+	"sc.repo_missing":                      {Socket: nil, Grade: gradeNone, Note: "the 98-type taxonomy has no missing-repository alert", Cadence: cadR24},
+	"sc.repo_ownership_mismatch":           {Socket: nil, Grade: gradeNone, Cadence: cadR24},
+	"sc.pom_developer_list_changed":        {Socket: nil, Grade: gradeNone, Note: "Maven-specific", Cadence: cadR24},
+	"sc.maintainer_account_very_young":     {Socket: nil, Grade: gradeNone, Cadence: cadFrozen},
+	"sc.maintainer_account_young":          {Socket: nil, Grade: gradeNone, Cadence: cadFrozen},
+	"sc.maintainer_account_somewhat_young": {Socket: nil, Grade: gradeNone, Cadence: cadFrozen},
+	"sc.provenance_verified":               {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal; Socket's model is negative-only", Cadence: cadR24},
+	"sc.signature_verified":                {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24},
+	"sc.builder_ref_version_mismatch":      {Socket: nil, Grade: gradeNone, Note: "weight-0 observation (S-3)", Cadence: cadR24},
+	"sc.slsa_level_bonus":                  {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24},
+	"sc.transitive_critical_vuln":          {Socket: nil, Grade: gradeNoneSt, Note: "our dependency-tree rollup; Socket surfaces transitive risk elsewhere", Cadence: cadR24OSV},
+	"sc.transitive_high_vuln":              {Socket: nil, Grade: gradeNoneSt, Cadence: cadR24OSV},
+	"sc.transitive_malware":                {Socket: nil, Grade: gradeNoneSt, Cadence: cadR24Feed},
 
 	// ── capability (npm only, flag-gated) ────────────────────────────────
-	"cap.network":      {Socket: []string{"networkAccess"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.shell":        {Socket: []string{"shellAccess"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.env_access":   {Socket: []string{"envVars"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.native_code":  {Socket: []string{"hasNativeCode"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.dynamic_eval": {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.network":      {Socket: []string{"networkAccess"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.shell":        {Socket: []string{"shellAccess"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.env_access":   {Socket: []string{"envVars"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.native_code":  {Socket: []string{"hasNativeCode"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.dynamic_eval": {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
 	// The weight-0 sibling fed by the codesmell regex detector. Mapped to
 	// the same Socket concepts: it is the same observation, reached with
 	// weaker evidence, and the harness grades the CONCEPT not the weight.
-	"cap.dynamic_eval_observed": {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact},
+	"cap.dynamic_eval_observed": {Socket: []string{"usesEval", "dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
 	// Socket's own "URL strings" alert; the same codesmell URL scan feeds it.
-	"cap.url_strings":                {Socket: []string{"urlStrings"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"sc.install_script_eval_encoded": {Socket: []string{"installScripts", "obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"cap.filesystem_read":            {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert"},
-	"cap.filesystem_write":           {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia},
+	"cap.url_strings":                {Socket: []string{"urlStrings"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"sc.install_script_eval_encoded": {Socket: []string{"installScripts", "obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.filesystem_read":            {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert", Cadence: cadR24B},
+	"cap.filesystem_write":           {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Cadence: cadR24B},
 
 	// ── vulnerability ───────────────────────────────────────────────────
-	"vuln.cvss_critical": {Socket: []string{"criticalCVE"}, Bucket: bucketAdvisory, Grade: gradeExact},
-	"vuln.cvss_high":     {Socket: []string{"cve"}, Bucket: bucketAdvisory, Grade: gradeExact, Note: "Socket's generic `cve` carries severity 2 = high"},
-	"vuln.cvss_medium":   {Socket: []string{"mediumCVE"}, Bucket: bucketAdvisory, Grade: gradeExact},
-	"vuln.cvss_low":      {Socket: []string{"mildCVE"}, Bucket: bucketAdvisory, Grade: gradeExact},
-	"vuln.kev":           {Socket: nil, Grade: gradeNone, Note: "CISA KEV cross-reference; no Socket equivalent in the taxonomy"},
+	"vuln.cvss_critical": {Socket: []string{"criticalCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Cadence: cadR24OSV},
+	"vuln.cvss_high":     {Socket: []string{"cve"}, Bucket: bucketAdvisory, Grade: gradeExact, Note: "Socket's generic `cve` carries severity 2 = high", Cadence: cadR24OSV},
+	"vuln.cvss_medium":   {Socket: []string{"mediumCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Cadence: cadR24OSV},
+	"vuln.cvss_low":      {Socket: []string{"mildCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Cadence: cadR24OSV},
+	"vuln.kev":           {Socket: nil, Grade: gradeNone, Note: "CISA KEV cross-reference; no Socket equivalent in the taxonomy", Cadence: cadR24},
 	// Deliberately unmapped. Socket's four CVE alerts (criticalCVE, cve,
 	// mediumCVE, mildCVE) are ALL severity-bearing, and this signal exists
 	// precisely for the case where no severity is available — 81% of OSV
@@ -203,56 +233,188 @@ var socketConceptMap = map[string]conceptMapping{
 	// bucket with a pairing neither side can satisfy.
 	// `potentialVulnerability` is not it either: that is severity 1 in
 	// Socket's supplyChainRisk category, not a confirmed advisory.
-	"vuln.known_vulnerable": {Socket: nil, Grade: gradeNone, Note: "confirmed advisory of UNKNOWN severity; every Socket CVE alert requires a severity tier"},
-	"vuln.epss_high":        {Socket: nil, Grade: gradeNone},
-	"vuln.fix_available":    {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
+	"vuln.known_vulnerable": {Socket: nil, Grade: gradeNone, Note: "confirmed advisory of UNKNOWN severity; every Socket CVE alert requires a severity tier", Cadence: cadR24OSV},
+	"vuln.epss_high":        {Socket: nil, Grade: gradeNone, Cadence: cadR24EPSS},
+	"vuln.fix_available":    {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24OSV},
 
 	// ── maintenance ─────────────────────────────────────────────────────
-	"maint.unpopular_package": {Socket: []string{"unpopularPackage"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"maint.abandoned_repo":    {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert"},
-	"maint.no_recent_release": {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia},
-	"maint.very_new_package":  {Socket: []string{"recentlyPublished"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
-	"maint.relocated":         {Socket: nil, Grade: gradeNone, Note: "Maven <relocation>; Socket has no relocation alert"},
-	"maint.outdated_version":  {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "version age; Socket's unmaintained is package-level"},
-	"maint.single_maintainer": {Socket: nil, Grade: gradeNone},
-	"maint.healthy_cadence":   {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
+	"maint.unpopular_package": {Socket: []string{"unpopularPackage"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
+	"maint.abandoned_repo":    {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert", Cadence: cadR24},
+	"maint.no_recent_release": {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Cadence: cadR24},
+	"maint.very_new_package":  {Socket: []string{"recentlyPublished"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
+	"maint.relocated":         {Socket: nil, Grade: gradeNone, Note: "Maven <relocation>; Socket has no relocation alert", Cadence: cadR24},
+	"maint.outdated_version":  {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "version age; Socket's unmaintained is package-level", Cadence: cadR24},
+	"maint.single_maintainer": {Socket: nil, Grade: gradeNone, Cadence: cadR24},
+	"maint.healthy_cadence":   {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24},
 
 	// ── licence ─────────────────────────────────────────────────────────
-	"lic.missing":                       {Socket: []string{"noLicenseFound"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"license.copyleft":                  {Socket: []string{"copyleftLicense"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"license.non_permissive":            {Socket: []string{"nonpermissiveLicense"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "our firing set is narrower than our own tag (weak-copyleft suppression)"},
-	"license.exception_present":         {Socket: []string{"licenseException"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"license.ambiguous_classifier":      {Socket: []string{"ambiguousClassifier"}, Bucket: bucketMetadata, Grade: gradeExact},
-	"license.unidentified":              {Socket: []string{"unidentifiedLicense", "explicitlyUnlicensedItem"}, Bucket: bucketMetadata, Grade: gradePartia},
-	"lic.changed_from_previous_version": {Socket: nil, Grade: gradeNone, Note: "no licence-change alert in the 98-type taxonomy"},
-	"lic.spdx_present":                  {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
+	"lic.missing":                       {Socket: []string{"noLicenseFound"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
+	"license.copyleft":                  {Socket: []string{"copyleftLicense"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24Rederived},
+	"license.non_permissive":            {Socket: []string{"nonpermissiveLicense"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "our firing set is narrower than our own tag (weak-copyleft suppression)", Cadence: cadR24Rederived},
+	"license.exception_present":         {Socket: []string{"licenseException"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24Rederived},
+	"license.ambiguous_classifier":      {Socket: []string{"ambiguousClassifier"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24Rederived},
+	"license.unidentified":              {Socket: []string{"unidentifiedLicense", "explicitlyUnlicensedItem"}, Bucket: bucketMetadata, Grade: gradePartia, Cadence: cadR24Rederived},
+	"lic.changed_from_previous_version": {Socket: nil, Grade: gradeNone, Note: "no licence-change alert in the 98-type taxonomy", Cadence: cadR24},
+	"lic.spdx_present":                  {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24},
 
 	// ── quality ─────────────────────────────────────────────────────────
-	"qual.minified_code":     {Socket: []string{"minifiedFile"}, Bucket: bucketArtifact, Grade: gradeExact},
-	"qual.version_anomaly":   {Socket: []string{"badSemverDependency", "floatingDependency"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true},
-	"qual.checksum_mismatch": {Socket: nil, Grade: gradeNone, Note: "registry-proxy property; Socket is not in the mirror path"},
-	"qual.checksum_verified": {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
+	"qual.minified_code":     {Socket: []string{"minifiedFile"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"qual.version_anomaly":   {Socket: []string{"badSemverDependency", "floatingDependency"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
+	"qual.checksum_mismatch": {Socket: nil, Grade: gradeNone, Note: "registry-proxy property; Socket is not in the mirror path", Cadence: cadR24B},
+	"qual.checksum_verified": {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24B},
 
 	// ── AI artifact ─────────────────────────────────────────────────────
 	// Socket's gpt* alerts are LLM review of ANY package, not model-artifact
 	// scanning; pairing them with pickle-opcode or MCP checks would be a
 	// pairing of convenience. Left NONE until a HuggingFace row exists to
 	// settle it with data.
-	"ai.dangerous_pickle_opcode":         {Socket: nil, Grade: gradeNone},
-	"ai.suspicious_pickle_opcode":        {Socket: nil, Grade: gradeNone},
-	"ai.unsafe_serialization_format":     {Socket: nil, Grade: gradeNone},
-	"ai.model_card_injection":            {Socket: nil, Grade: gradeNone},
-	"ai.prompt_template_injection":       {Socket: nil, Grade: gradeNone},
-	"ai.agent_tool_dangerous_capability": {Socket: nil, Grade: gradeNone},
-	"ai.agent_tool_declared":             {Socket: nil, Grade: gradeNone},
-	"ai.mcp_server_unverified":           {Socket: nil, Grade: gradeNone},
-	"ai.prefers_safetensors":             {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal"},
+	"ai.dangerous_pickle_opcode":         {Socket: nil, Grade: gradeNone, Cadence: cadR24B},
+	"ai.suspicious_pickle_opcode":        {Socket: nil, Grade: gradeNone, Cadence: cadR24B},
+	"ai.unsafe_serialization_format":     {Socket: nil, Grade: gradeNone, Cadence: cadR24B},
+	"ai.model_card_injection":            {Socket: nil, Grade: gradeNone, Cadence: cadR24B},
+	"ai.prompt_template_injection":       {Socket: nil, Grade: gradeNone, Cadence: cadR24B},
+	"ai.agent_tool_dangerous_capability": {Socket: nil, Grade: gradeNone, Cadence: cadR24B},
+	"ai.agent_tool_declared":             {Socket: nil, Grade: gradeNone, Cadence: cadR24B},
+	"ai.mcp_server_unverified":           {Socket: nil, Grade: gradeNone, Cadence: cadR24B},
+	"ai.prefers_safetensors":             {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24B},
 
 	// ── GitHub Actions ──────────────────────────────────────────────────
-	"action.unpinned_ref":      {Socket: nil, Grade: gradeNoneSt, Note: "different product surface (Socket's gha* family); no corpus rows"},
-	"action.unknown_publisher": {Socket: nil, Grade: gradeNoneSt},
-	"action.typosquat":         {Socket: nil, Grade: gradeNoneSt},
-	"action.malicious":         {Socket: nil, Grade: gradeNoneSt},
+	"action.unpinned_ref":      {Socket: nil, Grade: gradeNoneSt, Note: "different product surface (Socket's gha* family); no corpus rows", Cadence: cadWorkflow},
+	"action.unknown_publisher": {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
+	"action.typosquat":         {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
+	"action.malicious":         {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
+}
+
+// ─── G-3: the four declined product surfaces ────────────────────────────────
+
+// Socket surface names used by socketDeclinedSurfaces. One constant per
+// surface so a typo is a compile error and the per-surface counts below can be
+// asserted.
+const (
+	surfaceAgentSkills   = "AI agent-skills"
+	surfaceOpenVSX       = "OpenVSX / VS Code extensions"
+	surfaceActionsFlow   = "GitHub Actions data-flow"
+	surfaceBrowserExtens = "Chrome + browser extensions"
+)
+
+// socketDeclinedSurfaces records a DECISION about 37 Socket alert types that no
+// Chainsaw signal maps to, so they stop reading as "undecided" (G-3).
+//
+// A DECISION IS NOT COVERAGE, and this map is deliberately inert in every
+// metric: it is read only by the reverse REPORT in TestSocketAlertNamesAreReal
+// and by the guard below. Declining a surface must not move a single number.
+//
+// WHERE THESE 37 ACTUALLY SIT IN THE METRIC, because it is not where the plan
+// entry assumed. socketAlertBucket — the only thing that lets a Socket alert
+// enter the concept comparison at all — is built from socketConceptMap for
+// EXACT pairings ONLY. An alert no signal maps to is therefore absent from
+// socketAlertBucket, never enters skC, and never reaches socketOnlyAll or any
+// bucket tally. So these 37 are NOT "graded as socket wins": they are OUTSIDE
+// the published concept metric entirely, and were before this map existed. That
+// is true of every unmapped alert, declined or not; the decision changes
+// nothing about it.
+//
+// The thing that MUST stay true is the converse: declining an alert must never
+// become a way to make it count as AGREEMENT. There are two routes to that and
+// the guard below refuses both. It is in particular NOT
+// chainsawDetectsButDoesNotScore, which writes BOTH csC[a.Type] and
+// skC[a.Type] and so scores its slugs as agreement outright.
+//
+// WHY EACH SURFACE IS DECLINED, with the documented refusal rather than mere
+// absence. In all four cases the subject never traverses the install path, so
+// POSITIONING.md §17 Hard Rule 3 applies: "If it doesn't traverse the proxy,
+// Chainsaw doesn't see it and won't claim to."
+//
+//   - GitHub Actions data-flow (the gha* taint family: arg/context/env reaching
+//     an env, an output or a sink) is refused TWICE over. §17 Hard Rule 1:
+//     Chainsaw "does not read application code, .git history, repo CI
+//     configuration, or anything inside the customer's repository" — a workflow
+//     YAML is repo CI configuration. And §18: "Not a SAST product. No callgraph
+//     reachability"; "Not a CI posture auditor." Note this is NOT the whole
+//     GitHub Actions surface: the four action.* signals cover action REFERENCE
+//     hygiene (unpinned ref, unknown publisher, typosquat, known-malicious) and
+//     are already graded NONE_STRUCTURAL above. Reference hygiene and taint
+//     data-flow are different claims, and mapping one onto the other would
+//     relabel a real gap as covered.
+//
+//   - AI agent-skills (skill*) have the strongest reopen condition of the four,
+//     because AI artifacts ARE in scope: huggingface is a supported ecosystem
+//     and core/risk/registry_aiartifact.go already scores pickle opcodes, model
+//     cards, declared agent tools and MCP servers. What is missing is the
+//     SUBJECT. Those signals read package artifact BYTES (cadence R24+B, via
+//     ArtifactScanSection), and an agent skill is not a package coordinate on
+//     any registry the proxy fronts — there is no skill fetcher anywhere in
+//     core/ or internal/. So ai.prompt_template_injection cannot fire on
+//     skillPromptInjection's subject, and the two firing sets are DISJOINT
+//     rather than overlapping. Pairing them would claim an agreement neither
+//     side can ever satisfy, which is the same reasoning that leaves
+//     vuln.known_vulnerable unmapped above.
+//
+//   - OpenVSX / VS Code extensions (vsx*) and Chrome + browser extensions
+//     (chrome*, browserExtension*) are installed by the EDITOR and the BROWSER
+//     from their own marketplaces, not by a package manager through the proxy.
+//     §18's "what you buy" is enumerated as "every npm install, pip install,
+//     docker pull, and go get that traverses the proxy"; neither marketplace is
+//     one of those, there is no openvsx or Chrome Web Store fetcher in the tree,
+//     and no doc commits to either surface.
+//
+// WHAT WOULD REOPEN EACH ONE is recorded per surface in the G-3 decision report,
+// not here; the short version is a proxied install path for the artifact class.
+var socketDeclinedSurfaces = map[string]string{
+	// AI agent-skills — 13.
+	"skillAutonomyAbuse":    surfaceAgentSkills,
+	"skillCommandInjection": surfaceAgentSkills,
+	"skillDataExfiltration": surfaceAgentSkills,
+	"skillDiscoveryAbuse":   surfaceAgentSkills,
+	"skillHardcodedSecrets": surfaceAgentSkills,
+	"skillObfuscation":      surfaceAgentSkills,
+	"skillPreExecution":     surfaceAgentSkills,
+	"skillPromptInjection":  surfaceAgentSkills,
+	"skillResourceAbuse":    surfaceAgentSkills,
+	"skillSupplyChain":      surfaceAgentSkills,
+	"skillToolAbuse":        surfaceAgentSkills,
+	"skillToolChaining":     surfaceAgentSkills,
+	"skillTransitiveTrust":  surfaceAgentSkills,
+
+	// OpenVSX / VS Code extensions — 9.
+	"vsxActivationWildcard":          surfaceOpenVSX,
+	"vsxDebuggerContribution":        surfaceOpenVSX,
+	"vsxExtensionDependency":         surfaceOpenVSX,
+	"vsxExtensionPack":               surfaceOpenVSX,
+	"vsxProposedApiUsage":            surfaceOpenVSX,
+	"vsxUntrustedWorkspaceSupported": surfaceOpenVSX,
+	"vsxVirtualWorkspaceSupported":   surfaceOpenVSX,
+	"vsxWebviewContribution":         surfaceOpenVSX,
+	"vsxWorkspaceContainsActivation": surfaceOpenVSX,
+
+	// GitHub Actions data-flow — 7.
+	"ghaArgToEnv":        surfaceActionsFlow,
+	"ghaArgToOutput":     surfaceActionsFlow,
+	"ghaArgToSink":       surfaceActionsFlow,
+	"ghaContextToEnv":    surfaceActionsFlow,
+	"ghaContextToOutput": surfaceActionsFlow,
+	"ghaContextToSink":   surfaceActionsFlow,
+	"ghaEnvToSink":       surfaceActionsFlow,
+
+	// Chrome + browser extensions — 8.
+	"browserExtensionContentScript":          surfaceBrowserExtens,
+	"browserExtensionHostPermission":         surfaceBrowserExtens,
+	"browserExtensionPermission":             surfaceBrowserExtens,
+	"browserExtensionWildcardHostPermission": surfaceBrowserExtens,
+	"chromeContentScript":                    surfaceBrowserExtens,
+	"chromeHostPermission":                   surfaceBrowserExtens,
+	"chromePermission":                       surfaceBrowserExtens,
+	"chromeWildcardHostPermission":           surfaceBrowserExtens,
+}
+
+// expectedDeclinedPerSurface pins the shape of the G-3 decision. The counts are
+// the ones in the plan entry, so a slug silently added to or dropped from a
+// surface fails rather than quietly changing what was decided.
+var expectedDeclinedPerSurface = map[string]int{
+	surfaceAgentSkills:   13,
+	surfaceOpenVSX:       9,
+	surfaceActionsFlow:   7,
+	surfaceBrowserExtens: 8,
 }
 
 // chainsawDetectsButDoesNotScore are findings Chainsaw WRITES INTO THE REPORT
@@ -286,6 +448,12 @@ func TestSocketMapCoversRegistry(t *testing.T) {
 			continue
 		}
 		seen[s.ID] = true
+		if !knownCadences[m.Cadence] {
+			t.Errorf("signal %q has no cadence decision (%q) — decide how fresh its "+
+				"underlying fact is (see docs/SIGNAL_CADENCE_MAP.md §1 for the codes "+
+				"and §3 for the per-signal table) rather than letting it default to "+
+				"the flat 24h report TTL", s.ID, m.Cadence)
+		}
 		switch m.Grade {
 		case gradeExact, gradePartia:
 			if len(m.Socket) == 0 {
@@ -313,6 +481,122 @@ func TestSocketMapCoversRegistry(t *testing.T) {
 		}
 	}
 	t.Logf("map covers %d/%d registered signals", len(seen), len(all))
+}
+
+// socketAlertTypesJSON is a mirror of the taxonomy capture at
+// docs/socket-comparison-2026-09-14/socket-alert-types.json (fetched
+// 2026-09-14, 98 alert types). That file is the canonical historical evidence;
+// this is the guard's input.
+//
+// TWO COPIES OF ONE LIST, embedded for the same reason core/typosquat mirrors
+// the guard seeds (established.go:135-145): go:embed cannot reach outside its
+// own directory, and core/cli ships in the open-core module while the private
+// repo's docs/ does not. A path walk up to docs/ would resolve in the monorepo
+// and SKIP forever in the published chainsaw-core checkout — a guard that does
+// not execute where it is published, which is CLAUDE.md §3 by a different
+// mechanism. It would also start skipping here the day those five
+// docs/socket-comparison-* directories get archived, silently, with the suite
+// still green. Embedded, a deleted file is a compile error instead.
+//
+// Not byte-pinned against the docs/ copy on purpose: the capture is frozen
+// evidence of what socket.dev published on 2026-09-14, and a re-fetch updates
+// this one.
+//
+//go:embed seeds/socket-alert-types.json
+var socketAlertTypesJSON []byte
+
+// TestSocketAlertNamesAreReal is the socket half of the anti-rot guard, and the
+// comment at the top of socketConceptMap has claimed it existed since the map
+// was written. It did not, so until now a renamed or retired Socket alert
+// scored silently as "Socket missed it" — the map is the ONLY source of socket
+// slugs the harness consults (socketAlertBucket is built from the map itself,
+// so it is structurally incapable of noticing an alert the map gets wrong).
+//
+// Unlike TestSocketComparison this needs no corpus and no env vars: the
+// taxonomy is checked into the repo, so the guard runs in an ordinary pass.
+func TestSocketAlertNamesAreReal(t *testing.T) {
+	const taxonomyPath = "core/cli/seeds/socket-alert-types.json"
+	// Keyed by stringified numeric id; the id is also repeated in the value.
+	var taxonomy map[string]socketAlert
+	if err := json.Unmarshal(socketAlertTypesJSON, &taxonomy); err != nil {
+		t.Fatalf("parse embedded socket taxonomy %s: %v", taxonomyPath, err)
+	}
+	if len(taxonomy) == 0 {
+		t.Fatalf("embedded socket taxonomy %s parsed to zero entries — an empty map would "+
+			"make every assertion below vacuously pass", taxonomyPath)
+	}
+
+	byType := map[string]socketAlert{}
+	for _, a := range taxonomy {
+		byType[a.Type] = a
+	}
+
+	// Forward: every slug the map names must still be a real alert type.
+	mentioned := map[string]bool{}
+	var ids []string
+	for id := range socketConceptMap {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		for _, slug := range socketConceptMap[id].Socket {
+			mentioned[slug] = true
+			if _, ok := byType[slug]; !ok {
+				t.Errorf("signal %q maps to Socket alert %q, which is not in the %d-type "+
+					"taxonomy (%s) — the alert was renamed or retired, so the pairing now "+
+					"scores as 'Socket missed it'. Re-fetch socket.dev/alerts, then either "+
+					"update the slug or regrade the signal NONE",
+					id, slug, len(taxonomy), taxonomyPath)
+			}
+		}
+	}
+
+	// Reverse: REPORTED, never failed. Socket's taxonomy is far wider than our
+	// corpus can ask about (browser extensions, VS Code extensions, Actions
+	// dataflow, agent skills), and the unmapped set is the deliberate coverage
+	// gap the harness publishes as socket_only_concepts. Failing on it would
+	// make this test useless. The count is logged so a reviewer sees it move.
+	var unmapped, declined []string
+	for typ := range byType {
+		if mentioned[typ] {
+			continue
+		}
+		if _, ok := chainsawDetectsButDoesNotScore[typ]; ok {
+			continue
+		}
+		// G-3: a DECIDED non-goal is not an undecided gap. Split rather than
+		// skip, so the declined count stays visible — these alerts still
+		// count as socket-only in every agreement number, and hiding them
+		// here would be the first step toward reading a decision as coverage.
+		if _, ok := socketDeclinedSurfaces[typ]; ok {
+			declined = append(declined, typ)
+			continue
+		}
+		unmapped = append(unmapped, typ)
+	}
+	sort.Strings(unmapped)
+	sort.Strings(declined)
+	// Conditional on purpose: an unconditional "all present" line printed
+	// alongside the t.Errorf above contradicts it, and the reader of a failed
+	// run has to decide which of the two to believe.
+	if t.Failed() {
+		t.Logf("forward: %d distinct Socket slugs named by socketConceptMap; at least one is NOT in the %d-type taxonomy — see the failure above",
+			len(mentioned), len(taxonomy))
+	} else {
+		t.Logf("forward: %d distinct Socket slugs named by socketConceptMap, all present in the %d-type taxonomy",
+			len(mentioned), len(taxonomy))
+	}
+	t.Logf("reverse (REPORT, not a failure): %d of %d taxonomy entries are UNDECIDED — "+
+		"neither mapped, nor in chainsawDetectsButDoesNotScore, nor decided in "+
+		"socketDeclinedSurfaces: %v",
+		len(unmapped), len(taxonomy), unmapped)
+	bySurface := map[string]int{}
+	for _, slug := range declined {
+		bySurface[socketDeclinedSurfaces[slug]]++
+	}
+	t.Logf("reverse (G-3 DECIDED, outside the concept metric like every unmapped alert): "+
+		"%d of %d taxonomy entries are declined product surfaces: %v",
+		len(declined), len(taxonomy), bySurface)
 }
 
 // ─── snapshot types ─────────────────────────────────────────────────────────
@@ -1605,4 +1889,114 @@ func TestMaintenanceConceptCoversRegistryStateSignals(t *testing.T) {
 			t.Errorf("%s is not a maintenance-state fact but counts toward D", id)
 		}
 	}
+}
+
+// TestSocketDeclinedSurfacesAreNotCoverage is the G-3 guard, and the thing it
+// guards is the difference between a decision and a claim.
+//
+// Declining a surface records that we will not build it. It must not change a
+// single agreement number: Socket really does report those 37 alerts and we
+// really do not, so they have to keep counting as socket-only. There are
+// exactly two ways to turn the decision into a false claim of coverage, and
+// this test refuses both:
+//
+//  1. Naming a declined slug in socketConceptMap. At EXACT it enters
+//     socketAlertBucket, so the alert starts reaching skC AND csC and lands in
+//     ConceptBoth — it does not move out of socketOnlyAll, it was never in it;
+//     it enters the metric for the first time, as agreement, with no detector
+//     behind it. At PARTIAL or NONE it stays out of socketAlertBucket but the
+//     pairing still claims in the map that we cover an alert we decided not to
+//     build, which is the documentation half of the same lie. The guard refuses
+//     every grade.
+//  2. Adding a declined slug to chainsawDetectsButDoesNotScore, which writes
+//     BOTH csC[a.Type] and skC[a.Type] and so scores it as agreement outright.
+//
+// It also pins the per-surface counts, so a slug quietly added to or removed
+// from a surface fails instead of silently redefining what was decided.
+func TestSocketDeclinedSurfacesAreNotCoverage(t *testing.T) {
+	t.Parallel()
+
+	var taxonomy map[string]socketAlert
+	if err := json.Unmarshal(socketAlertTypesJSON, &taxonomy); err != nil {
+		t.Fatalf("parse embedded socket taxonomy: %v", err)
+	}
+	if len(taxonomy) == 0 {
+		t.Fatal("embedded socket taxonomy parsed to zero entries — every assertion " +
+			"below would pass vacuously")
+	}
+	byType := map[string]bool{}
+	for _, a := range taxonomy {
+		byType[a.Type] = true
+	}
+
+	// Every declined slug must be a REAL Socket alert. Declining something
+	// that does not exist is a decision about nothing, and it would hide a
+	// renamed alert as "already decided".
+	for slug, surface := range socketDeclinedSurfaces {
+		if !byType[slug] {
+			t.Errorf("socketDeclinedSurfaces declines %q (%s), which is not in the "+
+				"%d-type taxonomy — the alert was renamed or retired, so this decision "+
+				"now covers nothing. Re-fetch socket.dev/alerts and re-decide.",
+				slug, surface, len(taxonomy))
+		}
+		if _, ok := expectedDeclinedPerSurface[surface]; !ok {
+			t.Errorf("slug %q names surface %q, which is not one of the four G-3 "+
+				"surfaces — add it to expectedDeclinedPerSurface deliberately or fix "+
+				"the surface name", slug, surface)
+		}
+	}
+
+	// Failure mode 1: a declined slug named by any signal, at any grade.
+	for id, m := range socketConceptMap {
+		for _, slug := range m.Socket {
+			if surface, declined := socketDeclinedSurfaces[slug]; declined {
+				t.Errorf("signal %q maps to %q, which is DECLINED as part of the %q "+
+					"surface (grade %s).\n"+
+					"A declined surface is work we chose not to do, not work we have "+
+					"done. The concept loop writes csC for every slug in a Socket "+
+					"slice, so this pairing moves the alert out of socketOnlyAll and "+
+					"raises the agreement ratio with no detector behind it.\n"+
+					"If the detector genuinely covers this alert now, the surface is no "+
+					"longer declined: remove the slug from socketDeclinedSurfaces, drop "+
+					"its per-surface count, and say so in the plan.",
+					id, slug, surface, m.Grade)
+			}
+		}
+	}
+
+	// Failure mode 2: a declined slug smuggled in as a detected-but-unscored
+	// finding, which is counted as agreement on both sides.
+	for slug := range chainsawDetectsButDoesNotScore {
+		if surface, declined := socketDeclinedSurfaces[slug]; declined {
+			t.Errorf("%q is in BOTH chainsawDetectsButDoesNotScore and "+
+				"socketDeclinedSurfaces (%s). Those are contradictory: the first says "+
+				"we detect it and write it into the report, the second says we have "+
+				"decided not to build the surface. Pick one.", slug, surface)
+		}
+	}
+
+	// The shape of the decision itself.
+	got := map[string]int{}
+	for _, surface := range socketDeclinedSurfaces {
+		got[surface]++
+	}
+	total := 0
+	for surface, want := range expectedDeclinedPerSurface {
+		if got[surface] != want {
+			t.Errorf("surface %q has %d declined slugs, expected %d — a slug was added "+
+				"or dropped, which changes what G-3 decided", surface, got[surface], want)
+		}
+		total += want
+	}
+	if len(socketDeclinedSurfaces) != total {
+		t.Errorf("socketDeclinedSurfaces holds %d slugs but the four surfaces account "+
+			"for %d — a slug names a surface outside expectedDeclinedPerSurface",
+			len(socketDeclinedSurfaces), total)
+	}
+	t.Logf("G-3: %d alerts declined across %d surfaces %v. None is named by "+
+		"socketConceptMap or chainsawDetectsButDoesNotScore, so none can be counted as "+
+		"agreement. Note they are not counted as socket-only either: socketAlertBucket "+
+		"is built from EXACT pairings only, so every unmapped alert — declined or not — "+
+		"sits outside the published concept metric. The decision moves no number.",
+		len(socketDeclinedSurfaces), len(expectedDeclinedPerSurface), got)
 }

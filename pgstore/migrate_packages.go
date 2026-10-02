@@ -140,6 +140,39 @@ func (s *Store) ensurePackageRegistryColumns() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_package_metadata_org_updated_at ON package_metadata(org_id, updated_at)`); err != nil {
 		return fmt.Errorf("create package_metadata org_updated_at index: %w", err)
 	}
+	// Powers metadata.PackageMetadataHolders — "which orgs hold this
+	// coordinate" — which C-7 calls on every shared-change alert dispatch so
+	// an advisory on a coordinate reaches EVERY tenant holding it rather than
+	// only the first one walked.
+	//
+	// WHY THE PRIMARY KEY DOES NOT SERVE IT. package_metadata is keyed
+	// (org_id, repository, package, version), so a predicate on
+	// (package, version) alone cannot use a leading-column prefix and the
+	// planner falls back to a sequential scan — once per alert dispatch.
+	//
+	// (package, version) and not (package, version, org_id, repository): the
+	// query does ORDER BY org_id, repository, so the wider index would also
+	// serve the sort, but the row count per coordinate is the number of
+	// tenants holding it — single digits — so the sort is free and the extra
+	// two columns would be write amplification on a table the proxy serve
+	// path writes on every fetch.
+	//
+	// NOT CONCURRENTLY, following the file's own precedent: there is no
+	// CONCURRENTLY anywhere in core/pgstore. It would be legal here — these
+	// statements do not run inside a transaction block, only under a session
+	// advisory lock — but it can leave an INVALID index behind when it fails,
+	// which needs manual intervention, and that is the wrong failure mode for
+	// an unattended boot-time migration that must be idempotent.
+	//
+	// WHAT THE LOCK COSTS: a plain CREATE INDEX takes a SHARE lock on
+	// package_metadata, so concurrent READS proceed and WRITES block until the
+	// build finishes. The writer is the proxy serve path
+	// (internal/server/package_metadata.go). Production's package_metadata is
+	// small, so the build is milliseconds, and the migration advisory lock
+	// already means only one replica builds it.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_package_metadata_pkg_version ON package_metadata(package, version)`); err != nil {
+		return fmt.Errorf("create package_metadata pkg_version index: %w", err)
+	}
 
 	if err := s.addColumnIfMissing("vulnerability_metadata", "scanner_db_digest", "TEXT"); err != nil {
 		return err

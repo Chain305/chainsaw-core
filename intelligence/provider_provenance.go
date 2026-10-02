@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/chain305/chainsaw-core/httpclient"
 	"github.com/chain305/chainsaw-core/provenance"
 )
 
@@ -53,7 +54,15 @@ func (p *provenanceProvider) Run(ctx context.Context, req Request, prior *Report
 	if p.checker == nil {
 		return PartialReport{}, nil
 	}
-	result := p.checker.CheckWithSource(ctx, req.Key.Ecosystem, req.Key.Package, req.Key.Version, req.UpstreamURL)
+	// T-1: attestation probes are their own cost class and the largest
+	// refresher egress with no sub-caller before this — ~2 requests per
+	// maven/gradle coordinate, since trySigstore and tryPGP are both tried.
+	// Tagged here rather than inside the ~15 per-ecosystem checkers: one
+	// call site covers all of them, and the sidecar shapes stay separable
+	// by the host x outcome pair the counter already carries.
+	result := p.checker.CheckWithSource(
+		httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshProvenance),
+		req.Key.Ecosystem, req.Key.Package, req.Key.Version, req.UpstreamURL)
 
 	// Context deadlines / cancellations surface as a warning plus the
 	// unavailable status so the Report still records "we tried".

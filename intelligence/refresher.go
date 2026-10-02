@@ -42,6 +42,10 @@ type Refresher struct {
 	cfg RefresherConfig
 	now func() time.Time
 
+	// declaredOrgAllowed gates the declared half of the cross-surface fan-out
+	// per org, set by SetDeclaredAudience. Nil allows every org.
+	declaredOrgAllowed func(orgID string) bool
+
 	mu      sync.Mutex
 	running bool
 
@@ -49,6 +53,11 @@ type Refresher struct {
 	lastSkipped atomic.Int64
 	lastNewVers atomic.Int64
 	lastTickEnd atomic.Int64 // unix nanos
+
+	// advisoryForced counts the rows the advisory gate forced a rescan for
+	// in the CURRENT tick. Reset at the top of RunOnce because the budget it
+	// bounds is per-tick; see DefaultAdvisoryGateMaxRows.
+	advisoryForced atomic.Int64
 
 	// alerter is the issue #20 hook. Nil disables the feature; set via
 	// SetVulnAlerter during bootstrap. See vuln_alert.go for the
@@ -113,6 +122,18 @@ type RefresherConfig struct {
 	// RecomputeMaxRows caps how many matcher-stale coordinates one tick
 	// recomputes. Zero means DefaultRecomputeMaxRows.
 	RecomputeMaxRows int
+
+	// DeclaredTargets and SupplyChainDispatcher are the DECLARED-INVENTORY
+	// half of the cross-surface alert fan-out (C-7 across surfaces). Both nil
+	// means the walk notifies package_metadata holders only, which is what it
+	// did before — and was the defect: a coordinate the proxy serves to org A
+	// and org B DECLARES had its only diff window consumed by the walk, whose
+	// audience B is not in. See shared_change_fanout.go.
+	//
+	// Compile-time interfaces, not optional ones resolved by assertion; the
+	// assignment in internal/server is the guard.
+	DeclaredTargets       DeclaredTargetSource
+	SupplyChainDispatcher SupplyChainDispatcher
 
 	// StaleReportRefreshEnabled turns on the stale-report sweep (phase four).
 	//
@@ -193,6 +214,20 @@ type RefresherConfig struct {
 	// prevent, and it should not be reachable by forgetting a field.
 	RecomputeDisabled bool
 
+	// AdvisoryGateDisabled turns the advisory gate off.
+	//
+	// Default ON, with the same polarity as RecomputeDisabled and for the
+	// same reason: the gate's decision is a map lookup over data the walk has
+	// already loaded, so it adds no database or upstream work to a tick that
+	// finds nothing. It raises upstream volume only for coordinates a newly
+	// published advisory actually matches — work the sweep was going to do
+	// anyway, a sweep cycle later. See refresher_advisory_gate.go.
+	AdvisoryGateDisabled bool
+
+	// AdvisoryGateMaxRows caps the coordinates one tick will force a rescan
+	// for. Zero means DefaultAdvisoryGateMaxRows.
+	AdvisoryGateMaxRows int
+
 	Logger *slog.Logger
 }
 
@@ -227,6 +262,12 @@ type EcosystemResolver func(repoName string) string
 type MetadataSource interface {
 	IteratePackageMetadata(ctx context.Context, after metadata.PackageMetadataCursor, limit int) ([]metadata.PackageMetadataRow, metadata.PackageMetadataCursor, error)
 	PackageVersionExists(ctx context.Context, orgID, repository, packageName, version string) (bool, error)
+	// PackageMetadataHolders answers "which orgs hold this coordinate", the
+	// audience for an alert fan-out (C-7). On the interface rather than
+	// behind a runtime type assertion so the compiler, not production,
+	// catches a seam that stops being satisfied — see the note in
+	// refresher_alert_fanout.go.
+	PackageMetadataHolders(ctx context.Context, packageName, version string, limit int) ([]metadata.PackageHolder, error)
 }
 
 // NewRefresher constructs a Refresher with the supplied config. Returns
@@ -334,6 +375,9 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 	ctx = httpclient.WithEgressCaller(ctx, httpclient.EgressCallerRefresh)
 	start := r.now()
 	var scanned, skipped, newVers atomic.Int64
+	// Per-tick budget, so it resets with the tick rather than accumulating
+	// across the process lifetime and shutting the gate permanently.
+	r.advisoryForced.Store(0)
 
 	sem := make(chan struct{}, r.cfg.Concurrency)
 	var wg sync.WaitGroup
@@ -500,7 +544,12 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 			latest = probe.LatestVersion
 			probeAnswered = true
 		} else {
-			probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			// T-1: one cheap request per EXAMINED row, including rows the
+			// staleness gate then skips, so its share is not proportional
+			// to rescans and has to be measured separately.
+			probeCtx, cancel := context.WithTimeout(
+				httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshLatest),
+				10*time.Second)
 			latest, probeErr = r.cfg.LatestProber(probeCtx, row)
 			cancel()
 			r.storeProbe(ctx, row.OrgID, ecosystem, row.Package, latest, probeErr)
@@ -547,6 +596,11 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 	if r.cfg.Store != nil {
 		priorReport = r.loadPriorReport(ctx, row, ecosystem)
 	}
+	// Set by either skip site when the advisory gate declines the skip. It
+	// changes one thing below: the Scan's MaxStaleness, so Scan's cache-first
+	// read cannot serve the very row we are refreshing. The artifact fetch is
+	// deliberately NOT skipped — see the comment at its call site.
+	forcedByAdvisory := false
 	reportFresh := reportIsFresh(priorReport, r.cfg.Store != nil, row.UpdatedAt, staleAfter)
 	if reportFresh && probeAnswered && (latest == "" || latest == row.Version) {
 		// `latest == ""` is the part that was missing, and it was a 24x
@@ -569,7 +623,18 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 		// stored report ages past MaxStaleness the row scans regardless, and
 		// the probe's own TTL expiring is what schedules the retry. A package
 		// that comes back gets picked up on the next probe, not the next tick.
-		return actionSkipped
+		//
+		// ...unless the advisory corpus has learned something about this
+		// coordinate since the stored report was written. That is the one
+		// question `reportFresh` cannot answer — it measures the report's age,
+		// and a newly published advisory makes a report wrong without making
+		// it old. refresher_advisory_gate.go explains why the answer is to
+		// decline the skip rather than to write the advisory onto the row.
+		if r.advisoryGateOpen(row, ecosystem, priorReport) {
+			forcedByAdvisory = true
+		} else {
+			return actionSkipped
+		}
 	}
 
 	// New-version discovery: enqueue a separate Tier-1 Scan for the newer
@@ -643,7 +708,16 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 			//
 			// Returning here is what avoids the artifact fetch; the fetch is
 			// below, and it is the expensive half.
-			return actionSkipped
+			//
+			// Gated on the advisory corpus for the same reason as the skip
+			// above. Both skip sites consult it, because a guard on only the
+			// first one leaks every row that has a newer version upstream —
+			// which in production was 626 rows an hour, i.e. the majority.
+			if r.advisoryGateOpen(row, ecosystem, priorReport) {
+				forcedByAdvisory = true
+			} else {
+				return actionSkipped
+			}
 		}
 	}
 
@@ -667,8 +741,38 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 			MaxStaleness:  r.cfg.MaxStaleness,
 		},
 	}
+	if forcedByAdvisory {
+		// The row is FRESH — that is why both skip sites were about to return
+		// — so against the full MaxStaleness bound Scan's cache-first read
+		// would hand back the cached report and the forced refresh would be a
+		// no-op that still cost a tick. Same requirement, same idiom, as
+		// refreshAsync's "force a fetch".
+		req.Options.RefreshReason = RefreshReasonAdvisory
+		req.Options.MaxStaleness = advisoryRefreshStaleness
+	}
+	// The artifact IS fetched on an advisory-forced refresh, which makes the
+	// forced path byte-identical in shape to a scheduled one.
+	//
+	// Skipping it looks free — the gate fires on an advisory change, which
+	// moves only the vulnerability section, and mergeReportPayload would
+	// preserve the prior Scan section while the upsert ORs has_artifact_scan
+	// and COALESCEs artifact_sha256. But the risk evaluation is computed
+	// during runFanout, BEFORE that merge, and verdict / overall_score /
+	// risk_evaluation are overwritten unconditionally. Every artifact-derived
+	// signal — capabilities, minified files, checksum verification, the
+	// prior-version diff — would simply not fire, so a FRESH row's verdict
+	// would drift on an incomplete fact set, mostly toward a better grade
+	// because most of those signals are negative. That is a fail-open, and
+	// this gate is the only thing in the walk that rescans a row which was
+	// otherwise fine. The ~0.7 of 9.22 upstream requests it costs is the
+	// cheaper side of that trade.
 	if r.cfg.ArtifactEnabled && r.cfg.ArtifactFetcher != nil {
-		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// T-1: artifact fetches are their own cost class (~0.70 of 9.22
+		// req/coordinate) and the one T-2's cache acts on, so they are
+		// counted separately from this tick's metadata.
+		fetchCtx, cancel := context.WithTimeout(
+			httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshArtifact),
+			30*time.Second)
 		handle, err := r.cfg.ArtifactFetcher(fetchCtx, row)
 		cancel()
 		if err != nil {
@@ -695,6 +799,11 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 	}
 	if r.alerter != nil && nextReport != nil {
 		r.alerter.OnRefreshedReport(ctx, row, ecosystem, priorReport, nextReport)
+		// C-7: the shared report this refresh just rewrote is the ONLY diff
+		// window that will exist for this change, and every other org holding
+		// the coordinate would otherwise read it as already-current and be
+		// told nothing. See refresher_alert_fanout.go.
+		r.fanOutAlertToPeers(ctx, row, ecosystem, priorReport, nextReport)
 	}
 	return action
 }
@@ -764,6 +873,12 @@ func RefresherConfigFromEnv() RefresherConfig {
 	// Default ON, matching the refresher itself: an operator who has not
 	// thought about matcher epochs should still get a draining backlog.
 	cfg.RecomputeDisabled = !envBool("CHAINSAW_INTELLIGENCE_RECOMPUTE_ENABLED", true)
+	cfg.AdvisoryGateDisabled = !envBool("CHAINSAW_INTELLIGENCE_ADVISORY_GATE_ENABLED", true)
+	if v := strings.TrimSpace(os.Getenv("CHAINSAW_INTELLIGENCE_ADVISORY_GATE_MAX_ROWS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.AdvisoryGateMaxRows = n
+		}
+	}
 
 	// Default OFF, and the polarity is inverted relative to the two sweeps
 	// above on purpose. Those are database-only or already-bounded work, so an

@@ -35,6 +35,17 @@ func (p *manifestConfusionProvider) Signal() SignalMask  { return SignalManifest
 func (p *manifestConfusionProvider) Tier() int           { return 2 }
 func (p *manifestConfusionProvider) NeedsArtifact() bool { return true }
 
+// AnalyzerVersion: NOT CACHEABLE, and this one is load-bearing.
+//
+// The whole point of manifest confusion is that the registry's view and the
+// tarball's view DIVERGE after upload. Run reads req.RegistryMetadataBytes and
+// compares it against the archive, so identical bytes legitimately produce a
+// different answer every time the registry side is edited. Caching on the
+// artifact digest would make the signal permanently blind to the attack it
+// exists to detect — the detector would answer from the moment before the
+// attacker edited the metadata.
+func (p *manifestConfusionProvider) AnalyzerVersion() int { return AnalyzerNotCacheable }
+
 func (p *manifestConfusionProvider) Supports(eco string) bool {
 	e := strings.ToLower(strings.TrimSpace(eco))
 	return e == "npm" || e == "yarn" || e == "bun"

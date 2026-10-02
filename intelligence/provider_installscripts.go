@@ -33,15 +33,15 @@ import (
 //
 // Resolution (handled by featureflags.Eval):
 //
-//  1. CHAINSAW_FF_INSTALLSCRIPT_AST env override (kill switch for ops)
-//  2. `installscript_ast` PostHog flag, per-org via the scan's
-//     req.OrgID (rolls out to specific customers without redeploy)
-//  3. default false
+//  1. CHAINSAW_FF_INSTALLSCRIPT_AST env override
+//  2. default false
 //
-// The hot-path concern that originally motivated an env-var-only check
-// is now satisfied by the PostHog SDK's local evaluation mode (enabled
-// in featureflags.New when POSTHOG_PERSONAL_API_KEY is set): IsEnabled
-// becomes an in-memory map lookup, no HTTP per scan.
+// The `installscript_ast` PostHog flag cannot turn it on. The only caller
+// passes an empty org (see FEDERATION in run), and EvalStrict returns the
+// default with ErrNoIdentity when there is no user or org to bucket. So
+// since 5b997392 (2026-09-13) only the env var can enable AST; before
+// that, a per-org PostHog rollout could. Whichever ran is recorded in
+// ArtifactScanSection.InstallScriptDetector.
 func installscriptAstEnabled(ctx context.Context, orgID string) bool {
 	return featureflags.Default().Eval(ctx, "installscript_ast", "", orgID, false)
 }
@@ -62,6 +62,40 @@ func (p *installScriptsProvider) Tier() int { return 2 }
 
 // NeedsArtifact: true — we have nothing to do without bytes.
 func (p *installScriptsProvider) NeedsArtifact() bool { return true }
+
+// The install-script detector generations.
+//
+// THE TWO DETECTORS ARE SEPARATE GENERATIONS, NOT ONE VERSION. A-2 recorded
+// what happens when they are conflated: the AST and regex detectors disagree
+// on some manifests, so the first rescan after a flip of
+// CHAINSAW_FF_INSTALLSCRIPT_AST reported install_script_appeared on an
+// immutable version whose bytes never changed. A-2 fixed the ALERT by stamping
+// InstallScriptDetector on the facts; this fixes the CACHE, which would
+// otherwise hand the new detector the old detector's output and make the stamp
+// a lie.
+//
+// Keying them apart also makes a flip reversible at no cost: flipping back
+// finds the original rows still present at version 1 and reuses them, instead
+// of re-deriving the corpus a second time.
+const (
+	installScriptsAnalyzerRegex = 1
+	installScriptsAnalyzerAST   = 2
+)
+
+// AnalyzerVersion follows the detector actually in force.
+//
+// Evaluated with an empty org, exactly as Run does and for the same FEDERATION
+// reason stated there: these facts land on the shared coordinate row, so which
+// detector produced them must not depend on who scanned. context.Background()
+// is sufficient because an empty org cannot bucket — EvalStrict returns the
+// default with ErrNoIdentity — so the answer comes from the env override alone
+// and carries no request state.
+func (p *installScriptsProvider) AnalyzerVersion() int {
+	if installscriptAstEnabled(context.Background(), "") {
+		return installScriptsAnalyzerAST
+	}
+	return installScriptsAnalyzerRegex
+}
 
 // supportedInstallScriptEcosystems is the explicit whitelist of ecosystems
 // for which the installscripts package has a parser. Aliases (yarn, bun,
@@ -111,6 +145,7 @@ func (p *installScriptsProvider) run(ctx context.Context, req Request, prior *Re
 		extraMutate       bool
 		buildRsExecutes   bool
 		buildRsPrimitives []string
+		detector          string // set only where astEnabled chooses one
 	)
 
 	// FEDERATION: deliberately NOT req.OrgID. This flag selects between the
@@ -132,9 +167,9 @@ func (p *installScriptsProvider) run(ctx context.Context, req Request, prior *Re
 		}
 		manifest := FirstMatch(files, "package.json")
 		if astEnabled {
-			result = installscripts.NPMAST(manifest)
+			result, detector = installscripts.NPMAST(manifest), InstallScriptDetectorAST
 		} else {
-			result = installscripts.NPM(manifest)
+			result, detector = installscripts.NPM(manifest), InstallScriptDetectorRegex
 		}
 	case "pip", "pypi":
 		setupPy := FirstMatch(files, "setup.py")
@@ -148,9 +183,9 @@ func (p *installScriptsProvider) run(ctx context.Context, req Request, prior *Re
 			return PartialReport{}, nil
 		}
 		if astEnabled {
-			result = installscripts.PipAST(setupPy, pyproject)
+			result, detector = installscripts.PipAST(setupPy, pyproject), InstallScriptDetectorAST
 		} else {
-			result = installscripts.Pip(setupPy, pyproject)
+			result, detector = installscripts.Pip(setupPy, pyproject), InstallScriptDetectorRegex
 		}
 		if len(setupCfg) > 0 {
 			extraSeen = append(extraSeen, "setup.cfg")
@@ -277,12 +312,13 @@ func (p *installScriptsProvider) run(ctx context.Context, req Request, prior *Re
 	}
 
 	scan := &ArtifactScanSection{
-		Performed:            true,
-		InstallScriptKind:    kind,
-		HasInstallScript:     hasInstall,
-		InstallScriptFetches: fetches,
-		BuildRsExecutes:      buildRsExecutes,
-		BuildRsPrimitives:    buildRsPrimitives,
+		Performed:             true,
+		InstallScriptKind:     kind,
+		HasInstallScript:      hasInstall,
+		InstallScriptFetches:  fetches,
+		InstallScriptDetector: detector,
+		BuildRsExecutes:       buildRsExecutes,
+		BuildRsPrimitives:     buildRsPrimitives,
 	}
 	seen := make([]string, 0, len(files)+len(extraSeen))
 	for name := range files {

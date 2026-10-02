@@ -376,17 +376,11 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 	var livenessChecker *RepoLivenessChecker
 	if enableLiveness {
 		livenessChecker = NewRepoLivenessChecker(nil, logger)
+		livenessChecker.recheckInterval = cfg.RepoLivenessCheckInterval
+		if livenessChecker.recheckInterval <= 0 {
+			livenessChecker.recheckInterval = DefaultRepoLivenessInterval
+		}
 	}
-	livenessInterval := cfg.RepoLivenessCheckInterval
-	if livenessInterval <= 0 {
-		livenessInterval = DefaultRepoLivenessInterval
-	}
-
-	// livenessInterval is captured below for future wiring into the
-	// intelligence service's enrichment loop (Phase E repo-liveness
-	// migration). The orchestrator that previously consumed it was
-	// retired in Phase D.
-	_ = livenessInterval
 
 	comp := &Components{
 		TyposquatDetector:        detector,

@@ -24,6 +24,7 @@ package httpclient
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -56,6 +57,110 @@ const (
 	EgressCallerRefresh = "refresh"
 	EgressCallerOther   = "other"
 )
+
+// Refresher SUB-CALLERS. T-1 needs the per-class request split — artifact
+// bytes vs a package document vs a download count vs repo metadata — because
+// three rows of the cost decomposition are ASSUMED and the TTL decision rests
+// on them. The alternative considered and rejected was a `path_class` label
+// classified from host+path in RoundTrip: the same path shape means different
+// things per host (`registry.npmjs.org/lodash` is a document,
+// `.../-/lodash-4.17.21.tgz` is an artifact), so a parser produces a
+// confident wrong decomposition, and replacing an ASSUMED row with a wrong
+// MEASURED one is worse than leaving it assumed. The fetcher already knows
+// what it is fetching, so the tag goes there.
+//
+// EVERY sub-caller MUST keep the "refresh_" prefix. The deployed D-2 reading
+// and every query in docs/PLANS_INTELLIGENCE.md key on the refresher's
+// traffic, and they continue to work as `caller=~"refresh.*"` — which is the
+// whole reason for a prefix rather than five unrelated words.
+// TestRefreshSubCallersKeepTheQueryablePrefix pins it.
+//
+// Closed set, constants only. The label is a Prometheus dimension, so a
+// caller-supplied string here would be unbounded cardinality.
+const (
+	// EgressCallerRefreshArtifact is an artifact FETCH — the walk's fetcher
+	// and the stale-report sweep's. ~0.70 of the measured 9.22
+	// req/coordinate, and the row T-2's cache acts on. Not bytes alone: pip,
+	// Maven and Composer resolve the download URL with a metadata request
+	// under the same context, so that round-trip counts here too.
+	EgressCallerRefreshArtifact = "refresh_artifact"
+	// EgressCallerRefreshLatest is the latest-version probe, one cheap
+	// request per examined row whether or not the row is rescanned.
+	EgressCallerRefreshLatest = "refresh_latest"
+	// EgressCallerRefreshDownloads is a download-count lookup
+	// (api.npmjs.org, pypistats). npm serves a 7-day rolling window, so
+	// T-3 wants to know this row's size before cutting its cadence.
+	EgressCallerRefreshDownloads = "refresh_downloads"
+	// EgressCallerRefreshRepo is repository metadata — the liveness probe
+	// and the GitHub /repos read. The largest single upstream line at 1.55
+	// req/coordinate, and T-3's and T-4's shared subject.
+	EgressCallerRefreshRepo = "refresh_repo"
+	// EgressCallerRefreshDocument is a registry package document: a
+	// packument, a PyPI JSON, a Maven POM or maven-metadata.xml. ~1.5
+	// req/coordinate.
+	EgressCallerRefreshDocument = "refresh_document"
+	// EgressCallerRefreshProvenance is an attestation probe: a sigstore
+	// sidecar, a PGP .asc, the npm attestations endpoint, the Go checksum
+	// database, an apt/dnf repository signature. ~2 requests per
+	// maven/gradle coordinate, where both sidecars are tried in turn.
+	//
+	// ONE class, not sigstore-vs-PGP, decided on the "would they be acted on
+	// differently" rule: the two sidecars sit on the SAME host as the
+	// artifact, carry the same immutable-per-GAV caching story, and the only
+	// differential action anyone has proposed — stop making the
+	// usually-404 sigstore probe — is already refused in-tree for both
+	// (core/provenance/maven.go, "KEPT DELIBERATELY": sidecar presence is
+	// per-ARTIFACT not per-host, so skipping it silently downgrades the
+	// artifacts that DO carry a bundle). The split is also only expressible
+	// for 2 of ~15 ecosystems — npm has no PGP channel, Go uses the sumdb,
+	// apt/dnf use repository signatures — so a second caller would be
+	// ill-defined almost everywhere it applied. Which attestation type won
+	// is already on the report as ProvenanceSection.Kind, and the sidecar
+	// outcomes remain separable by the host x outcome pair.
+	EgressCallerRefreshProvenance = "refresh_provenance"
+	// EgressCallerRefreshAccount is a maintainer/publisher ACCOUNT lookup:
+	// api.github.com/users/<handle>, pypi.org/user, crates.io/api/v1/users,
+	// rubygems/packagist owner documents, Docker Hub and HuggingFace
+	// profiles. Distinct from EgressCallerRefreshRepo, which is
+	// api.github.com/repos/<owner>/<repo> — the two share a host and would
+	// be indistinguishable without this, and T-3's account-metadata reuse
+	// cannot be measured against a series it is mixed into.
+	EgressCallerRefreshAccount = "refresh_account"
+)
+
+// refreshSubCallerPrefix is what makes `caller=~"refresh.*"` cover the family.
+const refreshSubCallerPrefix = EgressCallerRefresh + "_"
+
+// RefineEgressCaller narrows ctx's caller to sub for a known refresher
+// sub-path, and is a NO-OP on every context that is not already refresher
+// traffic.
+//
+// That condition is the whole point. These sub-paths are shared code: the
+// downloads fetcher, the liveness probe and the registry-metadata provider all
+// run on customer install scans too, and a downloads lookup on an install path
+// must stay `other` rather than becoming `refresh_downloads`. Attribution is
+// decided by who STARTED the work, which is the outer tag, and this only ever
+// subdivides within it.
+//
+// Nesting is allowed and the innermost tag wins, because the family prefix is
+// accepted as well as the bare tag. That is what lets the GitHub /repos read
+// inside the registry-metadata provider count as `refresh_repo` while the
+// provider's own document fetches count as `refresh_document`.
+//
+// sub is expected to be one of the constants above. A sub without the family
+// prefix would silently drop that traffic out of every `refresh.*` query, so
+// it is refused rather than applied.
+func RefineEgressCaller(ctx context.Context, sub string) context.Context {
+	if !strings.HasPrefix(sub, refreshSubCallerPrefix) {
+		return ctx
+	}
+	switch cur := EgressCallerFrom(ctx); {
+	case cur == EgressCallerRefresh, strings.HasPrefix(cur, refreshSubCallerPrefix):
+		return WithEgressCaller(ctx, sub)
+	default:
+		return ctx
+	}
+}
 
 type egressCallerKey struct{}
 

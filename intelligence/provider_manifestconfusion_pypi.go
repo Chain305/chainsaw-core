@@ -62,6 +62,11 @@ func (p *pypiManifestConfusionProvider) Signal() SignalMask  { return SignalMani
 func (p *pypiManifestConfusionProvider) Tier() int           { return 2 }
 func (p *pypiManifestConfusionProvider) NeedsArtifact() bool { return true }
 
+// AnalyzerVersion: NOT CACHEABLE — same reason as the npm provider. Run
+// compares req.RegistryMetadataBytes against the sdist/wheel PKG-INFO, so the
+// answer tracks the registry side, which moves independently of the bytes.
+func (p *pypiManifestConfusionProvider) AnalyzerVersion() int { return AnalyzerNotCacheable }
+
 func (p *pypiManifestConfusionProvider) Supports(eco string) bool {
 	e := strings.ToLower(strings.TrimSpace(eco))
 	return e == "pip" || e == "pypi"

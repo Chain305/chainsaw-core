@@ -79,6 +79,12 @@ func (p *shrinkwrapProvider) Name() string        { return "shrinkwrap" }
 func (p *shrinkwrapProvider) Signal() SignalMask  { return SignalShrinkwrap }
 func (p *shrinkwrapProvider) Tier() int           { return 2 }
 func (p *shrinkwrapProvider) NeedsArtifact() bool { return true }
+
+// shrinkwrapAnalyzerVersion — bump when what counts as a shrinkwrap, or what
+// is read out of it, changes for identical bytes.
+const shrinkwrapAnalyzerVersion = 1
+
+func (p *shrinkwrapProvider) AnalyzerVersion() int { return shrinkwrapAnalyzerVersion }
 func (p *shrinkwrapProvider) Supports(eco string) bool {
 	_, ok := ecosystemLockfiles[strings.ToLower(strings.TrimSpace(eco))]
 	return ok

@@ -19,6 +19,12 @@ func (p *iocscanProvider) Signal() SignalMask  { return SignalIOCScan }
 func (p *iocscanProvider) Tier() int           { return 2 }
 func (p *iocscanProvider) NeedsArtifact() bool { return true }
 
+// iocscanAnalyzerVersion — bump when the indicator corpus or the
+// network-send pairing rule changes what this reports for identical bytes.
+const iocscanAnalyzerVersion = 1
+
+func (p *iocscanProvider) AnalyzerVersion() int { return iocscanAnalyzerVersion }
+
 // Supports: every ecosystem — an exfil webhook or stealer string is malicious
 // in any package's source.
 func (p *iocscanProvider) Supports(string) bool { return true }

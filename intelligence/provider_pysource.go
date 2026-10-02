@@ -21,6 +21,12 @@ func (p *pysourceProvider) Signal() SignalMask  { return SignalImportTimeExecuti
 func (p *pysourceProvider) Tier() int           { return 2 }
 func (p *pysourceProvider) NeedsArtifact() bool { return true }
 
+// pysourceAnalyzerVersion — bump when the import-time-execution detectors
+// change what they report for identical bytes.
+const pysourceAnalyzerVersion = 1
+
+func (p *pysourceProvider) AnalyzerVersion() int { return pysourceAnalyzerVersion }
+
 var pysourceEcosystems = map[string]struct{}{"pip": {}, "pypi": {}, "python": {}}
 
 func (p *pysourceProvider) Supports(ecosystem string) bool {

@@ -44,6 +44,8 @@ import (
 	"sync"
 
 	"github.com/chain305/chainsaw-core/upstreamhttp"
+
+	"github.com/chain305/chainsaw-core/httpclient"
 )
 
 // unknownDownloads is the sentinel that signals "data unavailable". Must
@@ -150,6 +152,8 @@ func DownloadsDo(req *http.Request) (*http.Response, error) {
 // FetchNPMWeeklyDownloads fetches the last-week download count for the given
 // npm package name from the npm downloads API.
 //
+// No production caller; the live path is premium weeklyDownloadsProvider.
+//
 // Returns unknownDownloads (-1) when:
 //   - CHAINSAW_OFFLINE=1 is set (defensive backstop; production goes through
 //     the provider which short-circuits earlier with nil instead).
@@ -163,6 +167,10 @@ func FetchNPMWeeklyDownloads(ctx context.Context, packageName string) int {
 	if IsOffline() {
 		return unknownDownloads
 	}
+	// T-1: tagged inside the fetcher, not at a call site, because this runs
+	// on install scans too and RefineEgressCaller is a no-op there — an
+	// install's download lookup must stay `other`.
+	ctx = httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshDownloads)
 
 	encoded := url.PathEscape(packageName)
 	apiURL := "https://api.npmjs.org/downloads/point/last-week/" + encoded
@@ -196,6 +204,8 @@ func FetchNPMWeeklyDownloads(ctx context.Context, packageName string) int {
 // FetchPyPIWeeklyDownloads fetches the last-week download count for the given
 // PyPI package name from the pypistats.org API.
 //
+// No production caller; the live path is premium weeklyDownloadsProvider.
+//
 // Returns unknownDownloads (-1) when:
 //   - CHAINSAW_OFFLINE=1 is set (defensive backstop; production goes through
 //     the provider which short-circuits earlier with nil instead).
@@ -208,6 +218,10 @@ func FetchPyPIWeeklyDownloads(ctx context.Context, packageName string) int {
 	if IsOffline() {
 		return unknownDownloads
 	}
+	// T-1: tagged inside the fetcher, not at a call site, because this runs
+	// on install scans too and RefineEgressCaller is a no-op there — an
+	// install's download lookup must stay `other`.
+	ctx = httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshDownloads)
 
 	// pypistats normalises package names to lowercase with hyphens.
 	name := strings.ToLower(strings.ReplaceAll(packageName, "_", "-"))

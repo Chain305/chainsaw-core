@@ -2,14 +2,22 @@ package doctor
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // pinnedEnv builds a map-backed getenv so tests stay hermetic.
@@ -192,12 +200,97 @@ func TestRun_JSONRoundtrip(t *testing.T) {
 
 func TestCheckTLS_HalfConfigured(t *testing.T) {
 	findings := checkTLS("", pinnedEnv(map[string]string{
-		"CHAINSAW_TLS_CERT": "/tmp/cert.pem",
+		"CHAINSAW_TLS_CERT_FILE": "/tmp/cert.pem",
 		// key intentionally unset
 	}))
 	if len(findings) != 1 || findings[0].Severity != SeverityBreaking {
 		t.Fatalf("expected one breaking finding, got %+v", findings)
 	}
+}
+
+// writeTLSPair writes a self-signed cert + key valid for a year.
+func writeTLSPair(t *testing.T, dir string) (certPath, keyPath string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "doctor-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
+}
+
+// TestCheckTLS_ReadsTheServersNames is the regression test for doctor
+// checking CHAINSAW_TLS_CERT / CHAINSAW_TLS_KEY, names the server never
+// read. A server configured the documented way — CHAINSAW_TLS_CERT_FILE /
+// CHAINSAW_TLS_KEY_FILE, or YAML server.tls — was reported as plaintext.
+func TestCheckTLS_ReadsTheServersNames(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeTLSPair(t, dir)
+	const pairOK = "cert + key parse, pair matches, expiry ≥30 days"
+
+	t.Run("env", func(t *testing.T) {
+		findings := checkTLS("", pinnedEnv(map[string]string{
+			"CHAINSAW_TLS_CERT_FILE": certPath,
+			"CHAINSAW_TLS_KEY_FILE":  keyPath,
+		}))
+		if len(findings) != 1 || findings[0].Message != pairOK {
+			t.Fatalf("env-configured TLS not seen: %+v", findings)
+		}
+	})
+
+	cfg := filepath.Join(dir, "chainsaw.yaml")
+	yamlBody := "server:\n  tls:\n    cert_file: " + certPath + "\n    key_file: " + keyPath + "\n"
+	if err := os.WriteFile(cfg, []byte(yamlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("yaml", func(t *testing.T) {
+		findings := checkTLS(cfg, pinnedEnv(nil))
+		if len(findings) != 1 || findings[0].Message != pairOK {
+			t.Fatalf("YAML-configured TLS not seen: %+v", findings)
+		}
+	})
+
+	// The server applies the env per field, so a cert from the env and a
+	// key from YAML is a complete pair, not a half-configured one.
+	t.Run("env overrides yaml per field", func(t *testing.T) {
+		findings := checkTLS(cfg, pinnedEnv(map[string]string{
+			"CHAINSAW_TLS_CERT_FILE": filepath.Join(dir, "missing.pem"),
+		}))
+		if len(findings) != 1 || findings[0].Check != "tls:cert" {
+			t.Fatalf("env cert path should win over YAML: %+v", findings)
+		}
+	})
+
+	t.Run("old names are not read", func(t *testing.T) {
+		findings := checkTLS("", pinnedEnv(map[string]string{
+			"CHAINSAW_TLS_CERT": certPath,
+			"CHAINSAW_TLS_KEY":  keyPath,
+		}))
+		if len(findings) != 1 || findings[0].Check != "tls" || findings[0].Message == pairOK {
+			t.Fatalf("CHAINSAW_TLS_CERT/KEY are not server config and must not count: %+v", findings)
+		}
+	})
 }
 
 func TestCheckDataDir_MissingPerms_AutoFixable(t *testing.T) {

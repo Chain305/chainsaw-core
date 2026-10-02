@@ -442,6 +442,30 @@ func (s *Store) ensureMonitoredTargetsSchema() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_monitored_targets_due ON monitored_targets(archived_at, last_scanned_at)`); err != nil {
 		return fmt.Errorf("create monitored_targets due index: %w", err)
 	}
+	// The "who ELSE declares this coordinate" query:
+	// monitoredtargets.ListDeclaringTargets, the C-7 fan-out. One `@>` probe
+	// with a CONSTANT right-hand operand, per transition found — which is
+	// rare, but each probe would otherwise detoast and walk a package_set of
+	// up to MaxPackagesPerTarget elements for every live target.
+	//
+	// It deliberately does NOT serve the C-6 anti-join in
+	// intelligence.StaleReportScope.where(). That predicate was written as a
+	// correlated `@>` first, which cannot use this index at all — the probe is
+	// built from the outer row, so there is no constant to look up — and it
+	// measured at over 120 seconds on 5,000 reports against one 19,083-element
+	// target. It is now an uncorrelated flatten-once anti-join, which needs no
+	// index on this table. See the comment on declaredCoordinateAntiJoin.
+	//
+	// jsonb_path_ops rather than the default jsonb_ops: it indexes
+	// path-to-value pairs, which is exactly what `@>` needs, and it is
+	// materially smaller because it stores no bare keys. Nothing here uses
+	// the key-existence operators (`?`, `?|`, `?&`) that jsonb_ops would be
+	// required for — if a future caller needs one, it will get a seq scan
+	// rather than a wrong answer, and that is the safe direction.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_monitored_targets_package_set
+		ON monitored_targets USING GIN (package_set jsonb_path_ops)`); err != nil {
+		return fmt.Errorf("create monitored_targets package_set index: %w", err)
+	}
 	return nil
 }
 
@@ -510,6 +534,105 @@ func (s *Store) ensureVerdictHistorySchema() error {
 	for _, stmt := range stmts {
 		if _, err := s.DB().Exec(stmt); err != nil {
 			return fmt.Errorf("pgstore: ensure verdict_history schema: %w", err)
+		}
+	}
+	return nil
+}
+
+// ensureArtifactAnalysesSchema creates artifact_analyses, the content-addressed
+// cache of per-analyzer artifact-analysis output (A-3).
+//
+// WHY A SEPARATE TABLE AND NOT A WIDER intelligence_reports KEY. An analysis
+// result is a fact about BYTES, not about a coordinate and not about a tenant,
+// so it is keyed by the artifact digest. Widening intelligence_reports instead
+// fails four ways: you cannot read without the digest and you only learn the
+// digest by fetching, which inverts the cache-first read; Store.Facets and
+// Store.Search have no notion of one row per coordinate; the matcher-epoch-
+// exempt sticky read loses "the prior row"; and verdict history is
+// per-coordinate and append-only inside the upsert transaction. The L-02
+// federation decision also stands: intelligence_reports carries no org_id, and
+// neither does this — bytes have no tenant.
+//
+// WHY THE KEY HAS FIVE COLUMNS AND NOT THREE. The cache is correct only if a
+// row's content is a function of everything in its key. Three columns was not:
+// four cacheable analyzers take an input that is neither the bytes nor their
+// own version, so the same (digest, analyzer, version) could legitimately hold
+// two different answers and the first one written would be served forever —
+// with nothing to evict it.
+//
+//	ecosystem        installscripts branches npm vs pip; capability picks a
+//	                 per-ecosystem scanner. The same bytes published to two
+//	                 ecosystems are two different analyses.
+//	analyzer_config  trivial_package and too_many_files resolve an operator
+//	                 threshold from the environment at construction, and
+//	                 capability's lane flag is read INSIDE Run, so an "off"
+//	                 run produces an empty partial that would be served after
+//	                 the flag was turned on.
+//
+// The alternative — packing the config into analyzer_version — was rejected
+// because it breaks the ordering the selective backfill depends on: the scope
+// selects `analyzer_version < current`, so LOWERING a threshold would produce a
+// smaller packed value and leave the rows written under the higher one
+// permanently unselectable. Config is not a generation and must not be ordered
+// like one.
+//
+// Marking those analyzers non-cacheable was also rejected: trivial_package and
+// too_many_files support fifteen ecosystems (everything except huggingface), so
+// forcing them to run would call SharedArtifactMap on essentially every scan
+// and pay the archive decompression this cache exists to avoid — destroying the
+// saving to protect two thresholds nobody has ever set.
+//
+// NO PK MIGRATION ACCOMPANIES THIS. The table has never shipped, so no
+// database holds the three-column key; a fresh checkout creates it correctly.
+// Had it shipped, the drop-constraint / dedup / re-add sequence at
+// migrate.go's intelligence_reports org_id removal is the precedent to copy.
+//
+// WHY analyzer_version IS IN THE PRIMARY KEY AND NOT A STALENESS COLUMN.
+// Bumping one analyzer's version makes that analyzer's lookups miss and
+// nothing else, so an upgrade re-derives only the rows that analyzer ran on.
+// It retires no row, needs no drain and has no serve floor — unlike the global
+// matcher epoch, where raising it by more than the backlog can absorb dropped
+// dependency lookups from 92,046 to 11,744 for about a week
+// (core/intelligence/report.go, MinServeableEpoch).
+//
+// NOTHING EVICTS THIS TABLE, AND NOTHING NEEDS TO. A row is at most the
+// JSON-encoded PartialReport of one provider over one artifact — flags and a
+// few short strings, order 1 KB. Rows are bounded by
+// (artifacts ever byte-scanned x cacheable analyzers), and a version bump adds
+// a generation rather than replacing one, which is deliberate: the old rows
+// stay valid for a rollback to the previous binary. If a generation ever needs
+// reclaiming it is one DELETE keyed on (analyzer, analyzer_version), which is
+// exactly what the secondary index below serves.
+//
+// A TRUNCATED WALK IS NEVER WRITTEN, so no lookup can serve one. That is an
+// invariant of the writer rather than a column the reader must remember to
+// filter on: a capped archive walk reports absences it never looked for, and
+// trivialPackage fires when LOC is BELOW a bound, so caching a truncated walk
+// would mint a permanent false positive.
+func (s *Store) ensureArtifactAnalysesSchema() error {
+	if s == nil || s.DB() == nil {
+		return nil
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS artifact_analyses (
+			artifact_sha256  TEXT        NOT NULL,
+			ecosystem        TEXT        NOT NULL,
+			analyzer         TEXT        NOT NULL,
+			analyzer_version INTEGER     NOT NULL,
+			analyzer_config  TEXT        NOT NULL DEFAULT '',
+			partial          JSONB       NOT NULL,
+			analyzed_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (artifact_sha256, ecosystem, analyzer, analyzer_version, analyzer_config)
+		)`,
+		// The selective-backfill index: "which coordinates hold an analysis
+		// from a superseded version of analyzer X". Without it that query
+		// seq-scans a table whose row count is a multiple of the corpus.
+		`CREATE INDEX IF NOT EXISTS idx_artifact_analyses_analyzer_version
+			ON artifact_analyses (analyzer, analyzer_version)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.DB().Exec(stmt); err != nil {
+			return fmt.Errorf("pgstore: ensure artifact_analyses schema: %w", err)
 		}
 	}
 	return nil
