@@ -950,14 +950,22 @@ func lookupDepReport(ctx context.Context, store transitiveLookup, orgID, eco, na
 			return resolved(pin, r)
 		}
 	}
-	v, parseErr, listErr := pickConstraintMatchDetailed(ctx, store, orgID, eco, name, constraint)
+	matches, parseErr, listErr := pickConstraintMatchesDetailed(ctx, store, orgID, eco, name, constraint)
 	if listErr != nil && firstStoreErr == nil {
 		firstStoreErr = listErr
 	}
-	if v != "" {
-		if r := probe(v); r != nil {
-			return resolved(v, r)
+	// Highest first. A miss or a superseded row ends the walk exactly as it
+	// did when only the best match was probed; the one thing that moves on to
+	// the next match is a version the registry no longer serves.
+	for _, v := range matches {
+		r := probe(v)
+		if r == nil {
+			break
 		}
+		if versionWithdrawn(eco, v, r) {
+			continue
+		}
+		return resolved(v, r)
 	}
 	if r := probe(transitiveLatestVersionSentinel); r != nil {
 		return resolved(transitiveLatestVersionSentinel, r)
@@ -1031,23 +1039,26 @@ func pickConstraintMatch(ctx context.Context, store transitiveLookup, orgID, eco
 // "best (highest) match" comes from the same library that parsed the
 // constraint — never mixing ecosystems' ordering rules.
 func pickConstraintMatchDetailed(ctx context.Context, store transitiveLookup, orgID, eco, name, constraint string) (string, error, error) {
+	matches, parseErr, listErr := pickConstraintMatchesDetailed(ctx, store, orgID, eco, name, constraint)
+	if len(matches) == 0 {
+		return "", parseErr, listErr
+	}
+	return matches[0], parseErr, listErr
+}
+
+// pickConstraintMatchesDetailed returns every cached concrete version that
+// satisfies the constraint, highest first under the ecosystem's ordering,
+// with the same parse/list error contract as pickConstraintMatchDetailed.
+func pickConstraintMatchesDetailed(ctx context.Context, store transitiveLookup, orgID, eco, name, constraint string) ([]string, error, error) {
 	sat, parseErr := parseEcosystemConstraint(eco, constraint)
 	if parseErr != nil {
-		return "", parseErr, nil
+		return nil, parseErr, nil
 	}
 	versions, err := store.ListVersions(ctx, orgID, eco, name)
 	if err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
-	if len(versions) == 0 {
-		return "", nil, nil
-	}
-	// Per-ecosystem max: each satisfier exposes a "better" comparator so
-	// the highest qualifying version (ecosystem-correct ordering) wins.
-	// Non-parseable cache entries are skipped — the satisfier's Check
-	// returns false on them and the comparator-bearing Better path is
-	// only consulted on entries that passed Check.
-	var bestRaw string
+	var out []string
 	for _, v := range versions {
 		// A cached key that is not one concrete release (a row written
 		// by scanning an install spec like `debug@4`) is not a
@@ -1056,11 +1067,41 @@ func pickConstraintMatchDetailed(ctx context.Context, store transitiveLookup, or
 		if !isConcreteVersion(eco, v) || !sat.Check(v) {
 			continue
 		}
-		if bestRaw == "" || sat.Greater(v, bestRaw) {
-			bestRaw = v
+		out = append(out, v)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return sat.Greater(out[i], out[j]) })
+	return out, nil, nil
+}
+
+// versionWithdrawn reports whether the registry no longer serves version v,
+// read from v's own report: its version timeline is the package's current
+// version list, and v is not in it.
+//
+// The flip count against prod on 2026-10-02 found the highest-cached rule
+// resolving flat-cache's `cacheable: ^2.3.4` to cacheable@2.5.1 — the
+// keyv/cacheable trojan, removed from npm, still cached — and quarantining
+// flat-cache, file-entry-cache and eslint, although a fresh install gets the
+// clean 2.5.0. npm and PyPI only: they delete versions, and their timelines
+// are the registry's full version list. NuGet's paged index can come back
+// partial, which would read as a withdrawal; crates, NuGet and Go keep
+// yanked/unlisted versions installable by pin anyway. An empty timeline
+// means it was not fetched, never that everything was withdrawn.
+func versionWithdrawn(eco, v string, r *Report) bool {
+	switch strings.ToLower(eco) {
+	case "npm", "pypi":
+	default:
+		return false
+	}
+	tl := r.Maintenance.VersionTimeline
+	if len(tl) == 0 {
+		return false
+	}
+	for _, rel := range tl {
+		if rel.Version == v {
+			return false
 		}
 	}
-	return bestRaw, nil, nil
+	return true
 }
 
 // versionSatisfier abstracts an ecosystem-specific constraint matcher

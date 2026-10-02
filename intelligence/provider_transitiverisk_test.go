@@ -1535,3 +1535,44 @@ func TestNuGet_NetFrameworkGroupsKept(t *testing.T) {
 		t.Fatalf("Direct = %+v, want %+v", got, want)
 	}
 }
+
+// TestTransitiveRisk_WithdrawnVersionIsNotResolved is the flip-count finding
+// of 2026-10-02: flat-cache declares `cacheable: ^2.3.4`, the store still
+// holds cacheable@2.5.1 (the keyv/cacheable trojan, removed from npm), and
+// highest-cached picked it. Its own report's timeline omits 2.5.1, so the
+// walk takes the next match, 2.5.0, which is what npm installs.
+func TestTransitiveRisk_WithdrawnVersionIsNotResolved(t *testing.T) {
+	timeline := []VersionRelease{{Version: "2.3.4"}, {Version: "2.5.0"}}
+	withTimeline := func(r *Report) *Report {
+		r.Maintenance.VersionTimeline = timeline
+		return r
+	}
+	build := func(eco string) (*fakeStore, *Report) {
+		store := newFakeStore()
+		store.put(eco, "cacheable", "2.3.4", withTimeline(newReport(eco, "cacheable", "2.3.4")))
+		store.put(eco, "cacheable", "2.5.0", withTimeline(newReport(eco, "cacheable", "2.5.0")))
+		store.put(eco, "cacheable", "2.5.1", withTimeline(maliciousReport(eco, "cacheable", "2.5.1", "MAL-2026-11963")))
+		root := makeReportWithDirect(eco, "flat-cache", "6.1.22", DependencyRef{Name: "cacheable", Constraint: "^2.3.4"})
+		return store, root
+	}
+
+	store, root := build("npm")
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+	if got := root.Risk.Resolution.TransitiveSeverity.MalwareCount; got != 0 {
+		t.Fatalf("npm: MalwareCount = %d, want 0: 2.5.1 is withdrawn, ^2.3.4 installs 2.5.0; blame=%v",
+			got, root.Risk.Resolution.TransitiveBlame)
+	}
+
+	// A registry whose timeline is not the full version list keeps
+	// highest-cached: the withdrawal check must not apply there.
+	store, root = build("cargo")
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+	if got := root.Risk.Resolution.TransitiveSeverity.MalwareCount; got != 1 {
+		t.Fatalf("cargo: MalwareCount = %d, want 1 (no withdrawal check outside npm/pypi)", got)
+	}
+
+	// An empty timeline means "not fetched", never "withdrawn".
+	if versionWithdrawn("npm", "2.5.1", &Report{}) {
+		t.Fatal("empty timeline read as a withdrawal")
+	}
+}
