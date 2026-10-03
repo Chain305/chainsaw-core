@@ -447,3 +447,27 @@ func TestGuardLoadMalwareSourcesCarriesFloor(t *testing.T) {
 		t.Fatalf("event-stream 3.3.6 not blocked by the guard's index (lookup = %+v)", res)
 	}
 }
+
+// TestGuardRangeRefusalNamesTheVersionAndHowToPin: `npm install debug@4`
+// stays refused offline (the guard cannot know npm would pick 4.4.3), but the
+// reason now names the malicious release and the way past it.
+func TestGuardRangeRefusalNamesTheVersionAndHowToPin(t *testing.T) {
+	idx := malware.NewIndex(nil)
+	idx.Load([]*malware.OSVEntry{{
+		ID: "MAL-2025-46974",
+		Affected: []malware.OSVAffected{{
+			Package:  malware.OSVPackage{Ecosystem: "npm", Name: "debug"},
+			Versions: []string{"4.4.2"},
+		}},
+	}})
+	g := &localGuard{detectors: map[string]*typosquat.Detector{}, malware: idx}
+	v := g.evaluate(context.Background(), packageSpec{Ecosystem: "npm", Name: "debug", Version: "4"})
+	if !v.Block {
+		t.Fatal("a range admitting a known-malicious release must stay blocked offline")
+	}
+	for _, want := range []string{"4.4.2", "pin an exact version", "MAL-2025-46974"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("reason %q lacks %q", v.Reason, want)
+		}
+	}
+}

@@ -675,6 +675,17 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 		if res.MalwareID != "" {
 			reason = fmt.Sprintf("known-malicious (%s)", res.MalwareID)
 		}
+		// A RANGE matched: refusing stays correct offline, but say which
+		// release made the range unsafe and how to get past it. `npm install
+		// debug@4` was refused with only an advisory ID although npm would
+		// install a clean 4.4.3 (2026-10-02).
+		if len(res.RangeMatchedVersions) > 0 {
+			reason = fmt.Sprintf("the range %q admits known-malicious %s %s; pin an exact version that is not listed (for example %s@<version>)",
+				spec.Version, spec.Name, strings.Join(res.RangeMatchedVersions, ", "), spec.Name)
+			if res.MalwareID != "" {
+				reason += " — " + res.MalwareID
+			}
+		}
 		return guardVerdict{Spec: spec, Block: true, Severity: "malicious", Reason: reason}
 	}
 
