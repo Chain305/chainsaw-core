@@ -1,6 +1,9 @@
 package risk
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // registry_maintenance_state.go holds the registry-native maintenance facts
 // that no older signal expresses. Most of them do not need one: every
@@ -36,6 +39,47 @@ func init() {
 			}
 			return true, "Relocated to " + in.RelocatedTo + ".",
 				map[string]any{"relocatedTo": in.RelocatedTo}
+		},
+	})
+}
+
+// SignalSCReleaseAfterDormancy: this version came out after the package had
+// published nothing for DormancyGapThreshold. The ctx (PyPI, 2022) takeover
+// was exactly this — eight years silent, then a backdoored release from an
+// account recovered through an expired maintainer domain — and expired
+// domains, Go repojacking and MavenGate all make the dormant package the
+// target. Weight 0 because recall cannot be measured yet: every malicious
+// corpus row lost its timeline when the registry deleted it. Benign base rate
+// at 2 years (2026-10-03): 5 of 443 dated corpus releases, 237 of 5,379 dated
+// prod reports.
+const SignalSCReleaseAfterDormancy = "sc.release_after_dormancy"
+
+// DormancyGapThreshold is the silence that makes a release notable.
+const DormancyGapThreshold = 2 * 365 * 24 * time.Hour
+
+func init() {
+	register(Signal{
+		ID:          SignalSCReleaseAfterDormancy,
+		Category:    CategorySupplyChain,
+		Severity:    SevInfo,
+		Weight:      0,
+		Title:       "Release after long dormancy",
+		Description: "This version was published more than two years after the previous release.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if in.VersionPublishedAt == nil || in.PriorReleaseAt == nil || in.PriorReleaseVersion == "" {
+				return false, "", nil
+			}
+			gap := in.VersionPublishedAt.Sub(*in.PriorReleaseAt)
+			if gap < DormancyGapThreshold {
+				return false, "", nil
+			}
+			days := int(gap.Hours() / 24)
+			return true, fmt.Sprintf("Published %d days after the previous release (%s).", days, in.PriorReleaseVersion),
+				map[string]any{
+					"gapDays":         days,
+					"priorVersion":    in.PriorReleaseVersion,
+					"priorReleasedAt": in.PriorReleaseAt.UTC().Format(time.RFC3339),
+				}
 		},
 	})
 }

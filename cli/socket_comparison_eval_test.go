@@ -181,6 +181,7 @@ var socketConceptMap = map[string]conceptMapping{
 	"sc.shell_access_appeared":             {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert", Cadence: cadR24BPrior},
 	"sc.filesystem_access_appeared":        {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert", Cadence: cadR24BPrior},
 	"sc.env_access_appeared":               {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert", Cadence: cadR24BPrior},
+	"sc.release_after_dormancy":            {Socket: nil, Grade: gradeNone, Note: "timeline gap before this release; socket.dev's unmaintained alert is package age, not a release after silence", Cadence: cadR24},
 	"sc.hidden_unicode":                    {Socket: []string{"obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "different detector class; overlapping intent", Cadence: cadR24B},
 	"sc.repo_archived":                     {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
 	"sc.git_url_dependency":                {Socket: []string{"gitDependency", "gitHubDependency"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadNever},

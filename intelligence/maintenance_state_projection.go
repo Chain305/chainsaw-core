@@ -25,6 +25,22 @@ func versionPublishedAt(r *Report) *time.Time {
 	return r.Release.VersionDate
 }
 
+// priorReleaseOf returns the release published immediately before this
+// version and its date, from the dated timeline; "" when it cannot be placed.
+func priorReleaseOf(r *Report, at *time.Time) (string, *time.Time) {
+	v := previousRelease(r.Maintenance.VersionTimeline, r.Identity.Version, at)
+	if v == "" {
+		return "", nil
+	}
+	for _, e := range r.Maintenance.VersionTimeline {
+		if e.Version == v && !e.PublishedAt.IsZero() {
+			t := e.PublishedAt
+			return v, &t
+		}
+	}
+	return "", nil
+}
+
 // newerStableVersion returns the newest non-prerelease version published after
 // `at`, or "" when none is known. A dated timeline is authoritative: when it
 // has dates and none is newer, there is no newer version. Only an undated one

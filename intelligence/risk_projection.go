@@ -486,6 +486,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		in.TransitiveBlockedCount = ts.BlockedCount
 	}
 	in.NewerVersion, in.NewerVersionAt = newerStableVersion(r, in.VersionPublishedAt)
+	in.PriorReleaseVersion, in.PriorReleaseAt = priorReleaseOf(r, in.VersionPublishedAt)
 
 	return in
 }

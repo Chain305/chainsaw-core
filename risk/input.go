@@ -273,6 +273,11 @@ type Input struct {
 	VersionPublishedAt *time.Time
 	NewerVersion       string
 	NewerVersionAt     *time.Time
+	// PriorReleaseVersion / PriorReleaseAt are the release published
+	// immediately before this one (dated timeline only); they feed
+	// sc.release_after_dormancy.
+	PriorReleaseVersion string
+	PriorReleaseAt      *time.Time
 	// ShrinkwrapPresent is true when the npm tarball ships a
 	// npm-shrinkwrap.json — an npm-specific lockfile that bypasses the
 	// consumer's review path.

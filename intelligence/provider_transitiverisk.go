@@ -1138,6 +1138,16 @@ type versionSatisfier interface {
 //	nuget             → Maven (bracket syntax is shared)
 //	packagist         → Maven (Composer is Maven-flavoured)
 //	default / unknown → Masterminds (npm/cargo/etc.)
+//
+// DependencyConstraintParses reports whether raw is a valid version
+// constraint in the ecosystem's own grammar — the same parser the transitive
+// walk resolves edges with. Exported for the policy-context projection of
+// dependency hygiene (BadDependencySemver).
+func DependencyConstraintParses(ecosystem, raw string) bool {
+	_, err := parseEcosystemConstraint(ecosystem, raw)
+	return err == nil
+}
+
 func parseEcosystemConstraint(ecosystem, raw string) (versionSatisfier, error) {
 	c := strings.TrimSpace(raw)
 	switch normalizeEcosystem(ecosystem) {
