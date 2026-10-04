@@ -116,10 +116,6 @@ var unconsumedInputFields = map[string]string{
 	"HasSourceRepo": "Projected at risk_projection.go from URLs.SourceRepoURL. The legacy " +
 		"core/trustscore engine reads a same-named field on a DIFFERENT struct " +
 		"(trustscore.Signals), which is why this reads as wired and is not.",
-	"FirstPublishedAt": "Projected from Maintenance.FirstPublishedAt, which core's " +
-		"applyTimeline computes on every scan. It is the field that would let " +
-		"maint.very_new_package age the PACKAGE rather than the resolved VERSION — " +
-		"the mechanism the Phase 8 baseline guessed at. Nothing reads it.",
 	"Stars": "COMMENT ASSERTS A CONSUMER THAT DOES NOT EXIST: input.go says Stars/Forks/" +
 		"OpenIssues/Subscribers are \"Used by quality-grade signals that mirror Socket's " +
 		"stargazer/fork/watcher dimensions\". No such signal is registered. Worse, these " +

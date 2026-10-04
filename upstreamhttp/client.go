@@ -1,6 +1,7 @@
 package upstreamhttp
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,6 +108,18 @@ func New(cfg Config, opts ...Option) *Client {
 		c.now = time.Now
 	}
 	return c
+}
+
+// Prepay waits on ctx for n of host's tokens and returns a context that
+// carries them (see InProcessHostLimiter.Prepay). A limiter that cannot
+// prepay leaves ctx unchanged and the requests queue as before.
+func (c *Client) Prepay(ctx context.Context, host string, n int, maxWait time.Duration) (context.Context, error) {
+	if p, ok := c.limiter.(interface {
+		Prepay(context.Context, string, int, time.Duration) (context.Context, error)
+	}); ok {
+		return p.Prepay(ctx, host, n, maxWait)
+	}
+	return ctx, nil
 }
 
 // HTTPClient returns a *http.Client whose Transport applies this

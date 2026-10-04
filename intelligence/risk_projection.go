@@ -256,6 +256,12 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		HasInstallScript:           r.Scan.HasInstallScript,
 		InstallScriptFetchesRemote: r.Scan.InstallScriptFetches,
 		InstallScriptEvalEncoded:   r.Scan.InstallScriptKind == "eval_encoded",
+		MaliciousIOCKind:           r.Scan.MaliciousIOCKind,
+		MaliciousIOCCoupled:        r.Scan.MaliciousIOCCoupled,
+		MaliciousIOCAtEntry:        r.Scan.MaliciousIOCAtEntry,
+		DependencyCredential:       r.Scan.DependencyCredential,
+		AppCredentialSend:          r.Scan.AppCredentialSend,
+		ImportTimeKind:             r.Scan.ImportTimeKind,
 
 		// Pain 9 (Agent D): env-var read and network-call axes are
 		// projected into risk.Input so the new compound rule
@@ -417,6 +423,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	if in.LicenseDataUnavailable {
 		in.LicenseTags = nil
 	}
+	projectLicenseFile(r, &in)
 
 	// PublishVelocityAnomaly — prefer the explicit pointer when an
 	// orchestrator or provider has set it; otherwise fall back to the
@@ -442,6 +449,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	// ever turns a false into a true.
 	projectCodeSmellCapabilities(&r.Scan, &in)
 	projectURLStrings(&r.Scan, &in)
+	projectDebugTelemetry(&r.Scan, &in)
 	projectVersionDiff(&r.Scan, r.priorScan, r.priorVersion, &in)
 	projectLicenseDiff(r.Metadata.LicenseExpression, r.priorLicense, r.priorVersion, &in)
 
@@ -1121,6 +1129,70 @@ func projectURLStrings(s *ArtifactScanSection, in *risk.Input) {
 	}
 }
 
+// projectLicenseFile lets the package's own top-level LICENSE file speak
+// when the manifest does not: an empty expression, or one the classifier
+// cannot identify. A declared, identified licence always wins.
+//
+// An identified file replaces the expression, so the tag signals price the
+// licence the bytes carry (lic.missing stops claiming there is none). A file
+// that matches no known text still proves a licence exists: the expression
+// stays as it was, and the tags become Unidentified rather than "none
+// declared" — that is socket.dev's unidentifiedLicense, not noLicenseFound.
+//
+// Licence-file facts are only ever POSITIVE (a file was found), so a
+// truncated walk or a scan that never ran leaves the manifest untouched.
+func projectLicenseFile(r *Report, in *risk.Input) {
+	if r == nil || in == nil || len(r.Scan.LicenseFilePaths) == 0 {
+		return
+	}
+	manifest := strings.TrimSpace(r.Metadata.LicenseExpression)
+	if manifest != "" && !slices.Contains(risk.Classify(manifest), risk.LicenseTagUnidentified) {
+		return
+	}
+	if expr := r.Scan.LicenseFileExpression; expr != "" {
+		in.LicenseSPDX = expr
+		in.LicenseTags = risk.Classify(expr)
+		in.LicenseDataUnavailable = false
+		in.LicenseFromFile = true
+		return
+	}
+	if manifest == "" {
+		in.LicenseSPDX = "LicenseRef-unrecognised-file:" + r.Scan.LicenseFilePaths[0]
+		in.LicenseTags = []risk.LicenseTag{risk.LicenseTagUnidentified}
+		in.LicenseDataUnavailable = false
+		in.LicenseFromFile = true
+	}
+}
+
+// projectDebugTelemetry lights cap.debug_access and cap.telemetry from the
+// debugtelemetry provider, their only producer. Both signals are weight 0.
+// A scan that never ran is not a scan that found nothing, so nothing is
+// projected unless Performed is set.
+func projectDebugTelemetry(s *ArtifactScanSection, in *risk.Input) {
+	if s == nil || in == nil || !s.Performed {
+		return
+	}
+	toEvidence := func(ls []ScanLocation) []risk.CapEvidenceEntry {
+		var out []risk.CapEvidenceEntry
+		for _, l := range ls {
+			out = append(out, risk.CapEvidenceEntry{File: l.File, Line: l.Line, Snippet: l.Snippet})
+		}
+		return out
+	}
+	if s.DebugAccess {
+		in.CapDebugAccess = true
+		in.CapDebugAccessEvidence = toEvidence(s.DebugAccessSamples)
+	}
+	if s.Telemetry {
+		in.CapTelemetry = true
+		in.CapTelemetryEvidence = toEvidence(s.TelemetrySamples)
+	}
+	if s.DynamicRequire {
+		in.CapDynamicRequire = true
+		in.CapDynamicRequireEvidence = toEvidence(s.DynamicRequireSamples)
+	}
+}
+
 // projectCodeSmellCapabilities lights the cap.* signals from the
 // CODESMELL scanners when the premium capability provider has not run.
 //
@@ -1259,11 +1331,16 @@ func projectLicenseDiff(cur, prior, priorVersion string, in *risk.Input) {
 // HasHTTPURLDep/HTTPURLDeps on the risk.Input. Runs for all ecosystems
 // but only produces hits when the version strings use git/http forms
 // (an npm-specific feature).
+//
+// devDependencies are deliberately NOT read. Both signals claim the
+// dependency "bypasses the registry hash chain" for whoever installs this
+// package, and installing a package never installs its devDependencies —
+// so a `git://` test helper in devDependencies reaches nobody. socket.dev's gitDependency/httpDependency draw the same line: on
+// corpus-v1-rev4, fl-backbone.nativeajax@0.4.3 (git sinon in
+// devDependencies only) is clean on their side and was -8 on ours.
 func projectURLDeps(r *Report, in *risk.Input) {
-	// Collect all four dependency buckets in one pass.
 	buckets := [][]DependencyRef{
 		r.Dependencies.Direct,
-		r.Dependencies.Dev,
 		r.Dependencies.Peer,
 		r.Dependencies.Optional,
 	}

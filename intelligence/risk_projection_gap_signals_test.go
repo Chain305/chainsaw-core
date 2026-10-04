@@ -28,8 +28,6 @@ func TestProjectToRiskInput_URLDeps_GitAndHTTP(t *testing.T) {
 			Direct: []DependencyRef{
 				{Name: "legit-pkg", Constraint: "^1.2.3"}, // registry
 				{Name: "git-dep", Constraint: "git+https://github.com/org/repo.git"},
-			},
-			Dev: []DependencyRef{
 				{Name: "http-dep", Constraint: "https://example.com/archive.tgz"},
 				{Name: "also-legit", Constraint: "latest"},
 			},
@@ -66,6 +64,44 @@ func TestProjectToRiskInput_URLDeps_GitAndHTTP(t *testing.T) {
 	}
 	if containsStr(in.GitURLDeps, "also-legit") || containsStr(in.HTTPURLDeps, "also-legit") {
 		t.Fatalf("also-legit (dist-tag) should not appear in URL dep lists")
+	}
+}
+
+// Shapes taken from corpus-v1-rev4. A git or tarball URL that only a
+// devDependency carries is never installed by a consumer, so neither signal
+// may fire; the same URL as a runtime dependency must.
+func TestProjectToRiskInput_URLDeps_DevDependenciesNotInstalled(t *testing.T) {
+	// fl-backbone.nativeajax@0.4.3: socket.dev reports no gitDependency.
+	devOnly := &Report{
+		Identity: IdentitySection{Ecosystem: "npm", Package: "fl-backbone.nativeajax", Version: "0.4.3"},
+		Dependencies: DependenciesSection{
+			Dev: []DependencyRef{
+				{Name: "mocha", Constraint: "^2.2.5"},
+				{Name: "sinon", Constraint: "git://github.com/cjohansen/Sinon.JS.git#b672042043517b9f84e14ed0fb8265126168778a"},
+				{Name: "fixture-server", Constraint: "https://example.com/fixture-server-1.0.0.tgz"},
+			},
+		},
+	}
+	in := ProjectToRiskInput(devOnly)
+	if in.HasGitURLDep || in.HasHTTPURLDep {
+		t.Fatalf("devDependency URLs must not set the flags: git=%v %v http=%v %v",
+			in.HasGitURLDep, in.GitURLDeps, in.HasHTTPURLDep, in.HTTPURLDeps)
+	}
+
+	// gi-dice-oimo@0.1.0: socket.dev reports gitDependency.
+	runtime := &Report{
+		Identity: IdentitySection{Ecosystem: "npm", Package: "gi-dice-oimo", Version: "0.1.0"},
+		Dependencies: DependenciesSection{
+			Direct: []DependencyRef{
+				{Name: "debounce", Constraint: "^2.2.0"},
+				{Name: "oimophysics", Constraint: "git+https://github.com/saharan/OimoPhysics.git#234c7a4cd4b5408fc834437fb3bb1763f7c4ccce"},
+			},
+			Dev: []DependencyRef{{Name: "vite", Constraint: "^6.2.0"}},
+		},
+	}
+	in = ProjectToRiskInput(runtime)
+	if !in.HasGitURLDep || !containsStr(in.GitURLDeps, "oimophysics") {
+		t.Fatalf("runtime git dependency must set HasGitURLDep, got %v %v", in.HasGitURLDep, in.GitURLDeps)
 	}
 }
 
@@ -310,4 +346,32 @@ func containsStr(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// The classifier-derived expressions above, through the projection and the
+// registry: a classifier-declared licence is not lic.missing, and a
+// copyleft classifier is license.copyleft.
+func TestProjectToRiskInput_PyPIClassifierLicence(t *testing.T) {
+	fired := func(expr string) map[string]bool {
+		r := &Report{
+			Identity: IdentitySection{Ecosystem: "pypi", Package: "x", Version: "1.0.0"},
+			Metadata: MetadataSection{LicenseExpression: expr},
+		}
+		out := map[string]bool{}
+		for _, cs := range risk.EvaluatePackage(ProjectToRiskInput(r), risk.Options{}).DirectScore.Categories {
+			for _, fs := range cs.FiredSignals {
+				out[fs.ID] = true
+			}
+		}
+		return out
+	}
+	if got := fired("AGPL-3.0-or-later"); got[risk.SignalLicMissing] || !got[risk.SignalLicCopyleft] {
+		t.Fatalf("khoj: want copyleft and no lic.missing, got %v", got)
+	}
+	if got := fired("Apache-2.0"); got[risk.SignalLicMissing] || got[risk.SignalLicUnidentified] {
+		t.Fatalf("recce: want a clean licence, got %v", got)
+	}
+	if got := fired("BSD"); got[risk.SignalLicMissing] || got[risk.SignalLicUnidentified] {
+		t.Fatalf("django-registration: BSD family is declared and recognised, got %v", got)
+	}
 }

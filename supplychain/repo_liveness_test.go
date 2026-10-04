@@ -245,6 +245,29 @@ func TestParseRepoURL(t *testing.T) {
 		{"", "", "", "", ""},
 		{"https://github.com/justowner", "", "", "", ""},
 		{"https://internal.example.com/a/b", "", "", "", ""},
+		// Non-https forms as registries store them (corpus-v1 rev5 rows).
+		{"git://github.com/juliangruber/brace-expansion", "github.com", "juliangruber", "brace-expansion", "github"},
+		{"ssh://git@github.com/AzureAD/passport-azure-ad", "github.com", "AzureAD", "passport-azure-ad", "github"},
+		{"git+ssh://git@github.com/a/b.git", "github.com", "a", "b", "github"},
+		{"git+https://github.com/a/b.git#v1.2.0", "github.com", "a", "b", "github"},
+		// Maven <scm>: org.grails:grails-core writes the scp form behind
+		// "scm:", others "scm:git:".
+		{"scm:git@github.com:grails/grails-core.git", "github.com", "grails", "grails-core", "github"},
+		{"scm:git:git@github.com:a/b.git", "github.com", "a", "b", "github"},
+		{"scm:git:https://github.com/a/b.git", "github.com", "a", "b", "github"},
+		{"scm:git:git://github.com/a/b.git", "github.com", "a", "b", "github"},
+		// A scheme with the scp colon, and an explicit ssh port.
+		{"git+ssh://git@github.com:a/b.git", "github.com", "a", "b", "github"},
+		{"ssh://git@github.com:22/a/b.git", "github.com", "a", "b", "github"},
+		// npm host shorthands.
+		{"github:a/b", "github.com", "a", "b", "github"},
+		{"bitbucket:team/repo", "bitbucket.org", "team", "repo", "bitbucket"},
+		{"gitlab:grp/sub/proj", "gitlab.com", "grp/sub", "proj", "gitlab"},
+		// Userinfo with a password must not be mistaken for the scp colon.
+		{"https://user:token@github.com/a/b.git", "github.com", "a", "b", "github"},
+		// Pages sites are not repositories; no guess is made.
+		{"http://davetron5000.github.com/moocow", "", "", "", ""},
+		{"http://pixaranimationstudios.github.io/ruby-jss/", "", "", "", ""},
 	}
 	for _, c := range cases {
 		h, o, r, k := parseRepoURL(c.in)

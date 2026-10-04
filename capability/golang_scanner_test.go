@@ -116,3 +116,28 @@ func TestScanGo_EvidenceAndCount(t *testing.T) {
 		t.Fatalf("evidence = %+v", ev)
 	}
 }
+
+// A module zip nests every file under the module PATH, and a path segment that
+// is also a skipped directory name (examples, tests, vendor, ...) must not hide
+// the module. The test directory INSIDE the module is still skipped.
+func TestScanGo_ModulePathSegmentsAreNotSkipDirs(t *testing.T) {
+	t.Parallel()
+	runNativeCases(t, "go", []nativeCase{
+		{
+			name: "vitess examples module",
+			files: map[string]string{
+				"vitess.io/vitess/examples/are-you-alive@v0.0.0-20201226175325-4df037de0a7d/pkg/client/client.go": goSrc(`"net/http"`, `_, _ = http.Get("http://vtgate:15001")`),
+				"vitess.io/vitess/examples/are-you-alive@v0.0.0-20201226175325-4df037de0a7d/test/fake.go":         goSrc(`"os/exec"`, `_ = exec.Command("sh")`),
+			},
+			want:   []capability.Capability{capability.CapNetwork},
+			absent: []capability.Capability{capability.CapShell},
+		},
+		{
+			name: "kops tests module",
+			files: map[string]string{
+				"k8s.io/kops/tests/e2e@v0.0.0-20260505071424-48f41f4149cd/pkg/env.go": goSrc(`"os"`, `_ = os.Getenv("KOPS_STATE_STORE")`),
+			},
+			want: []capability.Capability{capability.CapEnvAccess},
+		},
+	})
+}

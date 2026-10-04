@@ -11,8 +11,12 @@ func TestNPMPublisherBaseline(t *testing.T) {
 		"4.18.0": {
 			NpmUser:     &npmHuman{Name: "jdalton", Email: "john.david.dalton@gmail.com"},
 			Maintainers: []npmHuman{{Name: "jdalton", Email: "john.david.dalton@gmail.com"}},
+			Repository:  map[string]any{"type": "git", "url": "git+https://github.com/lodash/lodash.git"},
+			Homepage:    "https://lodash.com/",
 		},
-		"4.18.1": {NpmUser: &npmHuman{Name: "jdalton", Email: "john.david.dalton@gmail.com"}},
+		// The scanned version's own repository is the publisher's to write.
+		"4.18.1": {NpmUser: &npmHuman{Name: "jdalton", Email: "john.david.dalton@gmail.com"},
+			Repository: map[string]any{"type": "git", "url": "git+https://github.com/attacker/lodash.git"}},
 	}
 	stamps := map[string]string{
 		"created": "2012-04-23T16:37:11.912Z",
@@ -25,9 +29,11 @@ func TestNPMPublisherBaseline(t *testing.T) {
 	// store touched last.
 	got := npmPublisherBaseline(versions, stamps, "4.18.1")
 	want := &PublisherBaseline{
-		Version:     "4.18.0",
-		Publishers:  []string{"jdalton <john.david.dalton@gmail.com>"},
-		Maintainers: []string{"jdalton <john.david.dalton@gmail.com>"},
+		Version:       "4.18.0",
+		Publishers:    []string{"jdalton <john.david.dalton@gmail.com>"},
+		Maintainers:   []string{"jdalton <john.david.dalton@gmail.com>"},
+		SourceRepoURL: "https://github.com/lodash/lodash",
+		HomepageURL:   "https://lodash.com/",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("baseline for 4.18.1 = %+v, want %+v", got, want)

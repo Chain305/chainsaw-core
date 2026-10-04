@@ -106,22 +106,18 @@ func TestDirectionCheckClearsProductionFalsePositives(t *testing.T) {
 	d := prodShapedDetector(t)
 	for _, row := range prodHighFalsePositives {
 		t.Run(row.Ecosystem+"/"+row.Name+"@"+row.Version, func(t *testing.T) {
-			got := d.Check(context.Background(), row.Ecosystem, row.Name)
-
-			// The pair must still be FOUND — this is a demotion, not a
-			// silencing. If the detector stopped matching at all, the
-			// measurement below would pass for the wrong reason.
-			if !got.IsSuspected {
-				t.Fatalf("%s: expected the similarity to still be reported (demote, never silence), got a clean result",
-					row.Name)
+			// The pair must still be FOUND by the matcher, or the clean
+			// result below would pass for the wrong reason.
+			raw := d.check(context.Background(), row.Ecosystem, row.Name)
+			if !raw.IsSuspected || raw.SimilarTo != row.SimilarTo {
+				t.Fatalf("%s: matcher gave %+v, want a hit on %q — the production row is not being reproduced",
+					row.Name, raw, row.SimilarTo)
 			}
-			if got.SimilarTo != row.SimilarTo {
-				t.Fatalf("%s: SimilarTo = %q, want %q — the production row is not being reproduced",
-					row.Name, got.SimilarTo, row.SimilarTo)
-			}
-			if got.Confidence != "low" {
-				t.Errorf("%s → %q: confidence = %q, want \"low\". %q is the more-installed of the two, so the typosquat claim points the wrong way and must not reach the blocking lane",
-					row.Name, row.SimilarTo, got.Confidence, row.Name)
+			// Cleared, not demoted: a "low" still cost -8 and still read as
+			// suspected to a policy's isSuspectedTyposquat (json5, 2026-10-03).
+			if got := d.Check(context.Background(), row.Ecosystem, row.Name); got.IsSuspected {
+				t.Errorf("%s → %q: %+v, want clean. %q is the more-installed of the two, so the typosquat claim points the wrong way",
+					row.Name, row.SimilarTo, got, row.Name)
 			}
 		})
 	}
@@ -425,14 +421,13 @@ func TestDirectionCheckClearsProductionMediumFalsePositives(t *testing.T) {
 			}
 			d := NewDetector(slog.New(slog.NewTextHandler(io.Discard, nil)))
 			d.LoadEcosystem(row.Ecosystem, []PopularPackage{{Name: row.SimilarTo, Rank: 1}})
-			got := d.Check(context.Background(), row.Ecosystem, row.Name)
-			if !got.IsSuspected {
+			if !d.check(context.Background(), row.Ecosystem, row.Name).IsSuspected {
 				return // not reproducible from a one-name index; predicate asserted above
 			}
 			reproduced++
-			if got.Confidence != "low" {
-				t.Errorf("%s → %q: confidence = %q, want \"low\" — %q is the more-installed of the two",
-					row.Name, row.SimilarTo, got.Confidence, row.Name)
+			if got := d.Check(context.Background(), row.Ecosystem, row.Name); got.IsSuspected {
+				t.Errorf("%s → %q: %+v, want clean — %q is the more-installed of the two",
+					row.Name, row.SimilarTo, got, row.Name)
 			}
 		})
 	}
@@ -441,68 +436,58 @@ func TestDirectionCheckClearsProductionMediumFalsePositives(t *testing.T) {
 	}
 }
 
-// TestDirectionCheckDemotesEveryTierAboveLow pins the tier coverage itself.
+// TestDirectionCheckClearsEveryTier pins the tier coverage itself.
 // Correcting "high" and knowingly leaving "medium" wrong would be arbitrary:
 // the claim is false at both.
-func TestDirectionCheckDemotesEveryTierAboveLow(t *testing.T) {
+func TestDirectionCheckClearsEveryTier(t *testing.T) {
 	d := NewDetector(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// json5 → json3 is d=1 (high). acorn → cors is d=2 (medium). Both
-	// wrong-direction; both must land on "low".
+	// wrong-direction; both must come back clean.
 	d.LoadEcosystem("npm", []PopularPackage{{Name: "json3", Rank: 1}, {Name: "cors", Rank: 2}})
 	for _, tc := range []struct{ name, target, wasTier string }{
 		{"json5", "json3", "high"},
 		{"acorn", "cors", "medium"},
 	} {
-		got := d.Check(context.Background(), "npm", tc.name)
-		if !got.IsSuspected || got.SimilarTo != tc.target {
-			t.Fatalf("%s → %s not reproduced: %+v", tc.name, tc.target, got)
+		raw := d.check(context.Background(), "npm", tc.name)
+		if !raw.IsSuspected || raw.SimilarTo != tc.target || raw.Confidence != tc.wasTier {
+			t.Fatalf("%s → %s (%s) not reproduced: %+v", tc.name, tc.target, tc.wasTier, raw)
 		}
-		if got.Confidence != "low" {
-			t.Errorf("%s → %q (was %s): confidence = %q, want \"low\" — the demotion must cover every tier above low",
-				tc.name, tc.target, tc.wasTier, got.Confidence)
+		if got := d.Check(context.Background(), "npm", tc.name); got.IsSuspected {
+			t.Errorf("%s → %q (was %s): %+v, want clean — the direction check must cover every tier",
+				tc.name, tc.target, tc.wasTier, got)
 		}
 	}
 }
 
-// TestDirectionCheckLeavesTheCombosquatFloorAlone records the SCOPE of this
-// fix against two rows that look like they belong to it and do not.
-//
-// `prettier` reported as similar to `ret`, and `tailwindcss` to `css`, are
-// real and visibly false — but they are COMBOSQUAT hits, already graded
-// "low" (-8, advisory) by the lane's own deliberate breadth (checkCombosquat:
-// 13.0% of benign packages embed some popular name). Check's demotion is
-// guarded on `Confidence != "low"`, so this fix does not touch them and must
-// not be credited with fixing them. Correcting the combosquat lane's own
-// false-claim rate is separate work.
-func TestDirectionCheckLeavesTheCombosquatFloorAlone(t *testing.T) {
+// TestDirectionCheckClearsTheCombosquatFloor: `prettier` reported as similar
+// to `ret`, and `tailwindcss` to `css`, are combosquat hits graded "low" by
+// that lane's own breadth (13.0% of benign packages embed some popular name).
+// They are also wrong-direction, and since 2026-10-03 the direction check is
+// no longer guarded on `Confidence != "low"`, so they come back clean. On the
+// live server corpus that clears 237 of the 8,000 reviewed top npm/PyPI names,
+// every one of them a "low".
+func TestDirectionCheckClearsTheCombosquatFloor(t *testing.T) {
 	d := NewDetector(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	d.LoadEcosystem("npm", []PopularPackage{{Name: "ret", Rank: 1}, {Name: "css", Rank: 2}})
 	var live int
 	for _, name := range []string{"prettier", "tailwindcss"} {
-		got := d.Check(context.Background(), "npm", name)
-		if !got.IsSuspected {
+		raw := d.check(context.Background(), "npm", name)
+		if !raw.IsSuspected {
 			// `prettier` → `ret` needs a fuller corpus than two names to
 			// reproduce; `tailwindcss` → `css` reproduces here. Counted
 			// below so this test cannot quietly become vacuous.
 			continue
 		}
 		live++
-		if got.Confidence != "low" {
-			t.Errorf("%s → %q (%s): confidence = %q; this lane is expected to sit at the advisory floor, so the direction check has changed something it does not claim to fix",
-				name, got.SimilarTo, got.Method, got.Confidence)
+		if raw.Confidence != "low" {
+			t.Fatalf("%s → %q (%s): matcher confidence %q, expected the combosquat floor", name, raw.SimilarTo, raw.Method, raw.Confidence)
+		}
+		if got := d.Check(context.Background(), "npm", name); got.IsSuspected {
+			t.Errorf("%s → %q: %+v, want clean — wrong-direction at the floor too", name, raw.SimilarTo, got)
 		}
 	}
 	if live == 0 {
 		t.Fatal("neither combosquat hit reproduced — this test is asserting nothing")
-	}
-
-	// And the wrong-direction predicate DOES hold for both, which is the
-	// point: they are excluded by the `Confidence != "low"` guard in Check,
-	// not because the direction check considers them fine.
-	for _, tc := range []struct{ cand, target string }{{"prettier", "ret"}, {"tailwindcss", "css"}} {
-		if !moreEstablishedThanTarget("npm", tc.cand, tc.target) {
-			t.Errorf("%s → %q: expected wrong-direction on the reference; the scope note in this test is then wrong", tc.cand, tc.target)
-		}
 	}
 }
 

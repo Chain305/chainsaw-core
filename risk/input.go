@@ -83,6 +83,38 @@ type Input struct {
 	// benign packages. See registry_supplychain.go.
 	InstallScriptEvalEncoded bool
 
+	// MaliciousIOCKind is core/iocscan's verdict on the package's SHIPPING
+	// source: exfil_host (webhook, paste drop, tunnel, OOB host),
+	// stealer_string, or reputation_host; empty when nothing fired. Hits only
+	// in tests, docs examples or vendored trees are dropped upstream
+	// (provider_iocscan.go). MaliciousIOCCoupled is set on an exfil_host hit
+	// whose file also makes an outbound call.
+	//
+	// The provider has computed these since it was written; the legacy trust
+	// score and the policy context read them, and nothing in this engine did
+	// until 2026-10-03.
+	MaliciousIOCKind    string
+	MaliciousIOCCoupled bool
+	// MaliciousIOCAtEntry: the coupled sink is in a file that runs on install
+	// or import (npm hook scripts; setup.py, __init__.py). Gates the
+	// sc.exfil_sink_at_install quarantine.
+	MaliciousIOCAtEntry bool
+
+	// The 2026-10-04 iocscan indicators, each a detail string (empty = no
+	// hit): a credential embedded in a dependency spec (already redacted),
+	// and an application's private credential store read by a file that
+	// also sends.
+	DependencyCredential string
+	AppCredentialSend    string
+
+	// ImportTimeKind is core/pysource's verdict on what a Python package does
+	// at module top level, i.e. on import or install: top_level_shell,
+	// obfuscated_exec(_bare), import_time_exfil, import_time_beacon or
+	// embedded_executable; empty when nothing fired. Same history as
+	// MaliciousIOCKind. Only top_level_shell is scored — see
+	// sc.import_time_shell for why the others are not.
+	ImportTimeKind string
+
 	// ---- cross-version diff ----
 	//
 	// These are set ONLY when a prior version's artifact scan actually ran.
@@ -257,6 +289,11 @@ type Input struct {
 	// share one SPDX parse. A nil slice means "not yet classified" and
 	// all License* tag signals stay dormant.
 	LicenseTags []LicenseTag
+	// LicenseFromFile is true when LicenseSPDX / LicenseTags were taken from
+	// the package's own top-level LICENSE file because the manifest was
+	// empty or unidentified (intelligence.projectLicenseFile). The licence
+	// was inferred from text, not declared.
+	LicenseFromFile bool
 
 	// --- Socket-gap Wave 1 ---
 	// DeprecatedByMaintainer is true when the registry surfaced a
@@ -436,6 +473,18 @@ type Input struct {
 	// manifests) contain http(s) URLs. The count in CapCounts is per file.
 	CapURLStrings         bool
 	CapURLStringsEvidence []CapEvidenceEntry
+
+	// CapDebugAccess / CapTelemetry are the weight-0 cap.debug_access and
+	// cap.telemetry observations, set by projectDebugTelemetry from
+	// ArtifactScanSection.DebugAccess / .Telemetry.
+	CapDebugAccess         bool
+	CapDebugAccessEvidence []CapEvidenceEntry
+	CapTelemetry           bool
+	CapTelemetryEvidence   []CapEvidenceEntry
+	// CapDynamicRequire is the weight-0 cap.dynamic_require observation,
+	// set from ArtifactScanSection.DynamicRequire.
+	CapDynamicRequire         bool
+	CapDynamicRequireEvidence []CapEvidenceEntry
 
 	// CapCounts is the total number of matching lines per cap.* signal ID.
 	// The *Evidence slices above keep at most three locations; this is how

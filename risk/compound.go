@@ -19,6 +19,10 @@ type CompoundRule struct {
 	Title       string
 	Description string
 	Fires       func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any)
+	// MaxImpact has Signal.MaxImpact's meaning and joins the same minimum in
+	// applyMaxImpactCeiling. 0 = no ceiling, which every rule had until
+	// CompoundSCExfilAtInstall.
+	MaxImpact int
 }
 
 // CompoundRules is the registry for compound signals. Kept separate from
@@ -36,6 +40,7 @@ const (
 	// when all three axes line up. Pain 9 (Agent D).
 	CompoundSCNetShellInstallNPM = "sc.npm_install_net_shell"
 	CompoundSCEnvNetInstall      = "sc.env_net_install"
+	CompoundSCExfilAtInstall     = "sc.exfil_sink_at_install"
 )
 
 func init() {
@@ -203,6 +208,57 @@ func init() {
 					"networkAccess":    true,
 					"shellAccess":      true,
 				}
+		},
+	})
+}
+
+func init() {
+	// sc.exfil_sink_at_install — two independent detectors agree: code that
+	// runs on install or import sends to a hard-coded exfiltration sink
+	// (sc.exfil_sink_used with Input.MaliciousIOCAtEntry) AND it executes something malicious
+	// at install: a malware-shaped install script (fetch-and-exec,
+	// decode-and-eval, or a host-recon beacon in the script the hook runs;
+	// core/installscripts) or a module-level shell command
+	// (sc.import_time_shell; for setup.py that is install). Either alone
+	// warns. Together they quarantine.
+	//
+	// MEASURED 2026-10-04 on wave fd81f358, bytes only, feed-blind: 45 of
+	// 400 npm and 46 of 397 PyPI Datadog malware samples (without the
+	// install/import-path gate, 46 npm); 0 of 3,115 benign packages with bytes,
+	// including 381 npm install-hook versions and 696 PyPI sdists.
+	// Ecosystem-blind on purpose: unlike the two rules above it rests on no
+	// "has an install script" base rate.
+	//
+	// This is the first compound with a ceiling. The two above deliberately
+	// have none: measured on the same day they fire on esbuild, node-sass,
+	// canvas, chromedriver, @sentry/cli, ssh2, node-pty, @tensorflow/tfjs-node
+	// and youtube-dl-exec (10 of 94 install-hook packages), because a binary
+	// installer reads proxy settings, downloads and shells out.
+	CompoundRules = append(CompoundRules, CompoundRule{
+		ID:          CompoundSCExfilAtInstall,
+		Category:    CategorySupplyChain,
+		Severity:    SevCritical,
+		Weight:      -40,
+		MaxImpact:   thresholdQuarantine - 1,
+		Title:       "Exfiltration endpoint in a package with a malicious install script",
+		Description: "The package's code sends to a hard-coded exfiltration endpoint and it executes malware-shaped code at install time. Two independent detectors agree.",
+		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
+			// The sink itself must be on the install/import path. Measured:
+			// R4 vs this gate differ by 1 of 92 malware samples, and the gate
+			// is what keeps a security tool that posts to Slack from its own
+			// plugin module (detect-secrets) out of quarantine for good if it
+			// ever also gains a malware-shaped install step.
+			if !in.MaliciousIOCAtEntry {
+				return false, "", nil
+			}
+			_, sink := fired[SignalSCExfilSinkUsed]
+			_, fetch := fired[SignalSCInstallScriptNetwork]
+			_, enc := fired[SignalSCInstallScriptEvalEnc]
+			_, shell := fired[SignalSCImportTimeShell]
+			if !sink || !(fetch || enc || shell) {
+				return false, "", nil
+			}
+			return true, "Code sends to an exfiltration endpoint and runs malware-shaped code at install time.", nil
 		},
 	})
 }

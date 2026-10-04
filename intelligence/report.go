@@ -273,6 +273,13 @@ type PublisherBaseline struct {
 	Version     string
 	Publishers  []string
 	Maintainers []string
+	// SourceRepoURL and HomepageURL are THAT version's own repository and
+	// homepage, never the packument-level ones: those, like the scanned
+	// version's, are written by whoever publishes next, and the publisher
+	// diff grants mail-domain continuity only on ties the previous
+	// publisher's version already named.
+	SourceRepoURL string
+	HomepageURL   string
 }
 
 // ScanLocation is one place in a package's files where a scanner matched.
@@ -344,7 +351,17 @@ const (
 // of the archive itself (install scripts, hidden unicode, clam/trivy on
 // artifacts). Populated only when the caller passed an Artifact to Scan.
 type ArtifactScanSection struct {
-	Performed            bool       `json:"performed"`
+	// Performed means the artifact BYTES were scanned. Only a provider that
+	// read the bytes may set it: coverage counts, the artifact follow-up and
+	// retry triggers, the cross-version diffs and the "scanned" UI all read
+	// it as that.
+	Performed bool `json:"performed"`
+	// MetadataProbed means a provider that reads the REGISTRY, not the
+	// bytes, wrote into this section: maintainer account age, author
+	// existence, first-time collaborator, repo stars. Until 2026-10-04 those
+	// providers set Performed, so 60 unpublished malicious packages read as
+	// "artifact scanned" on nothing but a maintainer-age lookup.
+	MetadataProbed       bool       `json:"metadataProbed,omitempty"`
 	ScannedAt            *time.Time `json:"scannedAt,omitempty"`
 	ScannedArtifactSHA   string     `json:"scannedArtifactSha256,omitempty"`
 	InstallScriptKind    string     `json:"installScriptKind,omitempty"` // none|present|fetches_remote|eval_encoded|mutates_dependency
@@ -384,6 +401,18 @@ type ArtifactScanSection struct {
 	MaliciousIOC       bool   `json:"maliciousIOC,omitempty"`
 	MaliciousIOCKind   string `json:"maliciousIOCKind,omitempty"`   // exfil_host|stealer_string
 	MaliciousIOCDetail string `json:"maliciousIOCDetail,omitempty"` // indicator + file
+	// MaliciousIOCCoupled: an exfil_host hit whose file also sends
+	// (iocscan.Result.Coupled). False for every other kind.
+	MaliciousIOCCoupled bool `json:"maliciousIOCCoupled,omitempty"`
+	// MaliciousIOCAtEntry: a coupled exfil_host hit in an install/import
+	// entrypoint (npm hook scripts; setup.py, __init__.py).
+	MaliciousIOCAtEntry bool `json:"maliciousIOCAtEntry,omitempty"`
+
+	// The iocscan indicators added 2026-10-04 (core/iocscan/indicators.go).
+	// Each is a detail string, empty when nothing fired. DependencyCredential
+	// is already redacted to the token's prefix and length.
+	DependencyCredential string `json:"dependencyCredential,omitempty"`
+	AppCredentialSend    string `json:"appCredentialSend,omitempty"`
 
 	// BuildRsExecutes is set by the installscripts provider when a cargo
 	// crate ships a build.rs that performs shell or network execution at
@@ -398,16 +427,12 @@ type ArtifactScanSection struct {
 	ManifestFilesSeen  []string       `json:"manifestFilesSeen,omitempty"`
 	ExtraFindings      map[string]any `json:"extraFindings,omitempty"`
 
-	// Socket-gap Wave 1. ShrinkwrapPresent is npm-specific and set by
-	// the shrinkwrap provider; ManifestConfusion is npm-specific and
-	// set by the manifestconfusion provider.
-	ShrinkwrapPresent bool `json:"shrinkwrapPresent,omitempty"`
-	// ShrinkwrapSuppressed is true when at least one lockfile match
-	// was found but ALL matches were suppressed by context filters
-	// (test/example/docs paths, or a manifest-declared
-	// bundledDependencies block). Lets operators see "we found
-	// lockfiles but suppressed them" without re-firing the signal.
-	ShrinkwrapSuppressed    bool     `json:"shrinkwrapSuppressed,omitempty"`
+	// Socket-gap Wave 1. ShrinkwrapPresent (a root npm-shrinkwrap.json)
+	// is set by the shrinkwrap provider; ManifestConfusion is npm-specific
+	// and set by the manifestconfusion provider. (shrinkwrapSuppressed was
+	// removed 2026-10-03 with the suppressions that set it; old stored rows
+	// still decode, the field is ignored.)
+	ShrinkwrapPresent       bool     `json:"shrinkwrapPresent,omitempty"`
 	ManifestConfusion       bool     `json:"manifestConfusion,omitempty"`
 	ManifestConfusionFields []string `json:"manifestConfusionFields,omitempty"`
 
@@ -429,6 +454,26 @@ type ArtifactScanSection struct {
 	URLStringsFiles   int            `json:"urlStringsFiles,omitempty"`
 	URLStringsSamples []ScanLocation `json:"urlStringsSamples,omitempty"`
 	MinifiedCode      bool           `json:"minifiedCode,omitempty"`
+
+	// DebugAccess / Telemetry are the weight-0 cap.debug_access and
+	// cap.telemetry observations (core/codesmell/debug_telemetry.go). The
+	// samples are the first few matching locations.
+	DebugAccess        bool           `json:"debugAccess,omitempty"`
+	DebugAccessSamples []ScanLocation `json:"debugAccessSamples,omitempty"`
+	Telemetry          bool           `json:"telemetry,omitempty"`
+	TelemetrySamples   []ScanLocation `json:"telemetrySamples,omitempty"`
+	// DynamicRequire is the weight-0 cap.dynamic_require observation:
+	// JavaScript require() with a non-literal argument.
+	DynamicRequire        bool           `json:"dynamicRequire,omitempty"`
+	DynamicRequireSamples []ScanLocation `json:"dynamicRequireSamples,omitempty"`
+
+	// LicenseFileExpression is the SPDX id the package's own top-level
+	// LICENSE / COPYING text identifies as ("" when a licence file exists
+	// but matches no known text). LicenseFilePaths lists those files; an
+	// empty list means none was found, never "the package has no licence".
+	// Consulted only when the manifest licence is empty or unidentified.
+	LicenseFileExpression string   `json:"licenseFileExpression,omitempty"`
+	LicenseFilePaths      []string `json:"licenseFilePaths,omitempty"`
 
 	// Socket-gap Wave 4. TrivialPackage + TooManyFiles ride the shared
 	// Wave-0 artifact map. The three RTT signals (NonExistentAuthor,
@@ -608,6 +653,11 @@ type MaintainerAgeBasis struct {
 	// on reuse so a carried result reads exactly like a fetched one. ""
 	// for the direct account endpoints.
 	Method string `json:"method,omitempty"`
+	// Lookup is the generation of the lookup code that produced the number.
+	// A stored basis from another generation is not reused, so a fix to how
+	// an account is dated takes effect on the next scan rather than after
+	// the reuse window. 0 on rows written before the field existed.
+	Lookup int `json:"lookup,omitempty"`
 }
 
 // DownloadCount.Window values.
@@ -799,6 +849,10 @@ type ObservationSection struct {
 	DocStatus       string           `json:"docStatus,omitempty"` // official|official-plus-observed|provisional
 	Warnings        []Warning        `json:"warnings,omitempty"`
 	ProviderTimings []ProviderTiming `json:"providerTimings,omitempty"`
+
+	// ProvisionalStreak counts consecutive scans of this coordinate that
+	// ended Provisional, so the recheck backs off: see provisionalBackoff.
+	ProvisionalStreak int `json:"provisionalStreak,omitempty"`
 	// Partial is true when the Scan that produced this Report was
 	// capped via Options.MaxTier — i.e. the higher-tier providers were
 	// deliberately skipped to return inside a tighter deadline. The UI
@@ -1542,6 +1596,73 @@ func (r *Report) MatcherSupersededForRecompute() bool {
 		return true
 	}
 	return r.Observation.MatcherEpoch < CurrentMatcherEpoch
+}
+
+// WarnDownloadsQueued marks a download count that came back -1 because the
+// name was still queued behind the registry's rate limit at the provider
+// deadline. The answer lands in the process cache seconds later, so the -1
+// is provisional, not a registry answer: see Report.Provisional.
+const WarnDownloadsQueued = "downloads_queued"
+
+// provisionalBackoff is how long a provisional report counts as fresh, in
+// place of the 24h staleness window, by its ProvisionalStreak: 15m after the
+// first provisional scan, then 1h, then 4h, then the normal window. A queued
+// download count answers into a 24h process cache within seconds, so one
+// recheck usually fills it; a coordinate that is cut off on every try (a
+// Maven artifact with a long parent-POM chain under load) costs three extra
+// scans and then settles at the daily cadence instead of rescanning every 15
+// minutes for ever. The streak lives on the report, so it survives restarts.
+var provisionalBackoff = []time.Duration{15 * time.Minute, time.Hour, 4 * time.Hour}
+
+// nextProvisionalStreak is the streak a freshly scanned report carries: one
+// more than the stored row's while it stays provisional, zero once it is not.
+func nextProvisionalStreak(r *Report, prior int) int {
+	if !r.Provisional() {
+		return 0
+	}
+	return prior + 1
+}
+
+// Provisional reports a report whose gap is transient: a fact that was
+// in flight, not absent, when the scan ended. It must not stand for a full
+// staleness window as if the fact had failed. Until 2026-10-03 a
+// rate-limited npm count was written as a final -1 and served for 24h:
+// 11 of 35 popular npm packages in prod (react, ms, semver, tslib).
+//
+// A registry fetch cut off by the provider deadline is the same state with a
+// larger cost: the whole verdict is Unknown, and context_cancelled reads as
+// unavailable to a closed coverage gate, so a cached row refused installs for
+// a day. Provisional only when it actually cost the verdict: a fetch
+// cancelled because a malware hit short-circuited the scan sits on a decided
+// row, and rechecking that every 15 minutes would buy nothing.
+func (r *Report) Provisional() bool {
+	if r == nil {
+		return false
+	}
+	unknown := r.Risk != nil && r.Risk.Verdict == risk.VerdictUnknown
+	for _, w := range r.Observation.Warnings {
+		if w.Code == WarnDownloadsQueued {
+			return true
+		}
+		if unknown && w.Provider == "registrymetadata" && w.Code == WarnRegistryCancelled {
+			return true
+		}
+	}
+	return false
+}
+
+// freshFor is the window a stored report counts as fresh in: maxStale, or a
+// provisional report's backoff step, whichever is shorter. A row written
+// before the streak existed (0) is treated as the first step.
+func (r *Report) freshFor(maxStale time.Duration) time.Duration {
+	if !r.Provisional() {
+		return maxStale
+	}
+	step := max(r.Observation.ProvisionalStreak, 1) - 1
+	if step >= len(provisionalBackoff) || provisionalBackoff[step] >= maxStale {
+		return maxStale
+	}
+	return provisionalBackoff[step]
 }
 
 // MatcherStale reports whether this Report was produced by a superseded

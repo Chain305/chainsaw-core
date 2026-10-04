@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/chain305/chainsaw-core/hiddenunicode"
 )
@@ -23,6 +24,10 @@ const (
 	SignalSCPOMDeveloperListChanged = "sc.pom_developer_list_changed"
 	SignalSCInstallScriptNetwork    = "sc.install_script_fetches_remote"
 	SignalSCInstallScriptEvalEnc    = "sc.install_script_eval_encoded"
+	SignalSCExfilSinkUsed           = "sc.exfil_sink_used"
+	SignalSCImportTimeShell         = "sc.import_time_shell"
+	SignalSCDependencyCredential    = "sc.dependency_credential"
+	SignalSCAppCredentialExfil      = "sc.app_credential_exfil"
 	SignalSCInstallScriptOnly       = "sc.install_script_only"
 	SignalSCInstallScriptOnlyNPM    = "sc.install_script_only_npm"
 	SignalSCShellAppeared           = "sc.shell_access_appeared"
@@ -32,6 +37,7 @@ const (
 	SignalSCRepoOwnershipMismatch   = "sc.repo_ownership_mismatch"
 	SignalSCRepoArchived            = "sc.repo_archived"
 	SignalSCRepoMissing             = "sc.repo_missing"
+	SignalSCRepoMissingEstablished  = "sc.repo_missing_established"
 	SignalSCProvenanceVerified      = "sc.provenance_verified"
 	// SignalSCBuilderRefVersionMismatch: the attestation was built from a
 	// tag that does not name this version. Observed at weight 0 (S-3).
@@ -316,6 +322,134 @@ func init() {
 		},
 	})
 
+	// sc.exfil_sink_used — the package's own shipping code names an exfil
+	// sink (Discord/Telegram/Slack webhook, paste or anonymous-file drop,
+	// ngrok/interactsh tunnel, OOB host) AND the same file makes an outbound
+	// call. core/iocscan found these since it was written; this engine never
+	// read them until 2026-10-03.
+	//
+	// MEASURED 2026-10-03, bytes only, feed-blind:
+	//
+	//	                       fires        coupled (this signal)
+	//	Datadog malware npm    81 of 400    66 of 400
+	//	Datadog malware pypi  190 of 397   177 of 397
+	//	benign popular npm+pypi  2 of 943    0 of 943
+	//	benign corpus-v1 E       0 of 868    0 of 868
+	//
+	// Re-measured 2026-10-04 on wave fd81f358 against 3,115 benign packages
+	// with bytes (381 npm install-hook versions, 502 npm top-5000, 696 PyPI
+	// top-5k sdists, the 396-row popular stratum, rev5 C and E): ONE fire,
+	// detect-secrets 1.5.0, accepted as a known warn false positive. It is a
+	// secrets scanner whose Slack plugin knows the webhook host and posts to
+	// it to verify a found secret, which is exactly this signal's shape. Gating
+	// on the install/import path instead removes it but drops this signal from
+	// 177 to 52 PyPI malware fires, so the gate is applied only to the
+	// quarantine compound (sc.exfil_sink_at_install).
+	//
+	// The two benign hits are why the coupling exists: yt-dlp lists gofile.io
+	// among unsupported sites, and ngrok's own index.d.ts names .ngrok.io.
+	// Neither file sends anything. The stealer_string and reputation_host
+	// kinds are NOT read: stealer_string fired on 1 malware sample and 9
+	// benign packages (wallet SDKs, an editor's AutoHotkey mode), and
+	// reputation_host is a feed, not detection.
+	//
+	// Warn, not quarantine: one indicator, however specific, is not proof.
+	register(Signal{
+		ID:          SignalSCExfilSinkUsed,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -30,
+		MaxImpact:   40,
+		Title:       "Code sends data to an exfiltration endpoint",
+		Description: "The package's own code embeds a webhook, paste drop, tunnel or out-of-band host and makes an outbound call from the same file. Legitimate libraries do not ship a hard-coded exfiltration sink.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if in.MaliciousIOCKind != "exfil_host" || !in.MaliciousIOCCoupled {
+				return false, "", nil
+			}
+			return true, "Shipping code embeds an exfiltration endpoint and sends from the same file.", nil
+		},
+	})
+
+	// sc.import_time_shell — a Python module runs a shell command at top
+	// level, so it executes on import, and setup.py's on install
+	// (core/pysource, kind top_level_shell).
+	//
+	// MEASURED 2026-10-03/04, bytes only, feed-blind: 13 of 397 Datadog PyPI
+	// malware samples, all 13 otherwise allow; 0 of 696 top-5k PyPI sdists
+	// (305 of them ship a setup.py), 0 of 400 popular PyPI, and 0 of the
+	// corpus-v1 PyPI packages with bytes.
+	//
+	// pysource's other kinds are deliberately NOT scored, on the same
+	// measurement. import_time_exfil fired on 10 popular packages (aiohttp,
+	// prefect, mlflow-skinny, marimo, ...) against 3 malware samples.
+	// import_time_beacon would add 10 malware samples and fires on anyio, a
+	// top-50 package, and metaflow-netflixext; obfuscated_exec would add 6
+	// and fires on datachain. Those are trade-offs for a decision, not a
+	// default.
+	register(Signal{
+		ID:          SignalSCImportTimeShell,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -25,
+		MaxImpact:   40,
+		Title:       "Python module runs a shell command on import",
+		Description: "A module-level statement in the package's Python source spawns a shell, so it runs the moment the package is imported or, in setup.py, installed.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if in.ImportTimeKind != "top_level_shell" {
+				return false, "", nil
+			}
+			return true, "Module-level code spawns a shell at import time.", nil
+		},
+	})
+
+	// Two narrow indicators from reading the bytes of malware every other
+	// detector allowed (2026-10-04; core/iocscan/indicators.go). Each warns
+	// and neither quarantines.
+	//
+	// MEASURED, bytes only, feed-blind. Independent recall on the 797 Datadog
+	// samples: 1 each (genz-translator; defi-env-auditor), both already warn.
+	// Benign: 0 of 2,931 packages with bytes (380 npm install-hook versions,
+	// 498 npm top-5000, 700 PyPI top-5k sdists, 338 popular stratum, rev5 C
+	// 147 and E 868). Each was derived from one of the parity malicious rows
+	// it catches (@velliajs/discord, @yancyyu/agentcli), so that catch is not
+	// evidence.
+	//
+	// sc.dependency_credential — @velliajs/discord pulled an unpinned private
+	// repo with an embedded GitHub token on every install. A published
+	// package carrying a live credential is reportable whatever its intent.
+	register(Signal{
+		ID:          SignalSCDependencyCredential,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -25,
+		MaxImpact:   40,
+		Title:       "Dependency spec embeds a credential",
+		Description: "A dependency is fetched with a forge or registry token, or a user:password, written into the package's manifest or lockfile.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if in.DependencyCredential == "" {
+				return false, "", nil
+			}
+			return true, "Credential in a dependency spec: " + in.DependencyCredential, nil
+		},
+	})
+	// sc.app_credential_exfil — @yancyyu/agentcli read Lark and Codex/Claude
+	// credential stores and POSTed them. Narrow path list, same-file send.
+	register(Signal{
+		ID:          SignalSCAppCredentialExfil,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -25,
+		MaxImpact:   40,
+		Title:       "Code sends another application's credentials",
+		Description: "A file reads an application's private credential store (an AI coding assistant's auth or transcripts, a CLI keychain, git's credential file) and makes an outbound call.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if in.AppCredentialSend == "" {
+				return false, "", nil
+			}
+			return true, "Reads and sends: " + in.AppCredentialSend, nil
+		},
+	})
+
 	// Plain install script (no network), split into an OBSERVATION and an
 	// npm-scoped VERDICT as of 2026-09-17.
 	//
@@ -471,6 +605,17 @@ func init() {
 			if in.RepoLinkStatus != "archived" {
 				return false, "", nil
 			}
+			// An archived repo with a release in the last year is the tell
+			// of a MOVED project, not a retired one: rubygems' bundler
+			// (bundler/bundler archived into rubygems/rubygems, released
+			// 2026-09-30), the Eclipse xtext/xtend artifacts, NexusMods
+			// .MnemonicDB. On corpus-v1 rev5 this signal's warn-59 ceiling
+			// hit those as hard as the genuinely retired kubefed, paperclip
+			// and passport-azure-ad. An unknown release date keeps firing:
+			// it is not evidence of life.
+			if in.LatestReleaseAt != nil && time.Since(*in.LatestReleaseAt) < ArchivedRepoRecentReleaseWindow {
+				return false, "", nil
+			}
 			return true, "Source repository is archived (read-only).", nil
 		},
 	})
@@ -487,7 +632,30 @@ func init() {
 		MaxImpact: maxImpactWarnTop,
 		Title:     "Source repo missing",
 		Fires: func(in Input) (bool, string, map[string]any) {
-			if in.RepoLinkStatus != "missing" {
+			if in.RepoLinkStatus != "missing" || !youngOrUnknownAge(in) {
+				return false, "", nil
+			}
+			return true, "Declared source repository is unreachable or deleted.", nil
+		},
+	})
+
+	// The same fact on an ESTABLISHED package, priced but without the warn
+	// ceiling. A missing repo is the sole adverse ceiling on 27 of the 92
+	// Datadog malware samples (2026-10-03) that declare one — malware cites
+	// repos that never existed — but on corpus-v1 rev5 it was also the only
+	// thing warning 34 benign packages whose authors deleted or privated a
+	// repo years after publishing. Every one of the 18 npm samples among the
+	// 27 was published within 90 days of being taken down (0-41 days); 39
+	// of the 40 benign rows were older than that. See youngOrUnknownAge.
+	register(Signal{
+		ID:          SignalSCRepoMissingEstablished,
+		Category:    CategorySupplyChain,
+		Severity:    SevLow,
+		Weight:      -12,
+		Title:       "Source repo missing (established package)",
+		Description: "The declared source repository no longer resolves, on a package and version both older than 90 days.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if in.RepoLinkStatus != "missing" || youngOrUnknownAge(in) {
 				return false, "", nil
 			}
 			return true, "Declared source repository is unreachable or deleted.", nil
@@ -862,4 +1030,28 @@ func builderRefVersionMismatch(builderID, version string) (tag, vcore string, fi
 	vcore = versionCoreRe.FindString(strings.TrimPrefix(version, "v"))
 	fires = tag != "" && vcore != "" && !strings.Contains(strings.ToLower(tag), strings.ToLower(vcore))
 	return tag, vcore, fires
+}
+
+// youngOrUnknownAge is false — the package is established — only when THIS
+// version is provably older than RepoMissingYoungWindow, and the package's
+// first release, if known, is too. The version's date is PublishedAt, else
+// VersionPublishedAt (its own timeline entry, or the NuGet leaf / Maven POM
+// date when the registry document carries none). A version with no date of
+// its own is unknown age, and unknown keeps the ceiling: an old first
+// release says nothing about a new version on that name, which is how a
+// takeover or injected release looks when its publish date was not captured
+// (FirstPublishedAt survives a failed timeline fetch via carryReleaseHistory;
+// a carried timeline predates the new version, so it cannot date it).
+// Clauses tried and rejected (2026-10-03, same two sets): "unpopular" kept
+// the ceiling on 17 of the 40 benign rows (and more once npm counts stop
+// failing), and "single young maintainer" changed nothing on either set.
+func youngOrUnknownAge(in Input) bool {
+	at := in.PublishedAt
+	if at == nil {
+		at = in.VersionPublishedAt
+	}
+	if at == nil || time.Since(*at) < RepoMissingYoungWindow {
+		return true
+	}
+	return in.FirstPublishedAt != nil && time.Since(*in.FirstPublishedAt) < RepoMissingYoungWindow
 }

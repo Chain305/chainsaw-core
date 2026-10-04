@@ -637,6 +637,32 @@ func TestInstallScriptEvalEncodedProjection(t *testing.T) {
 	}
 }
 
+// TestIOCAndImportTimeProjection: the iocscan and pysource facts must reach
+// risk.Input. Both providers ran for months while this engine read neither.
+func TestIOCAndImportTimeProjection(t *testing.T) {
+	r := &Report{Scan: ArtifactScanSection{Performed: true,
+		MaliciousIOC: true, MaliciousIOCKind: "exfil_host", MaliciousIOCCoupled: true, MaliciousIOCAtEntry: true,
+		ImportTimeExecution: true, ImportTimeKind: "top_level_shell"}}
+	in := ProjectToRiskInput(r)
+	if in.MaliciousIOCKind != "exfil_host" || !in.MaliciousIOCCoupled || !in.MaliciousIOCAtEntry || in.ImportTimeKind != "top_level_shell" {
+		t.Fatalf("projected kind=%q coupled=%v import=%q", in.MaliciousIOCKind, in.MaliciousIOCCoupled, in.ImportTimeKind)
+	}
+}
+
+// TestMergeScanKeepsIOCCoupling: the provider's coupling bit must survive the
+// scanner merge, or sc.exfil_sink_used can never fire in a real scan.
+func TestMergeScanKeepsIOCCoupling(t *testing.T) {
+	var dst ArtifactScanSection
+	MergeScan(&dst, ArtifactScanSection{MaliciousIOC: true, MaliciousIOCKind: "exfil_host", MaliciousIOCCoupled: true, MaliciousIOCAtEntry: true})
+	if dst.MaliciousIOCKind != "exfil_host" || !dst.MaliciousIOCCoupled || !dst.MaliciousIOCAtEntry {
+		t.Fatalf("merged kind=%q coupled=%v", dst.MaliciousIOCKind, dst.MaliciousIOCCoupled)
+	}
+	MergeScan(&dst, ArtifactScanSection{DependencyCredential: "package.json: ghp_…(40 chars)", AppCredentialSend: ".codex/auth.json (x.js)"})
+	if dst.DependencyCredential == "" || dst.AppCredentialSend == "" || dst.MaliciousIOCKind != "exfil_host" {
+		t.Fatalf("indicators lost in merge: %+v", dst)
+	}
+}
+
 // TestProjectVersionDiffRequiresBothScans pins the safety property at the
 // projection, where it is actually enforced.
 //

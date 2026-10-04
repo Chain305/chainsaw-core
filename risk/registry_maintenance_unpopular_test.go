@@ -145,3 +145,28 @@ func unpopularFired(eval *Evaluation) bool {
 	}
 	return false
 }
+
+// All-time totals of corpus-v1-rev4 rows on either side of the line
+// socket.dev's unpopularPackage draws (counts fetched 2026-10-03).
+func TestMaintUnpopularPackage_TotalWindow_SocketBoundary(t *testing.T) {
+	cases := []struct {
+		eco, pkg string
+		total    int
+		fires    bool
+	}{
+		{"rubygems", "tag_options", 11397, true},
+		{"rubygems", "changeset", 9082, true},
+		{"rubygems", "redrock", 12138, false},
+		{"rubygems", "lita-eval", 18873, false},
+		{"nuget", "Soenneker.Utils.Strings.LevenshteinDistance", 67541, true},
+		{"nuget", "Dapr.AI", 57553, true},
+		{"nuget", "IoFluently.SystemTextJson", 78760, false},
+		{"nuget", "Soenneker.Html.Parser", 233632, false},
+	}
+	for _, tc := range cases {
+		in := Input{Ecosystem: tc.eco, Downloads: ptr(tc.total), DownloadsWindow: "total"}
+		if got := unpopularFired(EvaluatePackage(in, Options{})); got != tc.fires {
+			t.Errorf("%s/%s total=%d: fired=%v, want %v", tc.eco, tc.pkg, tc.total, got, tc.fires)
+		}
+	}
+}

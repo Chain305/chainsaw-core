@@ -100,7 +100,7 @@ func TestNuGetPositiveAssembly(t *testing.T) {
 	r := mustAnalyze(t, dir, "nuget")
 	want := map[Capability]string{
 		CapShell:           "System.Diagnostics.Process::Start",
-		CapNetwork:         "System.Net.Http.HttpClient::GetStringAsync",
+		CapNetwork:         "System.Net.Http.HttpClient::.ctor", // its GetStringAsync is a later MemberRef
 		CapEnvAccess:       "System.Environment::GetEnvironmentVariable",
 		CapFilesystemWrite: "System.IO.File::WriteAllText",
 		CapFilesystemRead:  "System.IO.File::ReadAllText",
@@ -275,5 +275,44 @@ func TestSigParam0(t *testing.T) {
 func TestNuGetRegistered(t *testing.T) {
 	if !Supported("NuGet") {
 		t.Fatal("nuget not supported")
+	}
+}
+
+// ctorDLLB64 is Ctor.cs built the same way (net10.0, Release):
+//
+//	public static class Factory { public static HttpClient Make() => new HttpClient(); }
+//
+// A library that builds an HttpClient and hands it on never calls Send itself;
+// constructing one is the network capability, as constructing a WebClient is.
+const ctorDLLB64 = "" +
+	"H4sIAAAAAAACA+1WTWwbRRR+Eycmcdo0gbZQQGWLGwGlWtlNK9ECbRM7aULzR+yGUJDStTN2l653" +
+	"ze44rS+0SCD1AAgkVOXSCgScuPSAUFWJExzpDRAHDlzghMQFiQpVhG9m1vE6TovgwIVOMt/Me/Pm" +
+	"/c3OPE+dfJdiRNSJvrpKdI10O0p/3y6g9z1yvY8+67mx6xqbvLErf9oOjKrvlX2rYhQt1/WEUeCG" +
+	"X3MN2zWyMzmj4i1xc/PmxO5Qx+wo0SSL0b7L93/Y0PsjPWr0shRRnHRHuzIIMNYc61fzDu03UXNU" +
+	"TnXoaYxOvSlF5X9zXBtUm4TemTDg3zo2CPIU0SYMKcg9TP+gwb/uCNkNejxCm4KfExg/7grjijf9" +
+	"jqg4ZfqBX6TQt6NhoN2tcmAfNX3ueEXtq/RZ6drUJjfSdoaDehxXW7poAUa/hw1G/649GMBoYg+N" +
+	"5J4bYaEW6cbyfjNlDqWG0gclp4sc4FtYTr5GdJNpf5M54dtuOZASN2M61OSJHN2K6TNLHjsxkZX6" +
+	"sPC1pEccrxDaxXZ2bCtRjyT+YEO0XcfQF6aChX70hnOd6hLTHsbpB/qcxclkEnfSR2wLfcckfwJf" +
+	"Z5y2sWXgJySxoPC8wlsK9yn8Smn4iXksQb+wi0qx1i7z8Drrp99BHlDUrDxxukQJ2GLw+TL8GADG" +
+	"aQcwQU8A+ymt8KDCYYUTCp9X+KJCS+19Ve19jF6iL8lEjEngfbQX+BAdByYpD3yS3gcO0RXg0/Qp" +
+	"MIP7bkJC8nPAzgvrT34FZCJCb6MtamzlXWxuembKW6o5/DBNWWc45eqB4BVzruYKu8Ipywu1ctkq" +
+	"OHxY4KwLNcFpOAh4peDU87aIsvOWX+ZiDA8JP+v5Z9rlx2yHz3M/sD23fXHCLXl+xRJYtJzbSmU8" +
+	"t2SXa76Say7P8VLOKnFRn0MgQZOf8SpV21HCc9yxzqlZ0K521kcKimIje5Wq5dYjlnReFF/YBdux" +
+	"RWS1NXlmGAZuCGWE55tLjhOKrEnyksOL0qsGZ5oLc1yIqtpBZlFiuJS1rbLrBcIuBust6UC5n+P+" +
+	"sl3kQXhusIzDBTlTeAVmSCrOODZ3BY1ZUnU9fEsWrucOx2PH3/j5ZO97b7/sUqfBWHfMINaFycCA" +
+	"JPu6rx5ZPD/wbeIQLvO9B7tZ+KjtlNcj37H9Bd+qTnvu6Lkir8qA8qd972zAIKdv7hFGO8zp0XzG" +
+	"8/lwtbo3TM6zy+mUmYKGvq1rn07WDqqOVZ8G2SO3GFKkh1GnygltYnQPjpNbAddEGi8V/vCNM+pK" +
+	"6yns9ra9df3raDHYnL/TqFcb1c3BKLWIELKOM2XZLlWCIuLh6mhlWx2Ejn76zxpTxh7QVbSFLy94" +
+	"agN+o3YsoLisROrXSsd+4DxelUXgKM1hNoFKOw16Ajimqy590fnrn1oPa9F5JFLX15flrJKax9vn" +
+	"Q4+NWsKh06USeWp9t9qVx6oFboB1iwTkPFC6Xe2UNYfBJwEpG/zyBpq+UTKptb/9ePuRA9qD+sXw" +
+	"dnpUoaqyUUdEFiiutGeg1YNe2fYp2YbuLHpARWWz2uJTdE8Kd6G5Zx7dx66mbBqvdWqtSxs9kJd+" +
+	"CyXrwhcn4lFDt0lL4Osv63FkldEk1stKWkZTRRzSszKdJhF+voeU7pmQb4e6G765d7Sh8zQLrgdu" +
+	"DXGL2+YphVq7XnZ95OlIzE+pHA1jNYBUBSfjwHvjDnv0vrut/Xeq/F30wYG7qfg/tr8AExCpaAAO" +
+	"AAA="
+
+func TestNuGetHttpClientConstruction(t *testing.T) {
+	r := mustAnalyze(t, writeFixtureTree(t, map[string][]byte{"lib/net10.0/Ctor.dll": unfixture(t, ctorDLLB64)}), "nuget")
+	if evs := r.Capabilities[CapNetwork]; len(evs) == 0 || evs[0].Snippet != "System.Net.Http.HttpClient::.ctor" {
+		t.Fatalf("HttpClient construction not detected: %v", r.Capabilities)
 	}
 }

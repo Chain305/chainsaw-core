@@ -77,9 +77,18 @@ func (p *installScriptsProvider) NeedsArtifact() bool { return true }
 // Keying them apart also makes a flip reversible at no cost: flipping back
 // finds the original rows still present at version 1 and reuses them, instead
 // of re-deriving the corpus a second time.
+//
+// 3/4 (were 1/2): a .gem's data.tar.gz is now mapped, so a rubygems scan can
+// find the gem's own *.gemspec. The pair still differs, which is what keeps
+// the detector flip reversible.
+//
+// 5/6 (2026-10-03): the cargo classifier reads build.rs alone, with a
+// Rust-aware fetch test, so both detectors are a new generation.
+// 7/8 (2026-10-03): ScanReferencedBody, shared by both detectors, learned
+// the host-recon beacon.
 const (
-	installScriptsAnalyzerRegex = 1
-	installScriptsAnalyzerAST   = 2
+	installScriptsAnalyzerRegex = 7
+	installScriptsAnalyzerAST   = 8
 )
 
 // AnalyzerVersion follows the detector actually in force.
@@ -223,7 +232,10 @@ func (p *installScriptsProvider) run(ctx context.Context, req Request, prior *Re
 				for _, h := range hits {
 					extraSeen = append(extraSeen, "build.rs:"+h)
 				}
-				if hasNetworkOrShell(hits) {
+				// The primitive list is evidence; whether the script fetches
+				// is the Rust-aware test. A bare "curl" word is not a fetch:
+				// rage 0.11.1's build.rs prints a man-page example with one.
+				if installscripts.CargoFetchesRemote(string(buildRs)) {
 					extraFetch = true
 					// First-class buildRsExecutes signal: a cargo build.rs
 					// performing shell/network execution at build time.
@@ -782,19 +794,4 @@ func scanBuildRs(body []byte) []string {
 		out = append(out, s)
 	}
 	return out
-}
-
-// hasNetworkOrShell reports whether any build.rs hit corresponds to a
-// network or shell-exec primitive (as opposed to a benign process
-// reference). Used to decide whether to escalate Kind to fetches_remote.
-func hasNetworkOrShell(hits []string) bool {
-	for _, h := range hits {
-		switch h {
-		case "reqwest", "hyper", "ureq", "curl", "wget",
-			"net::TcpStream", "TcpStream::connect",
-			"/bin/sh", "/bin/bash", "powershell":
-			return true
-		}
-	}
-	return false
 }

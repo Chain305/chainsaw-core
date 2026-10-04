@@ -65,15 +65,13 @@ func init() {
 		Category: CategorySupplyChain,
 		Severity: SevLow,
 		Weight:   -10,
-		// COPY IS NOT npm-ONLY. The producing provider's coverage map,
-		// intelligence.ecosystemLockfiles, covers five ecosystems —
-		// npm-family, pypi/pip, composer, cargo and rubygems — so a
-		// title naming npm-shrinkwrap.json was factually wrong on four
-		// of them (a Rust crate shipping Cargo.lock rendered as
-		// "Bundled npm-shrinkwrap.json"). Keep this wording in step
-		// with that map, not with npm.
+		// Since 2026-10-03 the producer fires only on a root
+		// npm-shrinkwrap.json, the one lockfile an installer honours inside
+		// a dependency (see provider_shrinkwrap.go for the table). Cargo.lock,
+		// Gemfile.lock, composer.lock, package-lock.json and the rest are
+		// ignored by their installers and no longer fire.
 		Title:       "Bundled dependency lockfile",
-		Description: "Artifact ships a pinned dependency lockfile (npm-shrinkwrap.json, package-lock.json, Pipfile.lock, poetry.lock, composer.lock, Cargo.lock or Gemfile.lock) — hides transitive deps from consumer review.",
+		Description: "Artifact ships an npm-shrinkwrap.json at its root. npm honours it when installing the package as a dependency, so it pins the transitive graph past the consumer's own resolution.",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if !in.ShrinkwrapPresent {
 				return false, "", nil

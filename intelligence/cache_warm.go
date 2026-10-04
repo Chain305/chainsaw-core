@@ -48,6 +48,7 @@ package intelligence
 import (
 	"context"
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/upstreamhttp"
 	"os"
 	"strings"
 	"sync"
@@ -167,6 +168,9 @@ func warmDirectDepsAtDepth(ctx context.Context, parent *Report, svc *DefaultServ
 	if caller := httpclient.EgressCallerFrom(ctx); caller != "" {
 		bg = httpclient.WithEgressCaller(bg, caller)
 	}
+	// Warm-up is best-effort: its registry requests take a bounded share
+	// of each host's rate and cannot starve the scans someone waits on.
+	bg = upstreamhttp.WithBackground(bg)
 
 	// Collect the (eco, name, version) triples we'll actually warm so the
 	// semaphore-bounded goroutine pool is sized to exactly the work that

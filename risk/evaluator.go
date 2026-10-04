@@ -997,24 +997,30 @@ func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSig
 	// bypassable makes the two interact in the one ecosystem where both
 	// are live.
 	//
-	// Compounds contribute no ceiling of their own — CompoundRule has no
-	// MaxImpact field (core/risk/compound.go:14) — so the cap is still the
-	// minimum across fired primitives. `compound` stays in the signature
-	// because callers pass it and because a compound MaxImpact, if one is
-	// ever added, belongs in the same minimum.
-	_ = compound
+	// The cap is the minimum MaxImpact across fired primitives AND fired
+	// compounds (CompoundRule.MaxImpact, added 2026-10-03 for
+	// sc.exfil_sink_at_install).
 	cap := -1 // -1 = no cap
 	capID := ""
-	for id := range primitives {
-		sig, ok := Registry[id]
-		if !ok || sig.MaxImpact <= 0 {
-			continue
+	consider := func(id string, maxImpact int) {
+		if maxImpact <= 0 {
+			return
 		}
 		// Ties resolve on the ID so the attribution is deterministic
 		// across map-iteration orders; a user comparing two runs of the
 		// same coordinate must not see the blame move.
-		if cap == -1 || sig.MaxImpact < cap || (sig.MaxImpact == cap && id < capID) {
-			cap, capID = sig.MaxImpact, id
+		if cap == -1 || maxImpact < cap || (maxImpact == cap && id < capID) {
+			cap, capID = maxImpact, id
+		}
+	}
+	for id := range primitives {
+		if sig, ok := Registry[id]; ok {
+			consider(id, sig.MaxImpact)
+		}
+	}
+	for _, rule := range CompoundRules {
+		if _, ok := compound[rule.ID]; ok {
+			consider(rule.ID, rule.MaxImpact)
 		}
 	}
 	if cap == -1 || overall <= cap {

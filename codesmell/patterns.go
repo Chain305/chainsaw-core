@@ -2,6 +2,7 @@ package codesmell
 
 import (
 	"regexp"
+	"regexp/syntax"
 	"strings"
 	"sync"
 )
@@ -76,6 +77,22 @@ var (
 	rulesOnce sync.Once
 )
 
+// allRuleSets is every finalized rule set, so a guard test can hold every rule
+// in the package to the anchor contract without a hand-kept list.
+var allRuleSets []*signalRules
+
+// finalizeRules builds each set's combined regex and prefilter anchors and
+// registers it. Every rule set in the package goes through here.
+func finalizeRules(sets ...*signalRules) {
+	for _, s := range sets {
+		for i := range s.ByLang {
+			s.Combined[i] = combinePatterns(s.ByLang[i])
+			s.Anchors[i] = anchorsFor(s.ByLang[i])
+		}
+		allRuleSets = append(allRuleSets, s)
+	}
+}
+
 // Ensure compiled rule tables are ready before any scanner runs. The
 // compilation is idempotent; sync.Once keeps it cheap.
 func ensureRules() {
@@ -85,30 +102,20 @@ func ensureRules() {
 		buildShellRules()
 		buildFilesystemRules()
 		buildEnvVarRules()
-		for _, s := range []*signalRules{&evalRules, &networkRules, &shellRules, &filesystemRules, &envVarRules} {
-			for i := range s.ByLang {
-				s.Combined[i] = combinePatterns(s.ByLang[i])
-				s.Anchors[i] = anchorsFor(s.ByLang[i])
-			}
-		}
+		finalizeRules(&evalRules, &networkRules, &shellRules, &filesystemRules, &envVarRules)
 	})
 }
 
-// anchorsFor returns one literal byte sequence per rule — chosen as
-// the longest literal prefix of the regex's source. If every rule has
-// a meaningful anchor, a single bytes.Contains sweep can reject a
-// file without running the regex engine. The anchors are intentionally
-// coarse — "eval", "fetch(", "child_process" — so a file legitimately
-// using one still passes through to the regex for shape confirmation.
+// anchorsFor returns one literal byte sequence per rule, each one a substring
+// EVERY match of that rule must contain, so a single bytes.Contains sweep can
+// reject a file without running the regex engine. If any rule has no such
+// literal (of 3+ bytes) it returns nil and the driver runs the combined regex
+// on every file.
 func anchorsFor(rules []pattern) [][]byte {
 	out := make([][]byte, 0, len(rules))
 	for _, r := range rules {
-		src := r.Re.String()
-		anchor := literalAnchor(src)
-		if anchor == "" {
-			// No reliable literal anchor — abandon the fast-path for
-			// this rule set by returning nil. The driver falls back
-			// to running the combined regex directly.
+		anchor := requiredLiteral(r.Re.String())
+		if len(anchor) < 3 {
 			return nil
 		}
 		out = append(out, []byte(anchor))
@@ -116,72 +123,114 @@ func anchorsFor(rules []pattern) [][]byte {
 	return out
 }
 
-// literalAnchor extracts the longest literal substring from a simple
-// regex source. It walks the source looking for at least 3 consecutive
-// literal ASCII characters (letters / digits / _ / -) that are not
-// inside a character class, alternation, or group modifier. This is
-// heuristic; it returns "" when no good anchor is found.
-func literalAnchor(src string) string {
-	var best, cur []byte
-	skip := 0
-	for i := 0; i < len(src); i++ {
-		if skip > 0 {
-			skip--
-			continue
-		}
-		c := src[i]
-		switch {
-		case c == '\\' && i+1 < len(src):
-			// Escaped single character. Any letter escape in a regex
-			// is a class (\s, \w, \d, \b, etc.) — NOT a literal — so
-			// treat it as an anchor break. A few specific escapes
-			// (e.g. \., \/, \$) escape a literal char; those are
-			// treated as literals. Numeric backrefs are rare in our
-			// rules; treat them as anchor breaks to be safe.
-			n := src[i+1]
-			literal := false
-			switch n {
-			case '.', '/', '(', ')', '[', ']', '{', '}',
-				'?', '*', '+', '|', '^', '$', '\\':
-				literal = true
-			}
-			if literal {
-				cur = append(cur, n)
-			} else {
-				if len(cur) > len(best) {
-					best = append(best[:0], cur...)
-				}
-				cur = cur[:0]
-			}
-			skip = 1
-		case c == '(' || c == ')' || c == '|' || c == '[' || c == ']' ||
-			c == '{' || c == '}' || c == '?' || c == '*' || c == '+' ||
-			c == '.' || c == '^' || c == '$':
-			if len(cur) > len(best) {
-				best = append(best[:0], cur...)
-			}
-			cur = cur[:0]
-		default:
-			// Treat normal identifier chars + "/" + "_" + "-" as literal.
-			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-				(c >= '0' && c <= '9') || c == '_' || c == '-' ||
-				c == '/' || c == '.' {
-				cur = append(cur, c)
-			} else {
-				if len(cur) > len(best) {
-					best = append(best[:0], cur...)
-				}
-				cur = cur[:0]
-			}
-		}
-	}
-	if len(cur) > len(best) {
-		best = cur
-	}
-	if len(best) < 3 {
+// requiredLiteral returns the longest literal that every match of the regex
+// contains, or "".
+//
+// It replaced a scan of the regex SOURCE for its longest literal run, which
+// was usually inside one alternation branch: `std::env::(?:var|vars)` got
+// "vars" and so never saw std::env::var("HOME"); Python's import rule got
+// "http.client" and never saw `import socket`; PHP's shell rule got
+// "shell_exec" and never saw exec("ls"). Here the parsed regex is walked:
+// a concatenation joins adjacent fixed pieces, an alternation keeps only what
+// all its branches share, and anything optional contributes nothing.
+func requiredLiteral(src string) string {
+	re, err := syntax.Parse(src, syntax.Perl)
+	if err != nil {
 		return ""
 	}
-	return string(best)
+	return reqLit(re.Simplify()).best
+}
+
+// litInfo: exact is set when the node always matches exactly s; best is the
+// longest literal every match of the node contains.
+type litInfo struct {
+	exact bool
+	s     string
+	best  string
+}
+
+func reqLit(re *syntax.Regexp) litInfo {
+	switch re.Op {
+	case syntax.OpLiteral:
+		lit := string(re.Rune)
+		if re.Flags&syntax.FoldCase != 0 && strings.ToLower(lit) != strings.ToUpper(lit) {
+			return litInfo{} // bytes.Contains is case-sensitive
+		}
+		return litInfo{exact: true, s: lit, best: lit}
+	case syntax.OpCharClass:
+		if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
+			lit := string(re.Rune[0])
+			return litInfo{exact: true, s: lit, best: lit}
+		}
+		return litInfo{}
+	case syntax.OpEmptyMatch, syntax.OpBeginLine, syntax.OpEndLine, syntax.OpBeginText,
+		syntax.OpEndText, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return litInfo{exact: true} // zero-width: consumes nothing
+	case syntax.OpCapture:
+		return reqLit(re.Sub[0])
+	case syntax.OpPlus:
+		c := reqLit(re.Sub[0])
+		return litInfo{best: c.best}
+	case syntax.OpRepeat:
+		if re.Min < 1 {
+			return litInfo{}
+		}
+		c := reqLit(re.Sub[0])
+		if re.Min == 1 && re.Max == 1 {
+			return c
+		}
+		return litInfo{best: c.best}
+	case syntax.OpConcat:
+		out := litInfo{exact: true}
+		run := ""
+		for _, sub := range re.Sub {
+			c := reqLit(sub)
+			if c.exact {
+				run += c.s
+				continue
+			}
+			out.exact = false
+			out.best = longer(out.best, longer(run, c.best))
+			run = ""
+		}
+		out.best = longer(out.best, run)
+		if out.exact {
+			out.s = run
+		}
+		return out
+	case syntax.OpAlternate:
+		branches := make([]litInfo, len(re.Sub))
+		for i, sub := range re.Sub {
+			branches[i] = reqLit(sub)
+		}
+		common := branches[0].best
+		for _, b := range branches[1:] {
+			common = longestCommonSubstring(common, b.best)
+		}
+		return litInfo{best: common}
+	}
+	return litInfo{} // star, quest, any-char: nothing required
+}
+
+func longer(a, b string) string {
+	if len(b) > len(a) {
+		return b
+	}
+	return a
+}
+
+// longestCommonSubstring is quadratic, which is fine for rule-sized strings.
+func longestCommonSubstring(a, b string) string {
+	best := ""
+	for i := range a {
+		for j := i + len(best) + 1; j <= len(a); j++ {
+			if !strings.Contains(b, a[i:j]) {
+				break
+			}
+			best = a[i:j]
+		}
+	}
+	return best
 }
 
 func init() { ensureRules() }
@@ -202,10 +251,14 @@ func buildEvalRules() {
 	// Python: eval(, exec(, compile(, __import__(. __import__ takes a
 	// string name so it composes with concatenated payloads — the same
 	// threat surface as eval/compile.
+	//
+	// The builtins only: a name after "." is a method. On 31 PyPI packages of
+	// the 2026-10 corpus a method call (re.compile, model.eval, cursor.exec)
+	// was the only hit, and socket.dev's usesEval agreed on 3 of them.
 	evalRules.ByLang[LangPython] = compilePatterns([][2]string{
-		{`\beval\s*\(`, "eval"},
-		{`\bexec\s*\(`, "exec"},
-		{`\bcompile\s*\(`, "compile"},
+		{`(?:^|[^.\w])eval\s*\(`, "eval"},
+		{`(?:^|[^.\w])exec\s*\(`, "exec"},
+		{`(?:^|[^.\w])compile\s*\(`, "compile"},
 		{`\b__import__\s*\(`, "__import__"},
 	})
 	// Ruby: eval, instance_eval, class_eval, module_eval

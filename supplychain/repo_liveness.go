@@ -39,8 +39,15 @@ const DefaultRepoLivenessInterval = 7 * 24 * time.Hour
 // `archived` flag, or the response omitted `pushed_at`). Callers MUST
 // treat nil as "unknown" — never collapse it to false / zero-time.
 type RepoLivenessResult struct {
-	Status       string
-	CheckedAt    time.Time
+	Status    string
+	CheckedAt time.Time
+	// UnknownReason says why a probe that WAS attempted ended as unknown:
+	// UnknownRateLimited, UnknownTransport or UnknownHTTP. It is "" when
+	// Status is known, and also when the URL was never probed (an
+	// unrecognised host), because there was no check to fail. Callers
+	// surface it so a failed check is not mistaken for "no repo".
+	UnknownReason string
+
 	LastCommitAt *time.Time
 	Archived     *bool
 
@@ -51,6 +58,19 @@ type RepoLivenessResult struct {
 	// (intelligence.mergeMaintenance, the store's carry-forward).
 	Stats RepoStats
 }
+
+// Why an attempted probe ended as unknown (RepoLivenessResult.UnknownReason).
+const (
+	// UnknownRateLimited: the forge refused for budget — a 429, or a 403
+	// carrying X-RateLimit-Remaining: 0 / RateLimit-Remaining: 0.
+	UnknownRateLimited = "rate_limited"
+	// UnknownTransport: no HTTP answer (dial, TLS, timeout, cancellation)
+	// or a 2xx body that did not decode.
+	UnknownTransport = "transport"
+	// UnknownHTTP: any other non-2xx, non-404 answer — a 5xx, a 401/403
+	// that is not a rate limit, or an unfollowed 3xx.
+	UnknownHTTP = "http_status"
+)
 
 // RepoStats are display-only repository activity counts.
 type RepoStats struct {
@@ -299,16 +319,16 @@ func (c *RepoLivenessChecker) Classify(ctx context.Context, repoURL string, publ
 func (c *RepoLivenessChecker) classifyGitHub(ctx context.Context, owner, repo string, publisherIDs []string, now time.Time) RepoLivenessResult {
 	base := c.baseURL("github", "https://api.github.com")
 	apiURL := fmt.Sprintf("%s/repos/%s/%s", base, url.PathEscape(owner), url.PathEscape(repo))
-	body, status, err := c.fetchJSON(ctx, apiURL, c.githubToken)
+	body, status, limited, err := c.fetchJSON(ctx, apiURL, c.githubToken)
 	if err != nil {
-		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
+		return unknownAfter(now, limited, err)
 	}
 	if status == http.StatusNotFound {
 		return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
 	}
 	if status < 200 || status >= 300 {
 		// 401/403 on a public repo means unusual — don't penalise.
-		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
+		return unknownAfter(now, limited, nil)
 	}
 	archived, archivedOK := body["archived"].(bool)
 	// pushed_at is GitHub's last-commit timestamp on the default branch.
@@ -359,15 +379,15 @@ func (c *RepoLivenessChecker) classifyGitLab(ctx context.Context, host, owner, r
 	projectPath := url.PathEscape(owner + "/" + repo)
 	base := c.baseURL("gitlab", "https://gitlab.com")
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s", base, projectPath)
-	body, status, err := c.fetchJSON(ctx, apiURL, "")
+	body, status, limited, err := c.fetchJSON(ctx, apiURL, "")
 	if err != nil {
-		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
+		return unknownAfter(now, limited, err)
 	}
 	if status == http.StatusNotFound {
 		return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
 	}
 	if status < 200 || status >= 300 {
-		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
+		return unknownAfter(now, limited, nil)
 	}
 	archived, archivedOK := body["archived"].(bool)
 	// GitLab exposes `last_activity_at` (RFC3339), which tracks the
@@ -396,20 +416,32 @@ func (c *RepoLivenessChecker) classifyBitbucket(ctx context.Context, owner, repo
 	base := c.baseURL("bitbucket", "https://api.bitbucket.org")
 	apiURL := fmt.Sprintf("%s/2.0/repositories/%s/%s",
 		base, url.PathEscape(owner), url.PathEscape(repo))
-	_, status, err := c.fetchJSON(ctx, apiURL, "")
+	_, status, limited, err := c.fetchJSON(ctx, apiURL, "")
 	if err != nil {
-		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
+		return unknownAfter(now, limited, err)
 	}
 	if status == http.StatusNotFound {
 		return RepoLivenessResult{Status: RepoLinkStatusMissing, CheckedAt: now}
 	}
 	if status < 200 || status >= 300 {
-		return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now}
+		return unknownAfter(now, limited, nil)
 	}
 	if ownershipMismatch(owner, publisherIDs) {
 		return RepoLivenessResult{Status: RepoLinkStatusOwnershipMismatch, CheckedAt: now}
 	}
 	return RepoLivenessResult{Status: RepoLinkStatusOK, CheckedAt: now}
+}
+
+// unknownAfter is the unknown result of an attempted probe, with the reason.
+func unknownAfter(now time.Time, limited bool, err error) RepoLivenessResult {
+	reason := UnknownHTTP
+	switch {
+	case limited:
+		reason = UnknownRateLimited
+	case err != nil:
+		reason = UnknownTransport
+	}
+	return RepoLivenessResult{Status: RepoLinkStatusUnknown, CheckedAt: now, UnknownReason: reason}
 }
 
 // baseURL returns the production base URL for a provider unless a test
@@ -429,10 +461,10 @@ func (c *RepoLivenessChecker) baseURL(provider, production string) string {
 // statuses are NOT returned as errors — callers branch on status.
 // fetchJSON GETs u. bearer, when non-empty, is sent as the Authorization
 // header; only the GitHub probe passes one.
-func (c *RepoLivenessChecker) fetchJSON(ctx context.Context, u, bearer string) (map[string]any, int, error) {
+func (c *RepoLivenessChecker) fetchJSON(ctx context.Context, u, bearer string) (map[string]any, int, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "chainsaw-repo-liveness/1.0")
@@ -441,16 +473,19 @@ func (c *RepoLivenessChecker) fetchJSON(ctx context.Context, u, bearer string) (
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	defer resp.Body.Close()
+	limited := resp.StatusCode == http.StatusTooManyRequests ||
+		(resp.StatusCode == http.StatusForbidden &&
+			(resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("RateLimit-Remaining") == "0"))
 	var body map[string]any
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			return nil, resp.StatusCode, err
+			return nil, resp.StatusCode, limited, err
 		}
 	}
-	return body, resp.StatusCode, nil
+	return body, resp.StatusCode, limited, nil
 }
 
 // parseRFC3339Pointer extracts an RFC3339-formatted timestamp from a
@@ -476,8 +511,40 @@ func parseRFC3339Pointer(v any) *time.Time {
 func parseRepoURL(raw string) (host, owner, repo, kind string) {
 	// Strip common prefixes (git+, ssh:, git:) and ".git" suffix.
 	s := strings.TrimSpace(raw)
+	// Maven <scm> URLs carry an "scm:<provider>:" prefix
+	// ("scm:git:git@github.com:o/r.git", "scm:git@github.com:o/r.git" as
+	// org.grails:grails-core writes it). Only the URL after it is the repo.
+	if rest, ok := strings.CutPrefix(s, "scm:"); ok {
+		s = rest
+		for _, prov := range []string{"git:", "svn:", "hg:"} {
+			s = strings.TrimPrefix(s, prov)
+		}
+	}
+	// npm's host shorthands ("github:o/r", "gitlab:g/p", "bitbucket:o/r").
+	for prefix, host := range map[string]string{"github:": "github.com", "gitlab:": "gitlab.com", "bitbucket:": "bitbucket.org"} {
+		if rest, ok := strings.CutPrefix(s, prefix); ok && !strings.HasPrefix(rest, "//") {
+			s = "https://" + host + "/" + rest
+		}
+	}
 	s = strings.TrimPrefix(s, "git+")
 	s = strings.TrimPrefix(s, "git://")
+	// "ssh://git@github.com:o/r.git" mixes a scheme with the scp-style
+	// colon, which url.Parse reads as a port and rejects. A colon after the
+	// host that is not followed by a port number is a path separator.
+	if i := strings.Index(s, "://"); i >= 0 {
+		rest := s[i+3:]
+		authority := rest
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			authority = rest[:slash]
+		}
+		hostStart := strings.LastIndexByte(authority, '@') + 1 // past any userinfo
+		if colon := strings.IndexByte(authority[hostStart:], ':'); colon >= 0 {
+			cut := hostStart + colon
+			if after := rest[cut+1:]; after != "" && (after[0] < '0' || after[0] > '9') {
+				s = s[:i+3] + rest[:cut] + "/" + after
+			}
+		}
+	}
 	// Rewrite "git@github.com:owner/repo" to the equivalent HTTPS URL
 	// so url.Parse has something it can understand. The SSH form is
 	// common in npm `repository.url` fields.
@@ -496,7 +563,7 @@ func parseRepoURL(raw string) (host, owner, repo, kind string) {
 	if err != nil {
 		return "", "", "", ""
 	}
-	h := strings.ToLower(u.Host)
+	h := strings.ToLower(u.Hostname()) // drops userinfo and an ssh port
 	path := strings.Trim(u.Path, "/")
 	path = strings.TrimSuffix(path, ".git")
 	parts := strings.Split(path, "/")

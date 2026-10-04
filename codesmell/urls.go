@@ -2,16 +2,27 @@ package codesmell
 
 import (
 	"path"
+	"regexp"
 	"strings"
 
 	"mvdan.cc/xurls/v2"
 )
 
-// urlRe is the precompiled strict URL regex from mvdan.cc/xurls/v2.
+// urlRe is mvdan.cc/xurls/v2's strict URL regex limited to http(s).
 // "Strict" requires an explicit scheme, so bare words like "example.com"
 // do not match — they are a lexical hazard, not an indicator of compromise
 // for this signal.
-var urlRe = xurls.Strict()
+//
+// The scheme is in the regex, not checked after the match: only the FIRST URL
+// in a file is looked at, so a file whose first URL was a mailto: or git://
+// never reported the https:// one after it.
+var urlRe = func() *regexp.Regexp {
+	re, err := xurls.StrictMatchingScheme(`https?://`)
+	if err != nil {
+		panic(err) // a literal; a bad one is a build-time bug
+	}
+	return re
+}()
 
 // urlAllowedDocs is the case-insensitive basename set for files whose
 // advertised URLs are legitimate metadata (homepage, repo link, etc.)
@@ -69,16 +80,12 @@ func ScanURLs(files map[string][]byte) Result {
 		if loc == nil {
 			return true
 		}
-		raw := string(body[loc[0]:loc[1]])
-		lower := strings.ToLower(raw)
-		if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
-			res.addMatch(Match{
-				Path:    name,
-				Line:    lineOf(body, loc[0]),
-				Snippet: raw,
-				Kind:    "url",
-			})
-		}
+		res.addMatch(Match{
+			Path:    name,
+			Line:    lineOf(body, loc[0]),
+			Snippet: string(body[loc[0]:loc[1]]),
+			Kind:    "url",
+		})
 		return true
 	})
 	return res

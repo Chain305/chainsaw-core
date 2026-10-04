@@ -344,30 +344,39 @@ var maxFireRate = map[sigEco]fireCeiling{
 	// com.google.guava:guava is Apache-2.0, monolog/monolog is MIT,
 	// ch.qos.logback:* is EPL-1.0/LGPL-2.1. The engine says they declare
 	// nothing.
-	{"lic.missing", "pypi"}: {11, defectBaseline + "P8-06 residual. jinja2 (BSD-3-Clause) " +
-		"and colorama (BSD-3-Clause) both declare licences via classifiers the reader " +
-		"does not consult."},
+	//
+	// The pypi entry is gone: its defect — jinja2 and colorama declaring their
+	// licence only through a trove classifier the reader did not consult — was
+	// fixed by pypiLicense (2026-10-03), and lic.missing/pypi measured 0/100.
 
 	// ── license.unidentified (−15) — "licence string not recognised" ──────
 	//
 	// Fires alongside lic.missing on the same coordinates, so a mis-read POM
 	// costs −30, not −15. That double charge is the reason a licence-reader
 	// bug moves scores at all.
-	{"license.unidentified", "pypi"}: {28, defectBaseline + "P8-06. 23/100, more than three " +
-		"times the pypi lic.missing rate, so this arm has failure modes of its own: " +
-		"beautifulsoup4 and aiosignal declare licences the classifier does not resolve."},
+	//
+	// The pypi entry was a 28% DEFECT BASELINE (P8-06): beautifulsoup4 and
+	// aiosignal declared licences the classifier did not resolve, and every
+	// empty expression paid this -15 on top of lic.missing. Both are fixed
+	// (2026-10-03: trove classifiers read, empty expression charged once by
+	// lic.missing), and it measured 2/100. What is left is legitimate.
+	{"license.unidentified", "pypi"}: {4, "Legitimate: a declared string that names no " +
+		"licence, such as python-dateutil's \"Dual License\"."},
 
 	// ── license.ambiguous_classifier (−10) ────────────────────────────────
 	//
 	// This one is largely CORRECT and is here to show the contrast: a signal
 	// firing at single digits on a benign corpus looks like a signal, not
 	// like a reader bug.
-	{"license.ambiguous_classifier", "pypi"}: {11, "Legitimate. PyPI classifiers genuinely " +
-		"carry unversioned strings (\"Apache Software License\", \"BSD License\") that do " +
-		"not resolve to one SPDX id. cryptography really is dual Apache-2.0/BSD-3-Clause."},
-	{"license.ambiguous_classifier", "go"}: {13, "Legitimate, same shape: testify and " +
-		"prometheus/client_golang expose licence text rather than an id."},
-	{"license.ambiguous_classifier", "npm"}: {4, "Legitimate and rare — 1/100."},
+	//
+	// The go and npm entries are gone, and pypi's reason changed: every
+	// firing on them combined only permissive licences — an OR (testify "MIT
+	// OR BSD-3-Clause OR ISC", type-fest "(MIT OR CC0-1.0)", cryptography)
+	// or an AND (aiohttp "Apache-2.0 AND MIT", numpy, greenlet) — which since
+	// 2026-10-03 leaves the operator nothing to resolve. What still fires is
+	// a combination with a copyleft part.
+	{"license.ambiguous_classifier", "pypi"}: {2, "A combination with a copyleft part: tqdm " +
+		"\"MPL-2.0 AND MIT\". The MPL obligation on tqdm's own files comes with the package."},
 
 	// ── license.copyleft / license.non_permissive (−20 each) ──────────────
 	//

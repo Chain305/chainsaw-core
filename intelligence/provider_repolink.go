@@ -16,7 +16,8 @@ package intelligence
 // Three-state contract preserved end-to-end: when Classify returns
 // RepoLinkStatusUnknown the provider emits no SupplyChain patch at all,
 // so a richer prior value (e.g. a previously cached probe result) is
-// not overwritten with zeros.
+// not overwritten with zeros. A probe that was attempted and failed emits
+// a warning instead (WarnRepoCheckRateLimited / WarnRepoCheckUnavailable).
 
 import (
 	"context"
@@ -41,6 +42,14 @@ import (
 type repoLivenessClassifier interface {
 	Classify(ctx context.Context, repoURL string, publisherIDs []string) supplychain.RepoLivenessResult
 }
+
+// Warning codes for a repo-liveness probe that was attempted and did not
+// complete. Visibility only: repolink is not a coverage source, so neither
+// moves a coverage gate.
+const (
+	WarnRepoCheckRateLimited = "repo_check_rate_limited"
+	WarnRepoCheckUnavailable = "repo_check_unavailable"
+)
 
 type repolinkProvider struct {
 	checker repoLivenessClassifier
@@ -71,8 +80,8 @@ func (p *repolinkProvider) Supports(ecosystem string) bool { return true }
 // checker (the production fallback when liveness is disabled) makes
 // Run a no-op. The Classify call never returns an error per its
 // contract — every non-classifiable path degrades to
-// RepoLinkStatusUnknown — so the warning surface is reserved for
-// future expansion.
+// RepoLinkStatusUnknown — and an attempted probe that ended there is
+// reported as a warning carrying its reason.
 func (p *repolinkProvider) Run(ctx context.Context, req Request, prior *Report) (PartialReport, error) {
 	if prior == nil || p.checker == nil {
 		return PartialReport{}, nil
@@ -133,15 +142,25 @@ func (p *repolinkProvider) Run(ctx context.Context, req Request, prior *Report) 
 		return out, nil
 	}
 
-	if result.Status == supplychain.RepoLinkStatusUnknown && result.CheckedAt.IsZero() {
-		// Defensive: only fires if a future Classify variant signals
-		// a probe-level error via a zero CheckedAt. The current
-		// implementation never hits this path, but the warning code
-		// is reserved.
+	// A probe that was attempted and ended unknown is recorded, never
+	// silent. Without this, a rate-limited or failed check left the row
+	// identical to one with no repo URL, so sc.repo_archived and
+	// sc.repo_missing went quiet and nothing said why.
+	//
+	// No status is written: "unknown" is not "missing", and an emitted
+	// status would also stop applyStickySupplyChain reviving the stored
+	// archived/missing answer on a transient failure. The warning is the
+	// record. An unrecognised host (UnknownReason "") was never probed and
+	// stays silent, as a row with no repo does.
+	if result.Status == supplychain.RepoLinkStatusUnknown && result.UnknownReason != "" {
+		code := WarnRepoCheckUnavailable
+		if result.UnknownReason == supplychain.UnknownRateLimited {
+			code = WarnRepoCheckRateLimited
+		}
 		return PartialReport{Warnings: []Warning{{
 			Provider: p.Name(),
-			Code:     "repolink_probe_error",
-			Message:  fmt.Sprintf("repo-liveness probe failed for %s", repoURL),
+			Code:     code,
+			Message:  fmt.Sprintf("repo-liveness check for %s did not complete (%s); repo archived/missing not evaluated", repoURL, result.UnknownReason),
 			At:       time.Now().UTC(),
 		}}}, nil
 	}

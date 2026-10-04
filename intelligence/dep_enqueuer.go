@@ -33,6 +33,7 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/upstreamhttp"
 )
 
 // maxAutoDepDepth bounds the recursion. With depth 0 == the parent,
@@ -103,6 +104,7 @@ func (s *DefaultService) enqueueDependencyScans(parentCtx context.Context, paren
 	}
 
 	parentEcosystem := parent.Identity.Ecosystem
+	caller := depScanEgressCaller(httpclient.EgressCallerFrom(parentCtx))
 
 	// Per-Scan dedup so the same dep appearing under multiple buckets
 	// doesn't double-fire.
@@ -131,7 +133,7 @@ func (s *DefaultService) enqueueDependencyScans(parentCtx context.Context, paren
 		wg.Add(1)
 		go func(eco, name string) {
 			defer wg.Done()
-			s.scanTransitiveDep(eco, name, depth+1)
+			s.scanTransitiveDep(eco, name, depth+1, caller)
 		}(eco, name)
 	}
 	// Don't block the parent on the children — fire-and-forget. The
@@ -143,7 +145,12 @@ func (s *DefaultService) enqueueDependencyScans(parentCtx context.Context, paren
 // It resolves the latest version, optionally fetches the tarball, and
 // invokes Scan against the same DefaultService instance — so the cache,
 // singleflight, and recursive enqueue chain all engage automatically.
-func (s *DefaultService) scanTransitiveDep(eco, name string, depth int) {
+//
+// caller is the egress tag the child's requests are counted under; see
+// depScanEgressCaller. It is the one value carried over from the parent's
+// context, which the child otherwise detaches from (s.bg), exactly as the
+// dependency cache-warm does.
+func (s *DefaultService) scanTransitiveDep(eco, name string, depth int, caller string) {
 	parent := s.bg
 	if parent == nil {
 		parent = context.Background()
@@ -151,6 +158,12 @@ func (s *DefaultService) scanTransitiveDep(eco, name string, depth int) {
 	ctx, cancel := context.WithTimeout(parent, autoDepScanDeadline)
 	defer cancel()
 	ctx = withDepDepth(ctx, depth)
+	if caller != "" {
+		ctx = httpclient.WithEgressCaller(ctx, caller)
+	}
+	// Best-effort: its registry requests take a bounded share of each
+	// host's rate and cannot starve the scans someone is waiting on.
+	ctx = upstreamhttp.WithBackground(ctx)
 
 	version := s.resolveLatestVersion(ctx, eco, name)
 	if version == "" {
@@ -189,6 +202,19 @@ func (s *DefaultService) scanTransitiveDep(eco, name string, depth int) {
 		s.logger.Debug("transitive dep scan failed",
 			"ecosystem", eco, "package", name, "version", version, "depth", depth, "err", err)
 	}
+}
+
+// depScanEgressCaller is who a dependency scan's requests are attributed to.
+// Attribution follows whoever STARTED the work: a refresher rescan's fan-out
+// is refresher cost, on its own sticky line (EgressCallerRefreshDep) so the
+// dependency share can be read separately; anything else keeps the parent's
+// tag, as the cache-warm does, so an install's dependency scans are not
+// counted as refresher cost.
+func depScanEgressCaller(parent string) string {
+	if parent == httpclient.EgressCallerRefresh || strings.HasPrefix(parent, httpclient.EgressCallerRefresh+"_") {
+		return httpclient.EgressCallerRefreshDep
+	}
+	return parent
 }
 
 // canAutoResolve gates which ecosystems we'll auto-fetch latest

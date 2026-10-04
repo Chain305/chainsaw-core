@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **85 risk signals**. Each is scored, not merely
+Chainsaw registers **93 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,15 +23,15 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 55 |
+| Supply chain | 63 |
 | Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 8 |
 | Quality | 6 |
-| **Total** | **85** |
+| **Total** | **93** |
 
 
-## Supply chain (55)
+## Supply chain (63)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -46,20 +46,27 @@ a configured server.
 | `ai.prompt_template_injection` | medium | -20.00 | Prompt template contains injection markers |
 | `ai.suspicious_pickle_opcode` | medium | -15.00 | Pickle imports uncommon for model weights |
 | `ai.unsafe_serialization_format` | low | -10.00 | Unsafe serialization format (pickle without safetensors) |
+| `cap.debug_access` | info | 0.00 | Package uses runtime debug or introspection modules |
 | `cap.dynamic_eval` | low | -3.00 | Package uses dynamic code evaluation |
 | `cap.dynamic_eval_observed` | info | 0.00 | Dynamic code evaluation observed in source |
+| `cap.dynamic_require` | info | 0.00 | Package loads modules by computed name |
 | `cap.env_access` | info | 0.00 | Package reads environment variables |
 | `cap.filesystem_read` | info | 0.00 | Package can read from the filesystem |
 | `cap.filesystem_write` | info | 0.00 | Package can write to the filesystem |
 | `cap.native_code` | info | 0.00 | Package uses native (C/C++) bindings |
 | `cap.network` | info | 0.00 | Package can open network connections |
 | `cap.shell` | info | 0.00 | Package can execute shell commands |
+| `cap.telemetry` | info | 0.00 | Package contains telemetry |
 | `cap.url_strings` | info | 0.00 | Package source contains URLs |
 | `sc.builder_ref_version_mismatch` | info | 0.00 | Built from a tag that does not name this version |
 | `sc.deprecated_by_maintainer` | medium | -15.00 | Deprecated by maintainer |
 | `sc.git_url_dependency` | low | -8.00 | Git URL dependency |
+| `sc.app_credential_exfil` | high | -25.00 | Code sends another application's credentials |
+| `sc.dependency_credential` | high | -25.00 | Dependency spec embeds a credential |
+| `sc.exfil_sink_used` | high | -30.00 | Code sends data to an exfiltration endpoint |
 | `sc.hidden_unicode` | medium | -20.00 | Hidden Unicode in source |
 | `sc.http_url_dependency` | low | -8.00 | HTTP(S) tarball URL dependency |
+| `sc.import_time_shell` | high | -25.00 | Python module runs a shell command on import |
 | `sc.install_script_fetches_remote` | high | -25.00 | Install script makes network calls |
 | `sc.install_script_eval_encoded` | high | -25.00 | Install script evaluates encoded content |
 | `sc.install_script_only` | info | 0.00 | Install lifecycle script present |
@@ -80,6 +87,7 @@ a configured server.
 | `sc.pom_developer_list_changed` | low | -5.00 | Declared developer list changed |
 | `sc.repo_archived` | medium | -12.00 | Source repo archived |
 | `sc.repo_missing` | medium | -12.00 | Source repo missing |
+| `sc.repo_missing_established` | low | -12.00 | Source repo missing (established package) |
 | `sc.repo_ownership_mismatch` | high | -20.00 | Source repo ownership mismatch |
 | `sc.shrinkwrap_present` | low | -10.00 | Bundled dependency lockfile |
 | `sc.signature_verified` | info | 5.00 | Upstream signature verified |
@@ -140,3 +148,14 @@ a configured server.
 | `qual.checksum_verified` | info | 5.00 | Checksum verified |
 | `qual.minified_code` | info | 0.00 | Shipped source appears minified or bundled |
 | `qual.version_anomaly` | medium | -10.00 | Version publishing anomaly |
+
+## Compound rules
+
+Compound rules fire on a combination of the signals above and add their weight
+to the supply-chain score. They are not counted in the totals. Only one carries
+a verdict ceiling.
+
+- `sc.takeover_signature`: critical, -55. Publisher change plus an install script (not maven/gradle).
+- `sc.env_net_install`: high, -45, npm only. Env-var read, network access and an install script. No ceiling: it fires on binary installers such as esbuild and node-sass.
+- `sc.npm_install_net_shell`: high, -30, npm only. Install script with network and shell access. No ceiling, same reason.
+- `sc.exfil_sink_at_install`: critical, -40, ceiling 29 (quarantine). Code that runs on install or import (npm hook scripts; setup.py, `__init__.py`) sends to a hard-coded exfiltration endpoint, and the package also runs malware-shaped code at install (`sc.install_script_fetches_remote`, `sc.install_script_eval_encoded` or `sc.import_time_shell`).

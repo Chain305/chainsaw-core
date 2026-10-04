@@ -12,6 +12,7 @@ package intelligence
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -43,7 +44,11 @@ func (p *hiddenUnicodeProvider) NeedsArtifact() bool { return true }
 
 // hiddenUnicodeAnalyzerVersion — bump when the codepoint set or the
 // file-selection rule changes what this reports for identical bytes.
-const hiddenUnicodeAnalyzerVersion = 1
+//
+// 2: a .gem's data.tar.gz is now mapped, so rubygems sees its code.
+// 3 (2026-10-03): bidi in minified bundles and test fixtures, and ZWSP word
+// breaks in unspaced scripts, are suppressed.
+const hiddenUnicodeAnalyzerVersion = 3
 
 func (p *hiddenUnicodeProvider) AnalyzerVersion() int { return hiddenUnicodeAnalyzerVersion }
 
@@ -177,6 +182,7 @@ func SuppressBenignHiddenUnicode(r *hiddenunicode.Result, files map[string][]byt
 		isI18n := codesmell.IsLikelyI18nFile(path)
 		isCatalog := isI18n || isMessageCatalogFile(path)
 		body := files[path]
+		bidiInert := bidiCannotDeceive(path, body)
 
 		// Density backstop (anti-bypass): a localized catalog carries a
 		// handful of lone word-break aids; a byte-encoded steganographic
@@ -211,7 +217,7 @@ func SuppressBenignHiddenUnicode(r *hiddenunicode.Result, files map[string][]byt
 			// inside an emoji flag sequence is a real subdivision-flag emoji.
 			// Neither is an executable payload, so volume alone cannot
 			// weaponise them. Checked before the density gate.
-			if structurallyBenignHiddenUnicode(h, body) {
+			if structurallyBenignHiddenUnicode(h, body) || (bidiInert && h.Kind == hiddenunicode.KindBidiOverride) {
 				suppressed++
 				continue
 			}
@@ -311,12 +317,57 @@ func benignHiddenUnicodeHit(h hiddenunicode.Hit, body []byte, isI18n, isCatalog 
 func structurallyBenignHiddenUnicode(h hiddenunicode.Hit, body []byte) bool {
 	switch h.Kind {
 	case hiddenunicode.KindZeroWidth:
-		return identifierCharsetZeroWidth(h, body)
+		return identifierCharsetZeroWidth(h, body) || unspacedScriptWordBreak(h, body)
 	case hiddenunicode.KindTag:
 		return emojiTagSequence(body, h.Offset)
 	default:
 		return false
 	}
+}
+
+// bidiCannotDeceive reports files where a bidi control cannot be Trojan
+// Source, i.e. text a reader sees differently from how it is used:
+//
+//   - a structured-data file in a test, vendor or build directory: a
+//     fixture, never compiled and never read as instructions. httpx 0.28.1
+//     ships the WHATWG URL test vectors, whose inputs deliberately carry
+//     U+202E/U+202D (2026-10-03).
+//   - a minified bundle: nobody reviews it, so there is no reader to
+//     deceive. The controls there come from bundled libraries — intl
+//     isolate constants (FSI/PDI), Unicode category tables, regex classes —
+//     in khoj, recce, statamic/cms, passbolt_api and ys-codegen-ui.
+//
+// Docs (.md, .txt) stay armed anywhere: a reversed install command in a
+// README is the copy-paste form of the attack. Zero-width and tag
+// characters are untouched; they are the GlassWorm payload encoding, which
+// works in any file.
+func bidiCannotDeceive(path string, body []byte) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json", ".yaml", ".yml", ".toml", ".xml":
+		if codesmell.IsLikelyTestOrVendor(path) {
+			return true
+		}
+	}
+	return codesmell.LooksMinified(body)
+}
+
+// unspacedScriptWordBreak reports a ZERO WIDTH SPACE between two letters of a
+// script written without spaces (Thai, Lao, Tibetan, Myanmar, Khmer), where
+// it is the standard word-break mark: syntaxoops/pluploadbe 14.0.2 ships
+// plupload's Khmer translation with 88 of them. A payload sits in ASCII
+// code, not between two Khmer letters.
+func unspacedScriptWordBreak(h hiddenunicode.Hit, body []byte) bool {
+	if h.Rune != 0x200B || h.Offset < 0 || h.Offset >= len(body) {
+		return false
+	}
+	unspaced := func(r rune) bool {
+		return (r >= 0x0E00 && r <= 0x0FFF) || (r >= 0x1000 && r <= 0x109F) ||
+			(r >= 0x1780 && r <= 0x17FF) || (r >= 0x19E0 && r <= 0x19FF)
+	}
+	before, _ := utf8.DecodeLastRune(body[:h.Offset])
+	_, sz := utf8.DecodeRune(body[h.Offset:])
+	after, _ := utf8.DecodeRune(body[h.Offset+sz:])
+	return unspaced(before) && unspaced(after)
 }
 
 // identifierCharsetZeroWidth reports whether a zero-width hit is a ZWNJ

@@ -40,6 +40,13 @@ type Result struct {
 	// its report field is named MaliciousIOC and a URL inside an SSRF-
 	// protection test is not that. Ignoring Weak reinstates the false-block.
 	Weak bool
+
+	// Coupled marks an exfil_host hit whose file also makes an outbound call:
+	// the sink is used, not merely named. A downloader that lists gofile.io
+	// among unsupported sites, or a type declaration naming .ngrok.io, names
+	// the host and sends nothing. The guard ignores this field; the risk
+	// engine requires it before an exfil host alone moves a verdict.
+	Coupled bool
 }
 
 const maxFileSize = 2 << 20 // 2 MiB per file
@@ -103,6 +110,11 @@ var (
 	// (so a stealer-shaped package that also sends is caught even if its sink
 	// host is not on the exfil list).
 	netSendRE = regexp.MustCompile(`requests\.(?:post|put|get)\s*\(|httpx\.(?:post|get|put|stream)|aiohttp\.|urllib\.request\.urlopen\s*\(|\.send(?:all)?\s*\(|http\.client|fetch\s*\(|axios\.|XMLHttpRequest`)
+
+	// nodeSendRE adds Node's own request primitives for the exfil_host
+	// coupling. Kept out of netSendRE so the stealer tier, which the guard
+	// enforces, is unchanged.
+	nodeSendRE = regexp.MustCompile(`\bhttps?\.(?:request|get)\s*\(|\bdns\.(?:lookup|resolve\w*)\s*\(|\bnet\.(?:connect|createConnection)\s*\(`)
 
 	// nonShippingPathRE marks files that ship inside a package but are not part
 	// of what the package DOES: its own test suite, its documentation examples,
@@ -203,6 +215,8 @@ func Scan(files map[string][]byte) Result {
 	// up. Deliberately not returned early: a real hit elsewhere in the same
 	// package must still win and still block.
 	var weakExfil *Result
+	// exfil is the first shipping exfil_host hit; a coupled one replaces it.
+	var exfil *Result
 
 	for name, b := range files {
 		body := string(b)
@@ -216,7 +230,14 @@ func Scan(files map[string][]byte) Result {
 		if m := findExfilHost(body); m != "" {
 			hit := Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + strings.TrimSpace(m)}
 			if !isNonShippingPath(name) {
-				return hit
+				hit.Coupled = netSendRE.MatchString(body) || nodeSendRE.MatchString(body)
+				if hit.Coupled {
+					return hit
+				}
+				if exfil == nil {
+					exfil = &hit
+				}
+				continue
 			}
 			if weakExfil == nil {
 				hit.Weak = true
@@ -237,6 +258,10 @@ func Scan(files map[string][]byte) Result {
 				stealerHit, stealerFile = true, name
 			}
 		}
+	}
+
+	if exfil != nil {
+		return *exfil
 	}
 
 	// Tier 2: a stealer string only counts when the package also has a sink or

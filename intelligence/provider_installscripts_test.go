@@ -467,6 +467,37 @@ fn main() {
 	}
 }
 
+// TestInstallScriptsProvider_CargoBuildRsWordIsNotAFetch is rage 0.11.1: its
+// build.rs renders a man page whose example reads "curl ... | rage", and the
+// bare word escalated the crate to fetches_remote (warn 40, rev5 2026-10-03).
+func TestInstallScriptsProvider_CargoBuildRsWordIsNotAFetch(t *testing.T) {
+	p := newInstallScriptsProvider()
+	buildRs := `use clap::{Command, CommandFactory};
+fn main() {
+    Example::new(fl!("man-rage-example-enc-github"))
+        .cmd("curl https://github.com/benjojo.keys | rage -R - example.jpg > example.jpg.age");
+}
+`
+	payload := buildTGZ(t, map[string]string{
+		"Cargo.toml": "[package]\nname = \"rage\"\nversion = \"0.11.1\"\n",
+		"build.rs":   buildRs,
+	})
+	partial, err := p.Run(context.Background(), Request{
+		Key:      Key{Ecosystem: "cargo", Package: "rage", Version: "0.11.1"},
+		Artifact: &ArtifactHandle{Bytes: payload},
+	}, nil)
+	if err != nil || partial.Scan == nil {
+		t.Fatalf("Run: %v %+v", err, partial)
+	}
+	if !partial.Scan.HasInstallScript {
+		t.Fatal("a root build.rs is a build script")
+	}
+	if partial.Scan.InstallScriptFetches || partial.Scan.BuildRsExecutes {
+		t.Fatalf("a man-page string is not a fetch: fetches=%v executes=%v primitives=%v",
+			partial.Scan.InstallScriptFetches, partial.Scan.BuildRsExecutes, partial.Scan.BuildRsPrimitives)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Bundled-install-script body scan (Shai-Hulud / "bun" loader wave).
 //

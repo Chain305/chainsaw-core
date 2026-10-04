@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"strings"
 	"testing"
 )
 
@@ -37,65 +36,6 @@ func TestShrinkwrapProvider_NotPresent(t *testing.T) {
 	}
 	if out.Scan != nil && out.Scan.ShrinkwrapPresent {
 		t.Fatalf("expected ShrinkwrapPresent=false")
-	}
-}
-
-func TestShrinkwrapProvider_PerEcosystemLockfiles(t *testing.T) {
-	cases := []struct {
-		name     string
-		eco      string
-		lockfile string
-	}{
-		{"npm/package-lock", "npm", "package-lock.json"},
-		{"npm/pnpm-lock", "npm", "pnpm-lock.yaml"},
-		{"npm/yarn-lock", "npm", "yarn.lock"},
-		{"npm/bun-lockb", "npm", "bun.lockb"},
-		{"npm/bun-lock", "npm", "bun.lock"},
-		{"yarn/yarn-lock", "yarn", "yarn.lock"},
-		{"yarn/package-lock", "yarn", "package-lock.json"},
-		{"bun/bun-lockb", "bun", "bun.lockb"},
-		{"bun/bun-lock", "bun", "bun.lock"},
-		{"pnpm/pnpm-lock", "pnpm", "pnpm-lock.yaml"},
-		{"pip/Pipfile.lock", "pip", "Pipfile.lock"},
-		{"pip/poetry.lock", "pip", "poetry.lock"},
-		{"pypi/Pipfile.lock", "pypi", "Pipfile.lock"},
-		{"pypi/poetry.lock", "pypi", "poetry.lock"},
-		{"composer/composer.lock", "composer", "composer.lock"},
-		{"cargo/Cargo.lock", "cargo", "Cargo.lock"},
-		{"rubygems/Gemfile.lock", "rubygems", "Gemfile.lock"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tgz := buildNPMTarball(t, map[string]string{
-				"package/manifest":       `{}`,
-				"package/" + tc.lockfile: `{}`,
-			})
-			req := Request{Key: Key{Ecosystem: tc.eco}, Artifact: &ArtifactHandle{Bytes: tgz}}
-			p := newShrinkwrapProvider()
-			out, err := p.Run(context.Background(), req, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if out.Scan == nil || !out.Scan.ShrinkwrapPresent {
-				t.Fatalf("expected ShrinkwrapPresent=true for (%s,%s), got %+v", tc.eco, tc.lockfile, out.Scan)
-			}
-		})
-	}
-}
-
-func TestShrinkwrapProvider_NestedLockfile(t *testing.T) {
-	tgz := buildNPMTarball(t, map[string]string{
-		"package/package.json":                          `{"name":"x","version":"1.0.0"}`,
-		"package/node_modules/inner/sub/deep/yarn.lock": `# yarn lockfile v1`,
-	})
-	req := Request{Key: Key{Ecosystem: "npm"}, Artifact: &ArtifactHandle{Bytes: tgz}}
-	p := newShrinkwrapProvider()
-	out, err := p.Run(context.Background(), req, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Scan == nil || !out.Scan.ShrinkwrapPresent {
-		t.Fatalf("expected nested yarn.lock to fire, got %+v", out.Scan)
 	}
 }
 
@@ -136,136 +76,63 @@ func TestShrinkwrapProvider_Supports(t *testing.T) {
 	}
 }
 
-func TestShrinkwrapProvider_PathSuppressed_ExamplesOnly(t *testing.T) {
-	tgz := buildNPMTarball(t, map[string]string{
-		"package/package.json":                   `{"name":"x","version":"1.0.0"}`,
-		"package/examples/foo/package-lock.json": `{}`,
-	})
-	req := Request{Key: Key{Ecosystem: "npm"}, Artifact: &ArtifactHandle{Bytes: tgz}}
-	out, err := newShrinkwrapProvider().Run(context.Background(), req, nil)
-	if err != nil {
-		t.Fatal(err)
+// Only the lockfile an installer honours inside a dependency fires. Every row
+// here is a shape the 2026-10 socket.dev corpus actually fired on before the
+// restriction (129 packages, 0 of them npm-shrinkwrap.json); socket.dev's
+// shrinkwrap alert fired on none.
+func TestShrinkwrapProvider_IgnoredLockfilesDoNotFire(t *testing.T) {
+	cases := []struct{ eco, path string }{
+		{"npm", "package/yarn.lock"},         // gm-api-sdk 1.0.1
+		{"npm", "package/package-lock.json"}, // xg-admin 1.2.0
+		{"npm", "package/pnpm-lock.yaml"},
+		{"bun", "package/bun.lock"},
+		{"pypi", "handy-utils-0.0.1a0/Pipfile.lock"}, // handy-utils 0.0.1a0
+		{"pypi", "pkg-1.0/poetry.lock"},
+		{"composer", "laravel-framework-1a2b3c/composer.lock"},
+		{"cargo", "ImtiazGermain-0.1.2/Cargo.lock"},
+		{"rubygems", "Gemfile.lock"}, // sidekiq 0.8.0: gem install ignores it
 	}
-	if out.Scan == nil || out.Scan.ShrinkwrapPresent {
-		t.Fatalf("expected ShrinkwrapPresent=false (path-suppressed), got %+v", out.Scan)
-	}
-	if !out.Scan.ShrinkwrapSuppressed {
-		t.Fatalf("expected ShrinkwrapSuppressed=true, got %+v", out.Scan)
-	}
-	if len(out.Warnings) != 1 || out.Warnings[0].Code != WarnShrinkwrapPathSuppressed {
-		t.Fatalf("expected one path-suppressed warning, got %+v", out.Warnings)
-	}
-	if !strings.Contains(out.Warnings[0].Message, "package/examples/foo/package-lock.json") {
-		t.Fatalf("warning message should include suppressed path; got %q", out.Warnings[0].Message)
-	}
-}
-
-func TestShrinkwrapProvider_BundledDependencies_Suppresses(t *testing.T) {
-	tgz := buildNPMTarball(t, map[string]string{
-		"package/package.json":      `{"name":"x","version":"1.0.0","bundledDependencies":["lodash"]}`,
-		"package/package-lock.json": `{}`,
-	})
-	req := Request{Key: Key{Ecosystem: "npm"}, Artifact: &ArtifactHandle{Bytes: tgz}}
-	out, err := newShrinkwrapProvider().Run(context.Background(), req, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Scan == nil || out.Scan.ShrinkwrapPresent {
-		t.Fatalf("expected ShrinkwrapPresent=false (bundledDeps-suppressed), got %+v", out.Scan)
-	}
-	if !out.Scan.ShrinkwrapSuppressed {
-		t.Fatalf("expected ShrinkwrapSuppressed=true, got %+v", out.Scan)
-	}
-	if len(out.Warnings) != 1 || out.Warnings[0].Code != WarnShrinkwrapBundledDepsSuppressed {
-		t.Fatalf("expected one bundled-deps suppression warning, got %+v", out.Warnings)
-	}
-}
-
-func TestShrinkwrapProvider_BundledDependencies_AltSpelling(t *testing.T) {
-	// Both spellings are valid per npm docs.
-	tgz := buildNPMTarball(t, map[string]string{
-		"package/package.json":      `{"name":"x","bundleDependencies":["lodash"]}`,
-		"package/package-lock.json": `{}`,
-	})
-	req := Request{Key: Key{Ecosystem: "npm"}, Artifact: &ArtifactHandle{Bytes: tgz}}
-	out, err := newShrinkwrapProvider().Run(context.Background(), req, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Scan == nil || out.Scan.ShrinkwrapPresent {
-		t.Fatalf("alt spelling 'bundleDependencies' should suppress, got %+v", out.Scan)
-	}
-}
-
-func TestShrinkwrapProvider_BundledDependencies_EmptyArrayDoesNotSuppress(t *testing.T) {
-	tgz := buildNPMTarball(t, map[string]string{
-		"package/package.json":      `{"name":"x","bundledDependencies":[]}`,
-		"package/package-lock.json": `{}`,
-	})
-	req := Request{Key: Key{Ecosystem: "npm"}, Artifact: &ArtifactHandle{Bytes: tgz}}
-	out, err := newShrinkwrapProvider().Run(context.Background(), req, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Scan == nil || !out.Scan.ShrinkwrapPresent {
-		t.Fatalf("empty bundledDependencies array must NOT suppress, got %+v", out.Scan)
-	}
-}
-
-func TestShrinkwrapProvider_RootMatchWinsOverSuppressedNested(t *testing.T) {
-	tgz := buildNPMTarball(t, map[string]string{
-		"package/package.json":                   `{"name":"x"}`,
-		"package/package-lock.json":              `{}`,
-		"package/examples/sub/package-lock.json": `{}`,
-	})
-	req := Request{Key: Key{Ecosystem: "npm"}, Artifact: &ArtifactHandle{Bytes: tgz}}
-	out, err := newShrinkwrapProvider().Run(context.Background(), req, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Scan == nil || !out.Scan.ShrinkwrapPresent {
-		t.Fatalf("root lockfile should fire even when nested example is suppressed, got %+v", out.Scan)
-	}
-	// Path-suppression warning still emitted for the example match.
-	sawPathWarn := false
-	for _, w := range out.Warnings {
-		if w.Code == WarnShrinkwrapPathSuppressed {
-			sawPathWarn = true
+	for _, tc := range cases {
+		tgz := buildNPMTarball(t, map[string]string{tc.path: `{}`})
+		req := Request{Key: Key{Ecosystem: tc.eco}, Artifact: &ArtifactHandle{Bytes: tgz}}
+		out, err := newShrinkwrapProvider().Run(context.Background(), req, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Scan != nil && out.Scan.ShrinkwrapPresent {
+			t.Errorf("%s %s fired; its installer never reads it inside a dependency", tc.eco, tc.path)
 		}
 	}
-	if !sawPathWarn {
-		t.Fatalf("expected path-suppression warning for examples/ match, got %+v", out.Warnings)
-	}
 }
 
-func TestShrinkwrapProvider_NonNPMEcosystem_NoBundledDepsCheck(t *testing.T) {
-	// pip with Pipfile.lock at root: bundledDeps suppression doesn't
-	// apply (different ecosystem); only path-based suppression would.
+// npm reads npm-shrinkwrap.json only at the package root. A bundled
+// dependency ships pre-installed and an example directory is just files.
+func TestShrinkwrapProvider_OnlyTheRootShrinkwrapFires(t *testing.T) {
+	for _, p := range []string{
+		"package/node_modules/inner/npm-shrinkwrap.json",
+		"package/examples/app/npm-shrinkwrap.json",
+	} {
+		tgz := buildNPMTarball(t, map[string]string{"package/package.json": `{"name":"x"}`, p: `{}`})
+		out, err := newShrinkwrapProvider().Run(context.Background(), Request{Key: Key{Ecosystem: "npm"}, Artifact: &ArtifactHandle{Bytes: tgz}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Scan != nil && out.Scan.ShrinkwrapPresent {
+			t.Errorf("%s fired; npm does not read it", p)
+		}
+	}
+	// bundledDependencies no longer suppresses: npm still honours the
+	// shrinkwrap for every dependency that is not bundled.
 	tgz := buildNPMTarball(t, map[string]string{
-		"package/Pipfile.lock": `[[source]]`,
+		"package/package.json":        `{"name":"x","bundledDependencies":["lodash"]}`,
+		"package/npm-shrinkwrap.json": `{}`,
 	})
-	req := Request{Key: Key{Ecosystem: "pip"}, Artifact: &ArtifactHandle{Bytes: tgz}}
-	out, err := newShrinkwrapProvider().Run(context.Background(), req, nil)
+	out, err := newShrinkwrapProvider().Run(context.Background(), Request{Key: Key{Ecosystem: "yarn"}, Artifact: &ArtifactHandle{Bytes: tgz}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out.Scan == nil || !out.Scan.ShrinkwrapPresent {
-		t.Fatalf("pip Pipfile.lock at root should fire, got %+v", out.Scan)
-	}
-}
-
-func TestShrinkwrapProvider_MalformedPackageJSONFiresNormally(t *testing.T) {
-	tgz := buildNPMTarball(t, map[string]string{
-		"package/package.json":      `{not valid json`,
-		"package/package-lock.json": `{}`,
-	})
-	req := Request{Key: Key{Ecosystem: "npm"}, Artifact: &ArtifactHandle{Bytes: tgz}}
-	out, err := newShrinkwrapProvider().Run(context.Background(), req, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Scan == nil || !out.Scan.ShrinkwrapPresent {
-		t.Fatalf("malformed package.json should not suppress, got %+v", out.Scan)
+		t.Fatalf("root npm-shrinkwrap.json with bundledDependencies must fire, got %+v", out.Scan)
 	}
 }
 

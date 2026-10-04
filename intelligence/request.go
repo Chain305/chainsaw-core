@@ -1,6 +1,7 @@
 package intelligence
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -100,6 +101,16 @@ const (
 	// indicators of compromise (exfil sink hosts, coupled stealer strings).
 	// Tier 2, cross-ecosystem, rides the shared artifact map.
 	SignalIOCScan
+
+	// SignalDebugTelemetry activates the debugtelemetry provider — the
+	// weight-0 debug-module (cap.debug_access) and telemetry (cap.telemetry)
+	// observations. Tier 2, rides the shared artifact map.
+	SignalDebugTelemetry
+
+	// SignalLicenseFile activates the licensefile provider — the licence
+	// named by the package's own top-level LICENSE / COPYING file. Tier 2,
+	// rides the shared artifact map.
+	SignalLicenseFile
 )
 
 // SignalAll activates every provider the service knows about. Callers who
@@ -313,8 +324,25 @@ const DefaultMaxStaleness = 24 * time.Hour
 const DefaultDeadline = 15 * time.Second
 
 // DefaultProviderTimeout is the per-provider context timeout inside the
-// Scan fan-out. Specific providers override this (CVE 8s, metadata 10s).
+// Scan fan-out. It starts after the provider's Prepare, if it has one.
 const DefaultProviderTimeout = 3 * time.Second
+
+// Preparer is a Tier-1/2 (phase one) provider with waiting to do before its
+// timeout starts:
+// registrymetadata queues for its fixed registry tokens here, so a shared
+// per-host limiter's queue wait does not eat the 3s it fetches under. The
+// wait is bounded by the Scan's own deadline, and the provider's timing
+// includes it.
+type Preparer interface {
+	Prepare(ctx context.Context, req Request) context.Context
+}
+
+func prepare(ctx context.Context, p Provider, req Request) context.Context {
+	if pp, ok := p.(Preparer); ok {
+		return pp.Prepare(ctx, req)
+	}
+	return ctx
+}
 
 // SearchQuery powers Service.Search for the admin UI list view.
 //

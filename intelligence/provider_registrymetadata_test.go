@@ -2334,3 +2334,136 @@ func TestNuGetDeprecationBecomesDeprecated(t *testing.T) {
 		})
 	}
 }
+
+// Release shapes from PyPI, as served for corpus-v1-rev4 coordinates. A
+// release that declares its licence only through a trove classifier must
+// not read as "no licence".
+func TestRegistryMetadataProvider_PyPIClassifierLicence(t *testing.T) {
+	cases := []struct {
+		pkg, ver, info, want string
+	}{
+		{"khoj", "1.29.0",
+			`"license": null, "classifiers": ["Programming Language :: Python :: 3", "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)"]`,
+			"AGPL-3.0-or-later"},
+		{"recce", "0.1.0",
+			`"license": "", "classifiers": ["License :: OSI Approved :: Apache Software License"]`,
+			"Apache-2.0"},
+		{"django-registration", "3.1.2",
+			`"license": "", "classifiers": ["Framework :: Django", "License :: OSI Approved :: BSD License"]`,
+			"BSD"},
+		{"stacrs", "0.5.0",
+			`"license": null, "classifiers": ["License :: OSI Approved :: Apache Software License", "License :: OSI Approved :: MIT License"]`,
+			"Apache-2.0 OR MIT"},
+		{"vaurienclient", "1.0",
+			`"license": "UNKNOWN", "classifiers": ["License :: OSI Approved :: Apache Software License"]`,
+			"Apache-2.0"},
+		// A declared field always wins over the classifiers.
+		{"wagtail", "6.0",
+			`"license": "BSD", "classifiers": ["License :: OSI Approved :: BSD License"]`,
+			"BSD"},
+		{"anthropickit", "999.9.9", `"license": "", "classifiers": ["Programming Language :: Python"]`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.pkg, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/pypi/"+tc.pkg+"/"+tc.ver+"/json", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"info": {"summary": "x", ` + tc.info + `}, "urls": []}`))
+			})
+			p, _ := newStubProvider(t, mux)
+			pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "pypi", Package: tc.pkg, Version: tc.ver}}, nil)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if pr.Metadata == nil || pr.Metadata.LicenseExpression != tc.want {
+				t.Fatalf("license = %+v, want %q", pr.Metadata, tc.want)
+			}
+		})
+	}
+}
+
+// aerogo/aero v1.1.10 is an older tag: the proxy's .info carries no Origin,
+// so the repo must come from the module path or the repolink probe never
+// learns that github.com/aerogo/aero is archived.
+func TestRunGo_RepoFromModulePathWhenNoOrigin(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/github.com/aerogo/aero/@v/v1.1.10.info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Version":"v1.1.10","Time":"2019-07-11T09:58:12Z"}`))
+	})
+	mux.HandleFunc("/github.com/aerogo/aero/@latest", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Version":"v1.3.59","Time":"2021-03-24T00:00:00Z"}`))
+	})
+	mux.HandleFunc("/github.com/aerogo/aero/@v/list", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("v1.1.10\nv1.3.59\n"))
+	})
+	registerDepsDevGoLicense(mux)
+	p, _ := newStubProvider(t, mux)
+	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "go", Package: "github.com/aerogo/aero", Version: "v1.1.10"}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if pr.URLs == nil || pr.URLs.SourceRepoURL != "https://github.com/aerogo/aero" {
+		t.Fatalf("sourceRepoURL: %+v", pr.URLs)
+	}
+}
+
+func TestGoModuleRepoURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"github.com/aerogo/aero":                             "https://github.com/aerogo/aero",
+		"github.com/census-instrumentation/opencensus-proto": "https://github.com/census-instrumentation/opencensus-proto",
+		"github.com/DataDog/datadog-agent/pkg/obfuscate":     "https://github.com/DataDog/datadog-agent",
+		"bitbucket.org/owner/repo/sub":                       "https://bitbucket.org/owner/repo",
+		"gitlab.com/group/subgroup/repo":                     "",
+		"golang.org/x/mod":                                   "",
+		"github.com/onlyowner":                               "",
+		"k8s.io/apimachinery":                                "",
+	} {
+		if got := goModuleRepoURL(in); got != want {
+			t.Errorf("goModuleRepoURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// github.com/FanFani4/ports/client_api ships no LICENSE; deps.dev answers
+// `"licenses": []`, which is a real "declares no licence". With a slow
+// module proxy the licence lookup must still land inside the provider
+// budget, or the row reads license_unavailable instead of lic.missing.
+func TestRunGo_LicenceNotStarvedBySlowProxy(t *testing.T) {
+	const slow = 700 * time.Millisecond
+	mux := http.NewServeMux()
+	mod := "github.com/!fan!fani4/ports/client_api"
+	ver := "v0.0.0-20210116161422-cb5a005e6754"
+	mux.HandleFunc("/"+mod+"/@v/"+ver+".info", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"Version":"` + ver + `","Time":"2021-01-16T16:14:22Z"}`))
+	})
+	slowly := func(body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-time.After(slow):
+			case <-r.Context().Done():
+				return
+			}
+			_, _ = w.Write([]byte(body))
+		}
+	}
+	mux.HandleFunc("/"+mod+"/@latest", slowly(`{"Version":"`+ver+`","Time":"2021-01-16T16:14:22Z"}`))
+	mux.HandleFunc("/"+mod+"/@v/"+ver+".mod", slowly("module github.com/FanFani4/ports/client_api\n"))
+	mux.HandleFunc("/"+mod+"/@v/list", slowly(ver+"\n"))
+	mux.HandleFunc("/v3/systems/go/packages/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"licenses":[]}`))
+	})
+	p, _ := newStubProvider(t, mux)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*slow)
+	defer cancel()
+	pr, err := p.Run(ctx, Request{Key: Key{Ecosystem: "go", Package: "github.com/FanFani4/ports/client_api", Version: ver}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, w := range pr.Warnings {
+		if w.Code == WarnLicenseUnavailable {
+			t.Fatalf("licence read was starved by the slow proxy: %+v", w)
+		}
+	}
+}

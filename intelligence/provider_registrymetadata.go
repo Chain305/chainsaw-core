@@ -37,6 +37,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -47,6 +48,7 @@ import (
 	"github.com/chain305/chainsaw-core/coverage"
 	"github.com/chain305/chainsaw-core/httpclient"
 	"github.com/chain305/chainsaw-core/provenance"
+	"github.com/chain305/chainsaw-core/risk"
 	"github.com/chain305/chainsaw-core/supplychain"
 	"github.com/chain305/chainsaw-core/upstreamhttp"
 	"golang.org/x/mod/modfile"
@@ -192,18 +194,88 @@ func newRegistryMetadataProvider() *registryMetadataProvider {
 var (
 	registryMetadataClientOnce sync.Once
 	registryMetadataClient     *http.Client
+	registryMetadataUpstream   *upstreamhttp.Client
 )
 
 func registryMetadataHTTPClient() *http.Client {
 	registryMetadataClientOnce.Do(func() {
 		base := httpclient.New(httpclient.WithTimeout(60 * time.Second))
-		registryMetadataClient = upstreamhttp.New(
+		registryMetadataUpstream = upstreamhttp.New(
 			upstreamhttp.FromEnv(),
 			upstreamhttp.WithBaseClient(base),
 			upstreamhttp.WithMaxRetries(0),
-		).HTTPClient()
+		)
+		registryMetadataClient = registryMetadataUpstream.HTTPClient()
 	})
 	return registryMetadataClient
+}
+
+// Prepare queues for this ecosystem's fixed registry requests BEFORE the
+// provider's 3s timeout starts, so the per-host limiter's queue wait no
+// longer eats the budget the requests are made under. The abf9a1f8 corpus
+// run lost the version timeline (the LAST of the sequential requests) on
+// 80 pypi rows to "rate: Wait(n=1) would exceed context deadline", and 69
+// maven, 63 rubygems and 23 go rows the same way; prod served npm json5
+// Unknown for 24h (2026-10-04). The count is only the requests every
+// successful run makes; conditional ones (Maven parents, deps.dev) still
+// queue inside the budget.
+//
+// The wait is capped by prepayWait: 2s when someone may be waiting on the
+// scan (a proxy install on a cache miss, a public lookup), 15s for work
+// nobody waits on (the refresher, dependency scans, cache warm-up). A prepay
+// that runs out of cap keeps what it paid and the scan proceeds exactly as
+// before: the rest queue inside the provider's 3s, and a refusal is the
+// provisional context_cancelled of 72972e98. Worst-case added install
+// latency is therefore prepayForegroundWait, and only under contention.
+func (p *registryMetadataProvider) Prepare(ctx context.Context, req Request) context.Context {
+	if registryMetadataUpstream == nil || p.client != registryMetadataClient {
+		return ctx
+	}
+	base, n := p.fixedRequests(req.Key.Ecosystem)
+	u, err := url.Parse(base)
+	if n == 0 || err != nil || u.Hostname() == "" {
+		return ctx
+	}
+	paid, _ := registryMetadataUpstream.Prepay(ctx, u.Hostname(), n, prepayWait(ctx))
+	return paid
+}
+
+const (
+	// prepayForegroundWait caps the token wait of a scan someone may be
+	// waiting on. It is the most a proxy cache-miss install can be delayed
+	// by Prepare, and only when the registry's bucket is contended.
+	prepayForegroundWait = 2 * time.Second
+	// prepayBackgroundWait caps the wait of work nobody waits on.
+	prepayBackgroundWait = 15 * time.Second
+)
+
+// prepayWait is the token-wait cap for the scan ctx belongs to.
+func prepayWait(ctx context.Context) time.Duration {
+	if upstreamhttp.IsBackground(ctx) || strings.HasPrefix(httpclient.EgressCallerFrom(ctx), httpclient.EgressCallerRefresh) {
+		return prepayBackgroundWait
+	}
+	return prepayForegroundWait
+}
+
+// fixedRequests is the primary host and the number of requests every
+// successful run against it makes: the version document, then the
+// unconditional follow-ups (status, owners, authors, timeline).
+func (p *registryMetadataProvider) fixedRequests(ecosystem string) (string, int) {
+	switch strings.ToLower(strings.TrimSpace(ecosystem)) {
+	case "npm", "yarn", "bun", "pnpm":
+		return p.endpoints.npm, 1 // the packument carries everything
+	case "pypi", "pip":
+		return p.endpoints.pypi, 3 // version JSON, /simple status, timeline
+	case "rubygems", "gem":
+		return p.endpoints.rubygems, 3 // version, owners, timeline
+	case "cargo":
+		return p.endpoints.cargo, 4 // version, owners, authors, timeline
+	case "maven", "gradle":
+		return p.endpoints.maven, 2 // POM, maven-metadata.xml
+	case "go", "gomod", "golang":
+		return p.endpoints.goproxy, 4 // .info, @latest, .mod, @v/list
+	}
+	return "", 0
 }
 
 // registryTimeouts holds per-ecosystem per-attempt timeout budgets.
@@ -617,6 +689,13 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 			// before sleeping; here just treat as transient.
 			_ = pErr
 		}
+		if errors.Is(err, upstreamhttp.ErrRateLimitedLocally) {
+			// Our own limiter refused: the registry was never asked, and
+			// the token would have come too late to ask it. The same state
+			// as a cancelled fetch (no facts, transient), not a transport
+			// failure, so it is provisional rather than final for 24h.
+			return &Warning{Provider: "registrymetadata", Code: WarnRegistryCancelled, Message: err.Error(), At: p.now()}, false, 0, err
+		}
 		return &Warning{Provider: "registrymetadata", Code: "transport", Message: err.Error(), At: p.now()}, isTransientErr(err), 0, err
 	}
 	defer resp.Body.Close()
@@ -662,7 +741,13 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 	limited := &io.LimitedReader{R: resp.Body, N: registryMaxBodyBytes}
 	if err := decode(limited); err != nil {
 		code, msg := WarnRegistryDecode, err.Error()
-		if limited.N <= 0 {
+		if ctx.Err() != nil {
+			// The deadline ended the body read, not a malformed document:
+			// typescript's 15.7 MB packument came back "decode: context
+			// deadline exceeded" and the coordinate read as a registry that
+			// served garbage. It is a cancellation, and a provisional one.
+			code, msg = WarnRegistryCancelled, ctx.Err().Error()
+		} else if limited.N <= 0 {
 			code = WarnRegistryBodyTooLarge
 			msg = fmt.Sprintf("response exceeded the %d-byte read ceiling and was truncated before parsing; "+
 				"this is our limit, not a malformed upstream document (%v)", registryMaxBodyBytes, err)
@@ -959,6 +1044,8 @@ func npmPublisherBaseline(versions map[string]npmVersionMeta, stamps map[string]
 		return b
 	}
 	meta := versions[prev]
+	b.SourceRepoURL = npmRepoURL(meta.Repository)
+	b.HomepageURL = string(meta.Homepage)
 	if meta.NpmUser != nil {
 		if s := meta.NpmUser.String(); s != "" {
 			b.Publishers = []string{s}
@@ -1397,6 +1484,7 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 			ProjectURLs       map[string]string `json:"project_urls"`
 			RequiresPython    string            `json:"requires_python"`
 			RequiresDist      []string          `json:"requires_dist"`
+			Classifiers       []string          `json:"classifiers"`
 			Yanked            any               `json:"yanked"`
 			YankedReason      string            `json:"yanked_reason"`
 			PackageURL        string            `json:"package_url"`
@@ -1492,7 +1580,7 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 	}
 
 	metadata := &MetadataSection{
-		LicenseExpression: firstNonEmpty(pack.Info.LicenseExpression, pack.Info.License),
+		LicenseExpression: pypiLicense(pack.Info.LicenseExpression, pack.Info.License, pack.Info.Classifiers),
 		Summary:           pack.Info.Summary,
 		Description:       pack.Info.Description,
 		RequiresRuntime:   pack.Info.RequiresPython,
@@ -4327,6 +4415,24 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 		return pr, nil
 	}
 
+	// The licence comes from deps.dev, which needs nothing but the
+	// coordinate, so it is fetched alongside the proxy calls below rather
+	// than after three of them. In sequence it was the fourth of six
+	// round trips inside the 3 s provider budget, so a slow proxy cancelled
+	// it more often than anything else: one corpus-v1 rev5 rescore turned
+	// six Go modules that ship no licence from lic.missing into
+	// license_unavailable, all six "deps.dev licence not read:
+	// context_cancelled".
+	type goLicence struct {
+		expr string
+		warn *Warning
+	}
+	licCh := make(chan goLicence, 1)
+	go func() {
+		lic, w := p.fetchDepsDevGoLicense(ctx, pkg, ver)
+		licCh <- goLicence{lic, w}
+	}()
+
 	// Best-effort companion request for "latest" — non-fatal if it fails
 	// (pseudo-versions and forks may not have a @latest pointer).
 	var latest struct {
@@ -4366,6 +4472,8 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	}
 	if info.Origin.URL != "" {
 		urls.SourceRepoURL = normaliseRepoURL(info.Origin.URL)
+	} else {
+		urls.SourceRepoURL = goModuleRepoURL(pkg)
 	}
 	artifact := &ArtifactSection{
 		Filename:  fmt.Sprintf("%s.zip", ver),
@@ -4388,7 +4496,8 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	// canonical 404 found was prometheus v0.315.0 an hour after release
 	// (package known, version not yet indexed), and every other 404 was a
 	// path whose go.mod declares a different module.
-	lic, licWarn := p.fetchDepsDevGoLicense(ctx, pkg, ver)
+	gl := <-licCh
+	lic, licWarn := gl.expr, gl.warn
 	metadata.LicenseExpression = lic
 	if licWarn != nil {
 		pr.Warnings = append(pr.Warnings, licenseUnavailableWarning("deps.dev licence not read: "+licWarn.Code, p.now()))
@@ -4479,6 +4588,26 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 		applyTimeline(&pr, timeline, "", nil)
 	}
 	return pr, nil
+}
+
+// goModuleRepoURL derives the source repository from a module path on a
+// host whose paths ARE repositories (github.com and bitbucket.org:
+// host/owner/repo[/subdir]), or "" anywhere else. gitlab.com is left out:
+// its subgroups make the repo boundary unknowable from the path. The proxy only carries an
+// Origin for versions it fetched after mid-2022, so pseudo-versions and
+// older tags arrived with no repo at all and the repolink probe never ran
+// on them: on corpus-v1 rev5, aerogo/aero v1.1.10 and four more modules
+// whose GitHub repos are archived read as clean.
+func goModuleRepoURL(module string) string {
+	parts := strings.Split(strings.TrimSpace(module), "/")
+	if len(parts) < 3 || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	switch strings.ToLower(parts[0]) {
+	case "github.com", "bitbucket.org":
+		return "https://" + strings.ToLower(parts[0]) + "/" + parts[1] + "/" + parts[2]
+	}
+	return ""
 }
 
 // fetchGoModState reads the go.mod of the module's latest version and
@@ -5453,6 +5582,48 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:i])
 	}
 	return s
+}
+
+// pypiLicense picks a PyPI release's licence: PEP 639 license_expression,
+// then the free-text `license` field, then the trove classifiers. Before
+// license_expression existed, a "License :: …" classifier was how most
+// setuptools projects declared a licence, often with `license` left empty
+// or setuptools' "UNKNOWN" placeholder. Reading only the two fields charged
+// those packages lic.missing and license.unidentified (-30) for a licence
+// they do declare: django-registration@3.1.2, recce@0.1.0 and khoj@1.29.0
+// (AGPL — so license.copyleft was missed too) on corpus-v1-rev4, where
+// socket.dev reports no noLicenseFound for any of them.
+//
+// Each classifier is normalised on its own before joining, because the
+// trove names contain the word "or" ("GNU General Public License v3 or
+// later (GPLv3+)") and a joined raw string would be split there by the
+// read-side normaliser. Several licence classifiers are joined with OR:
+// that is how a dual-licensed project lists itself. A name that does not
+// determine a licence ("Other/Proprietary License") stays as written, so
+// it reads as declared-but-unidentified rather than missing.
+func pypiLicense(expression, license string, classifiers []string) string {
+	if v := firstNonEmpty(expression, license); v != "" && !strings.EqualFold(v, "UNKNOWN") {
+		return v
+	}
+	var names []string
+	for _, c := range classifiers {
+		parts := strings.Split(c, "::")
+		if len(parts) < 2 || strings.TrimSpace(parts[0]) != "License" {
+			continue
+		}
+		name := strings.TrimSpace(parts[len(parts)-1])
+		if name == "" {
+			continue
+		}
+		name = risk.NormalizeLicenseExpression(name)
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return firstNonEmpty(expression, license)
+	}
+	return strings.Join(names, " OR ")
 }
 
 func firstNonEmpty(values ...string) string {

@@ -355,6 +355,7 @@ var refreshSubCallers = []string{
 	EgressCallerRefreshDocument,
 	EgressCallerRefreshProvenance,
 	EgressCallerRefreshAccount,
+	EgressCallerRefreshDep,
 }
 
 // THE compatibility guard. The deployed D-2 reading and every PromQL in
@@ -426,6 +427,18 @@ func TestRefineEgressCallerAllowsNestingWithinTheFamily(t *testing.T) {
 	if got := EgressCallerFrom(ctx); got != EgressCallerRefreshRepo {
 		t.Errorf("caller = %q, want %q — the GitHub read inside the document provider would "+
 			"otherwise be counted as a package document", got, EgressCallerRefreshRepo)
+	}
+}
+
+// A dependency scan is one line: the document, repo and account reads inside
+// it must not refine it away, or the fan-out's cost is spread back across the
+// classes the parent's own rescan is measured by.
+func TestRefineEgressCallerKeepsDepScanTrafficOnOneLine(t *testing.T) {
+	ctx := WithEgressCaller(context.Background(), EgressCallerRefreshDep)
+	for _, sub := range refreshSubCallers {
+		if got := EgressCallerFrom(RefineEgressCaller(ctx, sub)); got != EgressCallerRefreshDep {
+			t.Errorf("refining %q to %q gave %q", EgressCallerRefreshDep, sub, got)
+		}
 	}
 }
 

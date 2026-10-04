@@ -82,8 +82,8 @@ import (
 //
 // Exact, whole package names on a REVIEWED, DOWNLOAD-RANKED list, checked in
 // both directions. Same trust shape as officialSiblings (exact reviewed
-// names, no patterns) and the same demotion shape as sameOwnerSibling (a
-// structural fact, DEMOTE never silence).
+// names, no patterns). Originally a demotion to "low" like sameOwnerSibling;
+// since 2026-10-03 the hit is cleared (see moreEstablishedThanTarget).
 //
 // An attacker cannot forge a place on it. The list is generated from an
 // upstream DOWNLOAD ranking by core/tools/popular-corpus-gen and lands in the
@@ -95,7 +95,7 @@ import (
 //
 // ─── WHY THE PUBLISHED FP AND RECALL NUMBERS CANNOT MOVE ────────────────────
 //
-// The demotion is DEAD CODE whenever the match index and this reference are
+// The direction check is DEAD CODE whenever the match index and this reference are
 // the same list — and in the install guard they are. localGuard.detector()
 // loads core/cli/seeds/npm_popular.txt (or a signature-verified bundle) as
 // the npm index; this reference is a byte-identical mirror of that file
@@ -213,8 +213,9 @@ func establishedRank(ecosystem, name string) (int, bool) {
 
 // moreEstablishedThanTarget reports whether the CANDIDATE is at least as
 // established as the popular name it was matched against — i.e. whether the
-// typosquat claim points the wrong way round. Callers DEMOTE such a hit to
-// "low"; they do not silence it. See Check.
+// typosquat claim points the wrong way round. Check CLEARS such a hit, at
+// every tier (until 2026-10-03 it demoted to "low", which still cost -8 and
+// still read as suspected to policy). See Check.
 //
 // True when the candidate is on the reviewed download-ranked reference AND
 // the target is either absent from it or ranks below the candidate.
@@ -231,13 +232,11 @@ func establishedRank(ecosystem, name string) (int, bool) {
 // WHY THIS COSTS NO RECALL. The claim being deleted is "the candidate is
 // impersonating the target". If the candidate is the more-installed of the
 // two, that claim is false as a matter of fact, whatever the edit distance
-// says; the two names really are one apart and the finding stays visible at
-// "low" so a reader can see it. What it stops being is a reason to
-// QUARANTINE.
+// says.
 //
-// APPLIES AT EVERY TIER ABOVE "low", not just "high". The direction argument
-// is semantic rather than a tuned threshold, so correcting `high` and
-// knowingly leaving `medium` wrong would be arbitrary.
+// APPLIES AT EVERY TIER, including the combosquat "low" floor. The direction
+// argument is semantic rather than a tuned threshold, so correcting `high`
+// and knowingly leaving `medium` or `low` wrong would be arbitrary.
 //
 // Measured on the production export (7,099 rows), by re-running the real risk
 // engine over every affected row:
@@ -254,15 +253,15 @@ func establishedRank(ecosystem, name string) (int, bool) {
 //	        So the loosening half is 135 corrected display claims and no
 //	        verdict movement at all.
 //
-// SCOPE, stated so the next reader does not over-credit it. Two neighbouring
-// false-positive classes are deliberately NOT addressed:
+// The 2026-10-03 change to clearing, at every tier, re-measured against the
+// live server corpus (npm keyword search, 2,205 names; PyPI top 5,000): of
+// the 8,000 reviewed npm+PyPI names, findings 402 -> 165, all 237 removed at
+// "low"; the rev4 corpus (314 benign, 362 malicious npm/PyPI names) did not
+// move, because none of its malicious names is on the reviewed list.
 //
-//   - The combosquat floor. `prettier` reported as similar to `ret` and
-//     `tailwindcss` to `css` are wrong-direction AND visibly false, but they
-//     already sit at "low" and Check's demotion is guarded on
-//     `Confidence != "low"`, so this changes nothing for them. Their breadth
-//     is checkCombosquat's own deliberate trade (13.0% of benign packages
-//     embed some popular name) and correcting it is separate work.
+// SCOPE, stated so the next reader does not over-credit it. One neighbouring
+// false-positive class is deliberately NOT addressed:
+//
 //   - Coincidental short-name collisions. `immer` → `mime` is 10 production
 //     rows and is plainly false, but `mime` really is the more-downloaded of
 //     the two (#197 vs #807), so the DIRECTION is not what is wrong with it.

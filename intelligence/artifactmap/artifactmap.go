@@ -11,7 +11,9 @@
 // The package is intentionally dependency-free (stdlib only) so it can
 // be imported by low-level intelligence providers without introducing
 // cycles. Archive format support matches what provider_installscripts.go
-// ships today: zip, gzipped tar, and plain tar.
+// ships today: zip, gzipped tar, and plain tar — plus a RubyGems .gem,
+// whose outer plain tar carries the package's code in an inner
+// data.tar.gz that is mapped in place of the blob.
 package artifactmap
 
 import (
@@ -160,10 +162,12 @@ func Build(payload []byte, opts Options) Result {
 			return res
 		}
 		defer gzr.Close()
-		buildFromTar(gzr, opts, &res)
+		buildFromTar(gzr, opts, &res, false)
 	default:
 		// Plain tar? Try it; tar.NewReader will fail gracefully if not.
-		buildFromTar(bytes.NewReader(payload), opts, &res)
+		// A .gem is a plain tar, so this is the only call that expands
+		// a top-level data.tar.gz.
+		buildFromTar(bytes.NewReader(payload), opts, &res, true)
 	}
 	return res
 }
@@ -176,7 +180,14 @@ func looksLikeGzip(p []byte) bool {
 	return len(p) >= 2 && p[0] == 0x1f && p[1] == 0x8b
 }
 
-func buildFromTar(r io.Reader, opts Options, res *Result) {
+// buildFromTar walks a tar stream into res. expandGem maps the entries of a
+// top-level data.tar.gz (a RubyGems .gem) instead of the 2 MiB-capped blob
+// itself: without it a gem's map held only metadata.gz, data.tar.gz and
+// checksums.yaml.gz, so every source scanner saw zero code. The inner walk
+// shares res, so MaxFiles and MaxRetainedBytes bound both levels together,
+// and it never expands again — one level, not a recursion an attacker can
+// nest.
+func buildFromTar(r io.Reader, opts Options, res *Result, expandGem bool) {
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
@@ -198,6 +209,15 @@ func buildFromTar(r io.Reader, opts Options, res *Result) {
 		}
 		name := sanitizePath(hdr.Name)
 		if name == "" {
+			continue
+		}
+		if expandGem && name == "data.tar.gz" {
+			// A data.tar.gz that is not gzip is dropped, not kept: the
+			// failed header read has already consumed part of it.
+			if gzr, gerr := gzip.NewReader(tr); gerr == nil {
+				buildFromTar(gzr, opts, res, false)
+				gzr.Close()
+			}
 			continue
 		}
 		body, err := io.ReadAll(io.LimitReader(tr, opts.PerFileCap))

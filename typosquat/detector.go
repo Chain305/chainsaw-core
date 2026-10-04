@@ -216,36 +216,37 @@ func (d *Detector) LoadEcosystem(ecosystem string, packages []PopularPackage) {
 // Returns a zero-value result (IsSuspected=false) if no issue is found.
 func (d *Detector) Check(ctx context.Context, ecosystem, packageName string) DetectionResult {
 	res := d.check(ctx, ecosystem, packageName)
-	if res.IsSuspected && res.Confidence != "low" {
-		switch {
-		case sameOwnerSibling(ecosystem, packageName, res.SimilarTo):
-			// DEMOTE, never silence. The similarity is real and still worth
-			// showing — `actions/chekout` IS one edit from `actions/checkout`
-			// and a reader should see that. What it is not is a reason to
-			// QUARANTINE, because the two names have the same publisher.
-			//
-			// Clearing outright was the first implementation and it deleted an
-			// existing contract: TestDetectorGitHubActions asserts
-			// IsSuspected+SimilarTo (not confidence) for exactly that pair.
-			// Demotion keeps the finding, keeps that test byte-identical, and
-			// moves the verdict from sc.typosquat_high (SevCritical, -40,
-			// blocking) to sc.typosquat_low (SevLow, -8, advisory).
-			res.Confidence = "low"
-		case moreEstablishedThanTarget(ecosystem, packageName, res.SimilarTo):
-			// Same shape, same reason, different structural fact: the
-			// direction of the impersonation claim. A typosquat is a LESS
-			// established package wearing the face of a MORE established one,
-			// and `ms` is not squatting `msw`. Demoted rather than cleared for
-			// the same reason as above — the two names really are one edit
-			// apart and a reader should see it — and keyed on a reviewed
-			// download ranking an attacker cannot buy into.
-			//
-			// Read established.go before touching this: in particular why
-			// corpus rank cannot answer the question, why a target-rank cutoff
-			// was rejected, and why this branch is unreachable on the install
-			// guard's path and so cannot move its published FP/recall numbers.
-			res.Confidence = "low"
-		}
+	if !res.IsSuspected {
+		return res
+	}
+	// The direction of the impersonation claim. A typosquat is a LESS
+	// established package wearing the face of a MORE established one, and
+	// `json5` (#80 on the reviewed download ranking) is not squatting `json3`
+	// (not on it). Cleared, at every tier including the combosquat floor: the
+	// claim is false as a matter of fact, so it must not cost score or read
+	// as "suspected" to a policy's isSuspectedTyposquat condition — which a
+	// "low" demotion still did (json5 at -8 in prod, 2026-10-03).
+	//
+	// Read established.go before touching this: in particular why corpus rank
+	// cannot answer the question, why a target-rank cutoff was rejected, and
+	// why this branch is unreachable on the install guard's path and so
+	// cannot move its published FP/recall numbers.
+	if moreEstablishedThanTarget(ecosystem, packageName, res.SimilarTo) {
+		return DetectionResult{}
+	}
+	if res.Confidence != "low" && sameOwnerSibling(ecosystem, packageName, res.SimilarTo) {
+		// DEMOTE, never silence. The similarity is real and still worth
+		// showing — `actions/chekout` IS one edit from `actions/checkout`
+		// and a reader should see that. What it is not is a reason to
+		// QUARANTINE, because the two names have the same publisher.
+		//
+		// Clearing outright was the first implementation and it deleted an
+		// existing contract: TestDetectorGitHubActions asserts
+		// IsSuspected+SimilarTo (not confidence) for exactly that pair.
+		// Demotion keeps the finding, keeps that test byte-identical, and
+		// moves the verdict from sc.typosquat_high (SevCritical, -40,
+		// blocking) to sc.typosquat_low (SevLow, -8, advisory).
+		res.Confidence = "low"
 	}
 	return res
 }

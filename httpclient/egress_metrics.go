@@ -126,6 +126,19 @@ const (
 	// be indistinguishable without this, and T-3's account-metadata reuse
 	// cannot be measured against a series it is mixed into.
 	EgressCallerRefreshAccount = "refresh_account"
+	// EgressCallerRefreshDep is a DEPENDENCY scan the refresher's rescan
+	// fanned out (enqueueDependencyScans): up to 64 children per parent, two
+	// levels deep, each a full Scan with its own document, repo and account
+	// reads. Before this tag those scans ran on the service's untagged
+	// background context and were counted as `other` — customer traffic.
+	//
+	// STICKY: RefineEgressCaller leaves it alone, so everything under a
+	// dependency scan stays on this one line. That loses the per-class split
+	// inside it, which the host label still gives (api.github.com is the
+	// GitHub spend), and buys the number the dependency fan-out's budget is
+	// decided on. Refining it would scatter that cost back across the classes
+	// the parent's own rescan is measured by.
+	EgressCallerRefreshDep = "refresh_dep"
 )
 
 // refreshSubCallerPrefix is what makes `caller=~"refresh.*"` cover the family.
@@ -155,6 +168,8 @@ func RefineEgressCaller(ctx context.Context, sub string) context.Context {
 		return ctx
 	}
 	switch cur := EgressCallerFrom(ctx); {
+	case cur == EgressCallerRefreshDep:
+		return ctx
 	case cur == EgressCallerRefresh, strings.HasPrefix(cur, refreshSubCallerPrefix):
 		return WithEgressCaller(ctx, sub)
 	default:

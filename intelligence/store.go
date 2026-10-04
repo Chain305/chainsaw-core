@@ -665,6 +665,70 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 // repolinkProvider probes, which is once per recheck window, and never on a
 // scan capped below Tier 3. Called by the store merge and, so the report a
 // Scan RETURNS matches the row it wrote, by runFanout.
+// carryReleaseHistory fills an empty release history from the stored row: the
+// version timeline, first publish and latest release. A timeline fetch that
+// failed this scan (timeline_fetch_failed: pypi 80, maven 69, rubygems 63 and
+// go 23 of the abf9a1f8 corpus rows, mostly our own limiter) says nothing
+// about the package, and a release history only grows, so the last one read
+// is a true lower bound. The store merge always kept it for display; the
+// scan now keeps it for the verdict too, so maint.* and the repo_archived
+// moved-project exemption see what the page shows. Empty fields only: a
+// fetched value always wins.
+func carryReleaseHistory(dst *MaintenanceSection, prior MaintenanceSection) {
+	if len(dst.VersionTimeline) == 0 && len(prior.VersionTimeline) > 0 {
+		dst.VersionTimeline = prior.VersionTimeline
+	}
+	if dst.FirstPublishedAt == nil && prior.FirstPublishedAt != nil {
+		dst.FirstPublishedAt = prior.FirstPublishedAt
+	}
+	if dst.LatestReleaseAt == nil && prior.LatestReleaseAt != nil {
+		dst.LatestReleaseAt = prior.LatestReleaseAt
+	}
+}
+
+// carryLicense keeps the stored row's licence when this scan failed to read
+// one: license_unavailable, or the registry-metadata read cancelled, refused
+// by our own limiter, or timed out. Contended runs of the 151 rev5 maven
+// rows ended license_unavailable on 10 to 60 of them (2026-10-04, mostly a
+// parent-POM walk refused by the repo1 limiter), and a rescan replaced the
+// stored licence with nothing while carryReleaseHistory kept the timeline
+// beside it. A failed read says nothing about the package, so it must not
+// erase what was read before.
+//
+// Same coordinate only: a licence can change between versions, so a prior
+// row for any other version carries nothing. A fetched value always wins,
+// and the warning stays on the row — the licence is carried, not re-read.
+// The licence tags are derived from the expression at projection, so
+// carrying the expression carries them.
+func carryLicense(dst, prior *Report) {
+	if prior == nil || dst.Metadata.LicenseExpression != "" || prior.Metadata.LicenseExpression == "" {
+		return
+	}
+	if !sameCoordinate(dst.Identity, prior.Identity) || !licenseReadFailed(dst) {
+		return
+	}
+	dst.Metadata.LicenseExpression = prior.Metadata.LicenseExpression
+}
+
+func sameCoordinate(a, b IdentitySection) bool {
+	return strings.EqualFold(a.Ecosystem, b.Ecosystem) && a.Package == b.Package && a.Version == b.Version
+}
+
+// licenseReadFailed reports whether the registry-metadata read that carries
+// the licence failed rather than answered.
+func licenseReadFailed(r *Report) bool {
+	for _, w := range r.Observation.Warnings {
+		if w.Provider != "registrymetadata" {
+			continue
+		}
+		switch w.Code {
+		case WarnLicenseUnavailable, WarnRegistryCancelled, WarnTimeout:
+			return true
+		}
+	}
+	return false
+}
+
 func carryRepoStats(dst *MaintenanceSection, prior MaintenanceSection) {
 	if dst.Stars == 0 && prior.Stars != 0 {
 		dst.Stars = prior.Stars
@@ -711,8 +775,16 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 	// Scan: preserve the prior ArtifactScanSection when the new report's
 	// Scan section is effectively empty. "Empty" means no scan was
 	// performed AND every signal-bearing field is at its zero value.
-	if scanSectionEmpty(merged.Scan) && !scanSectionEmpty(prior.Scan) {
+	switch {
+	case scanSectionEmpty(merged.Scan) && !scanSectionEmpty(prior.Scan):
 		merged.Scan = prior.Scan
+	case !merged.Scan.Performed && prior.Scan.Performed:
+		// A bytes-less run that only probed the registry: keep the prior
+		// byte findings and take the fresh registry ones. Replacing the
+		// whole section dropped every artifact fact on such a refresh.
+		fresh := merged.Scan
+		merged.Scan = prior.Scan
+		overlayMetadataFacts(&merged.Scan, fresh)
 	}
 
 	// Vulnerabilities: preserve the prior VulnSection when the new
@@ -727,13 +799,9 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 	// because Tier-1 refreshers legitimately overwrite some fields
 	// (LatestReleaseAt, VersionCount, etc.) while leaving the timeline +
 	// repo-activity bits empty.
-	if len(merged.Maintenance.VersionTimeline) == 0 && len(prior.Maintenance.VersionTimeline) > 0 {
-		merged.Maintenance.VersionTimeline = prior.Maintenance.VersionTimeline
-	}
-	if merged.Maintenance.FirstPublishedAt == nil && prior.Maintenance.FirstPublishedAt != nil {
-		merged.Maintenance.FirstPublishedAt = prior.Maintenance.FirstPublishedAt
-	}
+	carryReleaseHistory(&merged.Maintenance, prior.Maintenance)
 	carryRepoStats(&merged.Maintenance, prior.Maintenance)
+	carryLicense(&merged, &prior)
 
 	// Artifact: per-field preservation. Tier-1 (registrymetadata) is
 	// authoritative for filename/size/declared digests so those always
@@ -821,6 +889,21 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 	return json.Marshal(&merged)
 }
 
+// overlayMetadataFacts copies the registry-derived (MetadataProbed) facts of
+// src onto dst, leaving every byte-derived field of dst alone.
+//
+// ponytail: all five are copied as a block, so a probe that did not run this
+// time zeroes its prior value. That is what replacing the whole section did
+// before, so it is never worse; per-provider presence would fix it.
+func overlayMetadataFacts(dst *ArtifactScanSection, src ArtifactScanSection) {
+	dst.MetadataProbed = dst.MetadataProbed || src.MetadataProbed
+	dst.NonExistentAuthor = src.NonExistentAuthor
+	dst.FirstTimeCollaborator = src.FirstTimeCollaborator
+	dst.SuspiciousRepoStars = src.SuspiciousRepoStars
+	dst.MaintainerAccountAgeDays = src.MaintainerAccountAgeDays
+	dst.MaintainerAge = src.MaintainerAge
+}
+
 // scanSectionEmpty reports whether an ArtifactScanSection carries no
 // Tier-2 signal data. Used by the Upsert merge to decide whether the
 // prior row's Scan subtree should be preserved.
@@ -829,7 +912,7 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 // set. We deliberately do not include the diagnostic fields
 // (ManifestFilesSeen, ExtraFindings) — those are housekeeping only.
 func scanSectionEmpty(s ArtifactScanSection) bool {
-	if s.Performed {
+	if s.Performed || s.MetadataProbed {
 		return false
 	}
 	if s.InstallScriptKind != "" || s.HasInstallScript || s.InstallScriptFetches {
@@ -838,23 +921,29 @@ func scanSectionEmpty(s ArtifactScanSection) bool {
 	if s.HiddenUnicodeHits > 0 || len(s.HiddenUnicodeKinds) > 0 {
 		return false
 	}
-	if s.ShrinkwrapPresent || s.ShrinkwrapSuppressed || s.ManifestConfusion {
+	if s.ShrinkwrapPresent || s.ManifestConfusion {
 		return false
 	}
 	if s.UsesEval || s.NetworkAccess || s.ShellAccess || s.FilesystemAccess ||
 		s.EnvVarAccess || s.NativeBinaryPresent || s.HighEntropyStrings ||
-		s.URLStrings || s.MinifiedCode {
+		s.URLStrings || s.MinifiedCode || s.DebugAccess || s.Telemetry || s.DynamicRequire ||
+		len(s.LicenseFilePaths) > 0 {
+		return false
+	}
+	if s.ImportTimeExecution || s.MaliciousIOC || s.BuildRsExecutes ||
+		s.DependencyCredential != "" || s.AppCredentialSend != "" {
 		return false
 	}
 	if s.TrivialPackage || s.TooManyFiles || s.NonExistentAuthor ||
-		s.SuspiciousRepoStars || s.MaintainerAccountAgeDays > 0 {
+		s.SuspiciousRepoStars || s.MaintainerAccountAgeDays > 0 ||
+		s.FirstTimeCollaborator != nil {
 		return false
 	}
 	if s.DangerousPickleOpcode || s.SuspiciousPickleOpcode ||
 		s.UnsafeSerializationFormat || s.PrefersSafetensorsAvailable ||
 		s.ModelCardInjection || s.AgentToolDeclared ||
 		s.AgentToolDangerousCapability || s.MCPServerUnverified ||
-		s.PromptTemplateInjection {
+		s.PromptTemplateInjection || s.ContainerScanIncomplete {
 		return false
 	}
 	if len(s.MinifiedFiles) > 0 || s.CapabilityReport != nil {

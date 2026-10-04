@@ -105,6 +105,19 @@ func loneFireFixtures() map[string]Input {
 		SignalSCInstallScriptEvalEnc: set(func(in *Input) {
 			in.InstallScriptEvalEncoded = true
 		}),
+		SignalSCDependencyCredential: set(func(in *Input) {
+			in.DependencyCredential = "package.json: ghp_…(40 chars)"
+		}),
+		SignalSCAppCredentialExfil: set(func(in *Input) {
+			in.AppCredentialSend = ".codex/auth.json (worker.js)"
+		}),
+		SignalSCImportTimeShell: set(func(in *Input) {
+			in.ImportTimeKind = "top_level_shell"
+		}),
+		SignalSCExfilSinkUsed: set(func(in *Input) {
+			in.MaliciousIOCKind = "exfil_host"
+			in.MaliciousIOCCoupled = true
+		}),
 		SignalSCShellAppeared: set(func(in *Input) {
 			in.PriorScanAvailable = true
 			in.PriorVersion = "0.9.0"

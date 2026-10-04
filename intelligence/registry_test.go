@@ -54,6 +54,8 @@ func TestProviderRegistry_CoreOrderAndTiers(t *testing.T) {
 		{38, "signature_verify", TierCore},
 		{41, "pysource", TierCore},
 		{42, "iocscan", TierCore},
+		{43, "debugtelemetry", TierCore},
+		{44, "licensefile", TierCore},
 	}
 
 	got := RegisteredProviders()

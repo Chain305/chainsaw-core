@@ -601,7 +601,8 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 	// read cannot serve the very row we are refreshing. The artifact fetch is
 	// deliberately NOT skipped — see the comment at its call site.
 	forcedByAdvisory := false
-	reportFresh := reportIsFresh(priorReport, r.cfg.Store != nil, row.UpdatedAt, staleAfter)
+	reportFresh := reportIsFresh(priorReport, r.cfg.Store != nil, row.UpdatedAt, staleAfter) &&
+		!(priorReport != nil && r.now().Sub(priorReport.Observation.CollectedAt) >= priorReport.freshFor(r.cfg.MaxStaleness))
 	if reportFresh && probeAnswered && (latest == "" || latest == row.Version) {
 		// `latest == ""` is the part that was missing, and it was a 24x
 		// amplifier on exactly the rows least worth rescanning.

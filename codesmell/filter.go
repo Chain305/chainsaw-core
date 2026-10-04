@@ -21,10 +21,13 @@ import (
 // that legitimate paths like `src/test_utils/foo.js` are not excluded by
 // accident — only files actually living under a test-shaped directory are
 // filtered.
-func IsLikelyTestOrVendor(p string) bool {
+func IsLikelyTestOrVendor(p string) bool { return isTestOrVendor(p, false) }
+
+func isTestOrVendor(p string, keepBuild bool) bool {
 	if p == "" {
 		return false
 	}
+	p = stripGoModulePrefix(p)
 	// Normalise: lower-case, slash-separated, leading+trailing slash so the
 	// segment checks match at boundaries without special-casing the start
 	// or end of the path.
@@ -34,6 +37,13 @@ func IsLikelyTestOrVendor(p string) bool {
 	for _, seg := range testOrVendorSegments {
 		if strings.Contains(norm, seg) {
 			return true
+		}
+	}
+	if !keepBuild {
+		for _, seg := range buildOutputSegments {
+			if strings.Contains(norm, seg) {
+				return true
+			}
 		}
 	}
 
@@ -58,6 +68,20 @@ func IsLikelyTestOrVendor(p string) bool {
 		}
 	}
 	return false
+}
+
+// stripGoModulePrefix drops a Go module zip's <module path>@<version>/ prefix.
+// The module path is a NAME, not a directory the package ships, so a segment of
+// it must not classify the files: every file of vitess.io/vitess/examples/... or
+// k8s.io/kops/tests/e2e matched "/examples/" or "/tests/" and was filtered out.
+// Keyed on "@v" after a non-empty name, which an npm scope ("@types/x") is not.
+func stripGoModulePrefix(p string) string {
+	if i := strings.Index(p, "@v"); i > 0 && p[i-1] != '/' {
+		if j := strings.IndexByte(p[i:], '/'); j > 0 {
+			return p[i+j+1:]
+		}
+	}
+	return p
 }
 
 // exampleOrDocSegments — path segments that mark "intentional packaging
@@ -105,12 +129,17 @@ var testOrVendorSegments = []string{
 	// Vendored deps.
 	"/node_modules/", "/vendor/", "/site-packages/",
 	"/.gradle/", "/.cargo/", "/.m2/", "/__pycache__/",
-	// Build / dist.
-	"/dist/", "/build/", "/.next/", "/.nuxt/",
-	"/target/release/", "/target/debug/", "/out/",
 	// Examples / docs / templates / samples.
 	"/examples/", "/example/", "/docs/", "/doc/",
 	"/templates/", "/template/", "/samples/",
+}
+
+// buildOutputSegments are build output. For a modern npm package that is the
+// package itself: its published code is dist/ (or build/), and src/ is often
+// not shipped at all.
+var buildOutputSegments = []string{
+	"/dist/", "/build/", "/.next/", "/.nuxt/",
+	"/target/release/", "/target/debug/", "/out/",
 }
 
 // testFileSuffixes match per-file naming conventions for unit tests across
@@ -219,12 +248,29 @@ func LooksGenerated(body []byte) bool {
 // NativeBinary — both signals legitimately fire on bundled or vendored
 // artefacts.
 func FilterTestVendorGenerated(in map[string][]byte) map[string][]byte {
+	return filterTestVendorGenerated(in, false)
+}
+
+// FilterTestVendorGeneratedKeepBuild is FilterTestVendorGenerated that keeps
+// build output (dist/, build/, out/). For URLStrings, whose only question is
+// whether the shipped code carries a URL: with this (and the http-only scheme
+// in urls.go) 16 more npm packages agreed with socket.dev's urlStrings on the
+// 2026-10 corpus, b2-js's api.backblazeb2.com endpoint in dist/ among them.
+//
+// Not for the capability axes. Those feed CompoundSCEnvNetInstall and
+// CompoundSCNetShellInstallNPM, which DO move a verdict; widening what they
+// see is a scoring change that needs its own measurement.
+func FilterTestVendorGeneratedKeepBuild(in map[string][]byte) map[string][]byte {
+	return filterTestVendorGenerated(in, true)
+}
+
+func filterTestVendorGenerated(in map[string][]byte, keepBuild bool) map[string][]byte {
 	if len(in) == 0 {
 		return in
 	}
 	out := make(map[string][]byte, len(in))
 	for p, b := range in {
-		if IsLikelyTestOrVendor(p) {
+		if isTestOrVendor(p, keepBuild) {
 			continue
 		}
 		if LooksGenerated(b) {

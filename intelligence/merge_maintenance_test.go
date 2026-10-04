@@ -168,34 +168,6 @@ func TestMergeProvenance_PreservesNewFields(t *testing.T) {
 	})
 }
 
-// TestMergeScan_PreservesShrinkwrapSuppressed pins the regression where
-// ArtifactScanSection.ShrinkwrapSuppressed was added by the shrinkwrap
-// provider but mergeScan ignored it. OR-semantics: once observed, the
-// bit stays set across the rest of the fan-in.
-func TestMergeScan_PreservesShrinkwrapSuppressed(t *testing.T) {
-	t.Run("src=true sets dst", func(t *testing.T) {
-		dst := ArtifactScanSection{}
-		MergeScan(&dst, ArtifactScanSection{ShrinkwrapSuppressed: true})
-		if !dst.ShrinkwrapSuppressed {
-			t.Fatalf("ShrinkwrapSuppressed=true from src was dropped")
-		}
-	})
-	t.Run("dst=true + src=false preserves true", func(t *testing.T) {
-		dst := ArtifactScanSection{ShrinkwrapSuppressed: true}
-		MergeScan(&dst, ArtifactScanSection{ShrinkwrapSuppressed: false})
-		if !dst.ShrinkwrapSuppressed {
-			t.Fatalf("ShrinkwrapSuppressed=true on dst was cleared by src=false")
-		}
-	})
-	t.Run("both false stays false", func(t *testing.T) {
-		dst := ArtifactScanSection{}
-		MergeScan(&dst, ArtifactScanSection{})
-		if dst.ShrinkwrapSuppressed {
-			t.Fatalf("ShrinkwrapSuppressed should remain false")
-		}
-	})
-}
-
 // T-4 fetch 3: RepoCreatedAt must survive BOTH merges, or
 // suspicious_repo_stars keeps making its own third GET of
 // /repos/{owner}/{repo} per scan.

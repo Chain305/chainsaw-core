@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/chain305/chainsaw-core/codesmell"
 )
 
 // sourceExts is the set of file extensions scanned for JS capability patterns.
@@ -328,8 +330,13 @@ func addNPMEvidence(caps map[Capability][]Evidence, cap Capability, ev Evidence)
 
 // truncateBytes returns s truncated to maxLen bytes (appending "..." when
 // truncation occurs). Operates on a []byte for efficiency in the hot scan path.
+//
+// URL credentials are redacted here, first (codesmell.RedactURLCredentials).
+// Every source-derived snippet in this package is built through this
+// function, and redacting after the cut could miss a secret whose '@' was
+// cut off.
 func truncateBytes(b []byte, maxLen int) string {
-	s := string(b)
+	s := codesmell.RedactURLCredentials(string(b))
 	if len(s) <= maxLen {
 		return s
 	}

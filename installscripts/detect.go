@@ -217,12 +217,17 @@ var pipNetworkFetchRE = regexp.MustCompile(
 // (native-build setup.py) without dropping the eval-encoded / mutates-dependency
 // signals, which are classified exactly as in finish().
 func finishPip(hasScript bool, body string) Result {
-	r := Result{Ecosystem: "pip", HasInstallScript: hasScript, ScriptBody: body}
+	return finishFetching("pip", hasScript, body, pipNetworkFetchRE.MatchString)
+}
+
+// finishFetching is finish() with the ecosystem's own fetches-remote test.
+func finishFetching(ecosystem string, hasScript bool, body string, fetches func(string) bool) Result {
+	r := Result{Ecosystem: ecosystem, HasInstallScript: hasScript, ScriptBody: body}
 	if !hasScript {
 		r.Kind = KindNone
 		return r
 	}
-	if pipNetworkFetchRE.MatchString(body) {
+	if fetches(body) {
 		r.InstallScriptFetchesRemote = true
 		r.Kind = KindFetchesRemote
 		return r
@@ -524,20 +529,38 @@ func RubyGems(gemspec []byte) Result {
 // cfg-if, pkg-config and wasm-bindgen-macro — crates with no build script
 // at all — and raised install_script_appeared recalls on them.
 // Build-dependencies alone run nothing: they only feed a build script.
+//
+// Only build.rs is classified. Cargo.toml is declarative and cargo runs
+// nothing in it: getrandom 0.4.3 carries a cross-rs `pre-build = ["curl
+// ..."]` CI recipe under [package.metadata] and read as fetches_remote
+// (warn 40) on one of the most-downloaded crates (2026-10-03).
 func Cargo(cargoToml, buildRs []byte) Result {
 	disabled, declared := CargoBuildScript(cargoToml)
 	if disabled {
 		return finish("cargo", false, "")
 	}
-	body := string(cargoToml)
-	hasScript := declared != ""
-	// build.rs is Rust that rustc compiles and runs at build time; its
-	// body is in-scope for the remote-fetch scan.
-	if len(buildRs) > 0 {
-		hasScript = true
-		body += "\n" + string(buildRs)
-	}
-	return finish("cargo", hasScript, body)
+	hasScript := declared != "" || len(buildRs) > 0
+	return finishFetching("cargo", hasScript, string(buildRs), CargoFetchesRemote)
+}
+
+// cargoNetworkRE is a build script reaching the network itself: an HTTP or
+// socket client crate, a raw TcpStream, or curl/wget spawned as a program.
+var cargoNetworkRE = regexp.MustCompile(
+	`\b(?:reqwest|ureq|attohttpc|minreq|isahc|curl|hyper|http_req|ehttp)::|\bTcpStream::connect\b|\bCommand::new\s*\(\s*"(?:curl|wget)(?:\.exe)?"`)
+
+// cargoShellRE spawns a shell, whose argument string may then curl.
+var cargoShellRE = regexp.MustCompile(`\bCommand::new\s*\(\s*"(?:/(?:usr/)?bin/)?(?:sh|bash|zsh|cmd|powershell|pwsh)(?:\.exe)?"`)
+
+var curlWgetRE = regexp.MustCompile(`\b(?:curl|wget)\b`)
+
+// CargoFetchesRemote is the Rust reading of fetchesRemoteRE. A bare "curl"
+// in a build.rs string is not a fetch: rage 0.11.1's build.rs renders a man
+// page whose EXAMPLES section reads "curl https://github.com/<user>.keys |
+// rage -R ...". A fetch needs a client, a spawned curl/wget, or a shell
+// spawned alongside a curl/wget token.
+func CargoFetchesRemote(body string) bool {
+	return cargoNetworkRE.MatchString(body) ||
+		(cargoShellRE.MatchString(body) && curlWgetRE.MatchString(body))
 }
 
 // CargoBuildScript reads the `build` key of the [package] table. disabled

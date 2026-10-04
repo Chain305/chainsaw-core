@@ -1,5 +1,7 @@
 package risk
 
+import "strings"
+
 const (
 	SignalLicMissing = "lic.missing"
 	// lic.policy_blocked is DEREGISTERED — deliberately, and the constant is
@@ -88,7 +90,9 @@ func init() {
 		Weight:   +5,
 		Title:    "SPDX license declared",
 		Fires: func(in Input) (bool, string, map[string]any) {
-			if in.LicenseSPDX == "" {
+			// A licence identified from LICENSE-file text was inferred,
+			// not declared; this +5 rewards the declaration.
+			if in.LicenseSPDX == "" || in.LicenseFromFile {
 				return false, "", nil
 			}
 			// A non-empty string is not an SPDX expression. Registries
@@ -176,14 +180,78 @@ func init() {
 		"License carries a WITH exception",
 		"Declared expression contains a WITH <exception> clause — review the exception text.",
 		LicenseTagExceptionPresent)
-	registerLicenseTagSignal(SignalLicAmbiguousClassifier, SevLow, -10,
-		"Ambiguous license expression",
-		"License expression combines multiple distinct license families — operator choice required.",
-		LicenseTagAmbiguous)
-	registerLicenseTagSignal(SignalLicUnidentified, SevMedium, -15,
-		"Unidentified license",
-		"License expression is NOASSERTION, empty, or not recognisable as SPDX.",
-		LicenseTagUnidentified)
+	registerAmbiguousSignal()
+	registerUnidentifiedSignal()
+}
+
+// registerAmbiguousSignal registers license.ambiguous_classifier without
+// one case its tag still covers: a combination whose every licence is
+// permissive. An OR ("MIT OR Apache-2.0") hands the CONSUMER a choice they
+// can take as it stands; an AND ("Apache-2.0 AND MIT") asks no choice at
+// all, only that every grant's notice is kept. Neither leaves the operator
+// anything to resolve. The OR form cost -10 on most Rust crates (16 of 43
+// rev5 firings, 7 more as crates.io's "MIT/Apache-2.0"); the AND form on
+// aiohttp and numpy in the server FP corpus.
+//
+// Still fired: any copyleft or source-available licence in the expression
+// (which branch you take, or what you combine with, changes your
+// obligations), NOASSERTION mixed in, and anything unrecognised. The TAG is
+// untouched for core/policy's LicenseAmbiguousClassifier condition, for
+// the reason given on registerUnidentifiedSignal.
+func registerAmbiguousSignal() {
+	const desc = "License expression combines multiple distinct license families — operator choice required."
+	register(Signal{
+		ID:          SignalLicAmbiguousClassifier,
+		Category:    CategoryLicense,
+		Severity:    SevLow,
+		Weight:      -10,
+		Title:       "Ambiguous license expression",
+		Description: desc,
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if IsAllPermissive(in.LicenseSPDX) {
+				return false, "", nil
+			}
+			for _, t := range in.LicenseTags {
+				if t == LicenseTagAmbiguous {
+					return true, desc, map[string]any{"license": in.LicenseSPDX, "tag": string(LicenseTagAmbiguous)}
+				}
+			}
+			return false, "", nil
+		},
+	})
+}
+
+// registerUnidentifiedSignal registers license.unidentified with one
+// exclusion its tag does not make: an EMPTY expression. Classify("") tags
+// Unidentified, and lic.missing (-15) already fires on exactly that case,
+// so an undeclared licence paid -30 for one fact. On corpus-v1-rev4 that
+// was 441 of the 553 rows this signal fired on.
+//
+// Like license.non_permissive below, the firing set is narrower than the
+// TAG on purpose: core/policy's LicenseUnidentified condition still sees
+// the empty expression as unidentified, because narrowing a policy
+// predicate is an enforcement change and this is a scoring fix.
+func registerUnidentifiedSignal() {
+	const desc = "License expression is NOASSERTION or not recognisable as SPDX."
+	register(Signal{
+		ID:          SignalLicUnidentified,
+		Category:    CategoryLicense,
+		Severity:    SevMedium,
+		Weight:      -15,
+		Title:       "Unidentified license",
+		Description: desc,
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if strings.TrimSpace(in.LicenseSPDX) == "" {
+				return false, "", nil
+			}
+			for _, t := range in.LicenseTags {
+				if t == LicenseTagUnidentified {
+					return true, desc, map[string]any{"license": in.LicenseSPDX, "tag": string(LicenseTagUnidentified)}
+				}
+			}
+			return false, "", nil
+		},
+	})
 }
 
 // registerNonPermissiveSignal registers license.non_permissive with the

@@ -140,6 +140,16 @@ func registerCoreProvidersInOrder() {
 		Name: "iocscan", Tier: TierCore, Order: 42,
 		Factory: func(BootstrapConfig) Provider { return newIOCScanProvider() },
 	})
+	// CORE: debugtelemetry — weight-0 cap.debug_access / cap.telemetry facts.
+	RegisterProvider(ProviderRegistration{
+		Name: "debugtelemetry", Tier: TierCore, Order: 43,
+		Factory: func(BootstrapConfig) Provider { return newDebugTelemetryProvider() },
+	})
+	// CORE: licensefile — licence from the package's own LICENSE file.
+	RegisterProvider(ProviderRegistration{
+		Name: "licensefile", Tier: TierCore, Order: 44,
+		Factory: func(BootstrapConfig) Provider { return newLicenseFileProvider() },
+	})
 	// CORE: checksum.
 	RegisterProvider(ProviderRegistration{
 		Name: "checksum", Tier: TierCore, Order: 11,

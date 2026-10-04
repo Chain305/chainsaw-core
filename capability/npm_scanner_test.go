@@ -3,6 +3,7 @@ package capability_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chain305/chainsaw-core/capability"
@@ -334,5 +335,29 @@ func TestAnalyzeUnsupportedEcosystem(t *testing.T) {
 	}
 	if !report.Unsupported {
 		t.Error("docker should be Unsupported")
+	}
+}
+
+// Capability evidence is a copy of the source line; a credential in a URL on
+// that line must not travel with it, including when the line is long enough
+// that the 120-byte truncation would cut between the secret and its '@'.
+func TestEvidenceNeverCarriesURLCredentials(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "index.js", "const r = fetch('https://bot:"+token+"@api.github.com/repos');\n"+
+		"const "+strings.Repeat("y", 70)+" = fetch('https://deploy:"+token+"@api.github.com/x');\n")
+	rep, err := capability.Analyze(dir, "npm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Has(capability.CapNetwork) {
+		t.Fatalf("network not detected: %+v", rep.Capabilities)
+	}
+	for c, evs := range rep.Capabilities {
+		for _, ev := range evs {
+			if strings.Contains(ev.Snippet, "ghp_") {
+				t.Errorf("%s evidence carries the credential: %q", c, ev.Snippet)
+			}
+		}
 	}
 }

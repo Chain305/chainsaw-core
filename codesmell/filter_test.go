@@ -35,6 +35,11 @@ func TestIsLikelyTestOrVendor(t *testing.T) {
 		// Examples / docs.
 		{"examples/demo.js", true},
 		{"docs/intro.md", true},
+		// Go module zips: the module PATH is a name, not a directory.
+		{"vitess.io/vitess/examples/are-you-alive@v0.0.0-20201226175325-4df037de0a7d/pkg/client/client.go", false},
+		{"k8s.io/kops/tests/e2e@v0.0.0-20260505071424-48f41f4149cd/pkg/env.go", false},
+		{"k8s.io/kops/tests/e2e@v0.0.0-20260505071424-48f41f4149cd/test/fake.go", true},
+		{"node_modules/@vue/shared/dist/shared.js", true},
 		// Case-insensitive + backslash normalisation.
 		{"Node_Modules/x.js", true},
 		{`pkg\__tests__\bar.test.js`, true},
@@ -174,5 +179,30 @@ func TestFilterAllowsMinifiedAndNativeTargets(t *testing.T) {
 	}
 	if !IsLikelyTestOrVendor("vendor/foo/lib.so") {
 		t.Error("vendor/foo/lib.so should be filtered (and so NativeBinary must opt out)")
+	}
+}
+
+// npm's published code is usually dist/ or build/. The URL scanner keeps it;
+// the capability axes do not (see FilterTestVendorGeneratedKeepBuild).
+func TestFilterKeepBuildKeepsPackageBuildOutput(t *testing.T) {
+	in := map[string][]byte{
+		"package/dist/api-operations/authorize-account.js": []byte("x"),
+		"package/build/config/constants.js":                []byte("x"),
+		"package/test/fixture.js":                          []byte("x"),
+		"package/node_modules/dep/dist/index.js":           []byte("x"),
+	}
+	got := FilterTestVendorGeneratedKeepBuild(in)
+	for _, p := range []string{"package/dist/api-operations/authorize-account.js", "package/build/config/constants.js"} {
+		if _, ok := got[p]; !ok {
+			t.Errorf("build output %s was filtered", p)
+		}
+	}
+	for _, p := range []string{"package/test/fixture.js", "package/node_modules/dep/dist/index.js"} {
+		if _, ok := got[p]; ok {
+			t.Errorf("%s survived the filter", p)
+		}
+	}
+	if _, ok := FilterTestVendorGenerated(in)["package/dist/api-operations/authorize-account.js"]; ok {
+		t.Error("the default filter must still drop dist/")
 	}
 }

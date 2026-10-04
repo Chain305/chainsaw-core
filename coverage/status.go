@@ -77,7 +77,8 @@ var unavailableCodes = map[string]bool{
 	// it only newly blocks for a deps.dev / parent-POM failure, and only
 	// for an org that declared registry_metadata mandatory in mode: closed.
 	"license_unavailable":       true,
-	"repolink_probe_error":      true,
+	"repo_check_rate_limited":   true,
+	"repo_check_unavailable":    true,
 	"transitive_dep_not_cached": true,
 	// osv_bundle_dormant: the osv provider ran with no advisory index
 	// loaded and the ecosystem has no scanner advisory source, so no

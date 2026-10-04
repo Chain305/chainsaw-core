@@ -188,7 +188,7 @@ func (s *DefaultService) scanFederated(ctx context.Context, req Request) (*Repor
 		// and cross-replica leader machinery below collapse the herd.
 		if cached, err := s.store.Get(scanCtx, req.OrgID, req.Key); err == nil && cached != nil && !cached.MatcherSupersededForRecompute() {
 			age := s.now().Sub(cached.Observation.CollectedAt)
-			if age < maxStale {
+			if age < cached.freshFor(maxStale) {
 				cached.Observation.Cached = true
 				s.metrics.RecordCache(true)
 				s.metrics.RecordScan(time.Since(scanStart), true)
@@ -628,9 +628,9 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			// parent ctx) so the short-circuit cancel propagates into
 			// every running provider. Per-provider deadline math stays
 			// the same — DefaultProviderTimeout is layered on top.
-			providerCtx, cancel := context.WithTimeout(fanoutCtx, DefaultProviderTimeout)
-			defer cancel()
 			start := time.Now()
+			providerCtx, cancel := context.WithTimeout(prepare(fanoutCtx, p, req), DefaultProviderTimeout)
+			defer cancel()
 			var out PartialReport
 			var runErr error
 			func() {
@@ -875,10 +875,14 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	// saw — the exact split, in a narrower window. Failure is soft: no
 	// prior row, or an unreachable store, leaves the report exactly as the
 	// providers built it.
+	priorProvisionalStreak := 0
 	if s.store != nil && !req.Options.Ephemeral {
 		// The row was read before the fan-out (see the read above phase 1).
 		// Nil — no row, or a failed read — is a no-op.
 		prior := report.priorRow
+		if prior != nil {
+			priorProvisionalStreak = prior.Observation.ProvisionalStreak
+		}
 		applyStickySupplyChain(report, prior)
 		// Repo stats are fetched only when the repo is probed, so most
 		// scans carry them from the row; without this the report Scan
@@ -886,6 +890,8 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 		// feed no signal, so this is display parity, not P8-71.
 		if prior != nil {
 			carryRepoStats(&report.Maintenance, prior.Maintenance)
+			carryReleaseHistory(&report.Maintenance, prior.Maintenance)
+			carryLicense(report, prior)
 		}
 		// Nothing reads it past here; don't pin a second full report on
 		// every caller that retains this one.
@@ -991,6 +997,7 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			}
 		}
 	}
+	report.Observation.ProvisionalStreak = nextProvisionalStreak(report, priorProvisionalStreak)
 	return report
 }
 
@@ -1349,6 +1356,9 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 	if src.Performed {
 		dst.Performed = true
 	}
+	if src.MetadataProbed {
+		dst.MetadataProbed = true
+	}
 	if src.ScannedAt != nil {
 		dst.ScannedAt = src.ScannedAt
 	}
@@ -1376,6 +1386,14 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 		dst.MaliciousIOC = true
 		dst.MaliciousIOCKind = src.MaliciousIOCKind
 		dst.MaliciousIOCDetail = src.MaliciousIOCDetail
+		dst.MaliciousIOCCoupled = src.MaliciousIOCCoupled
+		dst.MaliciousIOCAtEntry = src.MaliciousIOCAtEntry
+	}
+	if src.DependencyCredential != "" {
+		dst.DependencyCredential = src.DependencyCredential
+	}
+	if src.AppCredentialSend != "" {
+		dst.AppCredentialSend = src.AppCredentialSend
 	}
 	if src.BuildRsExecutes {
 		dst.BuildRsExecutes = true
@@ -1404,12 +1422,6 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 	// boolean wins and subsequent providers can only affirm (not clear).
 	if src.ShrinkwrapPresent {
 		dst.ShrinkwrapPresent = true
-	}
-	// ShrinkwrapSuppressed — OR-merge. Once a provider observes a
-	// lockfile entry that suppresses install scripts, the signal stays
-	// sticky across the rest of the fan-in.
-	if src.ShrinkwrapSuppressed {
-		dst.ShrinkwrapSuppressed = true
 	}
 	if src.ManifestConfusion {
 		dst.ManifestConfusion = true
@@ -1449,6 +1461,22 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 	}
 	if src.MinifiedCode {
 		dst.MinifiedCode = true
+	}
+	if src.DebugAccess {
+		dst.DebugAccess = true
+		dst.DebugAccessSamples = src.DebugAccessSamples
+	}
+	if src.Telemetry {
+		dst.Telemetry = true
+		dst.TelemetrySamples = src.TelemetrySamples
+	}
+	if src.DynamicRequire {
+		dst.DynamicRequire = true
+		dst.DynamicRequireSamples = src.DynamicRequireSamples
+	}
+	if len(src.LicenseFilePaths) > 0 {
+		dst.LicenseFileExpression = src.LicenseFileExpression
+		dst.LicenseFilePaths = src.LicenseFilePaths
 	}
 	// Socket-gap Wave 4 — same OR-merge semantics for the boolean
 	// signals; numeric fields (TrivialPackageLOC, TooManyFilesCount,

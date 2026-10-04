@@ -33,20 +33,29 @@ const (
 //   - Packagist, month    < 50 — about 12 a week. Fires on 75/108 benign
 //     packages; Packagist volumes are small and most corpus packages
 //     reported 0 for the month.
-//   - RubyGems, all time  < 500 — every published gem accrues a few hundred
-//     downloads from mirrors alone (corpus minimum 537), so under 500 means
-//     nobody beyond the mirrors. Fires on 0/111 benign gems.
-//   - NuGet, all time     < 500 — corpus benign minimum 247. Fires on 1/112.
+//   - RubyGems, all time  < 12,000 — and
+//   - NuGet, all time     < 75,000 — both set 2026-10-03 at the boundary
+//     socket.dev's unpopularPackage draws on the same rows (its snapshot
+//     against counts fetched 2026-10-03). RubyGems: of 151 gems still on
+//     the registry, socket fires on all 62 under 12,000 and on 1 of the 89
+//     above. NuGet: of 148, on all 33 under 75,000 and on 5 of the 115
+//     above. The first
+//     rule here, < 500 for both, was a mirror-noise floor ("nobody beyond
+//     the mirrors") that fired on 0/111 benign gems and 1/112 NuGet
+//     packages — so it never fired at all where socket fired 311 times.
+//     These fire on 51/111 and 28/112 benign, inside the npm share above.
+//     NuGet's line sits higher because every CI restore counts as a
+//     download there.
 //
 // An all-time total cannot be scaled to a week (it depends on age), which
 // is why those two are floors rather than conversions.
 const (
-	UnpopularNPMWeeklyThreshold     = 100 // npm downloads/week
-	UnpopularPyPIWeeklyThreshold    = 50  // PyPI downloads/week
-	UnpopularCargo90DayThreshold    = 100 // crates.io recent_downloads (90 days)
-	UnpopularComposerMonthThreshold = 50  // Packagist downloads/month
-	UnpopularRubyGemsTotalThreshold = 500 // RubyGems all-time downloads
-	UnpopularNuGetTotalThreshold    = 500 // NuGet all-time downloads
+	UnpopularNPMWeeklyThreshold     = 100   // npm downloads/week
+	UnpopularPyPIWeeklyThreshold    = 50    // PyPI downloads/week
+	UnpopularCargo90DayThreshold    = 100   // crates.io recent_downloads (90 days)
+	UnpopularComposerMonthThreshold = 50    // Packagist downloads/month
+	UnpopularRubyGemsTotalThreshold = 12000 // RubyGems all-time downloads
+	UnpopularNuGetTotalThreshold    = 75000 // NuGet all-time downloads
 )
 
 // unpopularThreshold returns the threshold and registry label for a count
@@ -87,6 +96,15 @@ const (
 	HealthyCadenceMaxAge      = 90 * 24 * time.Hour      // latest release within 90d
 	HealthyCadenceMinVersions = 5                        // AND >=5 historical versions
 )
+
+// ArchivedRepoRecentReleaseWindow: a release this recent on a package whose
+// repo is archived means the project moved, so sc.repo_archived stays silent
+// (registry_supplychain.go).
+const ArchivedRepoRecentReleaseWindow = 365 * 24 * time.Hour
+
+// RepoMissingYoungWindow: sc.repo_missing keeps its warn ceiling only on a
+// package or version younger than this (registry_supplychain.go).
+const RepoMissingYoungWindow = 90 * 24 * time.Hour
 
 // REFUSED, 2026-09-13: the signals in this file deliberately do NOT carry a
 // MaxImpact ceiling, so none of them can on its own produce an adverse
@@ -291,7 +309,7 @@ func init() {
 		Weight:   0,
 		Title:    "Very low download count",
 		Description: "The package has very few downloads (npm <100/wk, PyPI <50/wk, crates.io <100 in 90 days, " +
-			"Packagist <50/month, RubyGems and NuGet <500 in total), suggesting minimal community adoption. " +
+			"Packagist <50/month, RubyGems <12,000 and NuGet <75,000 in total), suggesting minimal community adoption. " +
 			"When download data is unavailable the signal fires with severity 'unknown'.",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			// Downloads carries its window; WeeklyDownloads is the

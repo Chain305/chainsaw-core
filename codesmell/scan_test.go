@@ -2,6 +2,7 @@ package codesmell
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -309,6 +310,23 @@ func TestScanEvalJSSetTimeoutFunctionDoesNotFire(t *testing.T) {
 	}
 }
 
+// Python method calls named like the builtins are not eval: re.compile was
+// the whole hit on most PyPI packages this fired on.
+func TestScanEvalPythonMethodsAreNotBuiltins(t *testing.T) {
+	files := map[string][]byte{
+		"kafka/consumer/subscription_state.py": []byte("import re\nTOPIC_LEGAL_CHARS = re.compile('^[a-zA-Z0-9._-]+$')\n" +
+			"self.subscribed_pattern = re.compile(pattern)\n"),
+		"torchfunc/module.py": []byte("model.eval()\ncursor.exec(sql)\n"),
+	}
+	if r := ScanEval(files); r.Fired {
+		t.Fatalf("method calls fired UsesEval: %+v", r.Matches)
+	}
+	builtin := map[string][]byte{"setup.py": []byte("exec(compile(open(f).read(), f, 'exec'))\n")}
+	if !ScanEval(builtin).Fired {
+		t.Fatal("builtin exec(compile(...)) at the start of a line did not fire")
+	}
+}
+
 func TestScanEvalPythonDunderImport(t *testing.T) {
 	files := map[string][]byte{
 		"x.py": []byte("mod = __import__('os')\n"),
@@ -424,11 +442,95 @@ func TestScanNativeBinaryFlagsRenamedMachO(t *testing.T) {
 	}
 }
 
+// A Makefile is a build script in no particular language.
+func TestScanNativeBinaryMakefileAloneIsNotNative(t *testing.T) {
+	files := map[string][]byte{
+		"github.com/superfly/flyctl@v0.1.136/Makefile": []byte("build:\n\tgo build ./...\n"),
+		"github.com/superfly/flyctl@v0.1.136/main.go":  []byte("package main\n"),
+	}
+	if r := ScanNativeBinary(files); r.Fired {
+		t.Fatalf("a Makefile alone was flagged native: %+v", r.Matches)
+	}
+	if !ScanNativeBinary(map[string][]byte{"package/binding.gyp": []byte("{}")}).Fired {
+		t.Fatal("binding.gyp must still flag: node-gyp compiles it at install")
+	}
+}
+
 func TestScanNativeBinaryFlagsRenamedPE(t *testing.T) {
 	files := map[string][]byte{
 		"trojan.dat": []byte("MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00rest"),
 	}
 	if !ScanNativeBinary(files).Fired {
 		t.Fatal("expected magic-byte fire on renamed PE")
+	}
+}
+
+// Only the first URL per file is examined, so a non-http scheme ahead of it
+// must not hide an https endpoint.
+func TestScanURLsHTTPAfterOtherScheme(t *testing.T) {
+	files := map[string][]byte{
+		"package/dist/client.js": []byte("// maintainer: mailto:dev@example.org\n" +
+			"const base = 'https://api.backblazeb2.com/b2api/v2';\n"),
+	}
+	r := ScanURLs(files)
+	if !r.Fired || r.Matches[0].Snippet != "https://api.backblazeb2.com/b2api/v2" {
+		t.Fatalf("https URL after a mailto: was not reported: %+v", r.Matches)
+	}
+	if ScanURLs(map[string][]byte{"a.js": []byte("// git://example.org/x.git mailto:a@b.c\n")}).Fired {
+		t.Fatal("a non-http scheme fired URLStrings")
+	}
+}
+
+// Past MaxFilesPerScan the scanned subset must be a function of the bytes, not
+// of map iteration order: the same artifact gave different answers per scan.
+func TestScanSubsetIsDeterministicPastTheFileCap(t *testing.T) {
+	files := map[string][]byte{}
+	for i := 0; i < MaxFilesPerScan+100; i++ {
+		files[fmt.Sprintf("webapp/src/m%04d.php", i)] = []byte("<?php echo 1;\n")
+	}
+	files["webapp/src/m0000.php"] = []byte("<?php eval($_POST['c']);\n")
+	files["webapp/lib/a.bin"] = []byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0}
+	for i := 0; i < 50; i++ {
+		if !ScanEval(files).Fired {
+			t.Fatalf("run %d: the first file in path order was not scanned", i)
+		}
+	}
+	big := map[string][]byte{}
+	for i := 0; i < MaxFilesPerScan*4+100; i++ {
+		big[fmt.Sprintf("z/%05d.txt", i)] = []byte("x")
+	}
+	big["a/agent"] = []byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0}
+	for i := 0; i < 50; i++ {
+		if !ScanNativeBinary(big).Fired {
+			t.Fatalf("run %d: native scan skipped the first file in path order", i)
+		}
+	}
+}
+
+// Non-source files must not spend the source budget, and two scans of the
+// same >500-file artifact must see the same subset.
+func TestIterFilesBudgetIsSourceOnlyAndStable(t *testing.T) {
+	files := map[string][]byte{}
+	for i := 0; i < MaxFilesPerScan+50; i++ {
+		files[fmt.Sprintf("assets/%04d.png", i)] = []byte("\x89PNG")
+	}
+	for i := 0; i < MaxFilesPerScan+50; i++ {
+		files[fmt.Sprintf("src/m%04d.js", i)] = []byte("x=1\n")
+	}
+	files["src/m0001.js"] = []byte("const s = require('child_process');\n")
+	if !ScanShell(files).Fired {
+		t.Fatal("non-source files used up MaxFilesPerScan before the code was reached")
+	}
+	walk := func() []string {
+		var seen []string
+		iterFiles(files, func(name string, _ []byte, _ Language) bool {
+			seen = append(seen, name)
+			return true
+		})
+		return seen
+	}
+	a, b := walk(), walk()
+	if len(a) != MaxFilesPerScan || strings.Join(a, ",") != strings.Join(b, ",") {
+		t.Fatalf("subset not stable: %d vs %d files, equal=%v", len(a), len(b), strings.Join(a, ",") == strings.Join(b, ","))
 	}
 }

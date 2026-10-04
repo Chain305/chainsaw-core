@@ -51,7 +51,7 @@ var dotnetRules = []dotnetRule{
 	{cap: CapShell, ns: "System.Management.Automation", typ: "PowerShell", members: "Create"},
 	{cap: CapShell, ns: "CliWrap", typ: "Cli", members: "Wrap"},
 
-	{cap: CapNetwork, ns: "System.Net.Http", typ: "HttpClient", members: "Send SendAsync GetAsync PostAsync PutAsync PatchAsync DeleteAsync GetStringAsync GetByteArrayAsync GetStreamAsync"},
+	{cap: CapNetwork, ns: "System.Net.Http", typ: "HttpClient", members: ".ctor Send SendAsync GetAsync PostAsync PutAsync PatchAsync DeleteAsync GetStringAsync GetByteArrayAsync GetStreamAsync"},
 	{cap: CapNetwork, ns: "System.Net.Http", typ: "HttpMessageInvoker", members: "Send SendAsync"},
 	{cap: CapNetwork, ns: "System.Net.Sockets", typ: "Socket", members: ".ctor Connect ConnectAsync Bind"},
 	{cap: CapNetwork, ns: "System.Net.Sockets", typ: "TcpClient", members: ".ctor Connect ConnectAsync"},

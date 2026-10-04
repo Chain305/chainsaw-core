@@ -117,10 +117,30 @@ func goMerge(ms ...map[string]Capability) map[string]Capability {
 	return out
 }
 
+// goModuleRoot returns the <module>@<version> directory of an extracted module
+// zip, or dir when there is none. Every file in a module zip sits under the
+// module PATH, so the walk would otherwise pass through its segments and skip
+// the whole module when one of them is a test/example/vendor name:
+// vitess.io/vitess/examples/are-you-alive and k8s.io/kops/tests/e2e were never
+// scanned at all.
+func goModuleRoot(dir string) string {
+	for cur := dir; ; {
+		ents, err := os.ReadDir(cur)
+		if err != nil || len(ents) != 1 || !ents[0].IsDir() {
+			return dir
+		}
+		cur = filepath.Join(cur, ents[0].Name())
+		if strings.Contains(ents[0].Name(), "@") {
+			return cur
+		}
+	}
+}
+
 func scanGo(pkgDir string) (map[Capability][]Evidence, map[Capability]int, error) {
 	if _, err := os.Stat(pkgDir); err != nil {
 		return nil, nil, err
 	}
+	pkgDir = goModuleRoot(pkgDir)
 	caps := map[Capability][]Evidence{}
 	counts := map[Capability]int{}
 	err := filepath.WalkDir(pkgDir, func(p string, d fs.DirEntry, walkErr error) error {

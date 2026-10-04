@@ -2,6 +2,7 @@ package codesmell
 
 import (
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -107,16 +108,20 @@ func iterFiles(files map[string][]byte, fn func(name string, body []byte, lang L
 	if len(files) == 0 {
 		return
 	}
+	// Only files a scanner can read count against the cap: 500 images,
+	// lockfiles or JSON files sorted ahead of the code used to spend the
+	// whole budget before the first source file.
 	visited := 0
-	for name, body := range files {
-		if visited >= MaxFilesPerScan {
-			return
-		}
-		visited++
+	for _, name := range sortedNames(files) {
 		lang := detectLanguage(name)
 		if lang == LangUnknown {
 			continue
 		}
+		if visited >= MaxFilesPerScan {
+			return
+		}
+		visited++
+		body := files[name]
 		if len(body) > MaxBytesPerFile {
 			body = body[:MaxBytesPerFile]
 		}
@@ -124,6 +129,23 @@ func iterFiles(files map[string][]byte, fn func(name string, body []byte, lang L
 			return
 		}
 	}
+}
+
+// sortedNames returns the map's keys in order. Past MaxFilesPerScan a scanner
+// sees only a subset, and ranging over the map picked a different random
+// subset on every scan: on the 2026-10 corpus three Go modules shipping
+// 772-2,309 source files flipped usesEval/shellAccess/envVarAccess between two
+// runs over identical bytes. Sorted, the subset is a function of the bytes.
+//
+// ponytail: lexical order, so the first 500 paths win; a scanner that should
+// prefer, say, shallow or entry-point files needs a ranking, not this.
+func sortedNames(files map[string][]byte) []string {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // addMatch appends a match to the result if we are below the cap.
@@ -135,6 +157,9 @@ func (r *Result) addMatch(m Match) {
 	if len(r.Matches) >= MaxMatchesPerResult {
 		return
 	}
+	// Every Match passes here, so this is the one place a snippet is
+	// redacted, and it must be before the truncation below.
+	m.Snippet = RedactURLCredentials(m.Snippet)
 	if len(m.Snippet) > maxSnippetLen {
 		m.Snippet = m.Snippet[:maxSnippetLen] + "..."
 	}

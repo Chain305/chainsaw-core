@@ -244,6 +244,36 @@ var execOfDecodeRE = regexp.MustCompile(
 // pulls a remote resource. Used together with a remote-fetch check.
 var pyExecRE = regexp.MustCompile(`os\.system|subprocess|\bexec\s*\(|\beval\s*\(|check_call|check_output|Popen`)
 
+// hostReconRE matches a read of the MACHINE's identity — hostname or network
+// interfaces — or a dump of the whole environment.
+// reconSendRE is any outbound primitive. Together, inside a script an install
+// hook runs, they are the dependency-confusion / install-beacon shape.
+//
+// MEASURED 2026-10-03 on referenced install-script bodies (npm):
+//
+//	Datadog malware 2025-26   71 of 400 newly flagged
+//	benign npm                 0 of 883  (502 top-5000, and 381 install-hook
+//	                                      versions of 142 top-10k packages:
+//	                                      esbuild, puppeteer, cypress, nx,
+//	                                      bcrypt, prisma, @sentry/cli, ...)
+//
+// What is deliberately NOT recon here, each because a real installer reads it:
+// os.userInfo() (the @scarf/scarf telemetry postinstall reads the username
+// and reports to scarf.sh; with it this rule warned on scarf 1.4.0 and 0.2.0,
+// and dropping it costs 1 of 72 malware samples), os.homedir() (cache
+// directories — @sentry/cli and puppeteer), os.platform()
+// and os.arch() (choosing a binary), single process.env.X reads (proxy and
+// mirror settings), and credential paths such as .npmrc (registry config).
+// A binary installer fetches and runs; it has no reason to know who you are.
+var (
+	hostReconRE = regexp.MustCompile(
+		`\bos\.(?:hostname|networkInterfaces)\s*\(|\.hostname\(\)|JSON\.stringify\(\s*process\.env\b|Object\.(?:keys|entries|values)\(\s*process\.env\b`,
+	)
+	reconSendRE = regexp.MustCompile(
+		`\bhttps?\.(?:request|get)\s*\(|\bfetch\s*\(|\baxios\b|XMLHttpRequest|\bdns\.(?:lookup|resolve\w*)\s*\(|\bnet\.(?:connect|createConnection|Socket)\b|\bcurl\b|\bwget\b|\bnslookup\b`,
+	)
+)
+
 // dependencyMutationRE catches script bodies that actively mutate installed
 // dependency files. It is intentionally paired with a node_modules path check in
 // MutatesDependency so ordinary package-local writes do not fire.
@@ -312,6 +342,12 @@ func ScanReferencedBody(body string) Kind {
 	//    blob, via strongEvalEncoded), or a high-volume javascript-obfuscator
 	//    hex-identifier blob.
 	if strongEvalEncoded(body) || looksObfuscatedJS(body) {
+		return KindFetchesRemote
+	}
+	// 1b. Host recon plus a send: the dependency-confusion beacon. It never
+	//     evals anything, so the coupling below cannot see it — it reads the
+	//     machine's identity and phones it home. See hostReconRE.
+	if hostReconRE.MatchString(body) && reconSendRE.MatchString(body) {
 		return KindFetchesRemote
 	}
 	// 2. Download-and-execute coupling.

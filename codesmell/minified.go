@@ -55,6 +55,12 @@ func ScanMinified(files map[string][]byte) Result {
 	return res
 }
 
+// LooksMinified reports whether one file has the minified shape ScanMinified
+// fires on.
+func LooksMinified(body []byte) bool {
+	return len(body) >= 2*MinifiedThresholds.AvgLineLen && looksMinified(body)
+}
+
 // looksMinified applies the two-factor heuristic. Cheap enough to run on
 // every sampled file: one pass counts lines and token shape.
 func looksMinified(body []byte) bool {

@@ -168,12 +168,13 @@ func LicenseStrengthOf(expression string) LicenseStrength {
 	for _, id := range ids {
 		low := strings.ToLower(strings.Trim(strings.TrimSpace(id), "() "))
 		s := LicenseStrengthPermissive
+		shareAlike, restricted := ccTerms(low)
 		switch {
 		case matchesPrefix(low, strongCopyleftPrefixes):
 			s = LicenseStrengthStrongCopyleft
-		case matchesPrefix(low, sourceAvailablePrefixes) || strings.Contains(low, "commons"):
+		case matchesPrefix(low, sourceAvailablePrefixes) || strings.Contains(low, "commons") || restricted:
 			s = LicenseStrengthSourceAvailable
-		case matchesPrefix(low, weakCopyleftPrefixes):
+		case matchesPrefix(low, weakCopyleftPrefixes) || shareAlike:
 			s = LicenseStrengthWeakCopyleft
 		}
 		if s > best {
@@ -273,10 +274,11 @@ func Classify(expression string) []LicenseTag {
 			continue
 		}
 		families[familyOf(lower)] = struct{}{}
-		if matchesPrefix(lower, copyleftPrefixes) {
+		shareAlike, restricted := ccTerms(lower)
+		if matchesPrefix(lower, copyleftPrefixes) || shareAlike {
 			copyleft = true
 		}
-		if matchesPrefix(lower, sourceAvailablePrefixes) {
+		if matchesPrefix(lower, sourceAvailablePrefixes) || restricted {
 			sourceAvail = true
 		}
 	}
@@ -367,8 +369,10 @@ func Classify(expression string) []LicenseTag {
 // is genuinely ambiguous is left alone so it keeps reporting
 // LicenseTagUnidentified, which is the honest answer. In particular:
 //
-//   - bare "BSD" is NOT here. It does not say 2-clause or 3-clause and the
-//     two are different grants.
+//   - bare "BSD" is given no clause count. It does not say 2-clause or
+//     3-clause and the two are different grants. Since 2026-10-03 it is a
+//     family token instead (licenseFamilyTokens): both grants are
+//     permissive, so it is recognised without being guessed at.
 //   - bare "Apache License" IS here, mapping to Apache-2.0, because
 //     Apache-1.1 has not been used for a new release in two decades and the
 //     string appears as the first line of the Apache-2.0 licence TEXT.
@@ -473,19 +477,98 @@ var licenseNameAliases = map[string]string{
 	"server side public license 1": "SSPL-1.0",
 
 	// Assorted permissive names that showed up as "unidentified".
-	"isc license":                                 "ISC",
-	"zlib license":                                "Zlib",
-	"python software foundation license":          "Python-2.0",
-	"psf license":                                 "Python-2.0",
-	"the unlicense":                               "Unlicense",
-	"unlicense":                                   "Unlicense",
-	"cc0 1.0 universal":                           "CC0-1.0",
-	"creative commons zero 1.0 universal":         "CC0-1.0",
-	"boost software license 1.0":                  "BSL-1.0",
-	"academic free license 3.0":                   "AFL-3.0",
-	"artistic license 2.0":                        "Artistic-2.0",
-	"microsoft public license":                    "MS-PL",
+	"isc license":                         "ISC",
+	"zlib license":                        "Zlib",
+	"python software foundation license":  "Python-2.0",
+	"psf license":                         "Python-2.0",
+	"the unlicense":                       "Unlicense",
+	"unlicense":                           "Unlicense",
+	"cc0 1.0 universal":                   "CC0-1.0",
+	"cc0":                                 "CC0-1.0",
+	"cc0 1.0":                             "CC0-1.0",
+	"creative commons zero 1.0 universal": "CC0-1.0",
+	"boost software license 1.0":          "BSL-1.0",
+	"academic free license 3.0":           "AFL-3.0",
+	"artistic license 2.0":                "Artistic-2.0",
+	"microsoft public license":            "MS-PL",
 	"do what the fuck you want to public license": "WTFPL",
+
+	// PyPI trove classifiers ("License :: OSI Approved :: <name>"), keyed
+	// on the final segment, which is what the PyPI extractor reads when a
+	// release declares its licence only that way. Only the names that
+	// determine one licence are listed ("BSD License" maps to the BSD
+	// family token further down); "Public Domain", "Other/Proprietary
+	// License" and the versionless "Academic Free" / "Artistic" names stay
+	// unidentified on purpose. "Apache Software
+	// License" is Apache-2.0 for the reason "apache license" is above.
+	"apache software license":                                  "Apache-2.0",
+	"gnu general public license 2 gplv2":                       "GPL-2.0-only",
+	"gnu general public license 2 or later gplv2":              "GPL-2.0-or-later",
+	"gnu general public license 3 gplv3":                       "GPL-3.0-only",
+	"gnu general public license 3 or later gplv3":              "GPL-3.0-or-later",
+	"gnu lesser general public license 2 lgplv2":               "LGPL-2.0-only",
+	"gnu lesser general public license 2 or later lgplv2":      "LGPL-2.0-or-later",
+	"gnu lesser general public license 3 lgplv3":               "LGPL-3.0-only",
+	"gnu lesser general public license 3 or later lgplv3":      "LGPL-3.0-or-later",
+	"gnu library or lesser general public license lgpl":        "LGPL",
+	"gnu affero general public license 3":                      "AGPL-3.0-only",
+	"gnu affero general public license 3 or later agplv3":      "AGPL-3.0-or-later",
+	"mozilla public license 2.0 mpl 2.0":                       "MPL-2.0",
+	"mozilla public license 1.1 mpl 1.1":                       "MPL-1.1",
+	"eclipse public license 1.0 epl 1.0":                       "EPL-1.0",
+	"european union public licence 1.1 eupl 1.1":               "EUPL-1.1",
+	"european union public licence 1.2 eupl 1.2":               "EUPL-1.2",
+	"common development and distribution license 1.0 cddl 1.0": "CDDL-1.0",
+	"isc license iscl":                                         "ISC",
+	"unlicense unlicense":                                      "Unlicense",
+	"boost software license 1.0 bsl 1.0":                       "BSL-1.0",
+	"cc0 1.0 universal cc0 1.0 public domain dedication":       "CC0-1.0",
+	"mit no attribution license mit 0":                         "MIT-0",
+	"zero clause bsd 0bsd":                                     "0BSD",
+	"universal permissive license upl":                         "UPL-1.0",
+
+	// The same LGPL-3.0 written as free text; both were "unidentified" on
+	// corpus-v1-rev4 PyPI rows that socket.dev flags copyleft.
+	"gnu lgpl 3": "LGPL-3.0-only",
+	"gnu lesser general public license lgpl version 3": "LGPL-3.0-only",
+
+	// Shorthands that fired license.unidentified on corpus-v1-rev4, each
+	// one written by more than one package. The version is in every one of
+	// them; only "LGPLv2.1+" loses its "+" to the key, so it keeps the
+	// family rather than claim -only or -or-later.
+	"gplv3":         "GPL-3.0-only",
+	"gpl 3":         "GPL-3.0-only",
+	"gpl version 3": "GPL-3.0-only",
+	"gplv2":         "GPL-2.0-only",
+	"gpl 2":         "GPL-2.0-only",
+	"gpl version 2": "GPL-2.0-only",
+	"agpl 3":        "AGPL-3.0-only",
+	"agplv3":        "AGPL-3.0-only",
+	"lgplv3":        "LGPL-3.0-only",
+	"lgplv2.1":      "LGPL",
+	"gnu lesser general public license version 3": "LGPL-3.0-only",
+	// "or later" spelled out. Unmapped, the read-side normaliser split these
+	// on the "or" and the halves fired license.ambiguous_classifier (two
+	// rev5 rows: "GNU Lesser General Public License v2.1 or later").
+	"gnu lesser general public license 2.1 or later":         "LGPL-2.1-or-later",
+	"gnu lesser general public license version 2.1 or later": "LGPL-2.1-or-later",
+	"gnu lesser general public license 3 or later":           "LGPL-3.0-or-later",
+	"gnu lesser general public license version 3 or later":   "LGPL-3.0-or-later",
+	"gnu general public license 2 or later":                  "GPL-2.0-or-later",
+	"gnu general public license version 2 or later":          "GPL-2.0-or-later",
+	"gnu general public license 3 or later":                  "GPL-3.0-or-later",
+	"gnu general public license version 3 or later":          "GPL-3.0-or-later",
+	"eclipse public license v 1.0":                           "EPL-1.0",
+	"eclipse public license v 2.0":                           "EPL-2.0",
+	"apache":                                                 "Apache-2.0",
+	"apl2":                                                   "Apache-2.0",
+	// crates.io's pre-SPDX "MIT/Apache-2.0" means the same as the
+	// "MIT OR Apache-2.0" it now rewrites it to.
+	"mit apache 2.0": "MIT OR Apache-2.0",
+	"apache 2.0 mit": "Apache-2.0 OR MIT",
+	// BSD is a known PERMISSIVE family whose clause count is unknown; see
+	// licenseFamilyTokens for why that identifies it.
+	"bsd license": "BSD",
 }
 
 // licenseFamilyTokens are the bare family identifiers licenseNameAliases
@@ -500,6 +583,14 @@ var licenseFamilyTokens = map[string]struct{}{
 	"mpl":  {},
 	"epl":  {},
 	"cddl": {},
+	// EUPL, as Maven POMs write it (7 corpus-v1-rev4 rows): strong
+	// copyleft whatever the version.
+	"eupl": {},
+	// Bare BSD. It does not say 2- or 3-clause, which is why no alias
+	// above invents a BSD-n-Clause id for it — but both grants are
+	// permissive, so the family decides every tag Classify can emit (none)
+	// and "unidentified" was a -15 for a licence whose class we know.
+	"bsd": {},
 }
 
 // minFullTextPrefixTokens is the shortest alias, in tokens, that may be
@@ -568,8 +659,33 @@ func NormalizeLicenseExpression(expr string) string {
 		return expr
 	}
 
-	// (1) whole-string.
-	if id, ok := licenseNameAliases[licenseNameKey(raw)]; ok {
+	// (0) a pasted trove classifier ("License :: OSI Approved :: MIT
+	// License") names the licence in its last segment, and a licence URL
+	// only identifies one where a standard page exists for it.
+	if strings.HasPrefix(raw, "License ::") {
+		if i := strings.LastIndex(raw, "::"); i >= 0 {
+			if name := strings.TrimSpace(raw[i+2:]); name != "" {
+				return NormalizeLicenseExpression(name)
+			}
+		}
+	}
+	if id, ok := licenseURLAlias(raw); ok {
+		return id
+	}
+
+	// (1) whole-string. A leading "GNU " is retried without it, so "GNU
+	// LGPLv3", "GNU GPLv3" and "GNU AGPLv3" (rubygems set_version et al.)
+	// resolve like their bare shorthands.
+	key := licenseNameKey(raw)
+	if id, ok := licenseNameAliases[key]; ok {
+		return id
+	}
+	if rest, ok := strings.CutPrefix(key, "gnu "); ok {
+		if id, ok := licenseNameAliases[rest]; ok {
+			return id
+		}
+	}
+	if id, ok := creativeCommonsID(key); ok {
 		return id
 	}
 
@@ -583,8 +699,44 @@ func NormalizeLicenseExpression(expr string) string {
 		if id, ok := fullTextHeadAlias(raw); ok {
 			return id
 		}
+		// The MIT body opens "MIT License" + a copyright line, which no
+		// three-token alias prefixes, so match its grant sentence instead.
+		if strings.Contains(licenseNameKey(raw), mitGrantKey) {
+			return "MIT"
+		}
 	}
 	return expr
+}
+
+// mitGrantKey is the MIT licence's grant sentence, keyed like an alias.
+var mitGrantKey = licenseNameKey("Permission is hereby granted, free of charge, to any person obtaining a copy")
+
+// licenseURLAlias maps a licence URL to the SPDX id it names, for the URLs
+// that are a standard name for one licence: opensource.org/licenses/<id>,
+// the Apache Software Foundation's LICENSE-2.0 page, and the AWS SDKs'
+// licenseUrl aws.amazon.com/apache2.0 (7 NuGet rows on corpus-v1-rev4). A
+// link to a project's own LICENSE file names nothing and stays unidentified.
+func licenseURLAlias(raw string) (string, bool) {
+	low := strings.ToLower(raw)
+	if !strings.HasPrefix(low, "http://") && !strings.HasPrefix(low, "https://") {
+		return "", false
+	}
+	u := strings.TrimPrefix(strings.TrimPrefix(low, "http://"), "https://")
+	u = strings.TrimSuffix(strings.TrimPrefix(u, "www."), "/")
+	switch u {
+	case "apache.org/licenses/license-2.0", "apache.org/licenses/license-2.0.txt",
+		"apache.org/licenses/license-2.0.html", "aws.amazon.com/apache2.0":
+		return "Apache-2.0", true
+	}
+	if strings.HasPrefix(u, "opensource.org/licenses/") {
+		id := strings.TrimSuffix(strings.TrimSpace(raw), "/")
+		id = id[strings.LastIndex(id, "/")+1:]
+		id = strings.TrimSuffix(strings.TrimSuffix(id, ".php"), ".html")
+		if valid, _ := spdxexp.ValidateLicenses([]string{id}); valid {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // normalizeOperands rewrites each non-SPDX operand of a compound
@@ -600,7 +752,10 @@ func normalizeOperands(raw string) (string, bool) {
 	parts := strings.Split(spaced, marker)
 	changed := false
 	for i, p := range parts {
-		trimmed := strings.TrimSpace(p)
+		// Parentheses belong to the expression, not the operand: match on
+		// the bare name and substitute inside them, so "(MIT OR CC0-1.0)"
+		// keeps its closing bracket.
+		trimmed := strings.Trim(strings.TrimSpace(p), "()")
 		if trimmed == "" || isConnective(trimmed) {
 			continue
 		}
@@ -673,6 +828,124 @@ func normalizeIfUnparsed(raw string) string {
 	return NormalizeLicenseExpression(raw)
 }
 
+// IsAllPermissive reports whether expression combines two or more
+// licences, every one of them a recognised permissive licence ("MIT OR
+// Apache-2.0", "Apache-2.0 AND MIT"): no WITH, no NOASSERTION, nothing
+// copyleft or source-available, nothing unrecognised. Normalised like
+// Classify, so crates.io's "MIT/Apache-2.0" answers the same as its SPDX
+// rewrite.
+func IsAllPermissive(expression string) bool {
+	raw := normalizeIfUnparsed(strings.TrimSpace(expression))
+	upper := " " + strings.ToUpper(strings.NewReplacer("(", " ", ")", " ").Replace(raw)) + " "
+	compound := strings.Contains(upper, " OR ") || strings.Contains(upper, " AND ")
+	if !compound || strings.Contains(upper, " WITH ") {
+		return false
+	}
+	tokens := splitLicenseTokens(raw)
+	if len(tokens) < 2 {
+		return false
+	}
+	for _, t := range tokens {
+		low := strings.ToLower(t)
+		if shareAlike, restricted := ccTerms(low); shareAlike || restricted {
+			return false
+		}
+		if low == "noassertion" || matchesPrefix(low, copyleftPrefixes) ||
+			matchesPrefix(low, sourceAvailablePrefixes) || strings.Contains(low, "commons") {
+			return false
+		}
+		if _, family := licenseFamilyTokens[low]; family {
+			continue
+		}
+		if ok, _ := spdxexp.ValidateLicenses([]string{t}); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// ccTerms reads the terms out of a lowercased Creative Commons SPDX id.
+// ShareAlike ("-sa") obliges adaptations to carry the same licence, which
+// is copyleft. NonCommercial ("-nc") and NoDerivatives ("-nd") forbid uses
+// a consumer may need, which is non-permissive. Plain CC-BY and CC0 carry
+// neither and stay permissive.
+func ccTerms(low string) (shareAlike, restricted bool) {
+	if !strings.HasPrefix(low, "cc-by") {
+		return false, false
+	}
+	return strings.Contains(low, "-sa"), strings.Contains(low, "-nc") || strings.Contains(low, "-nd")
+}
+
+// creativeCommonsID turns a free-text Creative Commons name, keyed by
+// licenseNameKey, into its SPDX id: "cc by nc sa 4.0" (written "CC BY-NC-SA
+// 4.0") and "creative commons attribution noncommercial sharealike 4.0
+// international" both give CC-BY-NC-SA-4.0. Any word it does not know, a
+// missing BY or a missing version gives no answer rather than a guess.
+// Without this, "Creative Commons …" names fell through to the
+// source-available "commons" (Commons Clause) match.
+func creativeCommonsID(key string) (string, bool) {
+	words := strings.Fields(key)
+	switch {
+	case len(words) > 2 && words[0] == "creative" && words[1] == "commons":
+		words = words[2:]
+	case len(words) > 1 && words[0] == "cc":
+		words = words[1:]
+	default:
+		return "", false
+	}
+	var by, nc, nd, sa bool
+	ver := ""
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		next := ""
+		if i+1 < len(words) {
+			next = words[i+1]
+		}
+		switch {
+		case w == "by" || w == "attribution":
+			by = true
+		case w == "nc" || w == "noncommercial":
+			nc = true
+		case w == "non" && next == "commercial":
+			nc = true
+			i++
+		case w == "sa" || w == "sharealike":
+			sa = true
+		case w == "share" && next == "alike":
+			sa = true
+			i++
+		case w == "nd" || w == "noderivatives" || w == "noderivs":
+			nd = true
+		case w == "no" && (next == "derivatives" || next == "derivs"):
+			nd = true
+			i++
+		case w == "international" || w == "license" || w == "licence" || w == "unported" || w == "generic":
+		case strings.Count(w, ".") == 1 && strings.Trim(w, "0123456789.") == "":
+			ver = w
+		default:
+			return "", false
+		}
+	}
+	if !by || ver == "" || (nd && sa) {
+		return "", false
+	}
+	id := "CC-BY"
+	if nc {
+		id += "-NC"
+	}
+	if nd {
+		id += "-ND"
+	}
+	if sa {
+		id += "-SA"
+	}
+	id += "-" + ver
+	if ok, _ := spdxexp.ValidateLicenses([]string{id}); !ok {
+		return "", false
+	}
+	return id, true
+}
+
 // familyOf returns the canonical family prefix of an SPDX id. "gpl-2.0-only"
 // -> "gpl"; "apache-2.0" -> "apache". Used so `MIT AND MIT` is not flagged
 // as ambiguous while `MIT AND BSD-3-Clause` is.
@@ -716,10 +989,11 @@ func fallbackClassify(raw string, add func(LicenseTag)) bool {
 			continue
 		}
 		low := strings.ToLower(t)
-		if matchesPrefix(low, copyleftPrefixes) {
+		shareAlike, restricted := ccTerms(low)
+		if matchesPrefix(low, copyleftPrefixes) || shareAlike {
 			copyleft = true
 		}
-		if matchesPrefix(low, sourceAvailablePrefixes) || strings.Contains(low, "commons") {
+		if matchesPrefix(low, sourceAvailablePrefixes) || strings.Contains(low, "commons") || restricted {
 			sourceAvail = true
 		}
 		// Validate against SPDX to decide whether this is a canonical
@@ -732,6 +1006,13 @@ func fallbackClassify(raw string, add func(LicenseTag)) bool {
 		// false negative this wave exists to remove.
 		if _, bare := licenseFamilyTokens[low]; bare {
 			families[low] = struct{}{}
+			continue
+		}
+		// A token we just classed as copyleft or source-available names a
+		// licence we know the obligations of; calling it "unidentified" as
+		// well tagged "LGPL-3" copyleft AND unidentified at once.
+		if matchesPrefix(low, copyleftPrefixes) || matchesPrefix(low, sourceAvailablePrefixes) {
+			families[familyOf(low)] = struct{}{}
 			continue
 		}
 		if ok, _ := spdxexp.ValidateLicenses([]string{t}); ok {

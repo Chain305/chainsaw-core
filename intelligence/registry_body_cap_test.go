@@ -94,3 +94,38 @@ func TestRegistryGenuineMalformationStillDecodes(t *testing.T) {
 		t.Errorf("a genuinely malformed body must stay %q, got %q", WarnRegistryDecode, warn.Code)
 	}
 }
+
+// TestRegistryDeadlineMidBodyIsACancellation: the deadline ending a slow body
+// read is not a malformed upstream document. typescript's 15.7 MB packument
+// came back "decode: context deadline exceeded" and read as a registry that
+// served garbage; it is WarnRegistryCancelled, which a provisional Unknown
+// rechecks in 15 minutes instead of serving for a day.
+func TestRegistryDeadlineMidBodyIsACancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"name":"slow","pad":"`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+		}
+		_, _ = io.WriteString(w, `x"}`)
+	}))
+	defer srv.Close()
+
+	p := &registryMetadataProvider{
+		client: srv.Client(),
+		now:    func() time.Time { return time.Unix(0, 0).UTC() },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var out map[string]any
+	warn, _, _, err := p.fetchOnce(ctx, srv.URL, "application/json",
+		func(r io.Reader) error { return json.NewDecoder(r).Decode(&out) })
+	if err == nil || warn == nil {
+		t.Fatal("a body cut off by the deadline must not be success")
+	}
+	if warn.Code != WarnRegistryCancelled {
+		t.Fatalf("code = %q, want %q: the deadline cut the read, the document was fine", warn.Code, WarnRegistryCancelled)
+	}
+}

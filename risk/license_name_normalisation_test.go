@@ -94,6 +94,14 @@ func TestLicenceNameFalseNegativesAreGone(t *testing.T) {
 		{"GNU General Public License", "GPL", LicenseStrengthStrongCopyleft},
 		{"GNU Affero General Public License", "AGPL", LicenseStrengthStrongCopyleft},
 		{"GNU General Public License, Version 3.0", "GPL-3.0-only", LicenseStrengthStrongCopyleft},
+
+		// PyPI, corpus-v1-rev4 rows socket.dev flags copyleft: free text
+		// (genbase, lc-django-autoslug) and trove classifier names.
+		{"GNU LGPL v3", "LGPL-3.0-only", LicenseStrengthWeakCopyleft},
+		{"GNU Lesser General Public License (LGPL), Version 3", "LGPL-3.0-only", LicenseStrengthWeakCopyleft},
+		{"GNU General Public License v3 (GPLv3)", "GPL-3.0-only", LicenseStrengthStrongCopyleft},
+		{"GNU Affero General Public License v3 or later (AGPLv3+)", "AGPL-3.0-or-later", LicenseStrengthStrongCopyleft},
+		{"GNU Library or Lesser General Public License (LGPL)", "LGPL", LicenseStrengthWeakCopyleft},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,7 +156,6 @@ func TestAlreadySPDXIsUntouched(t *testing.T) {
 // "unidentified" is the honest answer and is what the operator needs to see.
 func TestAmbiguousNamesStayUnidentified(t *testing.T) {
 	for _, expr := range []string{
-		"BSD",           // 2-clause or 3-clause? different grants
 		"Dual License",  // says nothing at all
 		"See LICENSE",   //
 		"Proprietary",   //
@@ -159,6 +166,94 @@ func TestAmbiguousNamesStayUnidentified(t *testing.T) {
 		if !hasTag(tags, LicenseTagUnidentified) {
 			t.Errorf("Classify(%q) = %v — a name that does not determine a "+
 				"licence must stay unidentified rather than be guessed", expr, tags)
+		}
+	}
+}
+
+// Bare BSD is still not GUESSED into a clause count — the expression keeps
+// its own word — but the family is permissive whichever grant it is, so it
+// is recognised rather than charged -15 as unidentified (2026-10-03; 9
+// corpus-v1-rev4 rows). Same for the trove spelling.
+func TestBareBSDIsAKnownPermissiveFamily(t *testing.T) {
+	for _, expr := range []string{"BSD", "BSD License"} {
+		if got := NormalizeLicenseExpression(expr); got != "BSD" {
+			t.Errorf("NormalizeLicenseExpression(%q) = %q, want the family token BSD", expr, got)
+		}
+		if tags := Classify(expr); len(tags) != 0 {
+			t.Errorf("Classify(%q) = %v, want no tags", expr, tags)
+		}
+	}
+	if tags := Classify("BSD-like"); !hasTag(tags, LicenseTagUnidentified) {
+		t.Errorf("Classify(BSD-like) = %v — not a BSD licence, must stay unidentified", tags)
+	}
+}
+
+// Real license strings that fired license.unidentified on corpus-v1-rev4
+// and name a licence a standard reading identifies.
+func TestCorpusLicenceStringsIdentify(t *testing.T) {
+	cases := []struct{ raw, want string }{
+		{"MIT/Apache-2.0", "MIT OR Apache-2.0"},
+		{"GPLv3", "GPL-3.0-only"},
+		{"GPL V3", "GPL-3.0-only"},
+		{"GPLv2", "GPL-2.0-only"},
+		{"GPL V2", "GPL-2.0-only"},
+		{"GPL version 2", "GPL-2.0-only"},
+		{"AGPL-3", "AGPL-3.0-only"},
+		{"LGPLv3", "LGPL-3.0-only"},
+		{"LGPLv2.1+", "LGPL"},
+		{"GNU Lesser General Public License version 3", "LGPL-3.0-only"},
+		{"Eclipse Public License - v 1.0", "EPL-1.0"},
+		{"Eclipse Public License - v 2.0", "EPL-2.0"},
+		{"Apache", "Apache-2.0"},
+		{"APL2", "Apache-2.0"},
+		{"EUPL", "EUPL"},
+		{"License :: OSI Approved :: MIT License", "MIT"},
+		{"http://aws.amazon.com/apache2.0/", "Apache-2.0"},
+		{"https://opensource.org/licenses/MIT", "MIT"},
+		{"http://www.apache.org/licenses/LICENSE-2.0", "Apache-2.0"},
+		{"MIT License\n        \n        Copyright (c) 2020 Nv7\n        \n        Permission is hereby granted, free of charge, to any person obtaining a copy\n        of this software", "MIT"},
+		{"The MIT License\n        \n        Copyright (c) 2025 Cloudbeds (http://cloudbeds.com)\n\n        Permission is hereby granted, free of charge, to any person obtaining a copy", "MIT"},
+	}
+	for _, tc := range cases {
+		if got := NormalizeLicenseExpression(tc.raw); got != tc.want {
+			t.Errorf("NormalizeLicenseExpression(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+		if hasTag(Classify(tc.raw), LicenseTagUnidentified) {
+			t.Errorf("Classify(%q) still unidentified: %v", tc.raw, Classify(tc.raw))
+		}
+	}
+	// URL and file references with no standard mapping stay unidentified.
+	for _, raw := range []string{
+		"https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+		"LICENSE.txt",
+		"http://www.ingeniux.com",
+		"SEE LICENSE IN LICENSE.md",
+		"https://opensource.org/licenses/NotALicence",
+		"Commercial",
+		"UNLICENSED",
+		"Public Domain",
+	} {
+		if !hasTag(Classify(raw), LicenseTagUnidentified) {
+			t.Errorf("Classify(%q) = %v — no standard mapping, must stay unidentified", raw, Classify(raw))
+		}
+	}
+	// "GNU " + shorthand (rev5: rubygems set_version "GNU LGPLv3").
+	for raw, want := range map[string]string{
+		"GNU LGPLv3": "LGPL-3.0-only", "GNU GPLv3": "GPL-3.0-only", "GNU AGPLv3": "AGPL-3.0-only",
+	} {
+		if got := NormalizeLicenseExpression(raw); got != want {
+			t.Errorf("NormalizeLicenseExpression(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	// A versioned copyleft token SPDX does not know is copyleft, and only
+	// that: not also unidentified.
+	if tags := Classify("LGPL-3"); !hasTag(tags, LicenseTagCopyleft) || hasTag(tags, LicenseTagUnidentified) {
+		t.Errorf("Classify(LGPL-3) = %v, want copyleft without unidentified", tags)
+	}
+	// The copyleft ones keep their class.
+	for _, raw := range []string{"GPLv3", "AGPL-3", "LGPLv2.1+", "EUPL", "GNU LGPLv3", "GNU AGPLv3", "LGPL-3"} {
+		if !hasTag(Classify(raw), LicenseTagCopyleft) {
+			t.Errorf("Classify(%q) lost copyleft: %v", raw, Classify(raw))
 		}
 	}
 }

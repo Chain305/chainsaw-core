@@ -1,74 +1,54 @@
 package intelligence
 
-// shrinkwrapProvider scans a package artifact for bundled lockfiles
-// (npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lockb,
-// Pipfile.lock, poetry.lock, composer.lock, Cargo.lock, Gemfile.lock).
-// Tier-2; zero new network cost — the archive is already decompressed
-// once via SharedArtifactMap.
+// shrinkwrapProvider reports a lockfile the INSTALLER will honour when this
+// package is installed as a dependency, which lets the package pin its whole
+// transitive graph past the consumer's own resolution. Tier-2; zero new
+// network cost — the archive is already decompressed once via
+// SharedArtifactMap.
 //
-// Fires when ANY path in the map matches an ecosystem-appropriate
-// lockfile name (case-insensitive, by basename). Nested lockfiles
-// under bundled subpackages also count: bundled deps with their own
-// pinned graphs are exactly the review-bypass pattern the signal
-// targets.
+// That is npm-shrinkwrap.json at the package root, and nothing else:
 //
-// Two context filters reduce false positives:
+//	npm-shrinkwrap.json (npm, yarn, pnpm, bun)   honoured for a dependency
+//	package-lock.json, yarn.lock, pnpm-lock, bun   ignored inside a dependency
+//	Pipfile.lock, poetry.lock (pip)                ignored
+//	composer.lock                                  ignored for a dependency
+//	Gemfile.lock (gem install)                     ignored
+//	Cargo.lock                                     only with an opt-in
+//	                                               `cargo install --locked`
+//	                                               on a binary crate
 //
-//  1. Path-based: lockfiles living under test/example/docs/templates/
-//     samples/fixtures directories are likely intentional artifacts of
-//     the package, not a review-bypass attempt. See
-//     codesmell.IsLikelyExampleOrDoc for the segment list. NOTE this
-//     deliberately does NOT match node_modules/ or vendor/ — a lockfile
-//     inside a bundled dep IS the review-bypass pattern.
+// Until 2026-10-03 every row of that table fired, at -10. On the 1,885-row
+// socket.dev corpus that was 129 packages (83 Cargo.lock, 22 composer.lock,
+// 13 Gemfile.lock, 10 yarn/package-lock, 1 Pipfile.lock) and not one
+// npm-shrinkwrap.json; socket.dev's shrinkwrap alert fired on none of them.
+// Restricting it flipped no verdict and raised 90 scores by 3-4 points.
 //
-//  2. Manifest-declared (npm/yarn/bun only): when the package's
-//     package.json declares a non-empty bundledDependencies (or
-//     bundleDependencies — both spellings are valid per
-//     https://docs.npmjs.com/cli/v10/configuring-npm/package-json#bundleddependencies)
-//     a lockfile at archive root is documented behavior; suppress.
-//
-// The signal STILL fires when at least one non-suppressed lockfile
-// match is found.
+// A shrinkwrap anywhere but the root is not read by npm either (one inside a
+// bundled node_modules/ ships pre-installed; one under examples/ is a file),
+// which is why the old path- and bundledDependencies-based suppressions are
+// gone rather than kept: nothing they suppressed can fire any more.
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"path"
-	"sort"
 	"strings"
-
-	"github.com/chain305/chainsaw-core/codesmell"
 )
 
-// Warning codes emitted when shrinkwrap suppression engages.
-const (
-	WarnShrinkwrapPathSuppressed        = "shrinkwrap_path_suppressed"
-	WarnShrinkwrapBundledDepsSuppressed = "shrinkwrap_bundled_deps_suppressed"
-)
-
-// ecosystemLockfiles maps a normalized ecosystem key to the set of
-// lockfile basenames that, when found inside an artifact, indicate a
-// bundled pinned dependency graph.
+// ecosystemLockfiles maps an ecosystem to the lockfile its installer honours
+// inside a dependency. The ecosystems whose installers honour none keep an
+// empty entry ON PURPOSE: Supports() stays true, so the ShrinkwrapPresent
+// policy condition evaluates (to false, which is the truth) instead of the
+// proxy matrix marking it unsupported, which skips the whole policy.
 var ecosystemLockfiles = map[string][]string{
-	"npm":      {"npm-shrinkwrap.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"},
-	"yarn":     {"npm-shrinkwrap.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"},
-	"bun":      {"npm-shrinkwrap.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"},
-	"pnpm":     {"npm-shrinkwrap.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"},
-	"pip":      {"Pipfile.lock", "poetry.lock"},
-	"pypi":     {"Pipfile.lock", "poetry.lock"},
-	"composer": {"composer.lock"},
-	"cargo":    {"Cargo.lock"},
-	"rubygems": {"Gemfile.lock"},
-}
-
-// npmFamily — ecosystems whose package.json may declare
-// bundledDependencies and thus opt out of the shrinkwrap signal.
-var npmFamily = map[string]struct{}{
-	"npm":  {},
-	"yarn": {},
-	"bun":  {},
-	"pnpm": {},
+	"npm":      {"npm-shrinkwrap.json"},
+	"yarn":     {"npm-shrinkwrap.json"},
+	"bun":      {"npm-shrinkwrap.json"},
+	"pnpm":     {"npm-shrinkwrap.json"},
+	"pip":      nil,
+	"pypi":     nil,
+	"composer": nil,
+	"cargo":    nil,
+	"rubygems": nil,
 }
 
 type shrinkwrapProvider struct{}
@@ -82,7 +62,12 @@ func (p *shrinkwrapProvider) NeedsArtifact() bool { return true }
 
 // shrinkwrapAnalyzerVersion — bump when what counts as a shrinkwrap, or what
 // is read out of it, changes for identical bytes.
-const shrinkwrapAnalyzerVersion = 1
+//
+// 2: artifactmap maps a .gem's data.tar.gz (6815af8e), so a Gemfile.lock
+// shipped inside a gem is now seen. 6815af8e bumped the other map readers
+// but not this one.
+// 3: only a root npm-shrinkwrap.json fires.
+const shrinkwrapAnalyzerVersion = 3
 
 func (p *shrinkwrapProvider) AnalyzerVersion() int { return shrinkwrapAnalyzerVersion }
 func (p *shrinkwrapProvider) Supports(eco string) bool {
@@ -112,121 +97,21 @@ func (p *shrinkwrapProvider) run(ctx context.Context, req Request, prior *Report
 	if len(res.Files) == 0 {
 		return PartialReport{}, nil
 	}
-	// TODO: cross-ecosystem path-collision detection — e.g. flag a
-	// stray Gemfile.lock inside an npm package as a manifest-confusion
-	// signal rather than silently ignoring it here.
-
-	// Collect matched lockfile paths, partitioned into path-suppressed
-	// vs. live (not suppressed by path).
-	var pathSuppressed []string
-	var live []string
 	for _, p := range res.Files.SortedPaths() {
-		base := path.Base(p)
-		if !matchesAny(base, names) {
-			continue
-		}
-		if codesmell.IsLikelyExampleOrDoc(p) {
-			pathSuppressed = append(pathSuppressed, p)
-			continue
-		}
-		live = append(live, p)
-	}
-
-	// No matches at all — silent.
-	if len(pathSuppressed) == 0 && len(live) == 0 {
-		return PartialReport{}, nil
-	}
-
-	var partial PartialReport
-
-	// Manifest-declared suppression for the npm family. The package.json
-	// has already been decompressed into the SharedArtifactMap; one read
-	// max, no second scan.
-	bundledSuppressed := false
-	if _, isNPM := npmFamily[eco]; isNPM && len(live) > 0 {
-		if pkgJSON := FirstMatch(res.Files.SelectLower(func(name string) bool {
-			return strings.EqualFold(path.Base(name), "package.json")
-		}), "package.json"); len(pkgJSON) > 0 {
-			if hasBundledDependencies(pkgJSON) {
-				bundledSuppressed = true
-			}
+		// ponytail: "root" is at most one directory deep, which is every
+		// registry tarball's shape (package/npm-shrinkwrap.json); reading
+		// package.json to find the root would only matter for a tarball
+		// with several top-level directories.
+		if strings.Count(p, "/") <= 1 && matchesAny(path.Base(p), names) {
+			return PartialReport{Scan: &ArtifactScanSection{Performed: true, ShrinkwrapPresent: true}}, nil
 		}
 	}
-
-	if bundledSuppressed {
-		// All live matches collapse into the bundled-deps suppression
-		// bucket; the warning lists them so an operator can audit.
-		bundled := live
-		live = nil
-		sort.Strings(bundled)
-		partial.Warnings = append(partial.Warnings, Warning{
-			Provider: "shrinkwrap",
-			Code:     WarnShrinkwrapBundledDepsSuppressed,
-			Message: fmt.Sprintf(
-				"lockfile at archive root suppressed because package.json declares bundledDependencies: [%s]",
-				strings.Join(bundled, ", "),
-			),
-		})
-	}
-
-	if len(pathSuppressed) > 0 {
-		sort.Strings(pathSuppressed)
-		partial.Warnings = append(partial.Warnings, Warning{
-			Provider: "shrinkwrap",
-			Code:     WarnShrinkwrapPathSuppressed,
-			Message: fmt.Sprintf(
-				"%d lockfile match(es) suppressed because they're in test/example/docs paths: [%s]",
-				len(pathSuppressed), strings.Join(pathSuppressed, ", "),
-			),
-		})
-	}
-
-	scan := &ArtifactScanSection{Performed: true}
-	if len(live) > 0 {
-		scan.ShrinkwrapPresent = true
-	} else {
-		// Matches found but all suppressed.
-		scan.ShrinkwrapSuppressed = true
-	}
-	partial.Scan = scan
-	return partial, nil
+	return PartialReport{}, nil
 }
 
 func matchesAny(base string, names []string) bool {
 	for _, n := range names {
 		if strings.EqualFold(base, n) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasBundledDependencies reports whether the given package.json bytes
-// declare a non-empty bundledDependencies (or the alternate spelling
-// bundleDependencies) array. Malformed JSON is tolerated: parse
-// failure means "not declared", and the signal fires normally.
-//
-// Per npm docs, the canonical field is "bundledDependencies" but
-// "bundleDependencies" (no 'd') is also accepted; both are arrays of
-// dependency names.
-// https://docs.npmjs.com/cli/v10/configuring-npm/package-json#bundleddependencies
-func hasBundledDependencies(pkgJSON []byte) bool {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(pkgJSON, &raw); err != nil {
-		return false
-	}
-	for _, key := range []string{"bundledDependencies", "bundleDependencies"} {
-		v, ok := raw[key]
-		if !ok {
-			continue
-		}
-		var arr []string
-		if err := json.Unmarshal(v, &arr); err != nil {
-			// Non-array shape — malformed or boolean form. Don't
-			// suppress on something we can't validate.
-			continue
-		}
-		if len(arr) > 0 {
 			return true
 		}
 	}
