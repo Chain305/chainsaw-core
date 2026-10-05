@@ -269,6 +269,11 @@ func (i *Index) LookupEx(ecosystem, pkg, version string) (hits, cleared, undecid
 	for _, a := range candidates {
 		affects, undecided := advisoryAffectsEx(a, version)
 		switch {
+		case affects && overrideFor(a, version) != nil:
+			// A reviewed override (overrides.go) says this hit is wrong
+			// for this version. Cleared, so the provider's veto retracts
+			// any copy an earlier scan stored.
+			cleared = append(cleared, a)
 		case affects:
 			hits = append(hits, a)
 		case undecided:
@@ -814,13 +819,28 @@ func normalizeVersionPrefix(v string) string {
 // non-nil error when the string cannot be parsed at all; the
 // compareVersions caller propagates the error so the range matcher
 // falls back to exact-string equality.
+//
+// Ordering is SemVer 2.0 precedence, which is also what Go modules
+// (including pseudo-versions), npm and Cargo use: dotted prerelease
+// identifiers compare left to right, numeric ones numerically,
+// alphanumeric ones lexically, numeric below alphanumeric, and a
+// shorter list below a longer one with the same prefix.
 func parseSemver(v string) (*semver.Version, error) {
 	s := strings.TrimSpace(v)
 	s = strings.TrimPrefix(s, "v")
-	// Drop a fourth dot-segment (`1.2.3.4` -> `1.2.3`) — npm publishes
-	// these occasionally and Masterminds rejects them outright.
-	if parts := strings.Split(s, "."); len(parts) > 3 {
-		head := strings.Join(parts[:3], ".")
+	// Drop a fourth dot-segment of the CORE version (`1.2.3.4` ->
+	// `1.2.3`) — npm publishes these occasionally and Masterminds
+	// rejects them outright. Only the core: the dots in a prerelease or
+	// build suffix separate identifiers that order the version. Cutting
+	// there read v1.85.0-dev.0.20260801000000-… as 1.85.0-dev, equal to
+	// every other pseudo-version on that line and to a fix bound such as
+	// 1.85.0-dev.0.20260825072537-…, so a pre-fix version read as fixed.
+	core, suffix := s, ""
+	if i := strings.IndexAny(s, "-+"); i >= 0 {
+		core, suffix = s[:i], s[i:]
+	}
+	if parts := strings.Split(core, "."); len(parts) > 3 {
+		head := strings.Join(parts[:3], ".") + suffix
 		if _, err := semver.NewVersion(head); err == nil {
 			s = head
 		}

@@ -160,6 +160,7 @@ func newOSVProvider(logger *slog.Logger, epss epssReader) *osvProvider {
 				"path", path,
 				"advisories", idx.Total(),
 				"loaded_at", idx.LoadedAt().Format(time.RFC3339))
+			logStaleOverrides(logger, idx)
 		}
 	} else {
 		// Missing bundle is the common "not yet generated" state — log
@@ -367,6 +368,13 @@ func (p *osvProvider) Run(ctx context.Context, req Request, prior *Report) (Part
 		}
 	}
 
+	// Notices: matched upstream, reported as information. LookupEx has
+	// already put them in `cleared`, so they never reach CVEs above and
+	// the veto retracts any copy an earlier scan stored.
+	for _, n := range idx.Notices(eco, pkg, ver) {
+		vuln.AdvisoryNotices = append(vuln.AdvisoryNotices, AdvisoryNotice{ID: n.AdvisoryID, Note: n.Reason})
+	}
+
 	out := PartialReport{Vulns: vuln}
 	if len(undecided) > 0 {
 		// Loud, but not scored. See WarnVulnRangeUndecidable: promoting
@@ -387,6 +395,16 @@ func (p *osvProvider) Run(ctx context.Context, req Request, prior *Report) (Part
 		})
 	}
 	return out, nil
+}
+
+// logStaleOverrides warns when a reviewed advisory override no longer
+// matches its upstream record. Such an override is inert (the upstream
+// answer wins), so the entry needs re-review. See osv/overrides.go.
+func logStaleOverrides(logger *slog.Logger, idx *osv.Index) {
+	if stale := idx.StaleOverrides(); len(stale) > 0 {
+		logger.Warn("osv: advisory overrides inert, upstream record changed; re-review osv/overrides.json",
+			"advisory_ids", stale)
+	}
 }
 
 // IndexLoaded reports whether the underlying OSV bundle was successfully
@@ -427,6 +445,7 @@ func (p *osvProvider) SwapIndex(idx *osv.Index) {
 		"advisories", idx.Total(),
 		"loaded_at", idx.LoadedAt().Format(time.RFC3339),
 	)
+	logStaleOverrides(p.logger, idx)
 	// /readyz dataset-load barrier — first SwapIndex (or first
 	// boot-time LoadFile completion) flips the osv sub-flag. Subsequent
 	// hot-swaps are no-ops (sync.Once).

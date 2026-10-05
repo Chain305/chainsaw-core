@@ -806,6 +806,19 @@ type VulnSection struct {
 	// KEVEntries is the catalog detail for each matched CVE (date
 	// added + ransomware flag). Omitted when KnownExploited is false.
 	KEVEntries []KEVEntry `json:"kevEntries,omitempty"`
+
+	// AdvisoryNotices are advisories that matched this coordinate but a
+	// reviewed override (osv/overrides.json, kind "notice") reports as
+	// information, not a vulnerability. They never feed IsVulnerable or
+	// CVEs; the provider also lists their ids in ClearedCVEs.
+	AdvisoryNotices []AdvisoryNotice `json:"advisoryNotices,omitempty"`
+}
+
+// AdvisoryNotice is one informational advisory. Note is the override's
+// reviewed reason.
+type AdvisoryNotice struct {
+	ID   string `json:"id"`
+	Note string `json:"note"`
 }
 
 // CVEDetail is per-CVE detail keyed alongside VulnSection.CVEs. Trivy
@@ -1642,6 +1655,9 @@ func (r *Report) Provisional() bool {
 	unknown := r.Risk != nil && r.Risk.Verdict == risk.VerdictUnknown
 	for _, w := range r.Observation.Warnings {
 		if w.Code == WarnDownloadsQueued {
+			return true
+		}
+		if w.Provider == "artifact" && w.Code == WarnArtifactFetchDeferred {
 			return true
 		}
 		if unknown && w.Provider == "registrymetadata" && w.Code == WarnRegistryCancelled {

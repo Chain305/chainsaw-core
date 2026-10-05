@@ -114,6 +114,9 @@ func New(cfg Config, opts ...Option) *Client {
 // carries them (see InProcessHostLimiter.Prepay). A limiter that cannot
 // prepay leaves ctx unchanged and the requests queue as before.
 func (c *Client) Prepay(ctx context.Context, host string, n int, maxWait time.Duration) (context.Context, error) {
+	if err := sonatypeEdge.standingOff(strings.ToLower(host)); err != nil {
+		return ctx, err
+	}
 	if p, ok := c.limiter.(interface {
 		Prepay(context.Context, string, int, time.Duration) (context.Context, error)
 	}); ok {
@@ -154,6 +157,12 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	var lastResp *http.Response
 	var lastErr error
 	for attempt := 0; attempt <= c.cfg.MaxRetries; attempt++ {
+		// Checked here, not in the limiter, so it holds for every limiter
+		// a Client can carry (WithLimiter), and before a prepaid credit is
+		// spent on a request the edge would refuse.
+		if err := sonatypeEdge.standingOff(host); err != nil {
+			return nil, err
+		}
 		if err := c.limiter.Wait(ctx, host); err != nil {
 			// Context cancelled while waiting on the bucket; surface
 			// the context error so the caller can distinguish shutdown
@@ -175,7 +184,9 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			// response-path below.
 			return nil, err
 		}
-		if !shouldRetry(resp.StatusCode) || attempt == c.cfg.MaxRetries {
+		// A 429 from Maven Central starts a stand-off and is never retried:
+		// asking again inside a block is what lengthens it.
+		if sonatypeEdge.observe(host, resp) || !shouldRetry(resp.StatusCode) || attempt == c.cfg.MaxRetries {
 			return resp, nil
 		}
 		// Retryable status and budget remaining: drain + close the

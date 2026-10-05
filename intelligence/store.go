@@ -968,7 +968,7 @@ func vulnSectionEmpty(v VulnSection) bool {
 	if v.IsVulnerable || v.CVSSScore > 0 || v.EPSSScore > 0 || v.KnownExploited {
 		return false
 	}
-	if len(v.CVEs) > 0 || len(v.CVEDetails) > 0 || len(v.KEVEntries) > 0 {
+	if len(v.CVEs) > 0 || len(v.CVEDetails) > 0 || len(v.KEVEntries) > 0 || len(v.AdvisoryNotices) > 0 {
 		return false
 	}
 	// A section carrying only vetoes is NOT empty. "These CVEs were

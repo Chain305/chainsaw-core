@@ -169,5 +169,6 @@ func cloneVulnSection(v VulnSection) VulnSection {
 	out.CVEDetails = append([]CVEDetail(nil), v.CVEDetails...)
 	out.ClearedCVEs = append([]string(nil), v.ClearedCVEs...)
 	out.KEVEntries = append([]KEVEntry(nil), v.KEVEntries...)
+	out.AdvisoryNotices = append([]AdvisoryNotice(nil), v.AdvisoryNotices...)
 	return out
 }

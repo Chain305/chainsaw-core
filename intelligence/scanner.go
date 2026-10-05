@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/chain305/chainsaw-core/upstreamhttp"
 	"github.com/chain305/chainsaw-core/xreplicaflight"
 	"golang.org/x/sync/singleflight"
 )
@@ -466,8 +468,11 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	}
 	if req.Artifact == nil && !req.ArtifactTooLarge && req.ArtifactFetchErr != nil {
 		code := WarnArtifactFetchFailed
-		if errors.Is(req.ArtifactFetchErr, ErrArtifactUpstreamRefused) {
+		switch {
+		case errors.Is(req.ArtifactFetchErr, ErrArtifactUpstreamRefused):
 			code = WarnArtifactUpstreamRefused
+		case errors.Is(req.ArtifactFetchErr, upstreamhttp.ErrRateLimitedLocally):
+			code = WarnArtifactFetchDeferred
 		}
 		msg := req.ArtifactFetchErr.Error()
 		if len(msg) > 300 {
@@ -1768,6 +1773,13 @@ func mergeVulns(dst *VulnSection, src VulnSection) {
 			}
 			idx[k.CVE] = struct{}{}
 			dst.KEVEntries = append(dst.KEVEntries, k)
+		}
+	}
+	// AdvisoryNotices: union by id. Informational only — the veto below
+	// does not touch them and they never set IsVulnerable.
+	for _, n := range src.AdvisoryNotices {
+		if !slices.ContainsFunc(dst.AdvisoryNotices, func(d AdvisoryNotice) bool { return d.ID == n.ID }) {
+			dst.AdvisoryNotices = append(dst.AdvisoryNotices, n)
 		}
 	}
 	// Veto pass — runs LAST so it applies to everything unioned above,

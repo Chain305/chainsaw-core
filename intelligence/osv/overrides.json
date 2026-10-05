@@ -1,0 +1,38 @@
+[
+  {
+    "kind": "not_affected",
+    "advisory_id": "GO-2026-6443",
+    "ecosystem": "Go",
+    "package": "google.golang.org/grpc",
+    "introduced": "1.84.0",
+    "fixed": "1.85.0-dev",
+    "reason": "GO-2026-6443 merges the 1.84 and 1.85 development lines into one range, [1.84.0-dev, 1.85.0-dev.0.20260825072537-93e31b48545e), so every 1.84 release matches. The fix landed on the 1.84 line at d5a41119e0e3 (v1.84.0-dev.0.20260825144003-d5a41119e0e3), which is an ancestor of the v1.84.0 tag (e84aa5ab15d1). GHSA-2v4p-qf9q-27wj, the same vulnerability, records the two lines separately and treats v1.84.0 as fixed. The override covers only released 1.84.x; 1.84.0-dev and 1.85.0-dev pseudo-versions before their fixes stay affected.",
+    "evidence": [
+      "https://pkg.go.dev/vuln/GO-2026-6443",
+      "https://github.com/advisories/GHSA-2v4p-qf9q-27wj",
+      "https://github.com/grpc/grpc-go/commit/d5a41119e0e3189ea913cf839586ce34a44f1a3f",
+      "https://github.com/grpc/grpc-go/releases/tag/v1.84.0"
+    ],
+    "reviewed": "2026-10-04",
+    "upstream_ranges": [
+      {"introduced": "0", "fixed": "1.82.2"},
+      {"introduced": "1.83.0", "fixed": "1.83.2"},
+      {"introduced": "1.84.0-dev", "fixed": "1.85.0-dev.0.20260825072537-93e31b48545e"}
+    ]
+  },
+  {
+    "kind": "notice",
+    "advisory_id": "GO-2026-5932",
+    "ecosystem": "Go",
+    "package": "golang.org/x/crypto",
+    "introduced": "0",
+    "reason": "GO-2026-5932 marks the golang.org/x/crypto/openpgp package as unmaintained and unsafe by design. It names no fixed version, so it matches every x/crypto release, but it affects only code that imports x/crypto/openpgp. The bundle keeps the module and drops the package list, so a module-level match cannot tell an openpgp importer from anyone else. Reported as a notice, not a vulnerability.",
+    "evidence": [
+      "https://pkg.go.dev/vuln/GO-2026-5932"
+    ],
+    "reviewed": "2026-10-04",
+    "upstream_ranges": [
+      {"introduced": "0"}
+    ]
+  }
+]

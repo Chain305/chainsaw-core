@@ -234,9 +234,16 @@ func (t countingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if paused := githubPausedResponse(req); paused != nil {
 		return paused, nil
 	}
+	// Likewise Maven Central during a stand-off (sonatype_standoff.go).
+	if paused := sonatypePausedResponse(req); paused != nil {
+		return paused, nil
+	}
 	resp, err := t.next.RoundTrip(req)
 	if err == nil {
 		observeGitHubResponse(req, resp)
+		if req != nil && req.URL != nil {
+			ObserveSonatypeResponse(req.URL.Hostname(), resp)
+		}
 	}
 
 	fp := egressRecorder.Load()

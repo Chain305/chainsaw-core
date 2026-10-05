@@ -65,9 +65,16 @@ const WarnArtifactTooLarge = "artifact_too_large"
 // they sit beside the needs_artifact warnings, so coverage is unchanged, and
 // unlike it they do NOT exclude the row from the sweep's retry: a failed fetch
 // can succeed next time.
+//
+// FetchDeferred is our own client declining to ask: the per-host limiter
+// refused, or Maven Central is inside a 429 stand-off (sonatype_standoff).
+// The registry was never asked, so the row is provisional (Report.Provisional)
+// and rechecked on the provisional backoff instead of waiting out the
+// staleness window.
 const (
 	WarnArtifactFetchFailed     = "artifact_fetch_failed"
 	WarnArtifactUpstreamRefused = "artifact_upstream_refused"
+	WarnArtifactFetchDeferred   = "artifact_fetch_deferred"
 )
 
 // artifactTruncationMessage is the operator-facing sentence. Deliberately says

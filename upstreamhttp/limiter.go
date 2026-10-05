@@ -156,6 +156,10 @@ func waitLeavingTime(ctx context.Context, lim *rate.Limiter) error {
 // burst 1.
 func (l *InProcessHostLimiter) backgroundFor(host string) *rate.Limiter {
 	h := strings.ToLower(host)
+	if isSonatypeHost(h) {
+		_, bg := sonatypeEdge.limiters(l.rateFor(sonatypeRateKey), l.cfg.Burst)
+		return bg
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if lim, ok := l.background[h]; ok {
@@ -175,6 +179,10 @@ func (l *InProcessHostLimiter) backgroundFor(host string) *rate.Limiter {
 // use the lowered form as the map key.
 func (l *InProcessHostLimiter) limiterFor(host string) *rate.Limiter {
 	h := strings.ToLower(host)
+	if isSonatypeHost(h) {
+		fg, _ := sonatypeEdge.limiters(l.rateFor(sonatypeRateKey), l.cfg.Burst)
+		return fg
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if lim, ok := l.limiters[h]; ok {
@@ -187,6 +195,14 @@ func (l *InProcessHostLimiter) limiterFor(host string) *rate.Limiter {
 	lim := rate.NewLimiter(rate.Limit(r), l.cfg.Burst)
 	l.limiters[h] = lim
 	return lim
+}
+
+// rateFor is host's configured rate.
+func (l *InProcessHostLimiter) rateFor(h string) float64 {
+	if override, ok := l.cfg.HostLimits[h]; ok {
+		return override
+	}
+	return l.cfg.DefaultLimit
 }
 
 // creditKey carries tokens a caller paid for before its fetch deadline
