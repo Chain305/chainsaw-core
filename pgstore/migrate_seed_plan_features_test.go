@@ -121,3 +121,38 @@ func TestSeededHardeningWizardIsProAndEnterpriseOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestSeededPlanPricing pins the per-seat Team pricing (owner decision
+// 2026-10-05): pro is displayed "Team", priced $25 per seat per month with a
+// 5-seat default cap and no per-GB overage; Enterprise ("unlimited") is
+// sales-only and keeps a NON-zero base price because ui_new renders 0 as
+// "Free" and ranks plans by it. Free is unchanged.
+func TestSeededPlanPricing(t *testing.T) {
+	type want struct {
+		name                      string
+		basePriceCents            int64
+		maxMembers                int
+		storageCentsGB, bwCentsGB int64
+	}
+	wants := map[string]want{
+		"free":      {"Free", 0, 3, 0, 0},
+		"pro":       {"Team", 2500, 5, 0, 0},
+		"unlimited": {"Enterprise", 200000, 0, 0, 0},
+	}
+	seen := 0
+	for _, p := range pricingPlanSeeds() {
+		w, ok := wants[p.id]
+		if !ok {
+			t.Errorf("unexpected seeded plan %q", p.id)
+			continue
+		}
+		seen++
+		got := want{p.name, p.basePriceCents, p.maxMembers, p.priceStorageCentsPerGB, p.priceBwCentsPerGB}
+		if got != w {
+			t.Errorf("plan %q = %+v, want %+v", p.id, got, w)
+		}
+	}
+	if seen != len(wants) {
+		t.Errorf("saw %d of %d expected plans", seen, len(wants))
+	}
+}

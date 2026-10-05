@@ -467,6 +467,12 @@ func (s *Store) ensurePricingPlanColumns() error {
 	if err := s.addColumnIfMissing("org_usage_limits", "max_members_per_org", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// Paddle item quantity = purchased seats on the per-seat Team (pro)
+	// plan. Written only by the verified webhook. Pre-existing rows get 1,
+	// which EffectiveMemberCap floors to the plan default.
+	if err := s.addColumnIfMissing("paddle_subscriptions", "quantity", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 
 	if err := s.seedPricingPlans(); err != nil {
 		return fmt.Errorf("seed pricing plans: %w", err)

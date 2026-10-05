@@ -125,15 +125,23 @@ func pricingPlanSeeds() []pricingPlanSeed {
 			features:       map[string]bool{},
 		},
 		{
+			// Display name "Team"; the id stays "pro" so Paddle env-var names,
+			// org_plan_assignments rows and analytics labels keep working.
+			// Sold PER SEAT: basePriceCents is the per-seat monthly price
+			// ($25; annual is $240/seat, priced in Paddle). maxMembers is the
+			// plan DEFAULT cap and also the purchase minimum — the purchased
+			// seat count (paddle_subscriptions.quantity) raises it, see
+			// billingapi.EffectiveMemberCap. Storage/bandwidth are fair-use
+			// caps; per-GB overage is no longer billed (0).
 			id:                     "pro",
-			name:                   "Pro",
-			description:            "For teams rolling Chainsaw into production pipelines.",
+			name:                   "Team",
+			description:            "Per-seat plan for teams rolling Chainsaw into production pipelines.",
 			storageBytes:           5 * 1024 * 1024 * 1024,  // 5 GiB
 			bandwidthBytes:         25 * 1024 * 1024 * 1024, // 25 GiB
-			maxMembers:             10,
-			basePriceCents:         14900,
-			priceStorageCentsPerGB: 150,
-			priceBwCentsPerGB:      150,
+			maxMembers:             5,
+			basePriceCents:         2500,
+			priceStorageCentsPerGB: 0,
+			priceBwCentsPerGB:      0,
 			isDefault:              0,
 			// Billy (AI assistant) and SSO (SAML/OIDC) are available on Pro and
 			// Enterprise. SSO lives on the first paid tier deliberately — no SSO
@@ -157,7 +165,12 @@ func pricingPlanSeeds() []pricingPlanSeed {
 			storageBytes:   0,
 			bandwidthBytes: 0,
 			maxMembers:     0,
-			basePriceCents: 119900,
+			// Sales-only, "from $24,000/yr". NOT 0: ui_new renders a 0 base
+			// price as "Free" (change-plan priceLabel), "$0" (billing page),
+			// shows the Upgrade chip (mega-nav / dashboard-topbar), and ranks
+			// plans by it (change-plan planRank, webhook upgrade/downgrade
+			// classification). 200000 = the $24,000/yr floor per month.
+			basePriceCents: 200000,
 			isDefault:      0,
 			// Enterprise adds external integrations (SIEM, ticketing) and on-prem
 			// on top of everything in Pro. SSO/SCIM are no longer exclusive here
