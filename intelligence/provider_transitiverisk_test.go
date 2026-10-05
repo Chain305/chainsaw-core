@@ -1117,19 +1117,6 @@ func TestPickConstraint_GradleUsesMaven(t *testing.T) {
 	}
 }
 
-// TestPickConstraint_ComposerUsesMaven verifies the packagist/composer
-// alias dispatches to Maven (Composer's range syntax is Maven-flavoured
-// enough that this is the safer fallback than Masterminds).
-func TestPickConstraint_ComposerUsesMaven(t *testing.T) {
-	got, parseErr := pickFor(t, "composer", []string{"1.1.3", "1.1.4", "2.0.0"}, "[1.1.4,2.0.0)")
-	if parseErr != nil {
-		t.Fatalf("parse failed: %v", parseErr)
-	}
-	if got != "1.1.4" {
-		t.Fatalf("got %q want %q", got, "1.1.4")
-	}
-}
-
 // TestPickConstraint_NPMStillUsesSemver is the no-regression shield:
 // the npm/yarn/cargo path must still resolve via Masterminds so the
 // existing range tests (TestTransitiveRisk_ResolvesRangeAgainstCachedVersion)

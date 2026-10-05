@@ -92,6 +92,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -282,6 +283,9 @@ func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID s
 			eco := strings.TrimSpace(ref.Ecosystem)
 			if eco == "" {
 				eco = entry.fallbackEco
+			}
+			if normalizeEcosystem(eco) == "packagist" && ComposerPlatformPackage(ref.Name) {
+				continue
 			}
 			depKey, depReport, outcome, lookupErr := lookupDepReport(ctx, store, orgID, eco, ref.Name, ref.Constraint)
 			switch outcome {
@@ -1033,8 +1037,8 @@ func pickConstraintMatch(ctx context.Context, store transitiveLookup, orgID, eco
 //
 // Constraint parsing dispatches per-ecosystem to match the same
 // per-ecosystem comparator used in osv.compareVersions (PEP 440 for
-// PyPI, Gem for RubyGems, Maven for Maven/Gradle/NuGet/Composer,
-// Masterminds/semver for everything else). The version-iteration loop
+// PyPI, Gem for RubyGems, Maven for Maven/Gradle/NuGet, normalised
+// Masterminds for Composer, Masterminds/semver for everything else). The version-iteration loop
 // reuses the same satisfier so the comparator used to rank
 // "best (highest) match" comes from the same library that parsed the
 // constraint — never mixing ecosystems' ordering rules.
@@ -1136,7 +1140,7 @@ type versionSatisfier interface {
 //	rubygems          → Gem (NewConstraints)
 //	maven / gradle    → Maven (NewConstraints)
 //	nuget             → Maven (bracket syntax is shared)
-//	packagist         → Maven (Composer is Maven-flavoured)
+//	packagist         → Composer (semver-shaped; see parseComposerConstraint)
 //	default / unknown → Masterminds (npm/cargo/etc.)
 //
 // DependencyConstraintParses reports whether raw is a valid version
@@ -1171,12 +1175,14 @@ func parseEcosystemConstraint(ecosystem, raw string) (versionSatisfier, error) {
 			return nil, err
 		}
 		return gemSatisfier{raw: c}, nil
-	case "maven", "nuget", "packagist":
-		// Maven, NuGet, and Composer all use bracket-range syntax
-		// ([1.0,2.0), (,1.0], [1.5.3], etc.) which the underlying mvn
-		// library doesn't parse natively — it accepts only
-		// operator-prefixed comma-separated constraints. Translate to
-		// the library's expected shape before parsing.
+	case "packagist":
+		return parseComposerConstraint(c)
+	case "maven", "nuget":
+		// Maven and NuGet use bracket-range syntax ([1.0,2.0), (,1.0],
+		// [1.5.3], etc.) which the underlying mvn library doesn't parse
+		// natively — it accepts only operator-prefixed comma-separated
+		// constraints. Translate to the library's expected shape before
+		// parsing.
 		translated, err := translateBracketConstraint(c)
 		if err != nil {
 			return nil, err
@@ -1248,6 +1254,96 @@ func (s semverSatisfier) Greater(a, b string) bool {
 		return false
 	}
 	vb, err := semver.NewVersion(b)
+	if err != nil {
+		return false
+	}
+	return va.GreaterThan(vb)
+}
+
+// parseComposerConstraint reads a Composer `require` range. Composer is not
+// Maven-flavoured: it writes ^2.1, ~1.2, 2.*, `|` alternation and @stability
+// flags, none of which the bracket grammar accepts, so until 2026-10-03 every
+// such edge ended as an "unparseable" warning and never entered the tree.
+// Once normalised it is Masterminds semver, with one difference fixed up:
+// Composer's two-part tilde moves the minor (~1.2 is >=1.2 <2.0) where
+// semver's moves only the patch.
+//
+// A constraint made only of branch references (dev-master, 2.x-dev) names no
+// release. It parses — the policy hygiene check reads it as legal — and
+// matches nothing, so the edge ends as a cache miss.
+func parseComposerConstraint(c string) (versionSatisfier, error) {
+	var alts []string
+	for _, alt := range strings.Split(strings.ReplaceAll(c, "||", "|"), "|") {
+		if i := strings.IndexByte(alt, '@'); i >= 0 {
+			alt = alt[:i] // stability flag, per alternative
+		}
+		alt = strings.TrimSpace(alt)
+		if alt == "" || strings.HasPrefix(alt, "dev-") || strings.HasSuffix(alt, "-dev") {
+			continue // a branch reference, not a range
+		}
+		alt = composerFourPart.ReplaceAllString(alt, "$1")
+		alts = append(alts, composerTildeMinor.ReplaceAllStringFunc(alt, func(m string) string {
+			p := composerTildeMinor.FindStringSubmatch(m)
+			major, _ := strconv.Atoi(p[1])
+			return fmt.Sprintf(">=%s.%s.0, <%d.0.0%s", p[1], p[2], major+1, p[3])
+		}))
+	}
+	if len(alts) == 0 {
+		return composerSatisfier{}, nil
+	}
+	semC, err := semver.NewConstraint(strings.Join(alts, " || "))
+	if err != nil {
+		return nil, err
+	}
+	return composerSatisfier{c: semC}, nil
+}
+
+// composerFourPart trims Composer's four-component versions (1.11.99.5) to
+// the three semver reads. ponytail: two releases that differ only in the
+// fourth component rank equal; ordering them needs a Composer comparator.
+var composerFourPart = regexp.MustCompile(`(\d+\.\d+\.\d+)\.\d+`)
+
+// composerTildeMinor is a two-part tilde (~1.2, ~ v0.3) and what follows it,
+// which must not be a third component.
+var composerTildeMinor = regexp.MustCompile(`~\s*v?(\d+)\.(\d+)([\s,]|$)`)
+
+// ComposerPlatformPackage reports `require` keys that name the PHP runtime,
+// an extension or the Composer API rather than a package. They are never in
+// the cache, so the walk would record them as uncached dependencies — which
+// the coverage gate counts as unavailable.
+func ComposerPlatformPackage(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return n == "php" || n == "hhvm" || strings.HasPrefix(n, "ext-") || strings.HasPrefix(n, "lib-") ||
+		n == "composer-plugin-api" || n == "composer-runtime-api" || n == "php-64bit"
+}
+
+// composerSatisfier is Masterminds semver over Composer-normalised
+// versions. A nil constraint is a branch-only requirement: it matches no
+// release.
+type composerSatisfier struct {
+	c *semver.Constraints
+}
+
+func composerVersion(v string) (*semver.Version, error) {
+	return semver.NewVersion(composerFourPart.ReplaceAllString(strings.TrimSpace(v), "$1"))
+}
+
+func (s composerSatisfier) Check(version string) bool {
+	v, err := composerVersion(version)
+	return err == nil && s.c != nil && s.c.Check(v)
+}
+
+func (s composerSatisfier) Valid(version string) bool {
+	_, err := composerVersion(version)
+	return err == nil
+}
+
+func (s composerSatisfier) Greater(a, b string) bool {
+	va, err := composerVersion(a)
+	if err != nil {
+		return false
+	}
+	vb, err := composerVersion(b)
 	if err != nil {
 		return false
 	}
@@ -1333,9 +1429,9 @@ func (g gemSatisfier) Greater(a, b string) bool {
 	return va.Compare(vb) > 0
 }
 
-// mvnSatisfier wraps go-mvn-version. Used for Maven, Gradle, NuGet,
-// and Composer/Packagist (all of which share bracket-range syntax with
-// Maven's set-notation: [1.0,2.0), (3.0,4.0], [1.0,] etc.). A bare
+// mvnSatisfier wraps go-mvn-version. Used for Maven, Gradle and NuGet,
+// which share bracket-range syntax with Maven's set-notation: [1.0,2.0),
+// (3.0,4.0], [1.0,] etc. A bare
 // Maven version (no brackets, e.g. "1.0") is a "soft requirement" and
 // the library treats it as an exact pin — safer than guessing
 // "compatible" because Maven 3 itself is ambiguous about the semantics.
@@ -1410,7 +1506,7 @@ func stripOuterParens(c string) string {
 	return strings.TrimSpace(c[1 : len(c)-1])
 }
 
-// translateBracketConstraint translates Maven/NuGet/Composer bracket
+// translateBracketConstraint translates Maven/NuGet bracket
 // range syntax into the operator-prefixed form go-mvn-version's
 // constraint parser understands. Examples:
 //
@@ -1622,7 +1718,9 @@ func isConcreteVersion(eco, v string) bool {
 		return pep440Satisfier{}.Valid(v)
 	case "rubygems":
 		return gemSatisfier{}.Valid(v)
-	case "maven", "nuget", "packagist":
+	case "packagist":
+		return composerSatisfier{}.Valid(v)
+	case "maven", "nuget":
 		return mvnSatisfier{}.Valid(v)
 	default:
 		return semverSatisfier{}.Valid(v)
