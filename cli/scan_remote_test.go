@@ -191,3 +191,27 @@ func TestScanRemote_CleanExitsZero(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0 for a medium/low-only report", code)
 	}
 }
+
+// TestRemoteScanIncompleteKeepsPolling pins the 2026-10-05 failure: the server
+// answered status=done with the upload-time aggregate (27 of 1,247 crates and
+// 1,220 pendingPackages), the loop exited on "done", and --json wrote a
+// report that looked complete because pendingPackages was not decoded.
+func TestRemoteScanIncompleteKeepsPolling(t *testing.T) {
+	stale := remoteScanResponse{Status: "done", Result: &remoteScanAggregate{
+		PendingPackages: []remoteScanPackage{{Ecosystem: "cargo", Name: "mime", Version: "0.3.17"}},
+	}}
+	if !stale.incomplete() {
+		t.Fatal("done + pendingPackages must be treated as still in progress")
+	}
+	final := remoteScanResponse{Status: "done", Result: &remoteScanAggregate{}}
+	if final.incomplete() {
+		t.Fatal("done with no pending packages is the final result")
+	}
+	var decoded remoteScanResponse
+	if err := json.Unmarshal([]byte(`{"status":"done","result":{"findings":[],"pendingPackages":[{"ecosystem":"cargo","name":"mime","version":"0.3.17","direct":false}],"riskSummary":{}}}`), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.incomplete() {
+		t.Fatal("pendingPackages from the server's wire shape was not decoded")
+	}
+}

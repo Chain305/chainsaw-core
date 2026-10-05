@@ -81,6 +81,64 @@ var swiftTopSeed []byte
 type Fetcher struct {
 	client *http.Client
 	logger *slog.Logger
+	// pageRetryDelay is the base backoff between attempts at one page of a
+	// paginated corpus fetch (doubled per attempt). Tests set it to zero.
+	pageRetryDelay time.Duration
+}
+
+// pageAttempts is how many times one page of a paginated corpus fetch is
+// tried before the fetch is abandoned. The shared upstreamhttp client already
+// retries 429/5xx, but deliberately not transport errors — and a dropped
+// connection mid-pagination is exactly what crates.io does (observed
+// 2026-10-05: page 1 OK, page 2 "Remote end closed connection").
+const pageAttempts = 3
+
+// ErrTruncatedCorpus means a paginated popular-package fetch failed after at
+// least one page had arrived. The partial list must NOT be loaded.
+//
+// A corpus cut off at page 1 still carries the top-100 TARGETS (`cc`, `libc`,
+// `time`, `rand`, `sha2`) but none of the names ranked below them, so every
+// one of those legitimate names is a candidate one edit from a target and
+// reads as a high-confidence typosquat. That is how `mime`, `sha1`, `libm`,
+// `crc`, `cbc`, `rend` and `scc` were quarantined in production on
+// 2026-10-05: before this error existed the loop `break`-ed on a failed page
+// and returned the pages it had as if they were the whole corpus. Callers
+// treat this like any other fetch error — the refresh keeps the previous
+// index, the bootstrap retries the ecosystem later.
+var ErrTruncatedCorpus = errors.New("typosquat: popular corpus truncated mid-pagination")
+
+func truncatedCorpus(ecosystem string, got, limit int, err error) error {
+	return fmt.Errorf("%w: %s stopped at %d of %d entries: %v", ErrTruncatedCorpus, ecosystem, got, limit, err)
+}
+
+// retryPage runs one page fetch, retrying up to pageAttempts times only once
+// earlier pages have arrived (midPagination) — that is where a failure used to
+// truncate the corpus. A FIRST-page failure is not retried: it is how an
+// air-gapped server and the offline install guard (guard_eval.go, which relies
+// on the offline transport failing instantly) reach the seed fallback, and a
+// retry there added seconds per ecosystem to `chainsaw cargo`/`gem`. A
+// suspicious response (allowlist/scheme violation) and a cancelled context
+// are final.
+func (f *Fetcher) retryPage(ctx context.Context, midPagination bool, fetch func() error) error {
+	attempts := 1
+	if midPagination {
+		attempts = pageAttempts
+	}
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(f.pageRetryDelay << (attempt - 1)):
+			}
+		}
+		err = fetch()
+		if err == nil || errors.Is(err, ErrSuspiciousRegistryResponse) || ctx.Err() != nil {
+			return err
+		}
+	}
+	return err
 }
 
 // maxPaginatedRequests limits the number of HTTP requests per ecosystem fetch.
@@ -187,7 +245,8 @@ func NewFetcher(logger *slog.Logger, opts ...FetcherOption) *Fetcher {
 				return enforceRequestSafety(req.URL)
 			},
 		},
-		logger: logger,
+		logger:         logger,
+		pageRetryDelay: 2 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(f)
@@ -604,10 +663,11 @@ func (f *Fetcher) fetchCargo(ctx context.Context, limit int) ([]PopularPackage, 
 
 	for page := 1; len(packages) < limit; page++ {
 		url := fmt.Sprintf("https://crates.io/api/v1/crates?sort=downloads&per_page=%d&page=%d", pageSize, page)
-		result, err := f.fetchJSON(ctx, url)
+		var result map[string]any
+		err := f.retryPage(ctx, len(packages) > 0, func() (e error) { result, e = f.fetchJSON(ctx, url); return e })
 		if err != nil {
 			if len(packages) > 0 {
-				break
+				return nil, truncatedCorpus("cargo", len(packages), limit, err)
 			}
 			// Network unreachable (air-gapped, install hot path). Fall back
 			// to the embedded curated seed so offline deployments still get
@@ -656,10 +716,11 @@ func (f *Fetcher) fetchComposer(ctx context.Context, limit int) ([]PopularPackag
 
 	for page := 1; len(packages) < limit; page++ {
 		url := fmt.Sprintf("https://packagist.org/explore/popular.json?per_page=%d&page=%d", pageSize, page)
-		result, err := f.fetchJSON(ctx, url)
+		var result map[string]any
+		err := f.retryPage(ctx, len(packages) > 0, func() (e error) { result, e = f.fetchJSON(ctx, url); return e })
 		if err != nil {
 			if len(packages) > 0 {
-				break
+				return nil, truncatedCorpus("composer", len(packages), limit, err)
 			}
 			return nil, fmt.Errorf("fetch composer popular packages: %w", err)
 		}
@@ -704,10 +765,18 @@ func (f *Fetcher) fetchRubyGems(ctx context.Context, limit int) ([]PopularPackag
 
 	for page := 1; len(packages) < limit; page++ {
 		url := fmt.Sprintf("https://rubygems.org/api/v1/search.json?query=*&page=%d&sort=downloads", page)
-		body, err := f.fetchRaw(ctx, url)
+		var gems []map[string]any
+		err := f.retryPage(ctx, len(packages) > 0, func() error {
+			body, e := f.fetchRaw(ctx, url)
+			if e != nil {
+				return e
+			}
+			gems = nil
+			return json.Unmarshal(body, &gems)
+		})
 		if err != nil {
 			if len(packages) > 0 {
-				break
+				return nil, truncatedCorpus("rubygems", len(packages), limit, err)
 			}
 			// Network unreachable (air-gapped, install hot path). Fall back
 			// to the embedded curated seed so offline deployments still get
@@ -716,10 +785,6 @@ func (f *Fetcher) fetchRubyGems(ctx context.Context, limit int) ([]PopularPackag
 			return f.fetchSeed(ctx, rubygemsTopSeed, limit)
 		}
 
-		var gems []map[string]any
-		if err := json.Unmarshal(body, &gems); err != nil {
-			break
-		}
 		if len(gems) == 0 {
 			break
 		}
@@ -749,10 +814,11 @@ func (f *Fetcher) fetchNuGet(ctx context.Context, limit int) ([]PopularPackage, 
 
 	for skip := 0; len(packages) < limit; skip += pageSize {
 		url := fmt.Sprintf("https://azuresearch-usnc.nuget.org/query?q=&skip=%d&take=%d&sortBy=totalDownloads-desc", skip, pageSize)
-		result, err := f.fetchJSON(ctx, url)
+		var result map[string]any
+		err := f.retryPage(ctx, len(packages) > 0, func() (e error) { result, e = f.fetchJSON(ctx, url); return e })
 		if err != nil {
 			if len(packages) > 0 {
-				break
+				return nil, truncatedCorpus("nuget", len(packages), limit, err)
 			}
 			return nil, fmt.Errorf("fetch nuget popular packages: %w", err)
 		}
@@ -785,18 +851,22 @@ func (f *Fetcher) fetchHuggingFace(ctx context.Context, limit int) ([]PopularPac
 
 	for offset := 0; len(packages) < limit; offset += pageSize {
 		url := fmt.Sprintf("https://huggingface.co/api/models?sort=downloads&limit=%d&offset=%d", pageSize, offset)
-		body, err := f.fetchRaw(ctx, url)
+		var models []map[string]any
+		err := f.retryPage(ctx, len(packages) > 0, func() error {
+			body, e := f.fetchRaw(ctx, url)
+			if e != nil {
+				return e
+			}
+			models = nil
+			return json.Unmarshal(body, &models)
+		})
 		if err != nil {
 			if len(packages) > 0 {
-				break
+				return nil, truncatedCorpus("huggingface", len(packages), limit, err)
 			}
 			return nil, fmt.Errorf("fetch huggingface popular models: %w", err)
 		}
 
-		var models []map[string]any
-		if err := json.Unmarshal(body, &models); err != nil {
-			break
-		}
 		if len(models) == 0 {
 			break
 		}
@@ -823,10 +893,11 @@ func (f *Fetcher) fetchMaven(ctx context.Context, limit int) ([]PopularPackage, 
 
 	for start := 0; len(packages) < limit; start += pageSize {
 		url := fmt.Sprintf("https://search.maven.org/solrsearch/select?q=*:*&rows=%d&start=%d&wt=json", pageSize, start)
-		result, err := f.fetchJSON(ctx, url)
+		var result map[string]any
+		err := f.retryPage(ctx, len(packages) > 0, func() (e error) { result, e = f.fetchJSON(ctx, url); return e })
 		if err != nil {
 			if len(packages) > 0 {
-				break
+				return nil, truncatedCorpus("maven", len(packages), limit, err)
 			}
 			return nil, fmt.Errorf("fetch maven popular packages: %w", err)
 		}

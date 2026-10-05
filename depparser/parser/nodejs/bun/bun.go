@@ -24,11 +24,8 @@
 package bun
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"io"
-	"regexp"
 	"strings"
 
 	ftypes "github.com/chain305/chainsaw-core/fanal"
@@ -39,28 +36,13 @@ type lockfile struct {
 	Packages        map[string][]any `json:"packages"`
 }
 
-var trailingCommaRe = regexp.MustCompile(`,(\s*[}\]])`)
-
 func Parse(r io.Reader) ([]ftypes.Package, error) {
-	// Drop // line comments and trailing commas so stdlib json accepts it.
-	buf := &bytes.Buffer{}
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		line := sc.Text()
-		if i := strings.Index(line, "//"); i >= 0 {
-			line = line[:i]
-		}
-		buf.WriteString(line)
-		buf.WriteByte('\n')
-	}
-	if err := sc.Err(); err != nil {
+	raw, err := io.ReadAll(r)
+	if err != nil {
 		return nil, err
 	}
-	cleaned := trailingCommaRe.ReplaceAllString(buf.String(), "$1")
-
 	var lf lockfile
-	if err := json.Unmarshal([]byte(cleaned), &lf); err != nil {
+	if err := json.Unmarshal(stripJSONC(raw), &lf); err != nil {
 		return nil, err
 	}
 
@@ -95,4 +77,51 @@ func splitAtLastAt(s string) (string, string) {
 		return "", ""
 	}
 	return s[:idx], s[idx+1:]
+}
+
+// stripJSONC drops `//` line comments and trailing commas so stdlib json
+// accepts a bun.lock — but only OUTSIDE string literals. Integrity hashes are
+// base64 and routinely contain "//" (feldera/feldera's bun.lock has 14); the
+// previous line-based strip cut those strings in half and the whole lockfile
+// failed with "invalid character '\n' in string literal".
+func stripJSONC(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	inString, escaped := false, false
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if inString {
+			out = append(out, c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch {
+		case c == '"':
+			inString = true
+		case c == '/' && i+1 < len(b) && b[i+1] == '/':
+			for i < len(b) && b[i] != '\n' {
+				i++
+			}
+			if i < len(b) {
+				out = append(out, '\n')
+			}
+			continue
+		case c == ',':
+			j := i + 1
+			for j < len(b) && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r') {
+				j++
+			}
+			if j < len(b) && (b[j] == '}' || b[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }

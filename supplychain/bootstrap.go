@@ -461,6 +461,7 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 		warmStart := time.Now()
 		logger.Info("popular package index warm-up started; typosquat detection degraded until complete",
 			"ecosystems", len(typosquat.EcosystemsWithTyposquatRisk()))
+		var failed []string
 		for _, ecosystem := range typosquat.EcosystemsWithTyposquatRisk() {
 			select {
 			case <-bootstrapCtx.Done():
@@ -471,6 +472,7 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 			if err != nil {
 				logger.Warn("failed to fetch popular packages",
 					"ecosystem", ecosystem, "error", err)
+				failed = append(failed, ecosystem)
 				continue
 			}
 			if len(pkgs) == 0 {
@@ -508,6 +510,11 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 		if cfg.OnPopularBootstrapComplete != nil {
 			cfg.OnPopularBootstrapComplete()
 		}
+		// A failed ecosystem is unloaded (Check skips it). Without this it
+		// stayed unloaded until the weekly refresh — and before
+		// typosquat.ErrTruncatedCorpus a transient failure on page 2 did
+		// not even count as failed: it LOADED the truncated corpus.
+		retryFailedPopularFetches(ctx, fetcher, detector, cfg.PopularPackageLimit, failed, logger)
 	}()
 
 	// 2. Weekly popular package refresh, with ±6h jitter per iteration
@@ -540,6 +547,44 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 	// complain about stale counters.
 
 	return comp
+}
+
+// popularRetryRounds and popularRetryDelay bound the post-bootstrap retry of
+// ecosystems whose popular-package fetch failed. Variables so tests can shrink
+// the delay.
+var (
+	popularRetryRounds = 3
+	popularRetryDelay  = 5 * time.Minute
+)
+
+// retryFailedPopularFetches re-attempts the ecosystems the bootstrap could not
+// load, a bounded number of times, and loads each one that now succeeds.
+func retryFailedPopularFetches(ctx context.Context, fetcher *typosquat.Fetcher, detector *typosquat.Detector, limit int, failed []string, logger *slog.Logger) {
+	for round := 1; round <= popularRetryRounds && len(failed) > 0; round++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(popularRetryDelay):
+		}
+		var still []string
+		for _, ecosystem := range failed {
+			fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			pkgs, err := fetcher.FetchPopularPackages(fetchCtx, ecosystem, limit)
+			cancel()
+			if err != nil || len(pkgs) == 0 {
+				logger.Warn("popular packages retry failed",
+					"ecosystem", ecosystem, "round", round, "error", err)
+				still = append(still, ecosystem)
+				continue
+			}
+			detector.LoadEcosystem(ecosystem, pkgs)
+		}
+		failed = still
+	}
+	if len(failed) > 0 {
+		logger.Warn("popular packages still unloaded after retries; typosquat detection skips these until the weekly refresh",
+			"ecosystems", failed)
+	}
 }
 
 func refreshPopularPackages(ctx context.Context, fetcher *typosquat.Fetcher, detector *typosquat.Detector, limit int, logger *slog.Logger) {

@@ -48,7 +48,11 @@ type remoteScanResponse struct {
 }
 
 type remoteScanAggregate struct {
-	Findings         []remoteScanFinding `json:"findings"`
+	Findings []remoteScanFinding `json:"findings"`
+	// PendingPackages are packages the server had not scored when this
+	// aggregate was built. They appear nowhere in Findings or Summary, so
+	// dropping the field made an incomplete report look complete.
+	PendingPackages  []remoteScanPackage `json:"pendingPackages,omitempty"`
 	Summary          remoteScanSummary   `json:"riskSummary"`
 	DirectCount      int                 `json:"directCount"`
 	TransitiveCount  int                 `json:"transitiveCount"`
@@ -61,6 +65,20 @@ type remoteScanFinding struct {
 	Verdict string   `json:"verdict"`
 	Score   int      `json:"score,omitempty"`
 	Reasons []string `json:"reasons,omitempty"`
+}
+
+type remoteScanPackage struct {
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+}
+
+// incomplete reports whether a "done" job still carries an aggregate built
+// before its pending packages were scored. A server that set status=done
+// before storing the recomputed aggregate served exactly that (2026-10-05:
+// 27 of 1,247 crates); keep polling rather than report it as the result.
+func (r *remoteScanResponse) incomplete() bool {
+	return r.Status == "done" && r.Result != nil && len(r.Result.PendingPackages) > 0
 }
 
 type remoteScanSummary struct {
@@ -157,7 +175,7 @@ func runScanRemote(cmd *cobra.Command, args []string) error {
 	// or a terminal "partial" the server reports once it stops advancing)
 	// or on timeout; terminal handling lives AFTER the loop so a terminal
 	// status is never masqueraded as a passing summary.
-	for resp.Status == "pending" || resp.Status == "partial" {
+	for resp.Status == "pending" || resp.Status == "partial" || resp.incomplete() {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out after %s waiting for server to resolve %d/%d packages",
 				timeout, resp.Resolved, resp.Total)
@@ -235,11 +253,15 @@ func printRemoteSummary(r *remoteScanResponse) error {
 	fmt.Printf("Lockfile:    %s\n", r.Filename)
 	fmt.Printf("Ecosystem:   %s\n", r.Ecosystem)
 	fmt.Printf("Risk engine: %s\n", r.RiskEngine)
-	fmt.Printf("Packages:    %d total (%d direct, %d transitive)\n",
+	fmt.Printf("Packages:    %d total (%d direct, %d transitive",
 		r.Total,
 		ifInt(r.Result, func(a *remoteScanAggregate) int { return a.DirectCount }),
 		ifInt(r.Result, func(a *remoteScanAggregate) int { return a.TransitiveCount }),
 	)
+	if n := ifInt(r.Result, unknownDepth); n > 0 {
+		fmt.Printf(", %d not reported by this lockfile format", n)
+	}
+	fmt.Println(")")
 	if r.Result != nil {
 		s := r.Result.Summary
 		fmt.Printf("Risk:        %d critical, %d high, %d medium, %d low, %d info",
@@ -281,6 +303,18 @@ func printRemoteSummary(r *remoteScanResponse) error {
 	// (--json, an early return on an empty findings list) silently skips the
 	// verdict. See runScanRemote's emitAndGate call.
 	return nil
+}
+
+// unknownDepth counts findings whose direct/transitive depth the lockfile
+// format does not record (the server reports depth "unknown").
+func unknownDepth(a *remoteScanAggregate) int {
+	n := 0
+	for _, f := range a.Findings {
+		if f.Depth == "unknown" {
+			n++
+		}
+	}
+	return n
 }
 
 func ifInt(a *remoteScanAggregate, f func(*remoteScanAggregate) int) int {
