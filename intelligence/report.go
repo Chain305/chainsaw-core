@@ -1667,6 +1667,19 @@ func (r *Report) Provisional() bool {
 	return false
 }
 
+// RetryDue reports whether a provisional report has outlived its backoff step
+// and should be rescanned rather than served. Always false for a settled
+// report: a normal 24h-old row is the refresher's job, not the caller's.
+//
+// Scan's cache-first read already applies this through freshFor. Readers that
+// call Store.Get directly do not — the lockfile scan's AggregateCached served a
+// registry-cancelled `unknown` (pyyaml, guava, markupsafe on 2026-10-05) for
+// the full 24h because only MISSING rows were queued for a scan.
+func (r *Report) RetryDue(now time.Time) bool {
+	return r != nil && r.Provisional() &&
+		now.Sub(r.Observation.CollectedAt) >= r.freshFor(DefaultMaxStaleness)
+}
+
 // freshFor is the window a stored report counts as fresh in: maxStale, or a
 // provisional report's backoff step, whichever is shorter. A row written
 // before the streak existed (0) is treated as the first step.

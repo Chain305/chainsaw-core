@@ -18,6 +18,9 @@ const lockWithSlashesInStrings = `{
   "packages": {
     "svelte": ["svelte@5.55.7", "", {}, "sha512-0PEIZNeIjkHoDR4YjjJp34biM0mDvplBe//mB+IHCqHDGV7pxF+7MklTvighcCPPZC7ynWyjdTA=="],
     "@scope/odd": ["@scope/odd@1.0.0", "https://registry.example.com/@scope/odd", { "note": "keeps ,] and // inside" }, "sha512-a//b=="],
+    "common-ui": ["common-ui@workspace:js-packages/common-ui"],
+    "local-thing": ["local-thing@file:../local-thing"],
+    "apache-arrow": ["apache-arrow@github:Karakatiza666/arrow-js#ddba834", {}, "Karakatiza666-arrow-js-ddba834"],
   },
 }
 `
@@ -32,7 +35,9 @@ func TestParseKeepsDoubleSlashInsideStrings(t *testing.T) {
 		got = append(got, p.Name+"@"+p.Version)
 	}
 	sort.Strings(got)
-	want := []string{"@scope/odd@1.0.0", "svelte@5.55.7"}
+	// Workspace and file: entries are first-party code and dropped (feldera's
+	// bun.lock has 8); the github: dependency is third-party and kept.
+	want := []string{"@scope/odd@1.0.0", "apache-arrow@github:Karakatiza666/arrow-js#ddba834", "svelte@5.55.7"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %v, want %v", got, want)
 	}

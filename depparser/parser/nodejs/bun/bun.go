@@ -57,7 +57,7 @@ func Parse(r io.Reader) ([]ftypes.Package, error) {
 			continue
 		}
 		name, ver := splitAtLastAt(spec)
-		if name == "" || ver == "" {
+		if name == "" || ver == "" || localProtocol(ver) {
 			continue
 		}
 		k := name + "@" + ver
@@ -68,6 +68,21 @@ func Parse(r io.Reader) ([]ftypes.Package, error) {
 		out = append(out, ftypes.Package{Name: name, Version: ver})
 	}
 	return out, nil
+}
+
+// localProtocol reports a version that points into the repository itself —
+// a workspace member or a local path — rather than at a registry. Those are
+// first-party code with no registry coordinate to score; the npm parser drops
+// the same entries (`link: true`). git/github/tarball sources are NOT local:
+// they are third-party code and stay in, to be reported as unknown rather
+// than silently omitted.
+func localProtocol(ver string) bool {
+	for _, p := range []string{"workspace:", "link:", "file:", "portal:"} {
+		if strings.HasPrefix(ver, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // splitAtLastAt: "@scope/foo@1.2.3" → ("@scope/foo", "1.2.3").
