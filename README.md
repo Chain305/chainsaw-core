@@ -214,6 +214,12 @@ server-backed. **Details: [docs/policy.md](docs/policy.md).**
 curl -fsSL https://chain305.com/install.sh | sh
 ```
 
+One command: it installs the binary and turns the install guard on, so every
+`npm` / `pip` / `go` / `cargo` / `gem` install in a new terminal is checked
+before it downloads. On Windows, `iwr -useb https://chain305.com/install.ps1 | iex`
+does the same. The output ends with a `Guard:` line; set `CHAINSAW_NO_GUARD=1`
+on the `sh` side of the pipe to install the binary only (CI skips it too).
+
 <details>
 <summary>Other install methods</summary>
 
@@ -231,13 +237,15 @@ linked (`CGO_ENABLED=0`).
 
 </details>
 
-Wire it into your shell — one command, idempotent, safe to re-run:
+Installed with `go install` or from source, or skipped by the installer? Wire
+the guard into your shell yourself — one command, idempotent, safe to re-run:
 
 ```sh
 chainsaw guard init --install
 ```
 
-That appends a single `eval` line to your shell rc file. Use `--dry-run` to see
+That appends a single `eval` line to your shell rc file (it's the same step the
+installer runs). Use `--dry-run` to see
 the exact file and line first, or skip it entirely and put
 `eval "$(chainsaw guard init zsh)"` in your rc yourself. `bash`, `zsh`, `fish`,
 `powershell` and `pwsh` are supported; on PowerShell the activation line is
@@ -420,7 +428,7 @@ flags and exit codes: **[docs/cli.md](docs/cli.md)**.
 The ones you need on day one:
 
 ```sh
-chainsaw guard init --install   # route npm/pip/go/cargo/gem through the guard
+chainsaw guard status          # is the guard on? (the installer turns it on)
 chainsaw why npm <pkg>          # explain any verdict
 chainsaw guard allow <coord>    # clear a false typosquat block
 chainsaw doctor                 # what's wired, what isn't
