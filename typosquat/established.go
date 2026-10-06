@@ -83,7 +83,7 @@ import (
 // Exact, whole package names on a REVIEWED, DOWNLOAD-RANKED list, checked in
 // both directions. Same trust shape as officialSiblings (exact reviewed
 // names, no patterns). Originally a demotion to "low" like sameOwnerSibling;
-// since 2026-10-03 the hit is cleared (see moreEstablishedThanTarget).
+// since 2026-10-03 the hit is cleared (see establishedCandidate).
 //
 // An attacker cannot forge a place on it. The list is generated from an
 // upstream DOWNLOAD ranking by core/tools/popular-corpus-gen and lands in the
@@ -211,73 +211,41 @@ func establishedRank(ecosystem, name string) (int, bool) {
 	return rank, ok
 }
 
-// moreEstablishedThanTarget reports whether the CANDIDATE is at least as
-// established as the popular name it was matched against — i.e. whether the
-// typosquat claim points the wrong way round. Check CLEARS such a hit, at
-// every tier (until 2026-10-03 it demoted to "low", which still cost -8 and
-// still read as suspected to policy). See Check.
+// establishedCandidate reports whether the CANDIDATE itself is on the
+// reviewed download-ranked reference for its ecosystem. Check CLEARS a hit
+// on such a name, at every tier: a package in the top-N most-installed of its
+// ecosystem is not impersonating anything, whichever name it happens to sit
+// one edit away from.
 //
-// True when the candidate is on the reviewed download-ranked reference AND
-// the target is either absent from it or ranks below the candidate.
+// HISTORY. Until 2026-10-06 this was a DIRECTION check: clear only when the
+// candidate out-ranked its target (or the target was off the list). That
+// cleared `json5` → `json3` but deliberately left the "coincidental
+// short-name collision" class flagged — `immer` → `mime`, `gaxios` → `axios`
+// (#734 vs #243), `csso` → `cssom`, `global` → `globals` — on the grounds
+// that the direction was not what was wrong. In production those were
+// high-confidence QUARANTINES of packages with tens of millions of weekly
+// downloads, so the owner ruled (2026-10-06) that list presence alone clears.
 //
-// THE ABSENT-TARGET ARM IS THE LOAD-BEARING ONE and deserves its own
-// justification: it is what clears `json5` → `json3` and `lie` → `li`, whose
-// targets are not on the reviewed list at all. Reading "target absent" as
-// "target is less established" is safe here precisely because the candidate's
-// presence has already been established — the pair is "a package in the
-// reviewed top-N of its ecosystem, matched against a name that is not". A
-// genuine squat cannot have that shape without the squat itself having
-// out-installed its victim.
+// THE OBJECTION THE OLD TEST RECORDED, answered. "An attacker whose name got
+// onto the reference list would get a blanket exemption." The list is
+// generated from a download ranking and lands through a reviewed commit; a
+// name only gets there with genuine mass adoption, at which point it is not
+// a squat. A popular package turned malicious is an account-takeover or
+// compromise, which the malware feed and the takeover signals cover — never
+// the typosquat signal. The true positives this check must not touch
+// (chalkk, expres, lodashs, lodahs, reqeusts, colourama) are all absent from
+// the list; TestDirectionCheckKeepsProductionTruePositives pins them.
 //
-// WHY THIS COSTS NO RECALL. The claim being deleted is "the candidate is
-// impersonating the target". If the candidate is the more-installed of the
-// two, that claim is false as a matter of fact, whatever the edit distance
-// says.
+// Unreachable on the install guard's path: there the match index IS this
+// list, so a listed query exact-matches before any distance work runs.
 //
-// APPLIES AT EVERY TIER, including the combosquat "low" floor. The direction
-// argument is semantic rather than a tuned threshold, so correcting `high`
-// and knowingly leaving `medium` or `low` wrong would be arbitrary.
-//
-// Measured on the production export (7,099 rows), by re-running the real risk
-// engine over every affected row:
-//
-//	high    15 rows → 6 demoted, 9 untouched. The 6 are exactly the
-//	        wrong-direction set and all 6 stop flipping warn → quarantine
-//	        (4 to allow, 2 to warn). The 9 are exactly the true positives
-//	        and none is touched.
-//	medium  172 rows → 135 demoted across 30 pairs, 37 untouched. 112 of
-//	        the 135 change their overall score and ZERO change verdict —
-//	        the three non-allow rows among them (@posthog/core@1.28.0,
-//	        eslint-config-next@16.0.4 and @16.1.6) stay `warn` because
-//	        another signal's MaxImpact ceiling is binding, not this weight.
-//	        So the loosening half is 135 corrected display claims and no
-//	        verdict movement at all.
-//
-// The 2026-10-03 change to clearing, at every tier, re-measured against the
-// live server corpus (npm keyword search, 2,205 names; PyPI top 5,000): of
-// the 8,000 reviewed npm+PyPI names, findings 402 -> 165, all 237 removed at
-// "low"; the rev4 corpus (314 benign, 362 malicious npm/PyPI names) did not
-// move, because none of its malicious names is on the reviewed list.
-//
-// SCOPE, stated so the next reader does not over-credit it. One neighbouring
-// false-positive class is deliberately NOT addressed:
-//
-//   - Coincidental short-name collisions. `immer` → `mime` is 10 production
-//     rows and is plainly false, but `mime` really is the more-downloaded of
-//     the two (#197 vs #807), so the DIRECTION is not what is wrong with it.
-//     25 medium rows across 12 pairs are in that class and this check
-//     correctly declines to speak to them.
-func moreEstablishedThanTarget(ecosystem, candidate, popular string) bool {
-	if candidate == "" || popular == "" {
+// A sibling rule outside this package clears a candidate whose OWN weekly
+// downloads are high (core/intelligence/typosquat_established.go); it needs
+// registry data the name-only detector does not have.
+func establishedCandidate(ecosystem, candidate string) bool {
+	if candidate == "" {
 		return false
 	}
-	candRank, candKnown := establishedRank(ecosystem, candidate)
-	if !candKnown {
-		return false
-	}
-	targetRank, targetKnown := establishedRank(ecosystem, popular)
-	if !targetKnown {
-		return true
-	}
-	return candRank <= targetRank
+	_, known := establishedRank(ecosystem, candidate)
+	return known
 }

@@ -880,6 +880,11 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 	// saw — the exact split, in a narrower window. Failure is soft: no
 	// prior row, or an unreachable store, leaves the report exactly as the
 	// providers built it.
+	// Before the sticky revival below, so a cleared hit is not resurrected,
+	// and before evaluation, so the verdict and every TyposquatStatus reader
+	// agree. Ephemeral scans too: an uploaded artifact is the same package.
+	clearEstablishedTyposquat(report, s.now())
+
 	priorProvisionalStreak := 0
 	if s.store != nil && !req.Options.Ephemeral {
 		// The row was read before the fan-out (see the read above phase 1).

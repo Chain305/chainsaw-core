@@ -142,24 +142,24 @@ func TestDirectionCheckKeepsProductionTruePositives(t *testing.T) {
 	}
 }
 
-// TestDirectionCheckIsDirectional proves the demotion is not "the candidate is
-// on the reviewed list, therefore exempt". Reverse the same pair — ask about
-// `msw` against an index carrying `ms` — and the claim now points the RIGHT
-// way (msw is rank #2888 on the reviewed list, ms is #8), so it must survive
-// at full confidence.
-//
-// Without this, an attacker whose name happened onto the reference list would
-// get a blanket exemption in both directions.
-func TestDirectionCheckIsDirectional(t *testing.T) {
+// TestListedCandidateIsClearedInEitherDirection pins the 2026-10-06 ruling.
+// Until then the check was directional, and this test asserted that `msw`
+// (#2894 on the reviewed list, Mock Service Worker) still read as a high
+// squat of `ms` (#14). A name on the download-ranked list is popular by
+// construction, so it is cleared whichever way the pair points; an unlisted
+// name one edit from a listed target is still flagged (the true-positive
+// test above).
+func TestListedCandidateIsClearedInEitherDirection(t *testing.T) {
 	d := NewDetector(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	d.LoadEcosystem("npm", []PopularPackage{{Name: "ms"}})
-
-	got := d.Check(context.Background(), "npm", "msw")
-	if !got.IsSuspected || got.SimilarTo != "ms" {
-		t.Fatalf("msw → ms not detected: %+v", got)
+	if raw := d.check(context.Background(), "npm", "msw"); !raw.IsSuspected || raw.SimilarTo != "ms" {
+		t.Fatalf("msw → ms not matched at all (%+v) — the clear below would pass for the wrong reason", raw)
 	}
-	if got.Confidence != "high" {
-		t.Errorf("msw → ms: confidence = %q, want \"high\" — this direction is the plausible one and must not be demoted", got.Confidence)
+	if got := d.Check(context.Background(), "npm", "msw"); got.IsSuspected {
+		t.Errorf("msw → ms: %+v, want clean — msw is on the reviewed download ranking", got)
+	}
+	if got := d.Check(context.Background(), "npm", "msx"); !got.IsSuspected {
+		t.Errorf("msx → ms: %+v, want suspected — msx is not on the reviewed list", got)
 	}
 }
 
@@ -176,7 +176,7 @@ func TestDirectionCheckIgnoresEcosystemsWithNoReference(t *testing.T) {
 		if _, ok := establishedRank(ecosystem, "anything"); ok {
 			t.Errorf("%s: establishedRank returned a rank for an ecosystem with no reference", ecosystem)
 		}
-		if moreEstablishedThanTarget(ecosystem, "chekout", "checkout") {
+		if establishedCandidate(ecosystem, "chekout") {
 			t.Errorf("%s: demotion fired for an ecosystem with no reference", ecosystem)
 		}
 	}
@@ -315,8 +315,9 @@ func TestEstablishedRankIsLineOrder(t *testing.T) {
 		}
 	}
 
-	// Targets that are absent entirely. The absent-target arm of
-	// moreEstablishedThanTarget is what clears json5→json3 and lie→li.
+	// Names that must stay OFF the list: two clearable targets and the true
+	// positives, whose flag survives only because establishedCandidate
+	// returns false for them.
 	for _, tc := range []struct{ ecosystem, name string }{
 		{"npm", "json3"},
 		{"npm", "li"},
@@ -415,7 +416,7 @@ func TestDirectionCheckClearsProductionMediumFalsePositives(t *testing.T) {
 	var reproduced int
 	for _, row := range prodMediumFalsePositives {
 		t.Run(row.Ecosystem+"/"+row.Name+"→"+row.SimilarTo, func(t *testing.T) {
-			if !moreEstablishedThanTarget(row.Ecosystem, row.Name, row.SimilarTo) {
+			if !establishedCandidate(row.Ecosystem, row.Name) {
 				t.Fatalf("%s → %q is not wrong-direction on the reviewed reference; this pair does not belong in the table",
 					row.Name, row.SimilarTo)
 			}
@@ -491,26 +492,30 @@ func TestDirectionCheckClearsTheCombosquatFloor(t *testing.T) {
 	}
 }
 
-// TestDirectionCheckDoesNotClaimTheCoincidentalCollisionClass records the
-// LIMIT of the fix, by name, so the next reader does not assume the medium
-// tier is now clean.
-//
-// `immer` → `mime` is 10 production rows and is plainly a false positive —
-// but `mime` really is the more-downloaded of the two (rank #197 vs #807), so
-// the direction claim is not what is wrong with it. It is a coincidental
-// short-name collision, a different class, and this check correctly declines
-// to speak to it. 25 medium rows across 12 pairs are in that class.
-func TestDirectionCheckDoesNotClaimTheCoincidentalCollisionClass(t *testing.T) {
+// TestCoincidentalCollisionClassIsCleared: until 2026-10-06 this asserted the
+// opposite — that the direction check declined to clear `immer` → `mime`
+// (#813 vs #197) and its class, because the target is the more downloaded of
+// the two. Those rows were plainly false and some were high-confidence
+// quarantines (gaxios → axios), so list presence now clears them.
+func TestCoincidentalCollisionClassIsCleared(t *testing.T) {
 	for _, tc := range []struct{ eco, cand, target string }{
 		{"npm", "immer", "mime"},
 		{"npm", "recast", "react"},
 		{"npm", "cssesc", "jsesc"},
 		{"npm", "vfile", "vite"},
 		{"npm", "string.prototype.trim", "string.prototype.trimend"},
+		{"npm", "gaxios", "axios"},
+		{"npm", "csso", "cssom"},
+		{"npm", "global", "globals"},
 	} {
-		if moreEstablishedThanTarget(tc.eco, tc.cand, tc.target) {
-			t.Errorf("%s → %q was treated as wrong-direction; on the reviewed reference the target is the more established of the two, so this pair is the coincidental-collision class and the direction check must not claim it",
-				tc.cand, tc.target)
+		if !establishedCandidate(tc.eco, tc.cand) {
+			t.Errorf("%s is not on the reviewed npm list; the %s → %q false positive would survive", tc.cand, tc.cand, tc.target)
+			continue
+		}
+		d := NewDetector(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		d.LoadEcosystem(tc.eco, []PopularPackage{{Name: tc.target, Rank: 1}})
+		if got := d.Check(context.Background(), tc.eco, tc.cand); got.IsSuspected {
+			t.Errorf("%s → %q: %+v, want clean", tc.cand, tc.target, got)
 		}
 	}
 }

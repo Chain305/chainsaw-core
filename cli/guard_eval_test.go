@@ -405,7 +405,10 @@ func TestGuardNeverWarnsOnLowConfidenceCombosquat(t *testing.T) {
 	// before the branch is reached — it is pinned separately below. The names
 	// kept here are shapes with no first-party relationship to their root, so
 	// they still reach the branch and still have to be silent.
-	for _, name := range []string{"lodash-utils", "express-session"} {
+	// `express-session` sat here until 2026-10-06; it is on the reviewed npm
+	// download ranking, so the detector now clears it before any branch
+	// runs. `express-toolkit` is the same shape and is not on the list.
+	for _, name := range []string{"lodash-utils", "express-toolkit"} {
 		res := d.Check(ctx, "npm", name)
 		if !res.IsSuspected || res.Method != "combosquat" || res.Confidence != "low" {
 			t.Errorf("%q no longer exercises the combosquat branch (%+v) — re-pick the fixture so this pin keeps testing something", name, res)

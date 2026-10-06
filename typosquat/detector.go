@@ -219,11 +219,11 @@ func (d *Detector) Check(ctx context.Context, ecosystem, packageName string) Det
 	if !res.IsSuspected {
 		return res
 	}
-	// The direction of the impersonation claim. A typosquat is a LESS
-	// established package wearing the face of a MORE established one, and
-	// `json5` (#80 on the reviewed download ranking) is not squatting `json3`
-	// (not on it). Cleared, at every tier including the combosquat floor: the
-	// claim is false as a matter of fact, so it must not cost score or read
+	// A typosquat is an obscure package wearing the face of a popular one. A
+	// name on the reviewed download ranking is popular by construction —
+	// `json5` (#80), `gaxios` (#734), `csso`, `global` — so the claim is
+	// false whatever it sits one edit away from. Cleared, at every tier
+	// including the combosquat floor, so it costs no score and does not read
 	// as "suspected" to a policy's isSuspectedTyposquat condition — which a
 	// "low" demotion still did (json5 at -8 in prod, 2026-10-03).
 	//
@@ -231,7 +231,7 @@ func (d *Detector) Check(ctx context.Context, ecosystem, packageName string) Det
 	// cannot answer the question, why a target-rank cutoff was rejected, and
 	// why this branch is unreachable on the install guard's path and so
 	// cannot move its published FP/recall numbers.
-	if moreEstablishedThanTarget(ecosystem, packageName, res.SimilarTo) {
+	if establishedCandidate(ecosystem, packageName) {
 		return DetectionResult{}
 	}
 	if res.Confidence != "low" && sameOwnerSibling(ecosystem, packageName, res.SimilarTo) {
