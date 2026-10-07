@@ -1,9 +1,15 @@
 // Package cargo parses Cargo.lock (Rust).
 //
 // Format: TOML. Top-level is an array-of-tables `[[package]]` with
-// name/version/source/checksum/dependencies. Entries whose source is the
-// local workspace (no `source` field) are the crate being built — we
-// include them: tools like cargo-audit actually scan those too.
+// name/version/source/checksum/dependencies. Entries with no `source` field
+// are the workspace's own crates and path dependencies — first-party code
+// with no registry coordinate — and are SKIPPED, as the npm parser skips
+// `link: true` and the bun parser skips workspace:/file: entries. They used
+// to be included ("cargo-audit scans those too"), but cargo-audit matches
+// advisories by crate NAME, which for local code is a coincidence, and
+// scoring them against registry intelligence only produced `unknown` rows:
+// 22 of feldera/feldera's 1,247 on 2026-10-07. git sources carry a `source`
+// and stay in.
 //
 // Trivy reference: pkg/dependency/parser/rust/cargo/parse.go.
 package cargo
@@ -32,7 +38,7 @@ func Parse(r io.Reader) ([]ftypes.Package, error) {
 	}
 	var out []ftypes.Package
 	for _, p := range lf.Packages {
-		if p.Name == "" || p.Version == "" {
+		if p.Name == "" || p.Version == "" || p.Source == "" {
 			continue
 		}
 		out = append(out, ftypes.Package{Name: p.Name, Version: p.Version})

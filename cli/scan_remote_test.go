@@ -215,3 +215,39 @@ func TestRemoteScanIncompleteKeepsPolling(t *testing.T) {
 		t.Fatal("pendingPackages from the server's wire shape was not decoded")
 	}
 }
+
+// TestScanRemoteRetriesTransientFailures pins the 2026-10-07 failure: one
+// "connection reset by peer" on a poll threw away a five-minute scan the
+// server went on to finish.
+func TestScanRemoteRetriesTransientFailures(t *testing.T) {
+	old := scanRemoteRetryDelay
+	scanRemoteRetryDelay = 0
+	t.Cleanup(func() { scanRemoteRetryDelay = old })
+
+	calls := 0
+	err := withScanRetry(context.Background(), "poll", func() error {
+		calls++
+		if calls < scanRemoteAttempts {
+			return errors.New("read tcp: connection reset by peer")
+		}
+		return nil
+	})
+	if err != nil || calls != scanRemoteAttempts {
+		t.Fatalf("err=%v calls=%d, want success on attempt %d", err, calls, scanRemoteAttempts)
+	}
+
+	calls = 0
+	err = withScanRetry(context.Background(), "poll", func() error {
+		calls++
+		return &apiError{Status: 404, Code: "CHW-1404"}
+	})
+	if err == nil || calls != 1 {
+		t.Fatalf("a 4xx answer was retried: err=%v calls=%d", err, calls)
+	}
+
+	for status, want := range map[int]bool{429: true, 502: true, 503: true, 504: true, 400: false, 401: false, 403: false} {
+		if got := transientScanErr(&apiError{Status: status}); got != want {
+			t.Errorf("status %d: transient=%v, want %v", status, got, want)
+		}
+	}
+}

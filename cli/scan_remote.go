@@ -19,6 +19,7 @@ package cli
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -154,8 +155,18 @@ func runScanRemote(cmd *cobra.Command, args []string) error {
 		"filename":      filepath.Base(path),
 		"contentBase64": base64.StdEncoding.EncodeToString(content),
 	}
+	// Bound to SIGINT/SIGTERM before the upload (it used to start after it)
+	// so Ctrl+C also cuts short an upload retry's backoff.
+	pollCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	// Retrying the upload is safe: the server returns the existing job for
+	// the same lockfile and owner (scanLookupExisting), so a request that
+	// timed out after the server accepted it does not start a second scan.
 	var resp remoteScanResponse
-	if err := client.Post("/api/v1/scan/lockfile", req, &resp); err != nil {
+	if err := withScanRetry(pollCtx, "upload", func() error {
+		return client.Post("/api/v1/scan/lockfile", req, &resp)
+	}); err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
 
@@ -167,8 +178,6 @@ func runScanRemote(cmd *cobra.Command, args []string) error {
 	// Ctrl+C aborts the poll within the next select wakeup instead of
 	// waiting out the in-progress sleep. cobra's default cmd.Context()
 	// is context.Background() — we need to bind signals here.
-	pollCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
 	deadline := time.Now().Add(timeout)
 	// "pending"/"partial" are the only transient (still-processing) states.
 	// The loop exits on any terminal state ("failed", "complete", "done",
@@ -198,7 +207,9 @@ func runScanRemote(cmd *cobra.Command, args []string) error {
 		case <-timer.C:
 		}
 		var next remoteScanResponse
-		if err := client.Get("/api/v1/scan/jobs/"+resp.JobID, &next); err != nil {
+		if err := withScanRetry(pollCtx, "poll", func() error {
+			return client.Get("/api/v1/scan/jobs/"+resp.JobID, &next)
+		}); err != nil {
 			return fmt.Errorf("poll failed: %w", err)
 		}
 		resp = next
@@ -322,4 +333,52 @@ func ifInt(a *remoteScanAggregate, f func(*remoteScanAggregate) int) int {
 		return 0
 	}
 	return f(a)
+}
+
+// scanRemoteAttempts bounds how often one upload or poll request is tried.
+// A 2026-10-07 rescan of feldera/feldera lost three of six lockfile scans —
+// two after ~5 minutes of server work — to a single "connection reset by
+// peer" on one poll, while the server stayed healthy and finished the jobs.
+const scanRemoteAttempts = 4
+
+// scanRemoteRetryDelay is the first backoff step (doubled per attempt).
+// A variable so tests can zero it.
+var scanRemoteRetryDelay = 2 * time.Second
+
+// transientScanErr reports whether a failed scan-remote request is worth
+// repeating: a transport failure (reset, timeout, DNS) or a 429/502/503/504.
+// Any other server answer — a 4xx with a CHW envelope — is final.
+func transientScanErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ae *apiError
+	if errors.As(err, &ae) {
+		switch ae.Status {
+		case 429, 502, 503, 504:
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+// withScanRetry runs fn up to scanRemoteAttempts times while its failures
+// are transient, backing off between attempts and stopping on ctx.
+func withScanRetry(ctx context.Context, what string, fn func() error) error {
+	var err error
+	for attempt := 0; attempt < scanRemoteAttempts; attempt++ {
+		if attempt > 0 {
+			fmt.Fprintf(os.Stderr, "\n%s failed (%v); retrying (%d/%d)\n", what, err, attempt, scanRemoteAttempts-1)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("scan-remote interrupted: %w", context.Cause(ctx))
+			case <-time.After(scanRemoteRetryDelay << (attempt - 1)):
+			}
+		}
+		if err = fn(); !transientScanErr(err) {
+			return err
+		}
+	}
+	return err
 }
