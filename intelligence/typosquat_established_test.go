@@ -163,3 +163,73 @@ func TestScanClearsEstablishedCrate(t *testing.T) {
 		}
 	}
 }
+
+// TestClearEstablishedTyposquatHistory uses production rows from 2026-10-07.
+// dbsp is the false positive (299 versions since 2023-08, 24,227 per 90 days,
+// below the download line); the squats carry at most 28 versions.
+func TestClearEstablishedTyposquatHistory(t *testing.T) {
+	now := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
+	day := func(s string) *time.Time {
+		d, err := time.Parse("2006-01-02", s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &d
+	}
+	for _, tc := range []struct {
+		name     string
+		versions int
+		first    *time.Time
+		cleared  bool
+	}{
+		{"dbsp", 299, day("2023-08-23"), true},
+		{"at-threshold", establishedTyposquatMinVersions, day("2024-10-07"), true},
+		{"one-day-short", establishedTyposquatMinVersions, day("2024-10-08"), false},
+		{"s2-common: young", 60, day("2026-01-09"), false},
+		{"avada", 28, day("2020-11-24"), false},
+		{"expres", 5, day("2012-10-10"), false},
+		{"no first publish", 299, nil, false},
+		{"timeline-only count (core build)", -1, day("2023-08-23"), true},
+	} {
+		r := squatReport(nil, "dasp")
+		r.Maintenance.Downloads = &DownloadCount{Count: 24_227, Window: DownloadWindow90Days}
+		if tc.versions < 0 {
+			// No premium VersionCount writer: only the timeline knows.
+			r.Maintenance.VersionTimeline = make([]VersionRelease, 299)
+		} else {
+			r.Maintenance.VersionCount = tc.versions
+		}
+		r.Maintenance.FirstPublishedAt = tc.first
+		clearEstablishedTyposquat(r, now)
+		if cleared := r.SupplyChain.TyposquatStatus == "clean"; cleared != tc.cleared {
+			t.Errorf("%s: cleared=%v, want %v", tc.name, cleared, tc.cleared)
+		}
+	}
+}
+
+// TestScanClearsLongHistoryCrate goes through Scan: the history arrives from
+// the metadata provider, after the name-only typosquat provider has flagged.
+func TestScanClearsLongHistoryCrate(t *testing.T) {
+	first := time.Date(2023, 8, 23, 0, 0, 0, 0, time.UTC)
+	squat := &fakeProvider{name: "fake-typosquat", signal: SignalTyposquat, partial: PartialReport{
+		SupplyChain: &SupplyChainSection{TyposquatStatus: "suspected", TyposquatConfidence: "high", TyposquatSimilarTo: "dasp"},
+	}}
+	meta := &fakeProvider{name: "fake-metadata", signal: SignalMalware, partial: PartialReport{
+		Maintenance: &MaintenanceSection{
+			Downloads:        &DownloadCount{Count: 24_227, Window: DownloadWindow90Days},
+			VersionCount:     299,
+			FirstPublishedAt: &first,
+		},
+	}}
+	svc := New(Config{Providers: []Provider{squat, meta}})
+	report, err := svc.Scan(context.Background(), Request{
+		Key:   Key{Ecosystem: "cargo", Package: "dbsp", Version: "0.363.0"},
+		OrgID: "org-default",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if got := report.SupplyChain.TyposquatStatus; got != "clean" {
+		t.Errorf("dbsp: TyposquatStatus %q, want clean", got)
+	}
+}

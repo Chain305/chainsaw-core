@@ -33,6 +33,25 @@ const establishedTyposquatWeeklyDownloads = 100_000
 // those from squat traffic with the same margin.
 const establishedTyposquat90DayDownloads = 75_000
 
+// establishedTyposquatMinVersions and establishedTyposquatMinAge are the
+// release-history line, for a real package whose download count no line can
+// separate from squat traffic.
+//
+// Why 50 versions over 2 years. Registries delete squats within weeks to
+// months of discovery, and a squat ships what it needs to look plausible:
+// across every typosquat-flagged row in production (2026-10-07) the real and
+// suspected squats carry 1 (chalkk, lodahs), 5 (expres), 6 (chan), 27
+// (bmp-ts) and 28 (avada) versions, and the deleted malicious rows carry no
+// history at all. The false positive this exists for is dbsp, Feldera's
+// incremental-computation engine: 299 versions since 2023-08-23 and 24,227
+// downloads per 90 days, quarantined as a squat of dasp. The age half stops a
+// burst of 50 publishes in one week from qualifying; s2-common (60 versions,
+// first published 2026-01) stays flagged for that reason.
+const (
+	establishedTyposquatMinVersions = 50
+	establishedTyposquatMinAge      = 2 * 365 * 24 * time.Hour
+)
+
 // WarnTyposquatClearedEstablished records a typosquat hit that was cleared
 // because the candidate is itself heavily installed. The message keeps the
 // lookalike and the count, so the clearing stays explainable after the
@@ -41,7 +60,8 @@ const WarnTyposquatClearedEstablished = "typosquat_cleared_established"
 
 // clearEstablishedTyposquat resets a "suspected" typosquat verdict to clean
 // when the candidate meets its registry window's established download line
-// (100,000 a week on npm/PyPI, 75,000 per 90 days on crates.io).
+// (100,000 a week on npm/PyPI, 75,000 per 90 days on crates.io), or has a
+// long release history (establishedHistory).
 //
 // It runs after every provider has finished because the typosquat provider is
 // name-only and runs in parallel with the registry metadata that carries the
@@ -59,15 +79,19 @@ func clearEstablishedTyposquat(r *Report, now time.Time) {
 	if sc.TyposquatStatus != "suspected" {
 		return
 	}
-	count, window, ok := establishedDownloads(r.Maintenance)
-	if !ok {
+	var why string
+	if count, window, ok := establishedDownloads(r.Maintenance); ok {
+		why = fmt.Sprintf("%d downloads per %s", count, window)
+	} else if n, since, ok := establishedHistory(r, now); ok {
+		why = fmt.Sprintf("%d versions since %s", n, since.Format("2006-01-02"))
+	} else {
 		return
 	}
 	r.Observation.Warnings = append(r.Observation.Warnings, Warning{
 		Provider: "typosquat",
 		Code:     WarnTyposquatClearedEstablished,
-		Message: fmt.Sprintf("name resembles %q (%s confidence); cleared: %d downloads per %s",
-			sc.TyposquatSimilarTo, sc.TyposquatConfidence, count, window),
+		Message: fmt.Sprintf("name resembles %q (%s confidence); cleared: %s",
+			sc.TyposquatSimilarTo, sc.TyposquatConfidence, why),
 		At: now,
 	})
 	sc.TyposquatStatus = "clean"
@@ -87,4 +111,21 @@ func establishedDownloads(m MaintenanceSection) (int, string, bool) {
 		return *d, DownloadWindowWeek, true
 	}
 	return 0, "", false
+}
+
+// establishedHistory reports the version count and first publish when the
+// candidate has at least establishedTyposquatMinVersions releases and its
+// first was at least establishedTyposquatMinAge before now. An unknown first
+// publish clears nothing.
+//
+// The count is projectedVersionCount, not Maintenance.VersionCount: the
+// latter has only a premium writer, so a core build holding the full
+// timeline would read 0.
+func establishedHistory(r *Report, now time.Time) (int, time.Time, bool) {
+	n := projectedVersionCount(r)
+	if r.Maintenance.FirstPublishedAt == nil || n < establishedTyposquatMinVersions {
+		return 0, time.Time{}, false
+	}
+	first := *r.Maintenance.FirstPublishedAt
+	return n, first, now.Sub(first) >= establishedTyposquatMinAge
 }
