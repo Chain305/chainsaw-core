@@ -323,7 +323,9 @@ func artifactURLFor(eco, name, version string) (string, string) {
 		// during resolveLatest.
 		return "", ""
 	case "cargo":
-		return fmt.Sprintf("https://crates.io/api/v1/crates/%s/%s/download", url.PathEscape(name), url.PathEscape(version)), "application/x-tar"
+		// static.crates.io directly: the crates.io download endpoint is a 302
+		// to it, and the SSRF-guarded client refuses redirects.
+		return fmt.Sprintf("https://static.crates.io/crates/%s/%s-%s.crate", url.PathEscape(name), url.PathEscape(name), url.PathEscape(version)), "application/x-tar"
 	case "rubygems":
 		return fmt.Sprintf("https://rubygems.org/gems/%s-%s.gem", url.PathEscape(name), url.PathEscape(version)), "application/octet-stream"
 	case "go", "gomod":
