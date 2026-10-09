@@ -175,9 +175,31 @@ const (
 // map without pulling pgstore. ListVersions returns every cached
 // version of (eco, name) so lookupDepReport can pick a row that
 // satisfies a range constraint when no candidate probe matches.
-type transitiveLookup interface {
+type TransitiveLookup interface {
 	Get(ctx context.Context, orgID string, key Key) (*Report, error)
 	ListVersions(ctx context.Context, orgID, ecosystem, name string) ([]string, error)
+}
+
+// transitiveLookup is the original unexported spelling, kept as an alias so
+// every existing reference in this package still reads the same.
+type transitiveLookup = TransitiveLookup
+
+// EvaluateTransitiveRisk folds the descendants reachable through `lookup`
+// into report.Risk, exactly as the scanner's own overlay does.
+//
+// Exported for ONE reason: a measurement harness outside this package could
+// not reach the overlay, so every corpus run graded roots only and the three
+// sc.transitive_* signals read as "fired 0 times" when they had never been
+// asked. `scanner.go` gates the overlay on a concrete *Store, which a harness
+// with no database cannot supply; this entry point takes the same two-method
+// interface the unit tests already stub. The harness therefore runs THIS code
+// path rather than reimplementing the BFS — a second implementation of the
+// tree walk is exactly the second source of truth we refuse elsewhere.
+//
+// Callers inside the server keep using the scanner's overlay; this wrapper
+// adds no behaviour of its own and must stay a pass-through.
+func EvaluateTransitiveRisk(ctx context.Context, lookup TransitiveLookup, orgID string, report *Report) {
+	evaluateTransitiveRisk(ctx, lookup, orgID, report)
 }
 
 func evaluateTransitiveRisk(ctx context.Context, store transitiveLookup, orgID string, report *Report) {
