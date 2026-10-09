@@ -1563,3 +1563,52 @@ func TestTransitiveRisk_WithdrawnVersionIsNotResolved(t *testing.T) {
 		t.Fatal("empty timeline read as a withdrawal")
 	}
 }
+
+// The production shape the test above never exercised: a removed malicious
+// version whose OWN report has no timeline at all, because the registry said
+// the version does not exist. Found 2026-10-09 on rc@1.2.9, which put a
+// transitive malware count on canvas, kerberos and three other popular npm
+// packages although `^1.2.7` installs the clean 1.2.8.
+func TestTransitiveRisk_RegistryNotFoundVersionIsNotResolved(t *testing.T) {
+	notFound := Warning{Provider: "registrymetadata", Code: WarnVersionNotFound}
+	build := func(eco string, warn bool) (*fakeStore, *Report) {
+		store := newFakeStore()
+		store.put(eco, "rc", "1.2.8", newReport(eco, "rc", "1.2.8"))
+		bad := maliciousReport(eco, "rc", "1.2.9", "MAL-2021-0001")
+		if warn {
+			bad.Observation.Warnings = append(bad.Observation.Warnings, notFound)
+		}
+		store.put(eco, "rc", "1.2.9", bad)
+		root := makeReportWithDirect(eco, "prebuild-install", "7.1.3", DependencyRef{Name: "rc", Constraint: "^1.2.7"})
+		return store, root
+	}
+
+	for _, eco := range []string{"npm", "pypi"} {
+		store, root := build(eco, true)
+		evaluateTransitiveRisk(context.Background(), store, "org", root)
+		if got := root.Risk.Resolution.TransitiveSeverity.MalwareCount; got != 0 {
+			t.Fatalf("%s: MalwareCount = %d, want 0: the registry reported 1.2.9 missing, so ^1.2.7 installs 1.2.8; blame=%v",
+				eco, got, root.Risk.Resolution.TransitiveBlame)
+		}
+	}
+
+	// MUTATION GUARD, negative direction. With no warning and no timeline the
+	// version is UNKNOWN, not withdrawn: the walk must keep resolving it, or a
+	// transient registry failure would silently clear a real malicious
+	// dependency.
+	store, root := build("npm", false)
+	evaluateTransitiveRisk(context.Background(), store, "org", root)
+	if got := root.Risk.Resolution.TransitiveSeverity.MalwareCount; got != 1 {
+		t.Fatalf("npm, no warning: MalwareCount = %d, want 1 (absence of evidence is not a withdrawal)", got)
+	}
+
+	// Ecosystems that keep yanked versions installable by pin never read the
+	// warning as a withdrawal.
+	if versionWithdrawn("cargo", "1.2.9", &Report{Observation: ObservationSection{Warnings: []Warning{notFound}}}) {
+		t.Fatal("cargo read a not-found warning as a withdrawal")
+	}
+	// Another provider's not-found is not the registry's answer.
+	if versionWithdrawn("npm", "1.2.9", &Report{Observation: ObservationSection{Warnings: []Warning{{Provider: "malware", Code: WarnVersionNotFound}}}}) {
+		t.Fatal("a non-registry provider's warning read as a withdrawal")
+	}
+}

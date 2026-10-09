@@ -1198,9 +1198,9 @@ func projectDebugTelemetry(s *ArtifactScanSection, in *risk.Input) {
 //
 // WHY THIS EXISTS. The cap.* signals were wired to exactly one producer:
 // internal/intelligence/premium/provider_capability.go, which is premium,
-// npm-only (core/capability/scanner.go:29-32 lists pip/rubygems/cargo as
-// TODO) and gated OFF by default behind CHAINSAW_CAPABILITY_SCAN. So in a
-// default deployment they never fired at all.
+// npm-family only (core/capability/scanner.go:22) and was then gated OFF by
+// default behind CHAINSAW_CAPABILITY_SCAN (it is default ON now;
+// capabilityScanEnabledIntel). So in a default deployment they never fired.
 //
 // Meanwhile core/codesmell computes the same capability facts, for every
 // ecosystem, with no env gate -- and wrote them ONLY onto

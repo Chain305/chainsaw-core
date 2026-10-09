@@ -36,8 +36,10 @@ const (
 	// network call + install-script" combination — the active-exfil
 	// fingerprint. The single-axis env-var detector remains
 	// context-only (it has too high a false-positive rate to act as a
-	// block by itself); this compound is the intended block carrier
-	// when all three axes line up. Pain 9 (Agent D).
+	// block by itself). This compound is NOT a block carrier on its own:
+	// an npm package with an install script, env, network, shell and a
+	// licence scores ALLOW 60 with it (-45) and sc.npm_install_net_shell
+	// (-30) both firing. Pain 9 (Agent D).
 	CompoundSCNetShellInstallNPM = "sc.npm_install_net_shell"
 	CompoundSCEnvNetInstall      = "sc.env_net_install"
 	CompoundSCExfilAtInstall     = "sc.exfil_sink_at_install"

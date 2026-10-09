@@ -1118,6 +1118,24 @@ func versionWithdrawn(eco, v string, r *Report) bool {
 	default:
 		return false
 	}
+	// The registry's own answer outranks the timeline. WarnVersionNotFound
+	// is emitted ONLY on positive evidence of absence — the package document
+	// fetched OK, enumerated a non-empty version list, and v was not in it
+	// (versionNotFoundWarning) — so for npm and PyPI it IS a withdrawal.
+	//
+	// The timeline check below cannot see this case on its own: PyPI returns
+	// before building a timeline once it has emitted the warning, so a
+	// withdrawn PyPI version always carries an EMPTY timeline, and an empty
+	// timeline deliberately reads as "not fetched". Found in production on
+	// 2026-10-09: canvas, kerberos, mongodb-client-encryption,
+	// @mongodb-js/zstd and prebuild-install all carried a transitive
+	// malware count from rc@1.2.9 — the November 2021 hijack release, long
+	// removed from npm — although `^1.2.7` installs the clean 1.2.8.
+	for _, w := range r.Observation.Warnings {
+		if w.Provider == "registrymetadata" && w.Code == WarnVersionNotFound {
+			return true
+		}
+	}
 	tl := r.Maintenance.VersionTimeline
 	if len(tl) == 0 {
 		return false

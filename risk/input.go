@@ -146,15 +146,15 @@ type Input struct {
 	// On its own this is a context-only signal — most legitimate code
 	// also reads env vars — so the v2 engine does NOT register a
 	// single-axis penalty for it. The compound rule
-	// CompoundSCEnvNetInstall is the block carrier (env-var ∧ network ∧
-	// install-script). See Pain 9 plan, registry_supplychain.go, and
-	// compound.go for the rationale.
+	// CompoundSCEnvNetInstall carries it (env-var ∧ network ∧
+	// install-script; -45, which alone does not block). See Pain 9 plan,
+	// registry_supplychain.go, and compound.go for the rationale.
 	EnvVarAccess bool
 	// NetworkAccess is true when the artifact scanner observed network
 	// primitives (fetch, http.get, urllib, ...) anywhere in the package
 	// body — not necessarily inside an install script. Treated as
 	// context-only for the same reason EnvVarAccess is, and feeds the
-	// CompoundSCEnvNetInstall block carrier.
+	// CompoundSCEnvNetInstall compound.
 	NetworkAccess bool
 
 	// HasHiddenUnicode is the kind-blind "the scanner found something" bit.

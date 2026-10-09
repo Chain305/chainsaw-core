@@ -119,6 +119,44 @@ type conceptMapping struct {
 	Bucket   string  // "metadata" | "artifact" | "advisory" — see conceptBucket
 	Cadence  cadence // refresh clock of the underlying fact — see docs/SIGNAL_CADENCE_MAP.md §3
 	Note     string
+	// Measured is the rev5 concept tally behind the grade (both, ours only,
+	// theirs only; docs/socket-comparison-2026-10-03-corpus-v1-rev5 regraded
+	// at this map), printed by TestSocketComparison. EXACT needs it at
+	// >= exactMinAgreement over >= minCoFire agreeing rows. A pairing that
+	// carries one stays in the concept metric whatever its grade: demoting it
+	// changes the CLAIM, not the count, or the demotion would delete its own
+	// socket-only rows from the blind-spot list.
+	Measured *agreeCounts
+	// CoFire is the rev5 count of rows where this signal fired and Socket
+	// raised a paired alert. An Inferred PARTIAL needs >= minCoFire.
+	CoFire int
+}
+
+// agreeCounts is one pairing's row tally: concept on both sides, ours only,
+// theirs only.
+type agreeCounts struct{ Both, CSOnly, SKOnly int }
+
+// agreement is positive agreement 2b/(2b+cs+sk), NaN when neither side fired.
+func (a agreeCounts) agreement() float64 {
+	d := 2*a.Both + a.CSOnly + a.SKOnly
+	if d == 0 {
+		return math.NaN()
+	}
+	return float64(2*a.Both) / float64(d)
+}
+
+// The data floor under a grade. Until 2026-10-09 EXACT was asserted, not
+// measured, and every EXACT concept but malware, CVE and filesystemAccess
+// scored below 0.60 on rev5 — shrinkwrap and missingAuthor at 0.00.
+const (
+	exactMinAgreement = 0.60
+	minCoFire         = 5
+)
+
+// compared reports whether the pairing enters the concept metric: every EXACT
+// one, and every PARTIAL one demoted on a measurement.
+func (m conceptMapping) compared() bool {
+	return m.Grade == gradeExact || (m.Grade == gradePartia && m.Measured != nil)
 }
 
 // Concept buckets. Mixing these three in one agreement ratio produces a number
@@ -128,8 +166,9 @@ type conceptMapping struct {
 //	           is the bucket where a disagreement is a real detector difference.
 //	artifact — needs the package BYTES. Chainsaw's public package-intelligence
 //	           path is metadata-only (the artifact-bound providers declare
-//	           NeedsArtifact() and are skipped), and cap.* additionally needs
-//	           CHAINSAW_CAPABILITY_SCAN=1 and is npm-only. So these read as
+//	           NeedsArtifact() and are skipped). cap.* needs no flag (the
+//	           premium scanner is npm-family only and default ON; codesmell
+//	           feeds it on every ecosystem with bytes). So these read as
 //	           "Socket only" on this surface REGARDLESS of detector quality.
 //	           That is a real difference in what the public feed reports, and a
 //	           useless measure of who has the better detector. Reported apart.
@@ -165,20 +204,20 @@ const (
 // (GitHub Actions, a different product surface with no corpus rows).
 var socketConceptMap = map[string]conceptMapping{
 	// ── supply chain ────────────────────────────────────────────────────
-	"sc.known_malicious":               {Socket: []string{"malware", "gptMalware"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24Feed},
+	"sc.known_malicious":               {Socket: []string{"malware"}, Bucket: bucketMetadata, Grade: gradeExact, Measured: &agreeCounts{420, 180, 0}, Note: "FEED PARITY, not detection: both sides read the same OSSF feed. gptMalware is an LLM verdict, declined with gptAnomaly/gptSecurity", Cadence: cadR24Feed},
 	"sc.typosquat_high":                {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "3 Chainsaw tiers vs 2 Socket alerts; no tier correspondence exists — never compare tier to tier", Cadence: cadR24Embed},
 	"sc.typosquat_medium":              {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Cadence: cadR24Embed},
 	"sc.typosquat_low":                 {Socket: []string{"didYouMean", "gptDidYouMean"}, Bucket: bucketMetadata, Grade: gradePartia, Cadence: cadR24Embed},
-	"sc.publisher_changed":             {Socket: []string{"unstableOwnership", "newAuthor"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Note: "newAuthor: ours fires when the publisher is in neither the previous version's publishers nor its maintainers; theirs on any first-time publisher, listed maintainer or not. Its exact counterpart sc.first_time_collaborator was deleted in v0.22.39", Cadence: cadR24},
-	"sc.non_existent_author":           {Socket: []string{"missingAuthor"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
+	"sc.publisher_changed":             {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to unstableOwnership/newAuthor; rev5 co-fire 0 rows (< 5), so unproven -- see socketUnprovenPairings. newAuthor: ours fires when the publisher is in neither the previous version's publishers nor its maintainers; theirs on any first-time publisher, listed maintainer or not. Its exact counterpart sc.first_time_collaborator was deleted in v0.22.39", Cadence: cadR24},
+	"sc.non_existent_author":           {Socket: []string{"missingAuthor"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{0, 8, 0}, Note: "demoted 2026-10-09: rev5 agreement 0.00, and Socket raised missingAuthor on no row", Cadence: cadR24},
 	"sc.install_script_fetches_remote": {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is strictly narrower: theirs fires on scripts EXISTING", Cadence: cadR24B},
 	"sc.install_script_only":           {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Cadence: cadR24B},
 	// Static indicators of malicious intent. Socket's closest concept is its
 	// (AI) malware verdict, which covers the intent and not the mechanism.
-	"sc.exfil_sink_used":       {Socket: []string{"malware", "gptMalware"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "ours is one static indicator: a hard-coded exfil sink the same file sends to", Cadence: cadR24B},
+	"sc.exfil_sink_used":       {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to malware; rev5 co-fire 0 rows (< 5). Ours is one static indicator: a hard-coded exfil sink the same file sends to", Cadence: cadR24B},
 	"sc.import_time_shell":     {Socket: []string{"shellAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is narrower: a shell spawned at Python module top level, not anywhere", Cadence: cadR24B},
 	"sc.dependency_credential": {Socket: []string{"gitDependency", "httpDependency"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is narrower: the URL dependency also embeds a credential", Cadence: cadR24B},
-	"sc.app_credential_exfil":  {Socket: []string{"malware", "gptMalware"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "ours: an app's private credential store read and sent from one file", Cadence: cadR24B},
+	"sc.app_credential_exfil":  {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to malware; rev5 co-fire 0 rows (< 5). Ours: an app's private credential store read and sent from one file", Cadence: cadR24B},
 	// EXACT for the npm-only half: since 7c473d3b it fires on exactly the
 	// hooks a registry install runs (preinstall/install/postinstall), which
 	// is socket's installScripts on npm. rev5 non-malicious npm: 6 both, 0
@@ -187,7 +226,7 @@ var socketConceptMap = map[string]conceptMapping{
 	// fires on PyPI setup.py, composer `bin` and NuGet install.ps1, which
 	// socket does not flag (107 ours-only rows on rev5), even though on
 	// cargo build.rs it agrees (12 both, 0 socket-only).
-	"sc.install_script_only_npm": {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"sc.install_script_only_npm": {Socket: []string{"installScripts"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{9, 2, 118}, Note: "demoted 2026-10-09: rev5 agreement 0.13: npm-only against a cross-ecosystem alert, so most of Socket's installScripts rows are out of our scope by construction", Cadence: cadR24B},
 	// Cross-version diff signals. Socket has no per-version capability-diff
 	// alert, so these are ours-only by construction rather than a gap in
 	// their taxonomy — graded as such so the harness does not read them as
@@ -196,14 +235,14 @@ var socketConceptMap = map[string]conceptMapping{
 	"sc.filesystem_access_appeared":        {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert", Cadence: cadR24BPrior},
 	"sc.env_access_appeared":               {Socket: nil, Bucket: bucketArtifact, Grade: gradeNone, Note: "cross-version diff; socket.dev exposes no capability-appeared alert", Cadence: cadR24BPrior},
 	"sc.release_after_dormancy":            {Socket: nil, Grade: gradeNone, Note: "timeline gap before this release; socket.dev's unmaintained alert is package age, not a release after silence", Cadence: cadR24},
-	"sc.hidden_unicode":                    {Socket: []string{"obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "different detector class; overlapping intent", Cadence: cadR24B},
-	"sc.repo_archived":                     {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
-	"sc.git_url_dependency":                {Socket: []string{"gitDependency", "gitHubDependency"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
-	"sc.http_url_dependency":               {Socket: []string{"httpDependency"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
-	"sc.shrinkwrap_present":                {Socket: []string{"shrinkwrap"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24B},
-	"sc.deprecated_by_maintainer":          {Socket: []string{"deprecated"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
-	"sc.manifest_confusion":                {Socket: []string{"manifestConfusion"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24B},
-	"sc.publish_velocity_anomaly":          {Socket: []string{"recentlyPublished"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
+	"sc.hidden_unicode":                    {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to obfuscatedFile; rev5: ours 15 rows, theirs 10, co-fire 0 -- measured disjoint", Cadence: cadR24B},
+	"sc.repo_archived":                     {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to unmaintained; rev5 co-fire 0 rows (< 5) -- the repo-liveness lane did not run (repoLinkStatus on 0 rows)", Cadence: cadR24},
+	"sc.git_url_dependency":                {Socket: []string{"gitDependency", "gitHubDependency"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{1, 0, 1}, Note: "demoted 2026-10-09: rev5 agreement on 3 rows, below the 5-row floor", Cadence: cadR24},
+	"sc.http_url_dependency":               {Socket: []string{"httpDependency"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{0, 0, 2}, Note: "demoted 2026-10-09: rev5 agreement 0.00 (Socket 2 rows, ours none)", Cadence: cadR24},
+	"sc.shrinkwrap_present":                {Socket: []string{"shrinkwrap"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{0, 115, 0}, Note: "demoted 2026-10-09: rev5 agreement 0.00: ours 115 rows, Socket's shrinkwrap on none", Cadence: cadR24B},
+	"sc.deprecated_by_maintainer":          {Socket: []string{"deprecated"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{10, 42, 9}, Note: "demoted 2026-10-09: rev5 agreement 0.28: ours-only rows are cargo/nuget/composer, theirs-only are all go -- a scope difference, not shown to be Socket's error", Cadence: cadR24},
+	"sc.manifest_confusion":                {Socket: []string{"manifestConfusion"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{0, 0, 0}, Note: "demoted 2026-10-09: neither side fired on any rev5 row, so the pairing is unmeasured", Cadence: cadR24B},
+	"sc.publish_velocity_anomaly":          {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to recentlyPublished; rev5 co-fire 0 rows (< 5)", Cadence: cadR24},
 	"sc.repo_missing":                      {Socket: nil, Grade: gradeNone, Note: "the 98-type taxonomy has no missing-repository alert", Cadence: cadR24},
 	"sc.repo_missing_established":          {Socket: nil, Grade: gradeNone, Note: "sc.repo_missing on a package and version older than 90 days, without the warn ceiling", Cadence: cadR24},
 	"sc.repo_ownership_mismatch":           {Socket: nil, Grade: gradeNone, Cadence: cadR24},
@@ -220,26 +259,26 @@ var socketConceptMap = map[string]conceptMapping{
 	"sc.transitive_malware":                {Socket: nil, Grade: gradeNoneSt, Cadence: cadR24Feed},
 
 	// ── capability (all 8 source ecosystems since v0.22.60; default ON) ───
-	"cap.network":      {Socket: []string{"networkAccess"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
-	"cap.shell":        {Socket: []string{"shellAccess"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
-	"cap.env_access":   {Socket: []string{"envVars"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
-	"cap.native_code":  {Socket: []string{"hasNativeCode"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
-	"cap.dynamic_eval": {Socket: []string{"usesEval"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.network":      {Socket: []string{"networkAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{277, 114, 266}, Note: "demoted 2026-10-09: rev5 agreement 0.59", Cadence: cadR24B},
+	"cap.shell":        {Socket: []string{"shellAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{159, 80, 289}, Note: "demoted 2026-10-09: rev5 agreement 0.46", Cadence: cadR24B},
+	"cap.env_access":   {Socket: []string{"envVars"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{156, 179, 113}, Note: "demoted 2026-10-09: rev5 agreement 0.52", Cadence: cadR24B},
+	"cap.native_code":  {Socket: []string{"hasNativeCode"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{57, 295, 33}, Note: "demoted 2026-10-09: rev5 agreement 0.26: 110 of our 295 ours-only rows are nuget and 100 maven, managed assemblies and bytecode Socket does not call native", Cadence: cadR24B},
+	"cap.dynamic_eval": {Socket: []string{"usesEval"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{140, 80, 311}, Note: "demoted 2026-10-09: rev5 agreement 0.42", Cadence: cadR24B},
 	// The weight-0 sibling fed by the codesmell regex detector. Mapped to
 	// the same Socket concepts: it is the same observation, reached with
 	// weaker evidence, and the harness grades the CONCEPT not the weight.
-	"cap.dynamic_eval_observed": {Socket: []string{"usesEval"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.dynamic_eval_observed": {Socket: []string{"usesEval"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{140, 80, 311}, Note: "demoted 2026-10-09: rev5 agreement 0.42", Cadence: cadR24B},
 	// Socket's own "URL strings" alert; the same codesmell URL scan feeds it.
-	"cap.url_strings":                {Socket: []string{"urlStrings"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
-	"sc.install_script_eval_encoded": {Socket: []string{"installScripts", "obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.url_strings":                {Socket: []string{"urlStrings"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{153, 324, 266}, Note: "demoted 2026-10-09: rev5 agreement 0.34", Cadence: cadR24B},
+	"sc.install_script_eval_encoded": {Socket: []string{"installScripts", "obfuscatedFile"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{9, 2, 126}, Note: "strictly narrower than both alerts (an install script that decodes and evals), the reason sc.install_script_fetches_remote is PARTIAL; never EXACT. Fired on 0 rev5 rows", Cadence: cadR24B},
 	// EXACT, though two signals feed one alert: Socket's filesystemAccess is
 	// "accesses the file system" with no read/write split, and each of ours is
 	// a sub-case of it, so either one firing satisfies Socket's definition and
 	// the concept (read OR write) is the same set. That is unlike
 	// maint.abandoned_repo/no_recent_release -> unmaintained below, where the
 	// two signals measure different facts from Socket's.
-	"cap.filesystem_read":  {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradeExact, Note: "read OR write == Socket's undivided filesystemAccess", Cadence: cadR24B},
-	"cap.filesystem_write": {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradeExact, Note: "read OR write == Socket's undivided filesystemAccess", Cadence: cadR24B},
+	"cap.filesystem_read":  {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradeExact, Measured: &agreeCounts{404, 220, 240}, Note: "read OR write == Socket's undivided filesystemAccess", Cadence: cadR24B},
+	"cap.filesystem_write": {Socket: []string{"filesystemAccess"}, Bucket: bucketArtifact, Grade: gradeExact, Measured: &agreeCounts{404, 220, 240}, Note: "read OR write == Socket's undivided filesystemAccess", Cadence: cadR24B},
 
 	// PARTIAL, not EXACT: Socket does not publish either rule. Ours are
 	// the shapes checked against the bytes of corpus packages Socket raised
@@ -247,21 +286,21 @@ var socketConceptMap = map[string]conceptMapping{
 	// fire on vm2, ys-coffee and ys-coffee-script but miss seekcode, whose
 	// import sits past the 64 KiB per-file window; telemetry fires on
 	// dagster 1.10.16. The two malicious npm telemetry rows are unpublished.
-	"cap.debug_access": {Socket: []string{"debugAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "node vm/inspector/v8 imports and process.binding only; Socket's wording also covers reflection", Cadence: cadR24B},
-	"cap.telemetry":    {Socket: []string{"telemetry"}, Bucket: bucketArtifact, Grade: gradePartia, Inferred: true, Note: "a telemetry endpoint or telemetry env switch; Socket's detector is unpublished", Cadence: cadR24B},
+	"cap.debug_access": {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to debugAccess; rev5 co-fire 0 rows (< 5), the detector postdates that corpus. node vm/inspector/v8 imports and process.binding only; Socket's wording also covers reflection", Cadence: cadR24B},
+	"cap.telemetry":    {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to telemetry; rev5 co-fire 0 rows (< 5), the detector postdates that corpus. A telemetry endpoint or telemetry env switch; Socket's detector is unpublished", Cadence: cadR24B},
 
 	// dynamicRequire used to be paired with cap.dynamic_eval*, which is a
 	// different claim (eval/Function) and produced ~117 Chainsaw-only rows
 	// against Socket's 8. Its own detector, on rev5 npm with bytes: both 4,
 	// Socket-only 0, Chainsaw-only 10 — all ten checked by hand and genuine
 	// non-literal requires (require(path.join(PWD, ...)), require(`./${name}`)).
-	"cap.dynamic_require": {Socket: []string{"dynamicRequire"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
+	"cap.dynamic_require": {Socket: []string{"dynamicRequire"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{0, 0, 0}, Note: "demoted 2026-10-09: the hand count above is 0.44, and rev5 cannot measure it (its lane did not run)", Cadence: cadR24B},
 
 	// ── vulnerability ───────────────────────────────────────────────────
-	"vuln.cvss_critical": {Socket: []string{"criticalCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Cadence: cadR24OSV},
-	"vuln.cvss_high":     {Socket: []string{"cve"}, Bucket: bucketAdvisory, Grade: gradeExact, Note: "Socket's generic `cve` carries severity 2 = high", Cadence: cadR24OSV},
-	"vuln.cvss_medium":   {Socket: []string{"mediumCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Cadence: cadR24OSV},
-	"vuln.cvss_low":      {Socket: []string{"mildCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Cadence: cadR24OSV},
+	"vuln.cvss_critical": {Socket: []string{"criticalCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Measured: &agreeCounts{195, 45, 1}, Cadence: cadR24OSV},
+	"vuln.cvss_high":     {Socket: []string{"cve"}, Bucket: bucketAdvisory, Grade: gradeExact, Measured: &agreeCounts{195, 45, 1}, Note: "Socket's generic `cve` carries severity 2 = high", Cadence: cadR24OSV},
+	"vuln.cvss_medium":   {Socket: []string{"mediumCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Measured: &agreeCounts{195, 45, 1}, Cadence: cadR24OSV},
+	"vuln.cvss_low":      {Socket: []string{"mildCVE"}, Bucket: bucketAdvisory, Grade: gradeExact, Measured: &agreeCounts{195, 45, 1}, Cadence: cadR24OSV},
 	"vuln.kev":           {Socket: nil, Grade: gradeNone, Note: "CISA KEV cross-reference; no Socket equivalent in the taxonomy", Cadence: cadR24},
 	// Deliberately unmapped. Socket's four CVE alerts (criticalCVE, cve,
 	// mediumCVE, mildCVE) are ALL severity-bearing, and this signal exists
@@ -276,28 +315,28 @@ var socketConceptMap = map[string]conceptMapping{
 	"vuln.fix_available":    {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24OSV},
 
 	// ── maintenance ─────────────────────────────────────────────────────
-	"maint.unpopular_package": {Socket: []string{"unpopularPackage"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
+	"maint.unpopular_package": {Socket: []string{"unpopularPackage"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{131, 169, 509}, Note: "demoted 2026-10-09: rev5 agreement 0.28 (0.09 on the published ledger)", Cadence: cadR24},
 	"maint.abandoned_repo":    {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "2 Chainsaw signals -> 1 Socket alert", Cadence: cadR24},
 	"maint.no_recent_release": {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Cadence: cadR24},
-	"maint.very_new_package":  {Socket: []string{"recentlyPublished"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
+	"maint.very_new_package":  {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to recentlyPublished; rev5 co-fire 0 rows (< 5)", Cadence: cadR24},
 	"maint.relocated":         {Socket: nil, Grade: gradeNone, Note: "Maven <relocation>; Socket has no relocation alert", Cadence: cadR24},
 	"maint.outdated_version":  {Socket: []string{"unmaintained"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "version age; Socket's unmaintained is package-level", Cadence: cadR24},
 	"maint.single_maintainer": {Socket: nil, Grade: gradeNone, Cadence: cadR24},
 	"maint.healthy_cadence":   {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24},
 
 	// ── licence ─────────────────────────────────────────────────────────
-	"lic.missing":                       {Socket: []string{"noLicenseFound"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24},
-	"license.copyleft":                  {Socket: []string{"copyleftLicense"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24Rederived},
+	"lic.missing":                       {Socket: []string{"noLicenseFound"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{47, 103, 129}, Note: "demoted 2026-10-09: rev5 agreement 0.29", Cadence: cadR24},
+	"license.copyleft":                  {Socket: []string{"copyleftLicense"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{82, 54, 42}, Note: "demoted 2026-10-09: 0.63 regraded here but 0.59 on the published rev5 ledger -- within 0.04 of the bar either way, so not EXACT", Cadence: cadR24Rederived},
 	"license.non_permissive":            {Socket: []string{"nonpermissiveLicense"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "our firing set is narrower than our own tag (weak-copyleft suppression)", Cadence: cadR24Rederived},
-	"license.exception_present":         {Socket: []string{"licenseException"}, Bucket: bucketMetadata, Grade: gradeExact, Cadence: cadR24Rederived},
+	"license.exception_present":         {Socket: []string{"licenseException"}, Bucket: bucketMetadata, Grade: gradePartia, Measured: &agreeCounts{1, 0, 6}, Note: "demoted 2026-10-09: rev5 agreement 0.25 on 7 rows", Cadence: cadR24Rederived},
 	"license.ambiguous_classifier":      {Socket: []string{"ambiguousClassifier"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "different object: ours is an SPDX expression joining >1 licence family; theirs is a PyPI trove classifier that names no single licence (\"BSD License\", bare \"OSI Approved\"). 0 of 10 rev4 rows agree", Cadence: cadR24Rederived},
 	"license.unidentified":              {Socket: []string{"unidentifiedLicense", "explicitlyUnlicensedItem", "miscLicenseIssues"}, Bucket: bucketMetadata, Grade: gradePartia, Note: "miscLicenseIssues (licence present but unparseable): rev4, ours co-fires on 6 of the 7 evaluated rows theirs does, all six on a NON-EMPTY odd expression (UNLICENSED, Commercial, Nonstandard, a URL). Of our 574 firings, 462 are an EMPTY expression, where lic.missing also fires; the overlap lives in the other 112", Cadence: cadR24Rederived},
 	"lic.changed_from_previous_version": {Socket: nil, Grade: gradeNone, Note: "no licence-change alert in the 98-type taxonomy", Cadence: cadR24},
 	"lic.spdx_present":                  {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24},
 
 	// ── quality ─────────────────────────────────────────────────────────
-	"qual.minified_code":     {Socket: []string{"minifiedFile"}, Bucket: bucketArtifact, Grade: gradeExact, Cadence: cadR24B},
-	"qual.version_anomaly":   {Socket: []string{"badSemverDependency", "floatingDependency"}, Bucket: bucketMetadata, Grade: gradePartia, Inferred: true, Cadence: cadR24},
+	"qual.minified_code":     {Socket: []string{"minifiedFile"}, Bucket: bucketArtifact, Grade: gradePartia, Measured: &agreeCounts{13, 106, 3}, Note: "demoted 2026-10-09: rev5 agreement 0.19: ours 119 rows, theirs 16", Cadence: cadR24B},
+	"qual.version_anomaly":   {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to badSemverDependency/floatingDependency; rev5 co-fire 0 rows (< 5)", Cadence: cadR24},
 	"qual.checksum_mismatch": {Socket: nil, Grade: gradeNone, Note: "registry-proxy property; Socket is not in the mirror path", Cadence: cadR24B},
 	"qual.checksum_verified": {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24B},
 
@@ -345,15 +384,16 @@ const (
 	surfaceRetiredSignal  = "retired signal, fact env-gated"
 )
 
-// socketDeclinedSurfaces records a DECISION about 52 Socket alert types that no
+// socketDeclinedSurfaces records a DECISION about 53 Socket alert types that no
 // Chainsaw signal maps to, so they stop reading as "undecided": 37 across the
-// four G-3 surfaces, and 15 across six more decided on 2026-10-03.
+// four G-3 surfaces, 15 across six more decided on 2026-10-03, and gptMalware,
+// moved here on 2026-10-09 from an EXACT pairing with sc.known_malicious.
 //
 // A DECISION IS NOT COVERAGE, and this map is deliberately inert in every
 // metric: it is read only by the reverse REPORT in TestSocketAlertNamesAreReal
 // and by the guard below. Declining a surface must not move a single number.
 //
-// WHERE THESE 52 ACTUALLY SIT IN THE METRIC, because it is not where the plan
+// WHERE THESE 53 ACTUALLY SIT IN THE METRIC, because it is not where the plan
 // entry assumed. socketAlertBucket — the only thing that lets a Socket alert
 // enter the concept comparison at all — is built from socketConceptMap for
 // EXACT pairings ONLY. An alert no signal maps to is therefore absent from
@@ -439,8 +479,10 @@ const (
 //     catalogue, not package age, so maint.outdated_version is NOT it. None
 //     says anything about the package. Reopen: never as detection.
 //
-//   - analyst or AI judgement (gptAnomaly, gptSecurity, potentialVulnerability,
-//     troll). gpt* are an LLM's read of the code; potentialVulnerability is
+//   - analyst or AI judgement (gptAnomaly, gptMalware, gptSecurity,
+//     potentialVulnerability, troll). gpt* are an LLM's read of the code;
+//     gptMalware was EXACT to sc.known_malicious until 2026-10-09, which
+//     graded one LLM verdict as our feed lookup and declined its two siblings; potentialVulnerability is
 //     "initial human review ... pending further analysis"; troll is "a list of
 //     troll packages that Socket maintains", AI-flagged and human-verified.
 //     Each is a curated verdict with no rule to reproduce. sc.known_malicious
@@ -449,10 +491,12 @@ const (
 //     an ingestible protestware feed, measured against the labelled corpus.
 //
 //   - org licence allow/deny policy (licenseSpdxDisj, "not allowed per your
-//     license policy"). F-6: there is no org licence allow/deny config to read;
-//     lic.policy_blocked was deregistered because nothing could feed it. The
-//     licence-class policy conditions exist, and re-evaluate in <=60s, but a
-//     policy verdict is not a signal. Reopen: an org licence list ships.
+//     license policy"). Declined as a SIGNAL pairing only: the capability
+//     exists as policy, Conditions.PackageLicense (core/policy/store.go:152,
+//     enforced at core/policy/evaluator.go:1514), and lic.policy_blocked was
+//     deregistered because no signal input carries the org's list. A policy
+//     verdict is not a signal, so it counts as covered outside the registry
+//     in the parity line, never as agreement.
 //
 //   - retired signal, fact env-gated (suspiciousStarActivity).
 //     sc.suspicious_repo_stars was DELETED in v0.22.39 because its provider is
@@ -518,6 +562,7 @@ var socketDeclinedSurfaces = map[string]string{
 	"policy":                   surfaceVendorWorkflow,
 	"socketUpgradeAvailable":   surfaceVendorWorkflow,
 	"gptAnomaly":               surfaceAnalystVerdict,
+	"gptMalware":               surfaceAnalystVerdict,
 	"gptSecurity":              surfaceAnalystVerdict,
 	"potentialVulnerability":   surfaceAnalystVerdict,
 	"troll":                    surfaceAnalystVerdict,
@@ -537,9 +582,41 @@ var expectedDeclinedPerSurface = map[string]int{
 	surfaceProjectScan:    4,
 	surfaceReportState:    2,
 	surfaceVendorWorkflow: 3,
-	surfaceAnalystVerdict: 4,
+	surfaceAnalystVerdict: 5,
 	surfaceOrgLicencePol:  1,
 	surfaceRetiredSignal:  1,
+}
+
+// socketUnprovenPairings are Socket alerts whose only pairing was an Inferred
+// PARTIAL that co-fired on fewer than minCoFire rev5 rows, so the pairing was
+// removed on 2026-10-09. DECIDED, not covered: the reverse guard accepts them,
+// they sit outside every agreement number, and the parity line counts them as
+// alerts we lack. Re-pair one only with a measured co-fire count.
+var socketUnprovenPairings = map[string]string{
+	"newAuthor":           "sc.publisher_changed: 0 co-fire rows (Socket 1 row)",
+	"unstableOwnership":   "sc.publisher_changed: Socket raised it on no row",
+	"recentlyPublished":   "sc.publish_velocity_anomaly, maint.very_new_package: Socket raised it on no row",
+	"debugAccess":         "cap.debug_access: 0 co-fire rows (Socket 11); detector postdates rev5",
+	"telemetry":           "cap.telemetry: 0 co-fire rows (Socket 3); detector postdates rev5",
+	"badSemverDependency": "qual.version_anomaly: Socket raised it on no row",
+	"floatingDependency":  "qual.version_anomaly: 0 co-fire rows (Socket 4)",
+}
+
+// otherProductSurfaces are declined surfaces whose subject is not a registry
+// package version. They leave the parity denominator; the same-surface
+// declines (analyst verdicts, org licence policy, the retired star signal)
+// stay in it, because Socket raises those on the packages we both grade.
+var otherProductSurfaces = map[string]bool{
+	surfaceAgentSkills: true, surfaceOpenVSX: true, surfaceActionsFlow: true,
+	surfaceBrowserExtens: true, surfaceProjectScan: true, surfaceReportState: true,
+	surfaceVendorWorkflow: true,
+}
+
+// coveredOutsideRegistry are package alerts we implement as something other
+// than a risk signal. They count in the parity denominator and on neither the
+// EXACT nor the "we lack" side.
+var coveredOutsideRegistry = map[string]string{
+	"licenseSpdxDisj": "policy DSL Conditions.PackageLicense (core/policy/store.go:152, core/policy/evaluator.go:1514)",
 }
 
 // chainsawDetectsButDoesNotScore are findings Chainsaw WRITES INTO THE REPORT
@@ -580,11 +657,11 @@ func reportOnlyConcepts(scan *intelligence.ArtifactScanSection, socketAlerts []s
 }
 
 // socketAlertBucket inverts the map: Socket alert type -> concept bucket, for
-// EXACT pairings only.
+// compared pairings only.
 var socketAlertBucket = func() map[string]string {
 	out := map[string]string{}
 	for _, m := range socketConceptMap {
-		if m.Grade == gradeExact {
+		if m.compared() {
 			for _, s := range m.Socket {
 				out[s] = m.Bucket
 			}
@@ -598,7 +675,10 @@ var socketAlertBucket = func() map[string]string {
 // tiers collapse into conceptCVEAny. sc.known_malicious is one finding; mapped
 // to both alerts it was counted twice, and on a row where Socket raised only
 // one of them it scored an agreement AND a Chainsaw-only at the same time
-// (gptMalware Chainsaw-only: 576 on rev 5).
+// (gptMalware Chainsaw-only: 576 on rev 5). Since 2026-10-09 gptMalware is a
+// declined LLM verdict and never enters socketAlertBucket, so on a row where
+// Socket raised only gptMalware the concept is ours alone; the alias stays so
+// the concept keeps its published name.
 const conceptMalwareAny = "malware:any"
 
 var conceptAlias = map[string]string{"malware": conceptMalwareAny, "gptMalware": conceptMalwareAny}
@@ -611,14 +691,14 @@ func aliasConcept(c string) string {
 }
 
 // rowConcepts builds one row's concept sets (concept -> bucket) for each side,
-// EXACT pairings only, and the worst CVE tier each side assigned. signals are
+// compared pairings only, and the worst CVE tier each side assigned. signals are
 // our fired signal IDs, unmeasured those that fired on their SevUnknown arm,
 // alerts Socket's alert types for the row.
 func rowConcepts(signals []string, unmeasured map[string]bool, scan *intelligence.ArtifactScanSection, alerts []string) (csC, skC map[string]string, csWorst, skWorst int) {
 	csC, skC = map[string]string{}, map[string]string{}
 	for _, id := range signals {
 		m, ok := socketConceptMap[id]
-		if !ok || m.Grade != gradeExact {
+		if !ok || !m.compared() {
 			continue
 		}
 		// A signal on its SevUnknown arm says we could NOT measure the
@@ -790,9 +870,28 @@ func TestSocketMapCoversRegistry(t *testing.T) {
 					"lands in the metadata ratio, where an architecture difference "+
 					"reads as a detector difference", s.ID, m.Grade)
 			}
+			// B8: a grade has a data floor, or it is an assertion.
+			if m.Grade == gradeExact {
+				switch {
+				case m.Measured == nil:
+					t.Errorf("signal %q is EXACT with no recorded agreement — run "+
+						"TestSocketComparison and record its measured counts, or grade it PARTIAL", s.ID)
+				case !(m.Measured.agreement() >= exactMinAgreement) || m.Measured.Both < minCoFire:
+					t.Errorf("signal %q is EXACT at agreement %.2f over %d agreeing rows — EXACT "+
+						"needs >= %.2f over >= %d; grade it PARTIAL",
+						s.ID, m.Measured.agreement(), m.Measured.Both, exactMinAgreement, minCoFire)
+				}
+			}
+			if m.Grade == gradePartia && m.Inferred && m.CoFire < minCoFire {
+				t.Errorf("signal %q is an inferred PARTIAL with %d co-fire rows — a judgement "+
+					"pairing needs >= %d measured rows or grade NONE", s.ID, m.CoFire, minCoFire)
+			}
 		case gradeNone, gradeNoneSt:
 			if len(m.Socket) != 0 {
 				t.Errorf("signal %q graded %s but names Socket alerts %v", s.ID, m.Grade, m.Socket)
+			}
+			if m.Measured != nil || m.Inferred {
+				t.Errorf("signal %q graded %s carries a measurement or Inferred — neither means anything without a pairing", s.ID, m.Grade)
 			}
 		default:
 			t.Errorf("signal %q has no explicit grade", s.ID)
@@ -899,6 +998,9 @@ func TestSocketAlertNamesAreReal(t *testing.T) {
 			declined = append(declined, typ)
 			continue
 		}
+		if _, ok := socketUnprovenPairings[typ]; ok {
+			continue
+		}
 		unmapped = append(unmapped, typ)
 	}
 	sort.Strings(unmapped)
@@ -928,6 +1030,66 @@ func TestSocketAlertNamesAreReal(t *testing.T) {
 	t.Logf("reverse (DECIDED, outside the concept metric like every unmapped alert): "+
 		"%d of %d taxonomy entries are declined product surfaces: %v",
 		len(declined), len(taxonomy), bySurface)
+	for slug := range socketUnprovenPairings {
+		if mentioned[slug] {
+			t.Errorf("%q is in socketUnprovenPairings and also paired in socketConceptMap — pick one", slug)
+		}
+		if _, ok := byType[slug]; !ok {
+			t.Errorf("socketUnprovenPairings names %q, which is not in the taxonomy", slug)
+		}
+	}
+	t.Log(parityLine(byType))
+}
+
+// parityLine is the claim the concept map supports, stated with its
+// denominator: D is every taxonomy alert minus the declined OTHER-product
+// surfaces; an alert counts EXACT when any pairing is EXACT, else PARTIAL
+// (and inferred when every PARTIAL pairing is), else covered outside the
+// registry, else lacking.
+func parityLine(byType map[string]socketAlert) string {
+	best := map[string]mapGrade{}
+	inferredOnly := map[string]bool{}
+	for _, m := range socketConceptMap {
+		for _, slug := range m.Socket {
+			switch {
+			case m.Grade == gradeExact:
+				best[slug] = gradeExact
+			case m.Grade == gradePartia && best[slug] != gradeExact:
+				if best[slug] != gradePartia {
+					inferredOnly[slug] = true
+				}
+				best[slug] = gradePartia
+				inferredOnly[slug] = inferredOnly[slug] && m.Inferred
+			}
+		}
+	}
+	var d, e, p, inf, outside int
+	var lack []string
+	for typ := range byType {
+		if otherProductSurfaces[socketDeclinedSurfaces[typ]] {
+			continue
+		}
+		d++
+		_, reportOnly := chainsawDetectsButDoesNotScore[typ]
+		_, policy := coveredOutsideRegistry[typ]
+		switch {
+		case best[typ] == gradeExact:
+			e++
+		case best[typ] == gradePartia:
+			p++
+			if inferredOnly[typ] {
+				inf++
+			}
+		case reportOnly || policy:
+			outside++
+		default:
+			lack = append(lack, typ)
+		}
+	}
+	sort.Strings(lack)
+	return fmt.Sprintf("parity: %d EXACT / %d PARTIAL (%d inferred) of %d comparable package alerts; "+
+		"%d more covered outside the signal registry (report-only fields, policy DSL); %d lacking: %v",
+		e, p, inf, d, outside, len(lack), lack)
 }
 
 // ─── snapshot types ─────────────────────────────────────────────────────────
@@ -1215,7 +1377,7 @@ func (o sideOutcome) String() string {
 // publishes no verdict, so this IS the judgement call — hence the sweep.
 // maintenanceStateExtra lists maintenance-state signals the concept map
 // cannot name, because Socket has no alert for them.
-var maintenanceStateExtra = map[string]bool{"maint.relocated": true}
+var maintenanceStateExtra = map[string]bool{"maint.relocated": true, "sc.repo_archived": true}
 
 // csMaintenanceConcept reports whether any maintenance-state signal fired:
 // every signal the concept map pairs with Socket's deprecated/unmaintained,
@@ -1254,6 +1416,44 @@ func socketDetected(r socketRow, minSev int) sideOutcome {
 		}
 	}
 	return outCleared
+}
+
+// reportLaneProbes are the lanes whose silence the input probes cannot see:
+// the field a provider writes even when it finds nothing, or the provider's
+// own timing entry. A lane absent on EVERY row never ran, and its signals are
+// unobservable, derived from the corpus rather than listed. rev4 and rev5
+// carried typosquatStatus on 0 of 1,885 rows and the harness printed "0 fired".
+var reportLaneProbes = []struct {
+	Lane  string
+	Ran   func(*intelligence.Report) bool
+	Feeds []string
+}{
+	{"supplyChain.typosquatStatus", func(r *intelligence.Report) bool { return r.SupplyChain.TyposquatStatus != "" },
+		[]string{"sc.typosquat_high", "sc.typosquat_medium", "sc.typosquat_low"}},
+	{"supplyChain.repoLinkStatus", func(r *intelligence.Report) bool { return r.SupplyChain.RepoLinkStatus != "" },
+		[]string{"sc.repo_archived", "sc.repo_missing", "sc.repo_missing_established", "sc.repo_ownership_mismatch"}},
+	{"provider debugtelemetry", func(r *intelligence.Report) bool {
+		for _, pt := range r.Observation.ProviderTimings {
+			if pt.Provider == "debugtelemetry" {
+				return true
+			}
+		}
+		return false
+	}, []string{"cap.debug_access", "cap.telemetry", "cap.dynamic_require"}},
+}
+
+// silentSignalReasons covers the case no probe can: a mapped signal that fired
+// on no row while Socket raised its pairing, on a lane that DID run. Without a
+// reason here TestSocketComparison fails, because that silence is either a
+// measured miss or a lane nobody asked. Measured misses stay in the metric;
+// a reason for a signal that fires is stale and also fails.
+var silentSignalReasons = map[string]string{
+	"sc.http_url_dependency":         "measured miss: registrymetadata ran on every row; counted socket-only",
+	"sc.install_script_eval_encoded": "measured zero: installscripts ran, installScriptKind was never eval_encoded; counted",
+	// Hand-reasoned: nothing in a stored report records the engine commit, so
+	// "the corpus predates the detector" cannot be derived from the data.
+	"sc.import_time_shell":     "rev5's engine ccfb52d5 predates the signal (1045f82f)",
+	"sc.dependency_credential": "rev5's engine ccfb52d5 predates the iocscan indicator (4ce0d1b6)",
 }
 
 type cmpRow struct {
@@ -1374,6 +1574,8 @@ func TestSocketComparison(t *testing.T) {
 	// grade rather than to attribute the silence to the engine — which is the
 	// error F-1 made.
 	treeEvaluated := false
+	laneSawData := map[string]bool{}
+	firedRows := map[string]int{} // signal -> rows it fired on (not on its unknown arm)
 
 	for _, sr := range snap {
 		key := labelKey(sr.Eco, sr.Pkg, sr.Ver)
@@ -1451,7 +1653,7 @@ func TestSocketComparison(t *testing.T) {
 		sort.Strings(row.CSSignals)
 		row.Stratum = stratumOf(lr.Label, cites[key], row.CSResolvable)
 
-		// Concept level. EXACT pairings only; NONE_STRUCTURAL is excluded from
+		// Concept level. Compared pairings only; NONE_STRUCTURAL is excluded from
 		// BOTH sides, because a positive signal has no possible counterpart.
 		// Each concept is tagged with its bucket so the ratios stay separate.
 		for _, a := range sr.Alerts {
@@ -1464,6 +1666,18 @@ func TestSocketComparison(t *testing.T) {
 			conceptSignals = append(append([]string(nil), row.CSSignals...), recovered...)
 			for id := range rUnmeasured {
 				unmeasured[id] = true
+			}
+		}
+		for _, lp := range reportLaneProbes {
+			if lp.Ran(&rep) {
+				laneSawData[lp.Lane] = true
+			}
+		}
+		rowFired := map[string]bool{}
+		for _, id := range conceptSignals {
+			if !unmeasured[id] && !rowFired[id] {
+				rowFired[id] = true
+				firedRows[id]++
 			}
 		}
 		csC, skC, csWorst, skWorst := rowConcepts(conceptSignals, unmeasured, &rep.Scan, skAlertTypes(sr))
@@ -1502,7 +1716,7 @@ func TestSocketComparison(t *testing.T) {
 			"sc.transitive_critical_vuln", "sc.transitive_high_vuln", "sc.transitive_malware",
 		} {
 			unobservable[sig] = "TransitiveSeverity (dependency tree never evaluated)"
-			if m, ok := socketConceptMap[sig]; ok && m.Grade == gradeExact {
+			if m, ok := socketConceptMap[sig]; ok && m.compared() {
 				for _, sk := range m.Socket {
 					unobservableSK[sk] = "TransitiveSeverity"
 				}
@@ -1515,9 +1729,22 @@ func TestSocketComparison(t *testing.T) {
 		}
 		for _, sig := range pr.Feeds {
 			unobservable[sig] = pr.Field
-			if m, ok := socketConceptMap[sig]; ok && m.Grade == gradeExact {
+			if m, ok := socketConceptMap[sig]; ok && m.compared() {
 				for _, sk := range m.Socket {
 					unobservableSK[sk] = pr.Field
+				}
+			}
+		}
+	}
+	for _, lp := range reportLaneProbes {
+		if laneSawData[lp.Lane] {
+			continue
+		}
+		for _, sig := range lp.Feeds {
+			unobservable[sig] = lp.Lane + " absent on every row"
+			if m, ok := socketConceptMap[sig]; ok && m.compared() {
+				for _, sk := range m.Socket {
+					unobservableSK[sk] = lp.Lane
 				}
 			}
 		}
@@ -1545,7 +1772,7 @@ func TestSocketComparison(t *testing.T) {
 				for _, s := range ss {
 					b := bucketMetadata
 					for id, m := range socketConceptMap {
-						if m.Grade != gradeExact {
+						if !m.compared() {
 							continue
 						}
 						hit := false
@@ -1589,7 +1816,7 @@ func TestSocketComparison(t *testing.T) {
 		sort.Strings(us)
 		t.Logf("  %d signal(s) UNOBSERVABLE in this build — their silence says NOTHING", len(us))
 		for _, s := range us {
-			t.Logf("    %-34s input %q had data on no row", s, unobservable[s])
+			t.Logf("    %-34s %s", s, unobservable[s])
 		}
 		var sk []string
 		for s := range unobservableSK {
@@ -1600,6 +1827,111 @@ func TestSocketComparison(t *testing.T) {
 		t.Logf("  cannot be counted as a Chainsaw blind spot: %s", strings.Join(sk, ", "))
 		t.Log("  This is the gate F-1 needed. Without it, a dormant provider reads as a")
 		t.Log("  product defect.")
+	}
+	t.Log("")
+
+	// ─── THE LANE GATE (B7) ─────────────────────────────────────────────
+	// Every signal with a Socket pairing must fire on at least one row, or be
+	// unobservable with a reason, or carry a silentSignalReasons entry. A
+	// mapped signal that is silent everywhere while Socket raises its alert
+	// is otherwise indistinguishable from a lane that was never asked.
+	pcRows := map[string]int{} // signal -> rows where Socket raised a paired alert
+	for i := range ledger {
+		raised := map[string]bool{}
+		for _, a := range skAlertTypes(ledger[i].SK) {
+			raised[a] = true
+		}
+		for id, m := range socketConceptMap {
+			for _, sk := range m.Socket {
+				if raised[sk] {
+					pcRows[id]++
+					break
+				}
+			}
+		}
+	}
+	var mapped []string
+	for id, m := range socketConceptMap {
+		if len(m.Socket) > 0 {
+			mapped = append(mapped, id)
+		}
+	}
+	sort.Strings(mapped)
+	silent := map[string]string{}
+	t.Log("LANE GATE — every Socket-paired signal fired, or says why it did not")
+	for _, id := range mapped {
+		_, unobs := unobservable[id]
+		why, hasWhy := silentSignalReasons[id]
+		switch {
+		case firedRows[id] > 0 && unobs:
+			t.Errorf("%s fired on %d rows but is declared unobservable (%s) — the probe is wrong",
+				id, firedRows[id], unobservable[id])
+		case firedRows[id] > 0 && hasWhy:
+			t.Errorf("%s fired on %d rows; its silentSignalReasons entry is stale — delete it", id, firedRows[id])
+		case firedRows[id] > 0, unobs:
+		case pcRows[id] == 0:
+			unobservable[id] = "no positive control: neither side fired on any row"
+		case hasWhy:
+			silent[id] = why
+			t.Logf("  %-34s silent, Socket %d rows: %s", id, pcRows[id], why)
+		default:
+			t.Errorf("%s fired on NO row while Socket raised %v on %d, and no probe or "+
+				"silentSignalReasons entry explains it. A lane that never ran reads here as "+
+				"\"0 fired\" — add a reportLaneProbes entry if it did not run, or record "+
+				"the measured miss in silentSignalReasons", id, socketConceptMap[id].Socket, pcRows[id])
+		}
+	}
+	t.Log("")
+
+	// ─── MEASURED AGREEMENT PER COMPARED PAIRING (B8) ────────────────────
+	t.Log("MEASURED AGREEMENT — 2b/(2b+cs+sk) per compared pairing; EXACT needs")
+	t.Logf("  >= %.2f over >= %d agreeing rows. Paste a changed tally into Measured.", exactMinAgreement, minCoFire)
+	measuredOut := map[string]agreeCounts{}
+	for _, id := range mapped {
+		m := socketConceptMap[id]
+		if !m.compared() {
+			continue
+		}
+		concepts := map[string]bool{}
+		for _, sk := range m.Socket {
+			if m.Bucket == bucketAdvisory {
+				concepts[conceptCVEAny] = true
+			} else {
+				concepts[aliasConcept(sk)] = true
+			}
+		}
+		anyIn := func(ss []string) bool {
+			for _, c := range ss {
+				if concepts[c] {
+					return true
+				}
+			}
+			return false
+		}
+		var a agreeCounts
+		for i := range ledger {
+			l := &ledger[i]
+			ours := anyIn(l.ConceptBoth) || anyIn(l.ConceptCS)
+			theirs := anyIn(l.ConceptBoth) || anyIn(l.ConceptSK)
+			switch {
+			case ours && theirs:
+				a.Both++
+			case ours:
+				a.CSOnly++
+			case theirs:
+				a.SKOnly++
+			}
+		}
+		measuredOut[id] = a
+		rec := "none"
+		if m.Measured != nil {
+			rec = fmt.Sprintf("%v", *m.Measured)
+		}
+		t.Logf("  %-30s %-7s &agreeCounts{%d, %d, %d} agr=%.2f  recorded %s",
+			id, m.Grade, a.Both, a.CSOnly, a.SKOnly, a.agreement(), rec)
+		if m.Grade == gradeExact && (!(a.agreement() >= exactMinAgreement) || a.Both < minCoFire) {
+			t.Errorf("%s is EXACT but measures %.2f over %d agreeing rows on this corpus", id, a.agreement(), a.Both)
+		}
 	}
 	t.Log("")
 	sort.Slice(ledger, func(i, j int) bool {
@@ -1931,15 +2263,16 @@ func TestSocketComparison(t *testing.T) {
 	t.Log("")
 
 	// ─── 7. CONCEPT-LEVEL FIDELITY, PER BUCKET ───────────────────────────
-	t.Log("CONCEPT-LEVEL FIDELITY (EXACT pairings only; positive signals and")
+	t.Log("CONCEPT-LEVEL FIDELITY (compared pairings: EXACT, and PARTIAL demoted on a")
+	t.Log("measurement; positive signals and")
 	t.Log("transitive rollups excluded structurally, not thresholded out).")
 	t.Log("Three buckets, NEVER one ratio — mixing them reports architecture as")
 	t.Log("detector quality:")
 	t.Log("  metadata  both sides reach it from registry metadata: a real comparison")
 	t.Log("  artifact  needs package BYTES. Our public intelligence path is")
 	t.Log("            metadata-only (artifact providers declare NeedsArtifact and are")
-	t.Log("            skipped) and cap.* additionally needs CHAINSAW_CAPABILITY_SCAN=1")
-	t.Log("            and is npm-only. Socket-only here is ARCHITECTURE, not blindness.")
+	t.Log("            skipped); cap.* rides those bytes on every ecosystem, no flag.")
+	t.Log("            Socket-only here is ARCHITECTURE, not blindness.")
 	t.Log("  advisory  CVE presence, tiers collapsed (see cvsTierOfSignal)")
 	t.Logf("  %-10s %8s %12s %12s %10s", "bucket", "both", "chainsaw_only", "socket_only", "agreement")
 	conceptOut := map[string]map[string]int{}
@@ -2136,6 +2469,8 @@ func TestSocketComparison(t *testing.T) {
 		"unmapped_socket_alerts":           unmapped,
 		"unobservable_signals":             unobservable,
 		"unobservable_socket_alerts":       unobservableSK,
+		"silent_signals":                   silent,
+		"measured_pairings":                measuredOut,
 	}
 	sb, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {

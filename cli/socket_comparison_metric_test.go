@@ -82,9 +82,14 @@ func TestBehaviouralViewExcludesFeedKnownMalicious(t *testing.T) {
 
 // One sc.known_malicious is one finding. Mapped to both `malware` and
 // `gptMalware`, it scored agreement on one and Chainsaw-only on the other
-// whenever Socket raised just one of them.
+// whenever Socket raised just one of them. gptMalware is a declined LLM
+// verdict since 2026-10-09, so alone it meets nothing on Socket's side.
 func TestKnownMaliciousIsOneConcept(t *testing.T) {
-	for _, alerts := range [][]string{{"malware"}, {"gptMalware"}, {"malware", "gptMalware"}} {
+	cs, sk, _, _ := rowConcepts([]string{"sc.known_malicious"}, nil, &intelligence.ArtifactScanSection{}, []string{"gptMalware"})
+	if len(cs) != 1 || len(sk) != 0 {
+		t.Fatalf("gptMalware alone: ours=%v theirs=%v; want our malware concept and nothing of theirs", cs, sk)
+	}
+	for _, alerts := range [][]string{{"malware"}, {"malware", "gptMalware"}} {
 		cs, sk, _, _ := rowConcepts([]string{"sc.known_malicious"}, nil, &intelligence.ArtifactScanSection{}, alerts)
 		if len(cs) != 1 || len(sk) != 1 {
 			t.Fatalf("alerts %v: ours=%v theirs=%v; want exactly one malware concept on each side", alerts, cs, sk)
