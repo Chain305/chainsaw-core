@@ -77,8 +77,8 @@ func TestCeilingBypassIsClosed(t *testing.T) {
 	const rollup = 73 // real value: npm|webpack|5.111.0, prod 2026-09-21
 
 	withCompound, pinnedWith := applyMaxImpactCeiling(rollup, prim,
-		map[string]FiredSignal{CompoundSCEnvNetInstall: {ID: CompoundSCEnvNetInstall, Compound: true}})
-	without, pinnedWithout := applyMaxImpactCeiling(rollup, prim, nil)
+		map[string]FiredSignal{CompoundSCEnvNetInstall: {ID: CompoundSCEnvNetInstall, Compound: true}}, nil)
+	without, pinnedWithout := applyMaxImpactCeiling(rollup, prim, nil, nil)
 
 	if withCompound > without {
 		t.Errorf("INVERSION: compound-present scored %d, better than compound-absent %d. "+
@@ -113,8 +113,8 @@ func TestMaxImpactCeilingIsMonotoneInCompounds(t *testing.T) {
 		CompoundSCEnvNetInstall: {ID: CompoundSCEnvNetInstall, Compound: true},
 	}
 	for rollup := 0; rollup <= 100; rollup++ {
-		with, _ := applyMaxImpactCeiling(rollup, prim, comp)
-		without, _ := applyMaxImpactCeiling(rollup, prim, nil)
+		with, _ := applyMaxImpactCeiling(rollup, prim, comp, nil)
+		without, _ := applyMaxImpactCeiling(rollup, prim, nil, nil)
 		if with > without {
 			t.Fatalf("rollup %d: compound-present %d > compound-absent %d", rollup, with, without)
 		}
@@ -236,10 +236,10 @@ func TestAuditProdCorpus(t *testing.T) {
 			}
 			// Stored r.D IS the uncapped rollup: with a compound present the
 			// real applyMaxImpactCeiling returns `overall` untouched.
-			if live, _ := applyMaxImpactCeiling(r.D, prim, comp); live != r.D {
+			if live, _ := applyMaxImpactCeiling(r.D, prim, comp, nil); live != r.D {
 				t.Fatalf("%s: compound path should be a no-op, got %d vs %d", r.K, live, r.D)
 			}
-			corrected, pinner := applyMaxImpactCeiling(r.D, prim, nil)
+			corrected, pinner := applyMaxImpactCeiling(r.D, prim, nil, nil)
 			if corrected < r.D {
 				ceilWouldBind++
 				// A Critical signal already forces a non-Allow verdict in
@@ -269,7 +269,7 @@ func TestAuditProdCorpus(t *testing.T) {
 			}
 			provSCMoved++
 			withoutOverall := ComputeOverallWithWeights(r.cats(&less), nil)
-			withoutOverall, _ = applyMaxImpactCeiling(withoutOverall, prim, comp)
+			withoutOverall, _ = applyMaxImpactCeiling(withoutOverall, prim, comp, nil)
 			if withoutOverall != r.D {
 				provMoved++
 				if band(withoutOverall) != band(r.D) {

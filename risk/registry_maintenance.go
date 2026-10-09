@@ -164,6 +164,7 @@ func init() {
 			return true, "No commits in over a year.",
 				map[string]any{"lastCommitAt": in.LastRepoCommitAt.UTC().Format(time.RFC3339)}
 		},
+		DampEstablished: true,
 	})
 
 	// Info, weight 0 since 2026-10-02 (was medium, -15). Re-scored at -15,
@@ -269,6 +270,7 @@ func init() {
 			}
 			return true, "Package has only one maintainer.", nil
 		},
+		DampEstablished: true,
 	})
 
 	// Positive signal.

@@ -97,6 +97,7 @@ func init() {
 			return true, "This package is on the known-malicious index — do not install.",
 				map[string]any{"malwareId": in.MalwareID, "summary": in.MalwareSummary}
 		},
+		TakeoverIndicator: true,
 	})
 
 	// MaxImpact tier: HIGH-confidence harmful (30-40). High-severity matched
@@ -140,6 +141,7 @@ func init() {
 			return true, "Name is highly similar to a popular package.",
 				map[string]any{"similarTo": in.TyposquatSimilarTo}
 		},
+		DampEstablished: true,
 	})
 
 	// MaxImpact tier: MEDIUM-confidence soft signal — NO ceiling. The -20
@@ -162,6 +164,7 @@ func init() {
 			return true, "Name is similar to a popular package.",
 				map[string]any{"similarTo": in.TyposquatSimilarTo}
 		},
+		DampEstablished: true,
 	})
 
 	register(Signal{
@@ -177,6 +180,7 @@ func init() {
 			return true, "Name is weakly similar to a popular package.",
 				map[string]any{"similarTo": in.TyposquatSimilarTo}
 		},
+		DampEstablished: true,
 	})
 
 	// Publisher-change alone is a strong signal (account takeover is the
@@ -221,6 +225,7 @@ func init() {
 			}
 			return true, "Publisher identity changed between versions.", nil
 		},
+		TakeoverIndicator: true,
 	})
 
 	// The POM-ecosystem context signal. Deliberately NOT a takeover claim:
@@ -270,6 +275,7 @@ func init() {
 			}
 			return true, "Install-time lifecycle script fetches remote content.", nil
 		},
+		TakeoverIndicator: true,
 	})
 
 	// sc.install_script_eval_encoded — an install script whose body carries
@@ -320,6 +326,7 @@ func init() {
 			}
 			return true, "Install script decodes and evaluates encoded content.", nil
 		},
+		TakeoverIndicator: true,
 	})
 
 	// sc.exfil_sink_used — the package's own shipping code names an exfil
@@ -368,6 +375,7 @@ func init() {
 			}
 			return true, "Shipping code embeds an exfiltration endpoint and sends from the same file.", nil
 		},
+		TakeoverIndicator: true,
 	})
 
 	// sc.import_time_shell — a Python module runs a shell command at top
@@ -400,6 +408,7 @@ func init() {
 			}
 			return true, "Module-level code spawns a shell at import time.", nil
 		},
+		TakeoverIndicator: true,
 	})
 
 	// Two narrow indicators from reading the bytes of malware every other
@@ -431,6 +440,7 @@ func init() {
 			}
 			return true, "Credential in a dependency spec: " + in.DependencyCredential, nil
 		},
+		TakeoverIndicator: true,
 	})
 	// sc.app_credential_exfil — @yancyyu/agentcli read Lark and Codex/Claude
 	// credential stores and POSTed them. Narrow path list, same-file send.
@@ -448,6 +458,7 @@ func init() {
 			}
 			return true, "Reads and sends: " + in.AppCredentialSend, nil
 		},
+		TakeoverIndicator: true,
 	})
 
 	// Plain install script (no network), split into an OBSERVATION and an
@@ -587,6 +598,7 @@ func init() {
 			}
 			return true, "Declared source repo owner does not match the publisher.", nil
 		},
+		TakeoverIndicator: true,
 	})
 
 	// MaxImpact tier: MEDIUM-confidence harmful (50-60). Archived repos
@@ -618,6 +630,7 @@ func init() {
 			}
 			return true, "Source repository is archived (read-only).", nil
 		},
+		DampEstablished: true,
 	})
 
 	// MaxImpact tier: MEDIUM-confidence harmful (50-60). Missing repo is
@@ -637,6 +650,7 @@ func init() {
 			}
 			return true, "Declared source repository is unreachable or deleted.", nil
 		},
+		DampEstablished: true,
 	})
 
 	// The same fact on an ESTABLISHED package, priced but without the warn
@@ -660,6 +674,7 @@ func init() {
 			}
 			return true, "Declared source repository is unreachable or deleted.", nil
 		},
+		DampEstablished: true,
 	})
 
 	// Positive signal — reward verifiable provenance.
@@ -786,6 +801,7 @@ func init() {
 			return true, "Youngest maintainer account is brand new.",
 				map[string]any{"days": in.MaintainerAccountAgeDays}
 		},
+		TakeoverIndicator: true,
 	})
 
 	register(Signal{
@@ -802,6 +818,7 @@ func init() {
 			return true, "Youngest maintainer account is recent.",
 				map[string]any{"days": in.MaintainerAccountAgeDays}
 		},
+		TakeoverIndicator: true,
 	})
 
 	register(Signal{
@@ -836,6 +853,7 @@ func init() {
 			}
 			return true, "Author identity does not resolve to a registry account.", nil
 		},
+		TakeoverIndicator: true,
 	})
 
 	// Git-URL dependency: the resolved version bypasses the registry hash
@@ -936,6 +954,7 @@ func init() {
 			return true, fmt.Sprintf("%d malicious descendant(s) reachable via dependencies.", in.TransitiveMalwareCount),
 				map[string]any{"count": in.TransitiveMalwareCount}
 		},
+		TakeoverIndicator: true,
 	})
 
 	// ---- cross-version diff signals ----
@@ -978,6 +997,7 @@ func init() {
 			return true, "Shell execution appeared in this version.",
 				map[string]any{"priorVersion": in.PriorVersion}
 		},
+		TakeoverIndicator: true,
 	})
 
 	register(Signal{
@@ -994,6 +1014,7 @@ func init() {
 			return true, "Filesystem access appeared in this version.",
 				map[string]any{"priorVersion": in.PriorVersion}
 		},
+		TakeoverIndicator: true,
 	})
 
 	register(Signal{
@@ -1010,6 +1031,7 @@ func init() {
 			return true, "Environment-variable access appeared in this version.",
 				map[string]any{"priorVersion": in.PriorVersion}
 		},
+		TakeoverIndicator: true,
 	})
 
 }

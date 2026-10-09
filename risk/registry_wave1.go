@@ -94,5 +94,6 @@ func init() {
 			return true, "Registry-side package.json differs from the tarball — possible metadata-tampering attack.",
 				map[string]any{"divergentFields": in.ManifestConfusionFields}
 		},
+		TakeoverIndicator: true,
 	})
 }

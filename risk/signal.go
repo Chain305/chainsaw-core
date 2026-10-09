@@ -55,6 +55,19 @@ type Signal struct {
 	// SC_KNOWN_MALICIOUS to weight +1000 to suppress enforcement of
 	// the known-malicious index.
 	NotTunable bool
+	// DampEstablished opts the signal into the established-package damper
+	// (established.go): on an established package, with no
+	// TakeoverIndicator fired, its ceiling is dropped and its weight halved.
+	// Default false, so a new signal is never softened by accident. Set it
+	// only on hygiene evidence that popularity or a long release history
+	// refutes; never on malware, compromise, vulnerability or licence
+	// signals. TestDampEstablishedSet pins the list.
+	DampEstablished bool
+	// TakeoverIndicator marks a signal whose firing suspends the damper for
+	// the whole evaluation: an established package showing it is the
+	// account-takeover scenario, where every hygiene signal must count in
+	// full. TestTakeoverIndicatorSet pins the list.
+	TakeoverIndicator bool
 }
 
 // maxImpactWarnTop is the tightest ceiling a signal can declare and still

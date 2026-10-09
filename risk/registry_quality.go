@@ -81,6 +81,7 @@ func init() {
 			return true, "One or more version-publishing anomalies detected.",
 				map[string]any{"flags": in.VersionAnomalyFlags}
 		},
+		DampEstablished: true,
 	})
 
 	// Informational: the package ships minified/bundled JS. This is not

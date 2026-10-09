@@ -77,6 +77,11 @@ type Options struct {
 	// when the flag is off, so the evaluator hot path stays free of
 	// per-signal map lookups in the default deployment.
 	SignalWeightOverrides map[string]int
+	// NoEstablishedDamper turns the established-package damper off. It
+	// exists for measurement: the replay in
+	// docs/PLANS_INTELLIGENCE.md#plan-established-damper scores every row
+	// twice through the same code and counts the verdicts the damper moved.
+	NoEstablishedDamper bool
 }
 
 func (o Options) now() time.Time {
@@ -170,9 +175,17 @@ func EvaluatePackage(in Input, opts Options) *Evaluation {
 
 	compoundFired := runCompoundRules(in, fired, opts.SignalWeightOverrides)
 
+	// After the instant-block check and the compound rules, which read only
+	// which signals fired: the damper changes weights and ceilings, never
+	// the fired set.
+	var damped map[string]bool
+	if !opts.NoEstablishedDamper {
+		damped = dampEstablished(in, fired, compoundFired, opts.now())
+	}
+
 	catScores := computeCategoryScores(fired, compoundFired, in)
 	overall := ComputeOverallWithWeights(catScores, opts.CategoryWeights)
-	overall, ceilingSignal := applyMaxImpactCeiling(overall, fired, compoundFired)
+	overall, ceilingSignal := applyMaxImpactCeiling(overall, fired, compoundFired, damped)
 	minScore, worst := minCategoryScore(catScores)
 
 	direct := Score{
@@ -968,7 +981,7 @@ func absF(f float64) float64 {
 // left no trace, so the breakdown a user reads does not add up to the
 // composite they are shown and there is nothing on the page that says why.
 // The empty string means the ceiling did not bind and nothing needs saying.
-func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSignal) (int, string) {
+func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSignal, damped map[string]bool) (int, string) {
 	// THE COMPOUND BYPASS IS GONE, and the rationale it carried was wrong.
 	//
 	// This function used to open `if len(compound) > 0 { return overall, "" }`,
@@ -1014,6 +1027,9 @@ func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSig
 		}
 	}
 	for id := range primitives {
+		if damped[id] {
+			continue // established-package damper: this ceiling no longer applies
+		}
 		if sig, ok := Registry[id]; ok {
 			consider(id, sig.MaxImpact)
 		}
