@@ -10,13 +10,16 @@ package intelligence
 // scheduled to land next).
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/chain305/chainsaw-core/codesmell"
@@ -48,7 +51,10 @@ func (p *hiddenUnicodeProvider) NeedsArtifact() bool { return true }
 // 2: a .gem's data.tar.gz is now mapped, so rubygems sees its code.
 // 3 (2026-10-03): bidi in minified bundles and test fixtures, and ZWSP word
 // breaks in unspaced scripts, are suppressed.
-const hiddenUnicodeAnalyzerVersion = 3
+// 4 (2026-10-09): emoji ZWJ sequences, directional marks in number/date formats, lone
+// characters in entity tables, and isolated tag characters in test vectors
+// are suppressed.
+const hiddenUnicodeAnalyzerVersion = 4
 
 func (p *hiddenUnicodeProvider) AnalyzerVersion() int { return hiddenUnicodeAnalyzerVersion }
 
@@ -183,6 +189,7 @@ func SuppressBenignHiddenUnicode(r *hiddenunicode.Result, files map[string][]byt
 		isCatalog := isI18n || isMessageCatalogFile(path)
 		body := files[path]
 		bidiInert := bidiCannotDeceive(path, body)
+		tagFixture := tagCannotSmuggle(path)
 
 		// Density backstop (anti-bypass): a localized catalog carries a
 		// handful of lone word-break aids; a byte-encoded steganographic
@@ -217,7 +224,8 @@ func SuppressBenignHiddenUnicode(r *hiddenunicode.Result, files map[string][]byt
 			// inside an emoji flag sequence is a real subdivision-flag emoji.
 			// Neither is an executable payload, so volume alone cannot
 			// weaponise them. Checked before the density gate.
-			if structurallyBenignHiddenUnicode(h, body) || (bidiInert && h.Kind == hiddenunicode.KindBidiOverride) {
+			if structurallyBenignHiddenUnicode(h, body) || (bidiInert && h.Kind == hiddenunicode.KindBidiOverride) ||
+				(tagFixture && isolatedTag(h, body)) {
 				suppressed++
 				continue
 			}
@@ -281,6 +289,21 @@ func benignHiddenUnicodeHit(h hiddenunicode.Hit, body []byte, isI18n, isCatalog 
 		if zeroWidthRunLength(body, h.Offset) > HiddenUnicodeMaxBenignRun {
 			return false
 		}
+		// Rule 4 — the whole value of a mapping entry: an HTML entity table
+		// (`"NegativeMediumSpace;": "\u200b"`, webpack and @sveltejs/kit), a
+		// character-name table (`lrm: "\u200e"`, mammoth), a JSON fixture.
+		// Density-gated like the rules below, so a table encoding a payload
+		// one invisible character per entry stays armed.
+		if soleStringMappingValue(body, h.Offset) {
+			return true
+		}
+		// Rule 5 — Unicode table data: a range endpoint (`\u180e\u200b-\u200f`,
+		// xregexp's Format category) or one member of a set of space
+		// characters (`" \u00a0\u00ad\u200b\u2060\u3000"`, libphonenumber).
+		// Both neighbours are themselves non-ASCII table members.
+		if unicodeTableMember(body, h.Offset) {
+			return true
+		}
 		// Rule 2 — word-break aid inside a localized/generated catalog's
 		// string VALUE. Requires both the file shape AND the byte position;
 		// a zero-width in a catalog's KEY or outside any string still fires.
@@ -317,7 +340,8 @@ func benignHiddenUnicodeHit(h hiddenunicode.Hit, body []byte, isI18n, isCatalog 
 func structurallyBenignHiddenUnicode(h hiddenunicode.Hit, body []byte) bool {
 	switch h.Kind {
 	case hiddenunicode.KindZeroWidth:
-		return identifierCharsetZeroWidth(h, body) || unspacedScriptWordBreak(h, body)
+		return identifierCharsetZeroWidth(h, body) || unspacedScriptWordBreak(h, body) ||
+			emojiZWJSequence(h, body) || formatDirectionMark(h, body)
 	case hiddenunicode.KindTag:
 		return emojiTagSequence(body, h.Offset)
 	default:
@@ -390,7 +414,34 @@ func identifierCharsetZeroWidth(h hiddenunicode.Hit, body []byte) bool {
 	if h.Rune != 0x200C && h.Rune != 0x200D {
 		return false
 	}
-	return offsetInRegexCharClass(body, h.Offset) || zeroWidthInUnicodeRangeContext(body, h.Offset)
+	return offsetInRegexCharClass(body, h.Offset) || zeroWidthInUnicodeRangeContext(body, h.Offset) ||
+		identifierCharComparison(body, h.Offset)
+}
+
+// identifierCharComparison reports ZWNJ/ZWJ as the whole of a string a lexer
+// compares a character against, in the same expression that tests the other
+// ECMAScript identifier punctuation (`c === "$" || c === "_" || c === "\u200c"`,
+// styled-jsx). Requiring the `"_"`/`"$"` test keeps a lone comparison
+// against an invisible string, which reads as `=== ""`, armed.
+func identifierCharComparison(body []byte, off int) bool {
+	if off <= 0 || off >= len(body) {
+		return false
+	}
+	q := body[off-1]
+	if q != '"' && q != '\'' {
+		return false
+	}
+	_, sz := utf8.DecodeRune(body[off:])
+	if off+sz >= len(body) || body[off+sz] != q {
+		return false
+	}
+	window := tailBytes(body, off, 60)
+	for _, lit := range []string{`"_"`, `'_'`, `"$"`, `'$'`} {
+		if bytes.Contains(window, []byte(lit)) {
+			return true
+		}
+	}
+	return false
 }
 
 // uniRangeWindowRunes / uniRangeMinNonASCII tune zeroWidthInUnicodeRangeContext.
@@ -782,4 +833,203 @@ func textFilesFor(h *ArtifactHandle) map[string][]byte {
 		return legacyWalkHiddenUnicodeText(h)
 	}
 	return res.Files.SelectLower(artifactmap.WantsHiddenUnicodeText)
+}
+
+// The shapes below were measured on 2026-10-09 across the 203 production
+// reports carrying hidden-unicode hits, none of them malicious: svelte,
+// webpack, @sveltejs/kit, mammoth, styled-jsx, django, pub intl,
+// go-playground/locales, unicode-width and idna among them. Each is a
+// position proof, never a file-type or package allow-list.
+
+// emojiZWJSequence reports a ZERO WIDTH JOINER that joins two emoji, the way
+// Unicode builds 👩‍🔬 (woman + ZWJ + microscope). unicode-width ships the
+// Unicode emoji test file; styled-jsx bundles an emoji list whose leading
+// code points are written as \uXXXX escapes. A payload cannot sit there: the
+// joiner must be followed by an emoji and preceded by one (or by its
+// variation selector, or by the escape that spells it).
+func emojiZWJSequence(h hiddenunicode.Hit, body []byte) bool {
+	if h.Rune != 0x200D || h.Offset <= 0 || h.Offset >= len(body) {
+		return false
+	}
+	_, sz := utf8.DecodeRune(body[h.Offset:])
+	after, _ := utf8.DecodeRune(body[h.Offset+sz:])
+	if !isPictographic(after) && !emojiEscape(unicodeEscapeHead.FindSubmatch(body[h.Offset+sz:])) {
+		return false
+	}
+	before, _ := utf8.DecodeLastRune(body[:h.Offset])
+	return isPictographic(before) || before == 0xFE0F || emojiEscape(unicodeEscapeTail.FindSubmatch(tailBytes(body, h.Offset, 12)))
+}
+
+var (
+	unicodeEscapeTail = regexp.MustCompile(`\\(?:u([0-9A-Fa-f]{4})|u\{([0-9A-Fa-f]{1,6})\}|U([0-9A-Fa-f]{8}))$`)
+	unicodeEscapeHead = regexp.MustCompile(`^\\(?:u([0-9A-Fa-f]{4})|u\{([0-9A-Fa-f]{1,6})\}|U([0-9A-Fa-f]{8}))`)
+)
+
+// emojiEscape reports an escape match whose value is an emoji or a UTF-16
+// surrogate half (how JS and JSON spell astral emoji, `\uD83C\uDFC3`).
+func emojiEscape(m [][]byte) bool {
+	if len(m) < 2 {
+		return false
+	}
+	for _, g := range m[1:] {
+		if len(g) == 0 {
+			continue
+		}
+		v, err := strconv.ParseUint(string(g), 16, 32)
+		if err != nil {
+			return false
+		}
+		r := rune(v)
+		return (r >= 0xD800 && r <= 0xDFFF) || r == 0xFE0F || isPictographic(r)
+	}
+	return false
+}
+
+func tailBytes(body []byte, off, n int) []byte {
+	if off < n {
+		return body[:off]
+	}
+	return body[off-n : off]
+}
+
+// isPictographic approximates Unicode Extended_Pictographic: the emoji
+// blocks, plus the symbol and arrow blocks emoji sequences use (↔, ♀, ⚕).
+func isPictographic(r rune) bool {
+	switch {
+	case r >= 0x1F000 && r <= 0x1FAFF, r >= 0x2600 && r <= 0x27BF,
+		r >= 0x2190 && r <= 0x21FF, r >= 0x2300 && r <= 0x23FF,
+		r >= 0x2B00 && r <= 0x2BFF, r >= 0x25A0 && r <= 0x25FF:
+		return true
+	}
+	switch r {
+	case 0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139, 0x24C2, 0x2934, 0x2935, 0x3030, 0x303D, 0x3297, 0x3299:
+		return true
+	}
+	return false
+}
+
+// formatDirectionMark reports a LEFT-TO-RIGHT or RIGHT-TO-LEFT MARK used the
+// way locale data uses it: beside a digit, a sign or separator of a number
+// or date pattern, or a right-to-left letter (`"\u200e-1"`, `'d\u200f/M\u200f/y'`
+// in django and pub intl; `"\u200f-"` in go-playground/locales). LRM and RLM
+// are not among the Trojan Source controls (the overrides and isolates,
+// which stay armed). A mark between two ASCII letters, or in a run, is not
+// covered.
+func formatDirectionMark(h hiddenunicode.Hit, body []byte) bool {
+	if (h.Rune != 0x200E && h.Rune != 0x200F) || h.Offset <= 0 || h.Offset >= len(body) {
+		return false
+	}
+	if zeroWidthInsideAsciiWord(body, h.Offset) || zeroWidthRunLength(body, h.Offset) > 1 {
+		return false
+	}
+	before, _ := utf8.DecodeLastRune(body[:h.Offset])
+	_, sz := utf8.DecodeRune(body[h.Offset:])
+	after, _ := utf8.DecodeRune(body[h.Offset+sz:])
+	if formatNeighbour(before) || formatNeighbour(after) {
+		return true
+	}
+	// `"4.3K\u200f"`: a compact number, the digit a couple of runes back.
+	return digitOrRTLWithin(body, h.Offset, 3)
+}
+
+func formatNeighbour(r rune) bool {
+	if unicode.IsDigit(r) || isRightToLeftRune(r) || unicode.Is(unicode.Sm, r) {
+		return true
+	}
+	return strings.ContainsRune("-+/%.,:;() ", r)
+}
+
+// digitOrRTLWithin reports a digit or right-to-left rune within n runes
+// before off.
+func digitOrRTLWithin(body []byte, off, n int) bool {
+	i := off
+	for k := 0; k < n && i > 0; k++ {
+		r, sz := utf8.DecodeLastRune(body[:i])
+		if unicode.IsDigit(r) || isRightToLeftRune(r) {
+			return true
+		}
+		i -= sz
+	}
+	return false
+}
+
+func isRightToLeftRune(r rune) bool {
+	return (r >= 0x0590 && r <= 0x08FF) || (r >= 0xFB1D && r <= 0xFDFF) || (r >= 0xFE70 && r <= 0xFEFF)
+}
+
+// soleStringMappingValue reports an invisible character that is the whole
+// content of a quoted string which is the value of a mapping entry
+// (`key: "X"`, `"key": "X"`). Only the value position counts: the same
+// string compared against (`=== "X"`) reads as an empty-string check to a
+// reviewer, which is the deception, and stays armed.
+func soleStringMappingValue(body []byte, off int) bool {
+	if off <= 0 || off >= len(body) {
+		return false
+	}
+	q := body[off-1]
+	if q != '"' && q != '\'' && q != '`' {
+		return false
+	}
+	_, sz := utf8.DecodeRune(body[off:])
+	if off+sz >= len(body) || body[off+sz] != q {
+		return false
+	}
+	i := off - 2
+	for i >= 0 && (body[i] == ' ' || body[i] == '\t') {
+		i--
+	}
+	return i >= 0 && body[i] == ':'
+}
+
+// tagCannotSmuggle reports a data file in a test or vendor directory, where
+// Unicode conformance vectors legitimately carry tag characters: idna ships
+// the UTS #46 test file, whose inputs include isolated U+E0037 and U+E0040.
+func tagCannotSmuggle(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".txt", ".json", ".yaml", ".yml", ".toml", ".xml", ".csv", ".tsv":
+		return codesmell.IsLikelyTestOrVendor(path)
+	}
+	return false
+}
+
+// isolatedTag reports a tag character with no tag character beside it. Tag
+// smuggling spells text one tag per ASCII character, so it needs a run; a
+// lone tag in a test vector carries nothing.
+func isolatedTag(h hiddenunicode.Hit, body []byte) bool {
+	if h.Kind != hiddenunicode.KindTag || h.Offset < 0 || h.Offset >= len(body) {
+		return false
+	}
+	isTag := func(r rune) bool { return r >= 0xE0000 && r <= 0xE007F }
+	before, _ := utf8.DecodeLastRune(body[:h.Offset])
+	_, sz := utf8.DecodeRune(body[h.Offset:])
+	after, _ := utf8.DecodeRune(body[h.Offset+sz:])
+	return !isTag(before) && !isTag(after)
+}
+
+// unicodeTableMember reports a zero-width written as data in a Unicode
+// character table: a range endpoint (`X-\u200b` or `\u200b-Y` with X or Y
+// non-ASCII) or a member of a run of non-ASCII space and format characters
+// (`\u00ad\u200b\u2060`). A payload in ASCII code has ASCII neighbours.
+func unicodeTableMember(body []byte, off int) bool {
+	if off <= 0 || off >= len(body) {
+		return false
+	}
+	before, bsz := utf8.DecodeLastRune(body[:off])
+	_, sz := utf8.DecodeRune(body[off:])
+	after, asz := utf8.DecodeRune(body[off+sz:])
+	tableRune := func(r rune) bool { return r >= 0x80 && r != utf8.RuneError && !(r >= 0x200B && r <= 0x200F) }
+	if after == '-' && tableRune(before) && off+sz+asz < len(body) {
+		next, _ := utf8.DecodeRune(body[off+sz+asz:])
+		if next >= 0x80 && next != utf8.RuneError {
+			return true
+		}
+	}
+	if before == '-' && off-bsz > 0 {
+		prev, _ := utf8.DecodeLastRune(body[:off-bsz])
+		if tableRune(prev) {
+			return true
+		}
+	}
+	spaceOrFormat := func(r rune) bool { return tableRune(r) && (unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)) }
+	return spaceOrFormat(before) && spaceOrFormat(after)
 }
