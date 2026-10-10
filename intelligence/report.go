@@ -1617,6 +1617,11 @@ func (r *Report) MatcherSupersededForRecompute() bool {
 // is provisional, not a registry answer: see Report.Provisional.
 const WarnDownloadsQueued = "downloads_queued"
 
+// WarnMalwareFeedNotLoaded marks a malware-index MISS taken before the
+// first feed sync finished. The status is left empty rather than "clean",
+// and the report is provisional so it is rescanned once the feed is in.
+const WarnMalwareFeedNotLoaded = "malware_feed_not_loaded"
+
 // provisionalBackoff is how long a provisional report counts as fresh, in
 // place of the 24h staleness window, by its ProvisionalStreak: 15m after the
 // first provisional scan, then 1h, then 4h, then the normal window. A queued
@@ -1654,7 +1659,7 @@ func (r *Report) Provisional() bool {
 	}
 	unknown := r.Risk != nil && r.Risk.Verdict == risk.VerdictUnknown
 	for _, w := range r.Observation.Warnings {
-		if w.Code == WarnDownloadsQueued {
+		if w.Code == WarnDownloadsQueued || w.Code == WarnMalwareFeedNotLoaded {
 			return true
 		}
 		if w.Provider == "artifact" && w.Code == WarnArtifactFetchDeferred {

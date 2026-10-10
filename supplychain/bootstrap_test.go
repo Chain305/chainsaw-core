@@ -55,6 +55,15 @@ func TestBootstrapWiresAllComponents(t *testing.T) {
 	}
 	if comp.MalwareIndex == nil {
 		t.Error("MalwareIndex is nil")
+	} else {
+		// The floor must be live before any feed sync: the first sync took
+		// 14.5 minutes in prod on 2026-10-10 and the index was empty for all of it.
+		if res := comp.MalwareIndex.Lookup(context.Background(), "npm", "rc", "1.2.9"); !res.IsKnownMalicious {
+			t.Error("embedded floor not loaded at Bootstrap: rc@1.2.9 misses before the first feed sync")
+		}
+		if comp.MalwareIndex.FeedLoaded() {
+			t.Error("floor preload must not mark the feed loaded")
+		}
 	}
 	if comp.MalwareSyncer == nil {
 		t.Error("MalwareSyncer is nil")

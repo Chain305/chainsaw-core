@@ -50,7 +50,14 @@ func (p stickyTestProvider) Run(_ context.Context, _ Request, _ *Report) (Partia
 		Maintenance: &MaintenanceSection{
 			LatestReleaseAt: &published,
 			MaintainerCount: 3,
-			VersionTimeline: []VersionRelease{{Version: "0.9.0"}, {Version: "1.0.0"}},
+			// Dated: since aa8ae61d an undated timeline means the scan
+			// could not have recomputed the anomaly, so the prior value is
+			// deliberately not revived. Undated, this fixture asserted the
+			// rule that commit removed.
+			VersionTimeline: []VersionRelease{
+				{Version: "0.9.0", PublishedAt: published.Add(-30 * 24 * time.Hour)},
+				{Version: "1.0.0", PublishedAt: published},
+			},
 		},
 		Vulns: &VulnSection{ScannedAt: &scanned},
 	}, nil

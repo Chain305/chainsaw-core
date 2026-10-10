@@ -237,6 +237,9 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) *Components {
 	}
 	fetcher := typosquat.NewFetcher(logger, fetcherOpts...)
 	malwareIdx := malware.NewIndex(logger)
+	// The first feed sync takes minutes; until it lands, the embedded
+	// floor is all that stands between a known hijack release and a scan.
+	malwareIdx.PreloadFloor()
 
 	// TEST-ONLY: load synthetic malware-index overrides from
 	// CHAINSAW_TEST_MALWARE_OVERRIDES (or its YAML mirror) so QA can
