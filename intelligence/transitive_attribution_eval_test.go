@@ -81,6 +81,19 @@ func TestTransitiveVerdictAttribution(t *testing.T) {
 		stored[vw]++
 		if r.Persisted != "" && r.Persisted != vw {
 			persistedMismatch++
+			// STALE when an older matcher or engine wrote the row; otherwise
+			// the same facts project to a different verdict today. On the
+			// 2026-10-09 sample all 11 are drift: persisted upgrade_available,
+			// recomputed quarantine, because promoteToUpgradeAvailable accepts
+			// the input without its transitive counts and refuses it with them.
+			kind := "PROJECTION DRIFT"
+			if rep.Observation.MatcherEpoch != CurrentMatcherEpoch ||
+				rep.Risk == nil || rep.Risk.EngineVersion != risk.EngineVersion {
+				kind = "STALE"
+			}
+			t.Logf("MISMATCH %s %s@%s persisted=%s recomputed=%s epoch=%d collectedAt=%s",
+				kind, r.Pkg, r.Ver, r.Persisted, vw, rep.Observation.MatcherEpoch,
+				rep.Observation.CollectedAt.Format("2006-01-02T15:04Z"))
 		}
 		if vw != string(risk.VerdictAllow) && vwo == string(risk.VerdictAllow) {
 			solelyTransitive[vw]++

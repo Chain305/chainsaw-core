@@ -50,9 +50,11 @@ func TestFeedBlindVerdicts(t *testing.T) {
 		if err := json.Unmarshal(r.Report, &rep); err != nil {
 			t.Fatalf("%s %s@%s: %v", r.Eco, r.Pkg, r.Ver, err)
 		}
-		asIs, _ := feedBlindEval(&rep)
+		asIs, _ := feedBlindEval(intelligence.ProjectToRiskInput(&rep))
 		stripMalwareFeed(&rep)
-		blind, sigs := feedBlindEval(&rep)
+		// The feed-blind verdict is a headline metric, so Go rows drop
+		// sc.transitive_* here too (headlineInput, judge round 2 B1).
+		blind, sigs := feedBlindEval(headlineInput(r.Eco, intelligence.ProjectToRiskInput(&rep)))
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Eco, r.Pkg, r.Ver, asIs, blind, sigs)
 		n++
 	}
@@ -87,8 +89,8 @@ func stripMalwareFeed(rep *intelligence.Report) {
 	rep.Vulnerabilities.IsVulnerable = len(cves) > 0
 }
 
-func feedBlindEval(rep *intelligence.Report) (verdict, signals string) {
-	ev := risk.EvaluatePackage(intelligence.ProjectToRiskInput(rep), risk.Options{})
+func feedBlindEval(in risk.Input) (verdict, signals string) {
+	ev := risk.EvaluatePackage(in, risk.Options{})
 	if ev == nil {
 		return "nil", ""
 	}

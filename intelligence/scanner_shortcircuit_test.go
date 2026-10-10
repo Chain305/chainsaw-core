@@ -222,3 +222,62 @@ func itoa(n int64) string {
 	}
 	return string(buf[i:])
 }
+
+// TestScannerFanout_ShortCircuitSparesRegistryMetadata: the malware
+// short-circuit must not cancel the registry provider. A cancelled registry
+// fetch leaves a malicious row with no WarnVersionNotFound, and the
+// transitive walk then resolves ranges onto withdrawn hijack releases
+// (rc@1.2.9 under canvas, kerberos, prebuild-install, 2026-10-09).
+func TestScannerFanout_ShortCircuitSparesRegistryMetadata(t *testing.T) {
+	t.Parallel()
+
+	registry := &shortCircuitProvider{
+		name:   "registrymetadata",
+		signal: SignalRegistryMetadata,
+		delay:  150 * time.Millisecond,
+		partial: PartialReport{Warnings: []Warning{{
+			Provider: "registrymetadata", Code: WarnVersionNotFound,
+		}}},
+	}
+	other := &shortCircuitProvider{
+		name:    "slow-allow",
+		signal:  SignalMaintenance,
+		delay:   150 * time.Millisecond,
+		partial: PartialReport{Maintenance: &MaintenanceSection{VersionCount: 1}},
+	}
+	blocker := &shortCircuitProvider{
+		name:    "fast-block",
+		signal:  SignalMalware,
+		delay:   10 * time.Millisecond,
+		partial: PartialReport{SupplyChain: &SupplyChainSection{MalwareStatus: "malicious"}},
+	}
+
+	svc := New(Config{Providers: []Provider{blocker, registry, other}})
+	report, err := svc.Scan(context.Background(), Request{
+		Key:   Key{Ecosystem: "npm", Package: "rc", Version: "1.2.9"},
+		OrgID: "org-default",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if got := report.SupplyChain.MalwareStatus; got != "malicious" {
+		t.Fatalf("MalwareStatus = %q, want malicious", got)
+	}
+	if atomic.LoadInt64(&registry.completed) != 1 || atomic.LoadInt64(&registry.cancelObserved) != 0 {
+		t.Fatalf("registrymetadata was cancelled by the short-circuit (completed=%d cancelled=%d)",
+			atomic.LoadInt64(&registry.completed), atomic.LoadInt64(&registry.cancelObserved))
+	}
+	found := false
+	for _, w := range report.Observation.Warnings {
+		if w.Provider == "registrymetadata" && w.Code == WarnVersionNotFound {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("registry's version_not_found did not reach the report: %+v", report.Observation.Warnings)
+	}
+	// The short-circuit still cancels everyone else.
+	if atomic.LoadInt64(&other.cancelObserved) != 1 {
+		t.Fatalf("non-registry sibling was not cancelled (cancelled=%d)", atomic.LoadInt64(&other.cancelObserved))
+	}
+}

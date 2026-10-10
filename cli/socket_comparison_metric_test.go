@@ -2,6 +2,7 @@ package cli
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,5 +162,35 @@ func TestWithoutRepoLivenessClearsEveryRepoInput(t *testing.T) {
 		if v := risk.EvaluatePackage(got, risk.Options{}).Verdict; v != risk.VerdictAllow {
 			t.Errorf("%s: counterfactual verdict %s, want allow", in.RepoLinkStatus, v)
 		}
+	}
+}
+
+// B1 (judge round 2): a Go row's headline is graded without sc.transitive_*,
+// and the verdict as scored survives beside it; other ecosystems keep theirs.
+func TestHeadlineEvalDropsTransitiveOnGoOnly(t *testing.T) {
+	in := risk.Input{TransitiveCriticalCount: 1}
+	fired := func(ev *risk.Evaluation) bool {
+		for _, c := range ev.DirectScore.Categories {
+			for _, fs := range c.FiredSignals {
+				if strings.HasPrefix(fs.ID, "sc.transitive_") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	npm, npmWith, _ := headlineEval("npm", in)
+	if !fired(npm) || string(npm.Verdict) != npmWith {
+		t.Fatalf("npm: transitive fired=%v verdict %s vs as-scored %s; the fixture no longer exercises sc.transitive_*", fired(npm), npm.Verdict, npmWith)
+	}
+	goEv, goWith, goNoRepo := headlineEval("go", in)
+	if fired(goEv) {
+		t.Errorf("go: headline carries sc.transitive_*")
+	}
+	if goWith != npmWith || string(goEv.Verdict) == goWith {
+		t.Errorf("go: headline %s, as scored %s; want the as-scored verdict kept (%s) and the headline to differ", goEv.Verdict, goWith, npmWith)
+	}
+	if goNoRepo != string(goEv.Verdict) {
+		t.Errorf("go: no-repo verdict %s is not built on the headline input (%s)", goNoRepo, goEv.Verdict)
 	}
 }

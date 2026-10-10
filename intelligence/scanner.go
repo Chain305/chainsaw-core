@@ -634,7 +634,25 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			// every running provider. Per-provider deadline math stays
 			// the same — DefaultProviderTimeout is layered on top.
 			start := time.Now()
-			providerCtx, cancel := context.WithTimeout(prepare(fanoutCtx, p, req), DefaultProviderTimeout)
+			// Registry metadata is EXEMPT from the short-circuit. It is
+			// the only source of "the registry no longer serves this
+			// version" (WarnVersionNotFound), and malicious versions are
+			// exactly the ones registries withdraw. Cancelling it left
+			// every malware row with context_cancelled and an empty
+			// timeline, so the transitive walk could not tell a withdrawn
+			// hijack release from a live one: canvas, kerberos and three
+			// more carried sc.transitive_malware from rc@1.2.9 (removed in
+			// 2021; `^1.2.7` installs 1.2.8). The verdict is unaffected —
+			// unavailableInput carries malware as an instant block — and
+			// the cost is this one fetch, still capped by
+			// DefaultProviderTimeout, on a scan that is refusing anyway.
+			// Keyed on Signal(), which eligibility already called, not
+			// Name(): see the Name()-panic note below.
+			parent := fanoutCtx
+			if p.Signal() == SignalRegistryMetadata {
+				parent = ctx
+			}
+			providerCtx, cancel := context.WithTimeout(prepare(parent, p, req), DefaultProviderTimeout)
 			defer cancel()
 			var out PartialReport
 			var runErr error
