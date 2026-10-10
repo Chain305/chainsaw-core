@@ -76,8 +76,10 @@ func TestCeilingBypassIsClosed(t *testing.T) {
 	}
 	const rollup = 73 // real value: npm|webpack|5.111.0, prod 2026-09-21
 
+	// A compound with no ceiling of its own (sc.env_net_install, the original
+	// fixture, gained a warn ceiling on 2026-10-10 and would tie at 59).
 	withCompound, pinnedWith := applyMaxImpactCeiling(rollup, prim,
-		map[string]FiredSignal{CompoundSCEnvNetInstall: {ID: CompoundSCEnvNetInstall, Compound: true}}, nil)
+		map[string]FiredSignal{CompoundSCTakeoverSignature: {ID: CompoundSCTakeoverSignature, Compound: true}}, nil)
 	without, pinnedWithout := applyMaxImpactCeiling(rollup, prim, nil, nil)
 
 	if withCompound > without {

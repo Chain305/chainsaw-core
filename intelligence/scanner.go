@@ -1673,6 +1673,9 @@ func mergeSupplyChain(dst *SupplyChainSection, src SupplyChainSection) {
 	if src.RepoArchived != nil {
 		dst.RepoArchived = src.RepoArchived
 	}
+	if src.ProvenanceDowngrade != nil {
+		dst.ProvenanceDowngrade = src.ProvenanceDowngrade
+	}
 }
 
 // mergeMaintenance populates Report.Maintenance from a provider's

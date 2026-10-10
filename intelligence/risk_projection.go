@@ -262,6 +262,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		DependencyCredential:       r.Scan.DependencyCredential,
 		AppCredentialSend:          r.Scan.AppCredentialSend,
 		ImportTimeKind:             r.Scan.ImportTimeKind,
+		TrivialPackage:             r.Scan.TrivialPackage,
 
 		// Pain 9 (Agent D): env-var read and network-call axes are
 		// projected into risk.Input so the new compound rule
@@ -495,6 +496,9 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	}
 	in.NewerVersion, in.NewerVersionAt = newerStableVersion(r, in.VersionPublishedAt)
 	in.PriorReleaseVersion, in.PriorReleaseAt = priorReleaseOf(r, in.VersionPublishedAt)
+	if d := r.SupplyChain.ProvenanceDowngrade; d != nil {
+		in.ProvenanceDowngradeFrom, in.ProvenanceDowngradePriorCount = d.LastAttestedVersion, d.PriorAttestedCount
+	}
 
 	return in
 }

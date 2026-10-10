@@ -69,6 +69,14 @@ const (
 	SignalSCTransitiveMalware      = "sc.transitive_malware"
 )
 
+// SignalSCProvenanceDowngrade: published without provenance after
+// ProvenanceDowngradeMinPrior consecutive attested releases on its line
+// (pnpm `trustPolicy: no-downgrade`).
+const (
+	SignalSCProvenanceDowngrade = "sc.provenance_downgrade"
+	ProvenanceDowngradeMinPrior = 2
+)
+
 func init() {
 	// Instant-block: known malicious. Weight is sentinel (-1000); the
 	// evaluator short-circuits to Overall=0 / Verdict=Quarantine when this
@@ -355,7 +363,8 @@ func init() {
 	//
 	// The two benign hits are why the coupling exists: yt-dlp lists gofile.io
 	// among unsupported sites, and ngrok's own index.d.ts names .ngrok.io.
-	// Neither file sends anything. The stealer_string and reputation_host
+	// Neither file sends anything. The uncoupled case warns through the
+	// compound sc.exfil_sink_named, which does not apply past a download line. The stealer_string and reputation_host
 	// kinds are NOT read: stealer_string fired on 1 malware sample and 9
 	// benign packages (wallet SDKs, an editor's AutoHotkey mode), and
 	// reputation_host is a feed, not detection.
@@ -393,7 +402,9 @@ func init() {
 	// import_time_beacon would add 10 malware samples and fires on anyio, a
 	// top-50 package, and metaflow-netflixext; obfuscated_exec would add 6
 	// and fires on datachain. Those are trade-offs for a decision, not a
-	// default.
+	// default. Decided 2026-10-10 for two of them, as warn-ceiling compounds
+	// (compound.go): sc.import_time_beacon, exempt past a download line, and
+	// sc.obfuscated_exec_eval (the bare kind with dynamic eval).
 	register(Signal{
 		ID:          SignalSCImportTimeShell,
 		Category:    CategorySupplyChain,
@@ -515,6 +526,13 @@ func init() {
 	// npm packages scored BEFORE they were found malicious (prod reports
 	// preceding a clean->malicious recall flip). Its cost is already known —
 	// a warn on ~2.9% of long-tail benign packages and on core-js.
+	//
+	// Measured 2026-10-10 as an OWNER DECISION, not shipped: a warn ceiling
+	// here, on top of the warn-ceiling compounds, moves feed-blind Datadog
+	// recall from about 66% to 71.3% and the held-out OSSF set to 71.1%, for
+	// 6 more benign npm rows on rev6 (about 2.9% of long-tail npm; 0.14% of
+	// popular npm). sc.npm_install_hook_shell already warns the hook-plus-
+	// shell half of it.
 	register(Signal{
 		ID:       SignalSCInstallScriptOnlyNPM,
 		Category: CategorySupplyChain,
@@ -717,6 +735,38 @@ func init() {
 			return true, "Provenance was built from a tag that does not name this version.",
 				map[string]any{"tag": tag, "versionCore": vcore}
 		},
+	})
+
+	// sc.provenance_downgrade — pnpm's `trustPolicy: no-downgrade`. A stolen
+	// publish token cannot mint an attestation tied to the project's CI, so
+	// a release without one after attested releases is the account-takeover
+	// shape: nx 20.9.0 / 21.5.0 (2025-08-26) each followed two attested
+	// releases on their line. Benign base rate, measured 2026-10-10 on 1,164
+	// provenance-using npm packages: 124 of 45,203 eligible stable releases
+	// (0.27%); 60 of the 124 came from the same account as the last
+	// attested release. Under 0.5%, so it carries the warn ceiling and
+	// suspends the established damper; it never quarantines alone. PyPI
+	// (PEP 740, simple-index provenance) feeds the same signal under a
+	// tighter rule — 3 prior releases, every file attested — that measured
+	// 63 of 14,196 (0.44%) on the top 3,000 projects; see
+	// pypiProvenanceDowngrade.
+	register(Signal{
+		ID:          SignalSCProvenanceDowngrade,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -25,
+		MaxImpact:   40,
+		Title:       "Published without provenance after attested releases",
+		Description: "This version has no provenance attestation although the releases before it on its line did. A stolen publish token cannot produce one tied to the project's CI.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if in.ProvenanceDowngradeFrom == "" || in.ProvenanceDowngradePriorCount < ProvenanceDowngradeMinPrior {
+				return false, "", nil
+			}
+			return true, fmt.Sprintf("No provenance attestation; the %d releases before it had one (last: %s).",
+					in.ProvenanceDowngradePriorCount, in.ProvenanceDowngradeFrom),
+				map[string]any{"lastAttestedVersion": in.ProvenanceDowngradeFrom, "priorAttestedCount": in.ProvenanceDowngradePriorCount}
+		},
+		TakeoverIndicator: true,
 	})
 
 	// SLSA build-level bonus on top of the bare provenance-verified reward.

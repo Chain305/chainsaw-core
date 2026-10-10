@@ -81,13 +81,31 @@ func establishedInputReason(in Input, now time.Time) string {
 
 // dampEstablished applies the damper to the fired primitive set in place and
 // returns the IDs whose ceiling no longer applies. It does nothing unless the
-// package is established, no TakeoverIndicator fired and no compound rule
-// fired: every compound rule (takeover signature, install-time env+network,
-// install-time network+shell, exfil sink at install) is compromise-shaped.
+// package is established, no TakeoverIndicator fired and no compromise-shaped
+// compound fired (takeover signature, exfil sink at install, obfuscated exec,
+// trivial dynamic code). A compound marked DampEstablished does not suspend
+// the damper. Its ceiling is lifted, weight kept, only when the package
+// clears a DOWNLOAD line: release history alone does not exempt it, because
+// pxnpm (168 versions since 2019, 1,640 a week) shipped install-hook malware
+// in October 2026 with no publisher change, and the history line would have
+// waved it through. Every measured benign hit of those rules is popular.
 func dampEstablished(in Input, fired, compound map[string]FiredSignal, now time.Time) map[string]bool {
 	reason := establishedInputReason(in, now)
-	if reason == "" || len(compound) > 0 {
+	if reason == "" {
 		return nil
+	}
+	popular := EstablishedReason(in.Downloads, in.DownloadsWindow, in.WeeklyDownloads, 0, nil, now)
+	var dampableCompounds []string
+	for _, rule := range CompoundRules {
+		if _, ok := compound[rule.ID]; !ok {
+			continue
+		}
+		if !rule.DampEstablished {
+			return nil
+		}
+		if popular != "" {
+			dampableCompounds = append(dampableCompounds, rule.ID)
+		}
 	}
 	for id := range fired {
 		if sig, ok := Registry[id]; ok && sig.TakeoverIndicator {
@@ -95,16 +113,15 @@ func dampEstablished(in Input, fired, compound map[string]FiredSignal, now time.
 		}
 	}
 	var damped map[string]bool
-	for id, f := range fired {
-		sig, ok := Registry[id]
-		if !ok || !sig.DampEstablished {
-			continue
-		}
+	mark := func(set map[string]FiredSignal, id string, halve bool, reason string) {
 		if damped == nil {
 			damped = make(map[string]bool)
 		}
 		damped[id] = true
-		f.Weight /= 2
+		f := set[id]
+		if halve {
+			f.Weight /= 2
+		}
 		ev := make(map[string]any, len(f.Evidence)+2)
 		for k, v := range f.Evidence {
 			ev[k] = v
@@ -112,7 +129,15 @@ func dampEstablished(in Input, fired, compound map[string]FiredSignal, now time.
 		ev["damped"] = true
 		ev["damped_reason"] = "established package: " + reason
 		f.Evidence = ev
-		fired[id] = f
+		set[id] = f
+	}
+	for id := range fired {
+		if sig, ok := Registry[id]; ok && sig.DampEstablished {
+			mark(fired, id, true, reason)
+		}
+	}
+	for _, id := range dampableCompounds {
+		mark(compound, id, false, popular)
 	}
 	return damped
 }

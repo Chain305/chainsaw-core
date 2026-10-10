@@ -18,6 +18,10 @@ package intelligence
 //
 //	CHAINSAW_RESCORE_IN=a.jsonl,b.jsonl CHAINSAW_RESCORE_OUT=out.jsonl \
 //	  go test ./core/intelligence/ -run TestFeedBlindRescore -count=1
+//
+// CHAINSAW_RESCORE_NO_EXEMPTION=1 is the counterfactual for the popular
+// exemption on warn-ceiling compounds: every rule's DampEstablished is cleared
+// for the run. "damped" lists the fired IDs the damper softened.
 
 import (
 	"bufio"
@@ -43,6 +47,13 @@ func TestFeedBlindRescore(t *testing.T) {
 	w := bufio.NewWriter(out)
 	defer w.Flush()
 	bytesOnly := os.Getenv("CHAINSAW_RESCORE_BYTES_ONLY") != ""
+	if os.Getenv("CHAINSAW_RESCORE_NO_EXEMPTION") != "" {
+		saved := append([]risk.CompoundRule(nil), risk.CompoundRules...)
+		defer func() { risk.CompoundRules = saved }()
+		for i := range risk.CompoundRules {
+			risk.CompoundRules[i].DampEstablished = false
+		}
+	}
 	n := 0
 	for _, path := range strings.Split(in, ",") {
 		f, err := os.Open(path)
@@ -76,18 +87,22 @@ func TestFeedBlindRescore(t *testing.T) {
 					Warning{Provider: "registrymetadata", Code: WarnLicenseUnavailable})
 			}
 			ev := risk.EvaluatePackage(ProjectToRiskInput(r), risk.Options{})
-			var fired []string
+			var fired, damped []string
 			for _, cs := range ev.DirectScore.Categories {
 				for _, f := range cs.FiredSignals {
 					fired = append(fired, f.ID)
+					if f.Evidence["damped"] == true {
+						damped = append(damped, f.ID)
+					}
 				}
 			}
 			sort.Strings(fired)
+			sort.Strings(damped)
 			line, _ := json.Marshal(map[string]any{
 				"eco": row.Eco, "pkg": row.Pkg, "ver": row.Ver,
 				"verdict": ev.Verdict, "overall": ev.DirectScore.Overall,
 				"sc":      ev.DirectScore.Categories[risk.CategorySupplyChain].Score,
-				"ceiling": ev.DirectScore.CeilingSignal, "fired": fired,
+				"ceiling": ev.DirectScore.CeilingSignal, "fired": fired, "damped": damped,
 			})
 			w.Write(append(line, '\n'))
 			n++

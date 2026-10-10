@@ -39,20 +39,22 @@ func TestFeedBlindMalwareVerdicts(t *testing.T) {
 		},
 		{
 			// yt-dlp: names gofile.io in a list of sites, sends nothing from
-			// that file.
-			name: "exfil host named but not used stays allow",
+			// that file. sc.exfil_sink_named warns this shape since
+			// 2026-10-10, except past a download line.
+			name: "exfil host named but not used stays allow on a popular package",
 			in: Input{Ecosystem: "pypi", Package: "x", Version: "1.0.0",
-				MaliciousIOCKind: "exfil_host"},
+				MaliciousIOCKind: "exfil_host", WeeklyDownloads: intp(5_000_000)},
 			want: VerdictAllow,
 		},
 		{
 			// esbuild / node-sass / canvas: an install hook, proxy env reads,
-			// a download and a shell-out. Both npm install compounds fire; they
-			// carry no ceiling, so the rollup alone decides.
-			name: "binary installer is not ceilinged",
+			// a download and a shell-out. All three npm install compounds fire;
+			// their warn ceilings do not apply past a download line, so the
+			// rollup alone decides.
+			name: "popular binary installer is not ceilinged",
 			in: Input{Ecosystem: "npm", Package: "x", Version: "1.0.0",
 				HasInstallScript: true, EnvVarAccess: true, NetworkAccess: true, CapShell: true,
-				LicenseSPDX: "MIT", LicenseTags: Classify("MIT")},
+				LicenseSPDX: "MIT", LicenseTags: Classify("MIT"), WeeklyDownloads: intp(5_000_000)},
 			want: VerdictAllow,
 		},
 	}

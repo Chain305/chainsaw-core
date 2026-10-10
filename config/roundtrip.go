@@ -121,9 +121,13 @@ var settingsBackedFields = map[string]string{
 	"Swift.TrustSwiftRoot":      settingSwiftTrustSwiftRoot,
 
 	// misc scalars
-	"ReleasePolicy.MinAgeDays":  settingReleaseMinAgeDays,
-	"BlockingMode":              settingBlockingMode,
-	"RepositoryAnonymousAccess": settingRepositoryAllowAnonymous,
+	"ReleasePolicy.MinAgeDays":         settingReleaseMinAgeDays,
+	"ReleasePolicy.MinAgeHours":        settingReleaseMinAgeHours,
+	"ReleasePolicy.WarnHoldMultiplier": settingReleaseWarnMultiplier,
+	"ReleasePolicy.ExemptScopes":       settingReleaseExemptScopes,
+	"ReleasePolicy.Exemptions":         settingReleaseExemptions,
+	"BlockingMode":                     settingBlockingMode,
+	"RepositoryAnonymousAccess":        settingRepositoryAllowAnonymous,
 
 	// remotes: the whole map in one JSON row.
 	"Remotes[].URL":            settingRemoteDefaults,

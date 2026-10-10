@@ -72,6 +72,13 @@ type Input struct {
 	PublisherChangeEvaluated bool
 	VersionAnomalyEvaluated  bool
 
+	// ProvenanceDowngradeFrom is the nearest lower release that carried a
+	// provenance attestation, when this version carries none;
+	// ProvenanceDowngradePriorCount is how many consecutive lower releases
+	// did. Feed sc.provenance_downgrade.
+	ProvenanceDowngradeFrom       string
+	ProvenanceDowngradePriorCount int
+
 	HasInstallScript           bool
 	InstallScriptFetchesRemote bool
 
@@ -111,9 +118,14 @@ type Input struct {
 	// at module top level, i.e. on import or install: top_level_shell,
 	// obfuscated_exec(_bare), import_time_exfil, import_time_beacon or
 	// embedded_executable; empty when nothing fired. Same history as
-	// MaliciousIOCKind. Only top_level_shell is scored — see
-	// sc.import_time_shell for why the others are not.
+	// MaliciousIOCKind. top_level_shell is scored by sc.import_time_shell;
+	// import_time_beacon and obfuscated_exec_bare only through warn-ceiling
+	// compounds (compound.go); the rest not at all.
 	ImportTimeKind string
+
+	// TrivialPackage: the package ships only a few lines of code
+	// (ArtifactScanSection.TrivialPackage). Read by sc.trivial_dynamic_code.
+	TrivialPackage bool
 
 	// ---- cross-version diff ----
 	//

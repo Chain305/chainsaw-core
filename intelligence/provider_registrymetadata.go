@@ -22,6 +22,7 @@ package intelligence
 // in tests with an httptest.Server just by swapping the base URLs.
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -43,6 +44,7 @@ import (
 	"sync"
 	"time"
 
+	pep440 "github.com/aquasecurity/go-pep440-version"
 	"golang.org/x/net/html/charset"
 
 	"github.com/chain305/chainsaw-core/coverage"
@@ -265,7 +267,7 @@ func (p *registryMetadataProvider) fixedRequests(ecosystem string) (string, int)
 	case "npm", "yarn", "bun", "pnpm":
 		return p.endpoints.npm, 1 // the packument carries everything
 	case "pypi", "pip":
-		return p.endpoints.pypi, 3 // version JSON, /simple status, timeline
+		return p.endpoints.pypi, 3 // version JSON, /simple (status, provenance), timeline
 	case "rubygems", "gem":
 		return p.endpoints.rubygems, 3 // version, owners, timeline
 	case "cargo":
@@ -882,6 +884,9 @@ type npmVersionMeta struct {
 		Tarball   string `json:"tarball"`
 		Shasum    string `json:"shasum"`
 		Integrity string `json:"integrity"`
+		// Raw, like the `any` fields around it: one odd-shaped value must
+		// not fail the whole packument decode. See npmAttested.
+		Attestations json.RawMessage `json:"attestations"`
 	} `json:"dist"`
 	// `any`, not string. npm's manifest allows BOTH a deprecation MESSAGE
 	// ("no longer supported") and a bare boolean `true`. Typed as string, a
@@ -1057,6 +1062,76 @@ func npmPublisherBaseline(versions map[string]npmVersionMeta, stamps map[string]
 		}
 	}
 	return b
+}
+
+// npmAttested reports whether a version's manifest carries a provenance
+// attestation (`dist.attestations.provenance`, present since npm provenance
+// launched in 2023 and on every trusted-publishing release).
+func npmAttested(meta npmVersionMeta) bool {
+	var a struct {
+		Provenance json.RawMessage `json:"provenance"`
+	}
+	if json.Unmarshal(meta.Dist.Attestations, &a) != nil {
+		return false
+	}
+	return len(a.Provenance) > 0 && string(a.Provenance) != "null"
+}
+
+// npmProvenanceDowngrade returns the evidence when ver carries no provenance
+// although its nearest lower releases did, or nil.
+//
+// Only stable versions take part, and the baseline is the releases BELOW ver
+// published before it, not whatever was published last: a backport to a line
+// that never had provenance is not a downgrade. Both rules were measured
+// (2026-10-10, 1,164 provenance-using npm packages, 45,203 eligible stable
+// releases): by publish time with prereleases included, 1.09% of eligible
+// releases fired, dominated by unattested canary builds; stable-only by
+// semver predecessor, 124 fired (0.27%). nx's 2025-08-26 malicious releases
+// (20.9.0, 21.5.0, …) each had two attested predecessors on their own line.
+func npmProvenanceDowngrade(versions map[string]npmVersionMeta, stamps map[string]string, ver string) *ProvenanceDowngrade {
+	cur := "v" + ver
+	if !semver.IsValid(cur) || semver.Prerelease(cur) != "" || semver.Build(cur) != "" || npmAttested(versions[ver]) {
+		return nil
+	}
+	at, ok := parseTime(stamps[ver])
+	if !ok {
+		return nil
+	}
+	var priors []attestedRelease
+	for v, meta := range versions {
+		sv := "v" + v
+		if !semver.IsValid(sv) || semver.Prerelease(sv) != "" || semver.Build(sv) != "" || semver.Compare(sv, cur) >= 0 {
+			continue
+		}
+		t, ok := parseTime(stamps[v])
+		if !ok || !t.Before(at) {
+			continue
+		}
+		priors = append(priors, attestedRelease{v, t, npmAttested(meta)})
+	}
+	sort.Slice(priors, func(i, j int) bool { return semver.Compare("v"+priors[i].ver, "v"+priors[j].ver) > 0 })
+	return attestedRun(priors, risk.ProvenanceDowngradeMinPrior)
+}
+
+// attestedRelease is one stable release lower than, and published before, the
+// scanned unattested one.
+type attestedRelease struct {
+	ver      string
+	at       time.Time
+	attested bool
+}
+
+// attestedRun returns the downgrade evidence when the first minPrior of
+// priors (sorted highest version first) are all attested, or nil.
+func attestedRun(priors []attestedRelease, minPrior int) *ProvenanceDowngrade {
+	n := 0
+	for n < len(priors) && priors[n].attested {
+		n++
+	}
+	if n < minPrior {
+		return nil
+	}
+	return &ProvenanceDowngrade{LastAttestedVersion: priors[0].ver, LastAttestedAt: priors[0].at, PriorAttestedCount: n}
 }
 
 // appendUniqueString appends s to xs unless already present.
@@ -1297,6 +1372,14 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 	// -- and Release.Yanked already routes there (risk_projection.go), so
 	// reusing it would both understate the fact and load a signal whose
 	// calibration is the open question in the corpus-v1 adjudication.
+	if hasEntry {
+		if d := npmProvenanceDowngrade(pack.Versions, pack.Time.Stamps, ver); d != nil {
+			if pr.SupplyChain == nil {
+				pr.SupplyChain = &SupplyChainSection{}
+			}
+			pr.SupplyChain.ProvenanceDowngrade = d
+		}
+	}
 	if pack.Time.Present && npmWithdrawn(ver, pack.Time.UnpublishedVersions, len(pack.Versions)) {
 		anomaly := true
 		if pr.SupplyChain == nil {
@@ -1613,8 +1696,15 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 	// PEP 792 project status is project-wide and applies to every version:
 	// archived (no further releases), deprecated, quarantined (PyPI staff).
 	// Routed onto Deprecated like Packagist's package-level `abandoned`.
-	if status := p.fetchPyPIProjectStatus(ctx, pkg); status != "" && release.Deprecated == "" {
+	status, files := p.fetchPyPISimple(ctx, pkg)
+	if status != "" && release.Deprecated == "" {
 		release.Deprecated = status
+	}
+	if d := pypiProvenanceDowngrade(files, ver); d != nil {
+		if pr.SupplyChain == nil {
+			pr.SupplyChain = &SupplyChainSection{}
+		}
+		pr.SupplyChain.ProvenanceDowngrade = d
 	}
 
 	pr.Release = release
@@ -1759,40 +1849,175 @@ var (
 	pypiReasonMeta = regexp.MustCompile(`<meta\s+name="pypi:project-status-reason"\s+content="([^"]*)"`)
 )
 
-// fetchPyPIProjectStatus returns "project status: <status>[: <reason>]" for a
-// PEP 792 status other than active, or "" (active, absent, or not read).
+// fetchPyPISimple reads the project's simple index as PEP 691 JSON and returns
+// the PEP 792 status line ("project status: <status>[: <reason>]", or "" for
+// active, absent or not read) and the file list that carries PEP 740
+// `provenance` per file — the only PyPI document that does; /pypi/<pkg>/json
+// does not.
 //
-// PyPI exposes the status only on the simple index, not the JSON API. The
-// JSON form puts it AFTER the file list (2.2 MB for boto3); the HTML form
-// puts it in <head>, so only the first 8 KiB is read. Best-effort like
-// fetchPubOptions: a miss is not a fact about the project and adds no
-// warning.
-func (p *registryMetadataProvider) fetchPyPIProjectStatus(ctx context.Context, pkg string) string {
+// The JSON puts the status AFTER the file list, so the whole document is read
+// (2.2 MB for boto3, 7.1 MB for grpcio-tools; the registry body cap is 32
+// MiB). It is the same request the provider made before for the status alone,
+// so the per-host prepay count does not change. An index that ignores the
+// Accept header and answers HTML still gives the status from <head>, and no
+// files, so no downgrade can be inferred from it. Best-effort like
+// fetchPubOptions: a miss is not a fact about the project and adds no warning.
+func (p *registryMetadataProvider) fetchPyPISimple(ctx context.Context, pkg string) (string, []pypiSimpleFile) {
 	endpoint := fmt.Sprintf("%s/simple/%s/", p.endpoints.pypi, url.PathEscape(pkg))
-	var head []byte
-	warn, err := p.fetchDecoded(ctx, endpoint, "text/html", func(r io.Reader) error {
-		b, rerr := io.ReadAll(io.LimitReader(r, 8<<10))
-		head = b
+	var body []byte
+	warn, err := p.fetchDecoded(ctx, endpoint, "application/vnd.pypi.simple.v1+json, text/html;q=0.1", func(r io.Reader) error {
+		b, rerr := io.ReadAll(r)
+		body = b
 		return rerr
 	})
 	if err != nil || warn != nil {
-		return ""
+		return "", nil
 	}
+	if b := bytes.TrimSpace(body); len(b) > 0 && b[0] == '{' {
+		return pypiSimpleJSON(b)
+	}
+	return pypiStatusFromHTML(body[:min(len(body), 8<<10)]), nil
+}
+
+// pypiSimpleFile is one entry of a PEP 691 file list.
+type pypiSimpleFile struct {
+	Filename   string          `json:"filename"`
+	UploadTime string          `json:"upload-time"`
+	Provenance json.RawMessage `json:"provenance"`
+}
+
+// pypiSimpleJSON decodes the status and the file list independently, so an
+// odd shape in one cannot cost the other.
+func pypiSimpleJSON(b []byte) (string, []pypiSimpleFile) {
+	var doc struct {
+		Status json.RawMessage `json:"project-status"`
+		Files  json.RawMessage `json:"files"`
+	}
+	if json.Unmarshal(b, &doc) != nil {
+		return "", nil
+	}
+	var st struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal(doc.Status, &st)
+	var files []pypiSimpleFile
+	_ = json.Unmarshal(doc.Files, &files)
+	return pypiStatusLine(st.Status, st.Reason), files
+}
+
+func pypiStatusFromHTML(head []byte) string {
 	m := pypiStatusMeta.FindSubmatch(head)
 	if m == nil {
 		return ""
 	}
-	status := strings.ToLower(strings.TrimSpace(html.UnescapeString(string(m[1]))))
+	reason := ""
+	if r := pypiReasonMeta.FindSubmatch(head); r != nil {
+		reason = html.UnescapeString(string(r[1]))
+	}
+	return pypiStatusLine(html.UnescapeString(string(m[1])), reason)
+}
+
+func pypiStatusLine(status, reason string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
 	if status == "" || status == "active" {
 		return ""
 	}
 	out := "project status: " + status
-	if r := pypiReasonMeta.FindSubmatch(head); r != nil {
-		if reason := strings.TrimSpace(html.UnescapeString(string(r[1]))); reason != "" {
-			out += ": " + reason
-		}
+	if reason = strings.TrimSpace(reason); reason != "" {
+		out += ": " + reason
 	}
 	return out
+}
+
+// pypiFileVersion is the version a wheel or sdist filename names, or "" for
+// legacy formats (.egg, .exe, .msi), which never carry provenance.
+func pypiFileVersion(name string) string {
+	if strings.HasSuffix(name, ".whl") {
+		if parts := strings.Split(name, "-"); len(parts) >= 5 {
+			return parts[1]
+		}
+		return ""
+	}
+	for _, ext := range []string{".tar.gz", ".zip", ".tar.bz2", ".tgz", ".tar.xz"} {
+		if stem, ok := strings.CutSuffix(name, ext); ok {
+			if i := strings.LastIndexByte(stem, '-'); i > 0 {
+				return stem[i+1:]
+			}
+		}
+	}
+	return ""
+}
+
+// pypiProvenanceDowngradeMinPrior is stricter than npm's 2. On the top 3,000
+// PyPI projects (2026-10-10, 975 with any provenance) the npm rule — 2 prior
+// releases with provenance on any file — fired on 77 of 15,031 eligible stable
+// releases (0.51%), over the 0.5% bar for a warn ceiling. Requiring 3 prior
+// releases with provenance on EVERY file: 63 of 14,196 (0.44%).
+const pypiProvenanceDowngradeMinPrior = 3
+
+// pypiProvenanceDowngrade is npmProvenanceDowngrade for PyPI, from the simple
+// index's per-file provenance. The scanned release is a downgrade only when
+// NONE of its files carries provenance; a prior counts as attested only when
+// EVERY one of its files does. A partially attested release is a mixed
+// pipeline (wheels built outside the trusted publisher), not the established
+// CI habit a stolen token breaks. Stable PEP 440 releases only, judged against
+// lower releases published before it.
+func pypiProvenanceDowngrade(files []pypiSimpleFile, ver string) *ProvenanceDowngrade {
+	cur, err := pep440.Parse(ver)
+	if err != nil {
+		return nil
+	}
+	type rel struct {
+		v                   pep440.Version
+		at                  time.Time
+		files, attestedFile int
+	}
+	rels := map[string]*rel{}
+	for _, f := range files {
+		v, err := pep440.Parse(pypiFileVersion(f.Filename))
+		if err != nil || v.IsPreRelease() {
+			continue
+		}
+		t, ok := parseTime(f.UploadTime)
+		if !ok {
+			continue
+		}
+		r := rels[v.String()]
+		if r == nil {
+			r = &rel{v: v, at: t}
+			rels[v.String()] = r
+		}
+		if t.Before(r.at) {
+			r.at = t
+		}
+		r.files++
+		if len(f.Provenance) > 0 && string(f.Provenance) != "null" {
+			r.attestedFile++
+		}
+	}
+	// Prereleases never enter rels, so a prerelease target is never judged.
+	var target *rel // by PEP 440 equality: the index may spell 1.0 where the request says 1.0.0
+	for _, r := range rels {
+		if r.v.Equal(cur) {
+			target = r
+		}
+	}
+	if target == nil || target.attestedFile > 0 {
+		return nil
+	}
+	var lower []*rel
+	for _, r := range rels {
+		if r.v.LessThan(cur) && r.at.Before(target.at) {
+			lower = append(lower, r)
+		}
+	}
+	sort.Slice(lower, func(i, j int) bool { return lower[i].v.GreaterThan(lower[j].v) })
+	priors := make([]attestedRelease, len(lower))
+	for i, r := range lower {
+		priors[i] = attestedRelease{r.v.String(), r.at, r.attestedFile == r.files}
+	}
+	return attestedRun(priors, pypiProvenanceDowngradeMinPrior)
 }
 
 // normalisePyPIYanked accepts a yanked value that may be a bool or a

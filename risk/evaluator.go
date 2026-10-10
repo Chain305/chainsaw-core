@@ -1035,7 +1035,7 @@ func applyMaxImpactCeiling(overall int, primitives, compound map[string]FiredSig
 		}
 	}
 	for _, rule := range CompoundRules {
-		if _, ok := compound[rule.ID]; ok {
+		if _, ok := compound[rule.ID]; ok && !damped[rule.ID] {
 			consider(rule.ID, rule.MaxImpact)
 		}
 	}

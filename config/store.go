@@ -64,6 +64,10 @@ const (
 	settingBlockingMode             = "blocking.mode"
 	settingRepositoryAllowAnonymous = "repository.allow_anonymous"
 	settingReleaseMinAgeDays        = "release.min_age_days"
+	settingReleaseMinAgeHours       = "release.min_age_hours"
+	settingReleaseWarnMultiplier    = "release.warn_hold_multiplier"
+	settingReleaseExemptScopes      = "release.exempt_scopes"
+	settingReleaseExemptions        = "release.exemptions"
 	settingIndexPath                = "index.path"
 	settingExceptionsPath           = "exceptions.path"
 	settingExceptionAge             = "exception.age"
@@ -323,7 +327,15 @@ func applySettingsOverlay(cfg *Config, settings settingMap) {
 	settings.overlayBool(settingSwiftTrustSwiftRoot, &cfg.Swift.TrustSwiftRoot)
 
 	// misc
-	settings.overlayInt(settingReleaseMinAgeDays, &cfg.ReleasePolicy.MinAgeDays)
+	// Both hold keys are pointers: no row means unset, which resolves to
+	// DefaultReleaseHold. A stored row is an explicit choice, 0 included —
+	// see plan-release-age-hold §5 for why an existing stored 0 is kept as
+	// "off" rather than reinterpreted as unset.
+	settings.overlayIntPtr(settingReleaseMinAgeDays, &cfg.ReleasePolicy.MinAgeDays)
+	settings.overlayIntPtr(settingReleaseMinAgeHours, &cfg.ReleasePolicy.MinAgeHours)
+	settings.overlayInt(settingReleaseWarnMultiplier, &cfg.ReleasePolicy.WarnHoldMultiplier)
+	settings.overlayCommaList(settingReleaseExemptScopes, &cfg.ReleasePolicy.ExemptScopes)
+	settings.overlayCommaList(settingReleaseExemptions, &cfg.ReleasePolicy.Exemptions)
 	settings.overlayBoolPtr(settingBlockingMode, &cfg.BlockingMode)
 	settings.overlayBoolPtr(settingRepositoryAllowAnonymous, &cfg.RepositoryAnonymousAccess)
 	settings.overlayRemoteDefaults(settingRemoteDefaults, &cfg.Remotes)
@@ -737,11 +749,16 @@ func saveDataSourceSettings(set, putRuntime settingSetter, keys dataSourceKeys, 
 // saveMiscSettings persists release policy, blocking mode, and
 // anonymous-access flags.
 func saveMiscSettings(set, putRuntime settingSetter, cfg *Config) error {
-	days := cfg.ReleasePolicy.MinAgeDays
-	if days < 0 {
-		days = 0
+	// Write the days row only when the config states it. Writing a 0 for
+	// an unset value is how every pre-2026-10-10 deployment ended up with a
+	// stored 0 nobody can attribute; doing it again would pin new
+	// deployments off the 48h default.
+	if days := cfg.ReleasePolicy.MinAgeDays; days != nil {
+		if err := set(settingReleaseMinAgeDays, strconv.Itoa(max(*days, 0))); err != nil {
+			return err
+		}
 	}
-	if err := set(settingReleaseMinAgeDays, strconv.Itoa(days)); err != nil {
+	if err := saveReleaseHold(set, nil, cfg.ReleasePolicy); err != nil {
 		return err
 	}
 	if cfg.BlockingMode != nil {
@@ -1096,6 +1113,46 @@ func SetReleaseMinAgeDaysForOrg(store *pgstore.Store, orgID string, days int) er
 // SetReleaseMinAgeDays persists the minimum release-age enforcement window.
 func SetReleaseMinAgeDays(store *pgstore.Store, days int) error {
 	return SetReleaseMinAgeDaysForOrg(store, tenancy.DefaultOrgID, days)
+}
+
+// SetReleaseHoldForOrg persists the release-hold fields beyond MinAgeDays
+// (hours override, warn multiplier, exempt scopes, exemptions). MinAgeDays
+// keeps its own setter above. A nil MinAgeHours DELETES the hours row, so
+// the days value (or the default) applies again.
+func SetReleaseHoldForOrg(store *pgstore.Store, orgID string, rp ReleasePolicyConfig) error {
+	if store == nil {
+		return errors.New("database store is required")
+	}
+	return saveReleaseHold(func(key, value string) error {
+		return setSettingForOrg(store, orgID, key, value)
+	}, func(key string) error {
+		return deleteSettingForOrg(store, orgID, key)
+	}, rp)
+}
+
+// saveReleaseHold writes the hold rows. del is nil on the YAML import path,
+// where an unset hours value must leave an API-written row alone.
+func saveReleaseHold(set settingSetter, del func(string) error, rp ReleasePolicyConfig) error {
+	switch {
+	case rp.MinAgeHours != nil:
+		if err := set(settingReleaseMinAgeHours, strconv.Itoa(max(*rp.MinAgeHours, 0))); err != nil {
+			return err
+		}
+	case del != nil:
+		if err := del(settingReleaseMinAgeHours); err != nil {
+			return err
+		}
+	}
+	for _, kv := range [][2]string{
+		{settingReleaseWarnMultiplier, strconv.Itoa(max(rp.WarnHoldMultiplier, 0))},
+		{settingReleaseExemptScopes, joinCommaList(rp.ExemptScopes)},
+		{settingReleaseExemptions, joinCommaList(rp.Exemptions)},
+	} {
+		if err := set(kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func SetExceptionAgeForOrg(store *pgstore.Store, orgID string, days int) error {

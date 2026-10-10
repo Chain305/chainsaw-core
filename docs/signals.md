@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **93 risk signals**. Each is scored, not merely
+Chainsaw registers **94 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,15 +23,15 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 63 |
+| Supply chain | 64 |
 | Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 8 |
 | Quality | 6 |
-| **Total** | **93** |
+| **Total** | **94** |
 
 
-## Supply chain (63)
+## Supply chain (64)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -81,6 +81,7 @@ a configured server.
 | `sc.maintainer_account_young` | medium | -15.00 | Maintainer account young (<90 days) |
 | `sc.manifest_confusion` | high | -45.00 | Registry/tarball manifest mismatch |
 | `sc.non_existent_author` | high | -20.00 | Declared author does not exist on registry |
+| `sc.provenance_downgrade` | high | -25.00 | Published without provenance after attested releases |
 | `sc.provenance_verified` | info | 15.00 | Verified build provenance |
 | `sc.publish_velocity_anomaly` | medium | -15.00 | Abnormal publish velocity |
 | `sc.publisher_changed` | high | -25.00 | Publisher changed from previous version |
@@ -152,10 +153,19 @@ a configured server.
 ## Compound rules
 
 Compound rules fire on a combination of the signals above and add their weight
-to the supply-chain score. They are not counted in the totals. Only one carries
-a verdict ceiling.
+to the supply-chain score. They are not counted in the totals. One carries a
+quarantine ceiling; seven carry a warn ceiling (59), which holds the package at
+the top of the warn band and can never quarantine it. A warn ceiling marked
+*popular exempt* does not apply to a package past a download line (100,000 a
+week, or 75,000 per 90 days on crates.io) unless a takeover indicator fired;
+release history alone does not exempt it.
 
 - `sc.takeover_signature`: critical, -55. Publisher change plus an install script (not maven/gradle).
-- `sc.env_net_install`: high, -45, npm only. Env-var read, network access and an install script. No ceiling: it fires on binary installers such as esbuild and node-sass.
-- `sc.npm_install_net_shell`: high, -30, npm only. Install script with network and shell access. No ceiling, same reason.
+- `sc.env_net_install`: high, -45, npm only. Env-var read, network access and an install script. Warn ceiling, popular exempt: it fires on binary installers such as esbuild and node-sass.
+- `sc.npm_install_net_shell`: high, -30, npm only. Install script with network and shell access. Warn ceiling, popular exempt, same reason.
 - `sc.exfil_sink_at_install`: critical, -40, ceiling 29 (quarantine). Code that runs on install or import (npm hook scripts; setup.py, `__init__.py`) sends to a hard-coded exfiltration endpoint, and the package also runs malware-shaped code at install (`sc.install_script_fetches_remote`, `sc.install_script_eval_encoded` or `sc.import_time_shell`).
+- `sc.npm_install_hook_shell`: medium, 0, npm only. An npm install hook (`sc.install_script_only_npm`) in a package whose source spawns a shell. Warn ceiling, popular exempt.
+- `sc.exfil_sink_named`: medium, 0. Shipping code names a webhook, paste drop, tunnel or out-of-band host, but no file both names it and sends (that is `sc.exfil_sink_used`). Warn ceiling, popular exempt (yt-dlp, ngrok's typings).
+- `sc.import_time_beacon`: medium, 0. Python module-level code reports host information over the network on import. Warn ceiling, popular exempt (anyio).
+- `sc.obfuscated_exec_eval`: medium, -15. Python module-level decode-and-exec with no other marker, in a package that evaluates dynamic code. Warn ceiling.
+- `sc.trivial_dynamic_code`: medium, -10. A trivial package (a few lines of code) that evaluates a string or requires a computed module name. Warn ceiling.

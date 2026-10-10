@@ -73,6 +73,7 @@ func TestTakeoverIndicatorSet(t *testing.T) {
 		SignalSCMaintainerAccountVeryYoung, SignalSCMaintainerAccountYoung, SignalSCManifestConfusion,
 		SignalSCNonExistentAuthor, SignalSCPublisherChanged, SignalSCRepoOwnershipMismatch,
 		SignalSCShellAppeared, SignalSCTransitiveMalware,
+		SignalSCProvenanceDowngrade,
 	}
 	assertFlagSet(t, "TakeoverIndicator", func(s Signal) bool { return s.TakeoverIndicator }, want)
 }

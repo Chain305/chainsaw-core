@@ -422,9 +422,25 @@ type DockerLayerHookConfig struct {
 
 // ReleasePolicyConfig controls how Chainsaw treats recently published packages.
 type ReleasePolicyConfig struct {
-	// MinAgeDays blocks package downloads when the upstream release timestamp is newer
-	// than the configured number of days. A value of zero disables the policy.
-	MinAgeDays int `yaml:"min_age_days"`
+	// MinAgeDays is the release-age hold in days. nil means unset, and an
+	// unset hold is DefaultReleaseHold (48h, owner decision 2026-10-10); an
+	// explicit 0 turns the hold off. See ReleaseHoldDuration.
+	MinAgeDays *int `yaml:"min_age_days"`
+	// MinAgeHours, when set, overrides MinAgeDays so a hold can be set
+	// below a day or at a non-whole number of days (e.g. 36). An explicit
+	// 0 turns the hold off.
+	MinAgeHours *int `yaml:"min_age_hours"`
+	// WarnHoldMultiplier stretches the hold for a version whose cached
+	// intelligence verdict is `warn`. 0 means the default (2); 1 turns the
+	// extension off. It can only lengthen a hold, never shorten one.
+	WarnHoldMultiplier int `yaml:"warn_hold_multiplier"`
+	// ExemptScopes lists package names or namespaces the hold never applies
+	// to: "@acme" covers every npm package in that scope, "acme-*" is a
+	// prefix match, anything else is an exact package name.
+	ExemptScopes []string `yaml:"exempt_scopes"`
+	// Exemptions lists exact "package@version" coordinates released from the
+	// hold early, for an urgent patch the CVE-fix rule does not recognise.
+	Exemptions []string `yaml:"exemptions"`
 }
 
 // SwiftConfig controls Swift Package Manager (SE-0292) specific knobs.
@@ -856,8 +872,10 @@ func (c *Config) applyDefaults(baseDir string) {
 	if c.Hooks.DockerLayer.SizeCapBytes == 0 {
 		c.Hooks.DockerLayer.SizeCapBytes = 1 << 30 // 1 GiB
 	}
-	if c.ReleasePolicy.MinAgeDays < 0 {
-		c.ReleasePolicy.MinAgeDays = 0
+	for _, v := range []*int{c.ReleasePolicy.MinAgeDays, c.ReleasePolicy.MinAgeHours} {
+		if v != nil && *v < 0 {
+			*v = 0
+		}
 	}
 	if c.RepositoryAnonymousAccess == nil {
 		defaultAnonymous := false
@@ -1419,16 +1437,41 @@ func (c *Config) AnonymousRepositoryAccess() bool {
 	return *c.RepositoryAnonymousAccess
 }
 
-// ReleaseMinAgeDays returns the minimum release age (in days) required before packages
-// are allowed to download. Zero disables the policy.
+// ReleaseMinAgeDays returns the configured release-age hold in days, or
+// -1 when min_age_days is unset (the hold then resolves through
+// ReleaseHoldDuration, normally to DefaultReleaseHold). Negative explicit
+// values clamp to 0.
 func (c *Config) ReleaseMinAgeDays() int {
+	if c == nil || c.ReleasePolicy.MinAgeDays == nil {
+		return -1
+	}
+	return max(*c.ReleasePolicy.MinAgeDays, 0)
+}
+
+// ReleaseHold returns the effective release-age hold. Zero means off.
+func (c *Config) ReleaseHold() time.Duration {
 	if c == nil {
-		return 0
+		return ReleaseHoldDuration(nil, nil)
 	}
-	if c.ReleasePolicy.MinAgeDays < 0 {
-		return 0
+	return ReleaseHoldDuration(c.ReleasePolicy.MinAgeDays, c.ReleasePolicy.MinAgeHours)
+}
+
+// DefaultReleaseHold is the hold an org gets when it has set neither
+// min_age_hours nor min_age_days. Owner decision 2026-10-10: on for every
+// org at 48h; an explicit 0 is the opt-out.
+const DefaultReleaseHold = 48 * time.Hour
+
+// ReleaseHoldDuration is the one place days, hours and the default
+// combine: an explicit hours value wins, then an explicit days value, then
+// DefaultReleaseHold. An explicit value of 0 (or below) means off.
+func ReleaseHoldDuration(days, hours *int) time.Duration {
+	switch {
+	case hours != nil:
+		return time.Duration(max(*hours, 0)) * time.Hour
+	case days != nil:
+		return time.Duration(max(*days, 0)) * 24 * time.Hour
 	}
-	return c.ReleasePolicy.MinAgeDays
+	return DefaultReleaseHold
 }
 
 // PolicyEvalCacheTTL returns the configured evaluation cache TTL as a

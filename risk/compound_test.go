@@ -4,7 +4,10 @@ package risk
 // only fires when ALL THREE axes (env-var, network, install-script)
 // are present, and that one or two axes alone leave it dormant.
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestCompoundSCEnvNetInstall_FiresWhenAllThree(t *testing.T) {
 	in := Input{
@@ -218,5 +221,158 @@ func TestEnvNetInstallIsNPMGated(t *testing.T) {
 				"more benign than malicious. pypi is in supportedInstallScriptEcosystems "+
 				"and sc.install_script_only is ungated, so this was reachable in production.", eco)
 		}
+	}
+}
+
+// warnCompoundBase is an otherwise clean package: nothing else it carries can
+// move the verdict, so a warn below comes from the compound's ceiling.
+func warnCompoundBase(eco string) Input {
+	return Input{Ecosystem: eco, Package: "fixture", Version: "1.0.0",
+		LicenseSPDX: "MIT", LicenseTags: Classify("MIT"), MaintainerCount: 3}
+}
+
+// TestWarnCeilingCompounds pins the 2026-10-10 set: each rule alone holds an
+// unpopular package at warn, never quarantine, and drops a term to go dormant.
+func TestWarnCeilingCompounds(t *testing.T) {
+	for _, tc := range []struct {
+		id         string
+		set, unset func(*Input)
+		eco        string
+	}{
+		{CompoundSCNPMInstallHookShell, func(in *Input) { in.HasInstallScript, in.CapShell = true, true },
+			func(in *Input) { in.CapShell = false }, "npm"},
+		{CompoundSCEnvNetInstall, func(in *Input) { in.HasInstallScript, in.EnvVarAccess, in.NetworkAccess = true, true, true },
+			func(in *Input) { in.EnvVarAccess = false }, "npm"},
+		{CompoundSCExfilSinkNamed, func(in *Input) { in.MaliciousIOCKind = "exfil_host" },
+			func(in *Input) { in.MaliciousIOCCoupled = true }, "pypi"},
+		{CompoundSCImportTimeBeacon, func(in *Input) { in.ImportTimeKind = "import_time_beacon" },
+			func(in *Input) { in.ImportTimeKind = "import_time_exfil" }, "pypi"},
+		{CompoundSCObfuscatedExecEval, func(in *Input) { in.ImportTimeKind, in.CapDynamicEval = "obfuscated_exec_bare", true },
+			func(in *Input) { in.CapDynamicEval = false }, "pypi"},
+		{CompoundSCTrivialDynamicCode, func(in *Input) { in.TrivialPackage, in.CapDynamicRequire = true, true },
+			func(in *Input) { in.TrivialPackage = false }, "npm"},
+		{CompoundSCTrivialDynamicCode, func(in *Input) { in.TrivialPackage, in.CapDynamicEvalObserved = true, true },
+			func(in *Input) { in.CapDynamicEvalObserved = false }, "pypi"},
+	} {
+		in := warnCompoundBase(tc.eco)
+		tc.set(&in)
+		ev := EvaluatePackage(in, Options{})
+		if _, ok := findFired(ev, tc.id); !ok {
+			t.Errorf("%s did not fire", tc.id)
+			continue
+		}
+		if ev.Verdict != VerdictWarn {
+			t.Errorf("%s: verdict %q (overall %d, ceiling %q), want warn",
+				tc.id, ev.Verdict, ev.DirectScore.Overall, ev.DirectScore.CeilingSignal)
+		}
+		tc.unset(&in)
+		if _, ok := findFired(EvaluatePackage(in, Options{}), tc.id); ok {
+			t.Errorf("%s fired with one of its terms removed", tc.id)
+		}
+	}
+}
+
+// TestWarnCeilingPopularityExemption: the binary-installer shape (esbuild,
+// node-sass) warns on an unpopular package and stays allow past a download
+// line; release history alone does not exempt it (pxnpm, 168 versions since
+// 2019 at 1,640 a week, shipped install-hook malware in October 2026); and the
+// rules that are not DampEstablished warn on popular packages too.
+func TestWarnCeilingPopularityExemption(t *testing.T) {
+	opts := Options{Now: func() time.Time { return dampNow }}
+	installer := func() Input {
+		in := warnCompoundBase("npm")
+		in.HasInstallScript, in.NetworkAccess, in.CapShell, in.EnvVarAccess = true, true, true, true
+		return in
+	}
+
+	in := installer()
+	if v := EvaluatePackage(in, opts).Verdict; v != VerdictWarn {
+		t.Errorf("unpopular installer: verdict %q, want warn", v)
+	}
+
+	in.WeeklyDownloads = intp(5_000_000)
+	ev := EvaluatePackage(in, opts)
+	if ev.Verdict != VerdictAllow {
+		t.Errorf("popular installer: verdict %q (overall %d, ceiling %q), want allow",
+			ev.Verdict, ev.DirectScore.Overall, ev.DirectScore.CeilingSignal)
+	}
+	for _, id := range []string{CompoundSCNPMInstallHookShell, CompoundSCNetShellInstallNPM, CompoundSCEnvNetInstall} {
+		f, ok := findFired(ev, id)
+		if !ok || f.Evidence["damped"] != true {
+			t.Errorf("%s: fired=%v, want fired and marked damped: %+v", id, ok, f.Evidence)
+		}
+	}
+
+	pxnpm := installer()
+	first := time.Date(2019, 4, 4, 0, 0, 0, 0, time.UTC)
+	pxnpm.WeeklyDownloads, pxnpm.VersionCount, pxnpm.FirstPublishedAt = intp(1_640), 168, &first
+	if v := EvaluatePackage(pxnpm, opts).Verdict; v != VerdictWarn {
+		t.Errorf("history-only established installer (pxnpm): verdict %q, want warn", v)
+	}
+
+	popular := warnCompoundBase("pypi")
+	popular.WeeklyDownloads = intp(5_000_000)
+	popular.ImportTimeKind, popular.CapDynamicEval = "obfuscated_exec_bare", true
+	if v := EvaluatePackage(popular, opts).Verdict; v != VerdictWarn {
+		t.Errorf("popular package with obfuscated exec: verdict %q, want warn (not exempt)", v)
+	}
+}
+
+// TestDampableCompoundDoesNotSuspendDamper: a DampEstablished compound is not
+// compromise-shaped, so on a popular package it must leave the hygiene damper
+// running; a takeover indicator still suspends everything.
+func TestDampableCompoundDoesNotSuspendDamper(t *testing.T) {
+	opts := Options{Now: func() time.Time { return dampNow }}
+	in := archivedInput(2_000_000)
+	in.ImportTimeKind = "import_time_beacon"
+	ev := EvaluatePackage(in, opts)
+	if f, _ := findFired(ev, SignalSCRepoArchived); f.Evidence["damped"] != true {
+		t.Errorf("sc.repo_archived not damped next to a dampable compound: %+v", f)
+	}
+	if ev.Verdict != VerdictAllow {
+		t.Errorf("popular package, beacon + archived repo: verdict %q, want allow", ev.Verdict)
+	}
+	in.MaliciousIOCKind, in.MaliciousIOCCoupled = "exfil_host", true // sc.exfil_sink_used, a takeover indicator
+	ev = EvaluatePackage(in, opts)
+	if f, _ := findFired(ev, CompoundSCImportTimeBeacon); f.Evidence["damped"] == true {
+		t.Error("beacon ceiling lifted despite a takeover indicator")
+	}
+}
+
+// TestQuarantineCompoundIgnoresPopularExemption: the popular exemption is for
+// warn-ceiling rules only. sc.exfil_sink_at_install must still quarantine an
+// established, popular package, including when exempt rules fire beside it.
+// The direct call drops the takeover indicator that co-fires in practice
+// (sc.exfil_sink_used), so the guarantee does not lean on it.
+func TestQuarantineCompoundIgnoresPopularExemption(t *testing.T) {
+	for _, rule := range CompoundRules {
+		if rule.MaxImpact > 0 && rule.MaxImpact < thresholdQuarantine && rule.DampEstablished {
+			t.Errorf("%s carries a quarantine ceiling and is DampEstablished", rule.ID)
+		}
+	}
+
+	opts := Options{Now: func() time.Time { return dampNow }}
+	first := time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
+	in := warnCompoundBase("npm")
+	in.WeeklyDownloads, in.VersionCount, in.FirstPublishedAt = intp(50_000_000), 500, &first
+	in.HasInstallScript, in.InstallScriptFetchesRemote = true, true
+	in.EnvVarAccess, in.NetworkAccess, in.CapShell = true, true, true
+	in.MaliciousIOCKind, in.MaliciousIOCCoupled, in.MaliciousIOCAtEntry = "exfil_host", true, true
+	ev := EvaluatePackage(in, opts)
+	if ev.Verdict != VerdictQuarantine || ev.DirectScore.CeilingSignal != CompoundSCExfilAtInstall {
+		t.Errorf("popular package with an exfil sink at install: verdict %q ceiling %q, want quarantine by %s",
+			ev.Verdict, ev.DirectScore.CeilingSignal, CompoundSCExfilAtInstall)
+	}
+
+	comp := map[string]FiredSignal{
+		CompoundSCExfilAtInstall:   {ID: CompoundSCExfilAtInstall, Compound: true},
+		CompoundSCImportTimeBeacon: {ID: CompoundSCImportTimeBeacon, Compound: true},
+	}
+	damped := dampEstablished(in, map[string]FiredSignal{}, comp, dampNow)
+	if damped[CompoundSCExfilAtInstall] {
+		t.Error("sc.exfil_sink_at_install was damped")
+	}
+	if got, by := applyMaxImpactCeiling(100, nil, comp, damped); got != thresholdQuarantine-1 || by != CompoundSCExfilAtInstall {
+		t.Errorf("ceiling %d by %q, want %d by %s", got, by, thresholdQuarantine-1, CompoundSCExfilAtInstall)
 	}
 }

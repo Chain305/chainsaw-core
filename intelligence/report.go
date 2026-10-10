@@ -592,6 +592,12 @@ type SupplyChainSection struct {
 	RepoLastCommitAt *time.Time `json:"repoLastCommitAt,omitempty"`
 	RepoArchived     *bool      `json:"repoArchived,omitempty"`
 
+	// ProvenanceDowngrade is set when this version was published WITHOUT a
+	// provenance attestation although the releases before it carried one —
+	// pnpm's `trustPolicy: no-downgrade`. A stolen publish token cannot mint
+	// an attestation tied to the project's CI. npm only; nil otherwise.
+	ProvenanceDowngrade *ProvenanceDowngrade `json:"provenanceDowngrade,omitempty"`
+
 	// TransitiveCoverage records how much of the direct-dep graph the
 	// transitive risk evaluator could actually see. Populated by
 	// evaluateTransitiveRisk when at least one direct dep is declared.
@@ -599,6 +605,15 @@ type SupplyChainSection struct {
 	// is incomplete" — a clean RolledUp score with partial coverage is
 	// not the same signal as a clean score with full coverage.
 	TransitiveCoverage *TransitiveCoverage `json:"transitiveCoverage,omitempty"`
+}
+
+// ProvenanceDowngrade is the evidence for SupplyChainSection.ProvenanceDowngrade:
+// the nearest lower release, which carried an attestation, and how many
+// consecutive lower releases did.
+type ProvenanceDowngrade struct {
+	LastAttestedVersion string    `json:"lastAttestedVersion"`
+	LastAttestedAt      time.Time `json:"lastAttestedAt"`
+	PriorAttestedCount  int       `json:"priorAttestedCount"`
 }
 
 // TransitiveCoverage captures resolved-vs-total dep counts for one

@@ -105,6 +105,9 @@ func loneFireFixtures() map[string]Input {
 		SignalSCInstallScriptEvalEnc: set(func(in *Input) {
 			in.InstallScriptEvalEncoded = true
 		}),
+		SignalSCProvenanceDowngrade: set(func(in *Input) {
+			in.ProvenanceDowngradeFrom, in.ProvenanceDowngradePriorCount = "21.4.1", 2
+		}),
 		SignalSCDependencyCredential: set(func(in *Input) {
 			in.DependencyCredential = "package.json: ghp_…(40 chars)"
 		}),

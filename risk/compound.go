@@ -23,6 +23,14 @@ type CompoundRule struct {
 	// applyMaxImpactCeiling. 0 = no ceiling, which every rule had until
 	// CompoundSCExfilAtInstall.
 	MaxImpact int
+	// DampEstablished has Signal.DampEstablished's meaning for the ceiling
+	// only: on a package past a download line (release history does not
+	// count, see dampEstablished) with no TakeoverIndicator fired, the rule's
+	// MaxImpact does not apply. The weight is kept, and the rule never
+	// suspends the damper. Set it on rules whose measured benign hits
+	// are popular packages (binary installers, yt-dlp, anyio), never on a
+	// rule that is compromise-shaped on any package.
+	DampEstablished bool
 }
 
 // CompoundRules is the registry for compound signals. Kept separate from
@@ -43,6 +51,13 @@ const (
 	CompoundSCNetShellInstallNPM = "sc.npm_install_net_shell"
 	CompoundSCEnvNetInstall      = "sc.env_net_install"
 	CompoundSCExfilAtInstall     = "sc.exfil_sink_at_install"
+
+	// The 2026-10-10 warn-ceiling set (init below).
+	CompoundSCNPMInstallHookShell = "sc.npm_install_hook_shell"
+	CompoundSCExfilSinkNamed      = "sc.exfil_sink_named"
+	CompoundSCImportTimeBeacon    = "sc.import_time_beacon"
+	CompoundSCObfuscatedExecEval  = "sc.obfuscated_exec_eval"
+	CompoundSCTrivialDynamicCode  = "sc.trivial_dynamic_code"
 )
 
 func init() {
@@ -108,12 +123,16 @@ func init() {
 	// further. That's the intent — separate axes adding evidence
 	// rather than a single OR rule.
 	CompoundRules = append(CompoundRules, CompoundRule{
-		ID:          CompoundSCEnvNetInstall,
-		Category:    CategorySupplyChain,
-		Severity:    SevHigh,
-		Weight:      -45,
-		Title:       "Install script reads env vars and makes network calls",
-		Description: "All three of (env-var read, network primitive, install-time lifecycle script) are present. The active-exfil fingerprint of credential-stealing malware in the install path.",
+		ID:       CompoundSCEnvNetInstall,
+		Category: CategorySupplyChain,
+		Severity: SevHigh,
+		Weight:   -45,
+		// Warn ceiling 2026-10-10, popular packages exempt: it fires on
+		// esbuild, node-sass and canvas (see the exfil_sink_at_install note).
+		MaxImpact:       maxImpactWarnTop,
+		DampEstablished: true,
+		Title:           "Install script reads env vars and makes network calls",
+		Description:     "All three of (env-var read, network primitive, install-time lifecycle script) are present. The active-exfil fingerprint of credential-stealing malware in the install path.",
 		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
 			// npm-gated as of 2026-09-16, on measurement. This rule shipped
 			// ecosystem-blind and INVERTS on PyPI:
@@ -191,12 +210,18 @@ func init() {
 	// one asserts capability co-occurrence in the install path and nothing
 	// about intent.
 	CompoundRules = append(CompoundRules, CompoundRule{
-		ID:          CompoundSCNetShellInstallNPM,
-		Category:    CategorySupplyChain,
-		Severity:    SevHigh,
-		Weight:      -30,
-		Title:       "npm install script with network and shell access",
-		Description: "The package runs an install-time script and its source both reaches the network and spawns a shell. Measured on npm as a 0%-false-positive combination; deliberately not applied to other ecosystems, where a build-time setup script shelling out is ordinary.",
+		ID:       CompoundSCNetShellInstallNPM,
+		Category: CategorySupplyChain,
+		Severity: SevHigh,
+		Weight:   -30,
+		// Warn ceiling 2026-10-10, popular packages exempt, same reason
+		// as sc.env_net_install. Not binding today: wherever this fires,
+		// sc.npm_install_hook_shell (59) or sc.install_script_fetches_remote
+		// (40) fires too. Kept so the rule states its own band.
+		MaxImpact:       maxImpactWarnTop,
+		DampEstablished: true,
+		Title:           "npm install script with network and shell access",
+		Description:     "The package runs an install-time script and its source both reaches the network and spawns a shell. Measured on npm as a 0%-false-positive combination; deliberately not applied to other ecosystems, where a build-time setup script shelling out is ordinary.",
 		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
 			if !isNPMEcosystem(in.Ecosystem) {
 				return false, "", nil
@@ -231,11 +256,12 @@ func init() {
 	// Ecosystem-blind on purpose: unlike the two rules above it rests on no
 	// "has an install script" base rate.
 	//
-	// This is the first compound with a ceiling. The two above deliberately
-	// have none: measured on the same day they fire on esbuild, node-sass,
-	// canvas, chromedriver, @sentry/cli, ssh2, node-pty, @tensorflow/tfjs-node
-	// and youtube-dl-exec (10 of 94 install-hook packages), because a binary
-	// installer reads proxy settings, downloads and shells out.
+	// This was the first compound with a ceiling. The two above had none
+	// until 2026-10-10: measured on the same day they fire on esbuild,
+	// node-sass, canvas, chromedriver, @sentry/cli, ssh2, node-pty,
+	// @tensorflow/tfjs-node and youtube-dl-exec (10 of 94 popular install-hook
+	// packages), because a binary installer reads proxy settings, downloads
+	// and shells out. Their warn ceiling is therefore DampEstablished.
 	CompoundRules = append(CompoundRules, CompoundRule{
 		ID:          CompoundSCExfilAtInstall,
 		Category:    CategorySupplyChain,
@@ -261,6 +287,120 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Code sends to an exfiltration endpoint and runs malware-shaped code at install time.", nil
+		},
+	})
+}
+
+func init() {
+	// The warn-ceiling set, 2026-10-10. Each holds a package at the top of the
+	// warn band and none can quarantine. Chosen by a byte-feature combiner
+	// analysis (docs/PLANS_INTELLIGENCE.md#plan-signal-repair): on the 797
+	// Datadog samples, bytes only and feed-blind, the union moves warn+ recall
+	// from 57.0% to 66.1%. Benign cost was measured on rev6 E/C/D with
+	// bytes (1,199 rows, 431 npm/PyPI); that base holds only 8 npm packages
+	// with an install hook, so the install-path rules below also lean on the
+	// popular install-hook measurement quoted on sc.exfil_sink_at_install.
+	//
+	// Rules whose benign hits are popular packages are DampEstablished: the
+	// ceiling does not apply on a package past a download line unless a
+	// takeover indicator fired. A bytes-only scan carries no download data, so
+	// the malware measurement is unaffected by the exemption. Those rules
+	// weigh 0: the ceiling is their whole claim, and an exempt package must
+	// not move. A weight on sc.npm_install_hook_shell would also stack on the
+	// two install-path compounds it overlaps and warn esbuild by arithmetic.
+	warn := func(r CompoundRule) {
+		r.Category, r.MaxImpact = CategorySupplyChain, maxImpactWarnTop
+		CompoundRules = append(CompoundRules, r)
+	}
+
+	// npm install hook AND shell. +33 Datadog malware samples to warn; on
+	// rev6 2 of 431 npm/PyPI benign (at-builder, ap-browser-connect).
+	// A superset of sc.npm_install_net_shell on non-fetching hooks, so it
+	// shares that rule's popular binary-installer hits; hence the exemption.
+	warn(CompoundRule{
+		ID:              CompoundSCNPMInstallHookShell,
+		Severity:        SevMedium,
+		Weight:          0,
+		DampEstablished: true,
+		Title:           "npm install script in a package that spawns a shell",
+		Description:     "The package runs an npm install hook and its source spawns a shell. On popular packages (binary installers) the warn ceiling does not apply.",
+		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
+			if _, hook := fired[SignalSCInstallScriptOnlyNPM]; !hook || !in.CapShell {
+				return false, "", nil
+			}
+			return true, "npm package runs an install hook and its source spawns a shell.", nil
+		},
+	})
+
+	// An exfiltration host named in shipping code with no send from the same
+	// file (the coupled case is sc.exfil_sink_used). +18 malware; 0 of 1,199
+	// rev6 benign. Popular hits measured 2026-10-03: yt-dlp (gofile.io in its
+	// unsupported-sites list) and ngrok's typings.
+	warn(CompoundRule{
+		ID:              CompoundSCExfilSinkNamed,
+		Severity:        SevMedium,
+		Weight:          0,
+		DampEstablished: true,
+		Title:           "Code names an exfiltration endpoint",
+		Description:     "Shipping code embeds a webhook, paste drop, tunnel or out-of-band host, though no file both names it and sends.",
+		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
+			if in.MaliciousIOCKind != "exfil_host" || in.MaliciousIOCCoupled {
+				return false, "", nil
+			}
+			return true, "Shipping code names an exfiltration endpoint.", nil
+		},
+	})
+
+	// pysource import_time_beacon: module top level sends host identity.
+	// +10 malware; 0 of 1,199 rev6 benign, but it fires on anyio (top-50
+	// PyPI) and metaflow-netflixext, which is why it was declined on
+	// 2026-10-04 and ships now only with the exemption.
+	warn(CompoundRule{
+		ID:              CompoundSCImportTimeBeacon,
+		Severity:        SevMedium,
+		Weight:          0,
+		DampEstablished: true,
+		Title:           "Python module beacons on import",
+		Description:     "Module-level code in the package's Python source reports host information over the network when it is imported.",
+		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
+			if in.ImportTimeKind != "import_time_beacon" {
+				return false, "", nil
+			}
+			return true, "Module-level code beacons host information on import.", nil
+		},
+	})
+
+	// A bare decode-and-exec at module top level AND the capability scanner's
+	// dynamic eval. +15 malware; 1 of 431 benign (azure-ai-contentsafety
+	// 1.0.0). Not exempt: the one benign hit is accepted, and a decode-and-exec
+	// is how a compromised popular package would deliver.
+	warn(CompoundRule{
+		ID:          CompoundSCObfuscatedExecEval,
+		Severity:    SevMedium,
+		Weight:      -15,
+		Title:       "Obfuscated code executed on import",
+		Description: "Module-level code decodes a blob and executes it, and the package evaluates dynamic code.",
+		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
+			if in.ImportTimeKind != "obfuscated_exec_bare" || !in.CapDynamicEval {
+				return false, "", nil
+			}
+			return true, "Module-level decode-and-exec in a package that evaluates dynamic code.", nil
+		},
+	})
+
+	// A trivial package (a few lines of code) that evaluates or requires
+	// code it computes. +10 malware; 0 of 1,199 rev6 benign.
+	warn(CompoundRule{
+		ID:          CompoundSCTrivialDynamicCode,
+		Severity:    SevMedium,
+		Weight:      -10,
+		Title:       "Trivial package runs dynamic code",
+		Description: "The package is a few lines of code and evaluates a string or requires a computed module name.",
+		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
+			if !in.TrivialPackage || !(in.CapDynamicEvalObserved || in.CapDynamicRequire) {
+				return false, "", nil
+			}
+			return true, "Trivial package evaluates or requires dynamic code.", nil
 		},
 	})
 }

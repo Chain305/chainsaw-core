@@ -351,8 +351,8 @@ func TestConfigAccessorsNilSafe(t *testing.T) {
 	if !c.AnonymousRepositoryAccess() {
 		t.Error("nil Config should default AnonymousRepositoryAccess to true")
 	}
-	if c.ReleaseMinAgeDays() != 0 {
-		t.Error("nil Config should report 0 min age")
+	if c.ReleaseMinAgeDays() != -1 || c.ReleaseHold() != DefaultReleaseHold {
+		t.Error("nil Config should report an unset min age resolving to the default hold")
 	}
 	if c.ExceptionAgeDays() != 0 {
 		t.Error("nil Config should report 0 exception age")
@@ -364,11 +364,11 @@ func TestConfigAccessorsNilSafe(t *testing.T) {
 
 func TestReleaseMinAgeDaysClampsNegative(t *testing.T) {
 	c := &Config{}
-	c.ReleasePolicy.MinAgeDays = -5
+	c.ReleasePolicy.MinAgeDays = intPtr(-5)
 	if got := c.ReleaseMinAgeDays(); got != 0 {
 		t.Errorf("expected negative min age to clamp to 0, got %d", got)
 	}
-	c.ReleasePolicy.MinAgeDays = 7
+	c.ReleasePolicy.MinAgeDays = intPtr(7)
 	if got := c.ReleaseMinAgeDays(); got != 7 {
 		t.Errorf("expected 7, got %d", got)
 	}
@@ -456,12 +456,12 @@ func TestValidateBubblesDataSourceError(t *testing.T) {
 
 func TestApplyDefaultsClampsAndPopulates(t *testing.T) {
 	c := &Config{}
-	c.ReleasePolicy.MinAgeDays = -1
+	c.ReleasePolicy.MinAgeDays = intPtr(-1)
 	c.HTTPClient.TimeoutSeconds = 0
 	c.HTTPClient.MaxIdleConns = 0
 	c.applyDefaults("")
-	if c.ReleasePolicy.MinAgeDays != 0 {
-		t.Errorf("negative min_age_days should clamp to 0, got %d", c.ReleasePolicy.MinAgeDays)
+	if *c.ReleasePolicy.MinAgeDays != 0 {
+		t.Errorf("negative min_age_days should clamp to 0, got %d", *c.ReleasePolicy.MinAgeDays)
 	}
 	if c.HTTPClient.TimeoutSeconds != 60 {
 		t.Errorf("timeout default 60, got %d", c.HTTPClient.TimeoutSeconds)
