@@ -272,19 +272,24 @@ func (s *S3BlobStore) WriteForOrg(orgID, repo, logicalPath string, src io.Reader
 // Open returns a reader for the blob at the given key. The caller
 // MUST Close the reader to release the underlying TCP connection.
 //
-// Cancellation: the request context governs only the GetObject call
-// (header fetch). Streaming the body uses a long-lived background
-// context so multi-GB downloads aren't killed by a small timeout —
-// the SDK's HTTP client owns idle/read timeouts at the transport layer.
+// Cancellation: a 30s timer bounds only the GetObject call (headers).
+// The SDK ties the body stream to the same context, so the context lives
+// until the caller closes the body. It used to be cancelled as soon as
+// the headers arrived, which made every body not already buffered fail
+// with "context canceled": in prod, every S3-served proxy cache hit on
+// anything but a tiny object 502'd (2026-10-10). The SDK's HTTP client
+// owns idle/read timeouts on the stream itself.
 func (s *S3BlobStore) Open(key string) (io.ReadCloser, error) {
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	headerTimer := time.AfterFunc(30*time.Second, cancel)
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
-	cancel()
+	headerTimer.Stop()
 	if err != nil {
+		cancel()
 		if isS3NotFound(err) {
 			s.observeOp("get", key, start, ErrBlobNotFound)
 			return nil, ErrBlobNotFound
@@ -293,7 +298,19 @@ func (s *S3BlobStore) Open(key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("s3 get %s: %w", key, err)
 	}
 	s.observeOp("get", key, start, nil)
-	return out.Body, nil
+	return &cancelOnClose{ReadCloser: out.Body, cancel: cancel}, nil
+}
+
+// cancelOnClose releases Open's context when the body is closed.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // Stat returns minimal metadata for the blob at the given key.
