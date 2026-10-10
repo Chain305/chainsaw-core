@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chain305/chainsaw-core/risk"
 )
@@ -86,6 +87,10 @@ func TestFeedBlindRescore(t *testing.T) {
 				r.Observation.Warnings = append(r.Observation.Warnings,
 					Warning{Provider: "registrymetadata", Code: WarnLicenseUnavailable})
 			}
+			// The scanner's post-merge typosquat clear, so a change to it
+			// shows here without a rescan. Idempotent on rows it already
+			// cleared at scan time.
+			clearEstablishedTyposquat(r, time.Now())
 			ev := risk.EvaluatePackage(ProjectToRiskInput(r), risk.Options{})
 			var fired, damped []string
 			for _, cs := range ev.DirectScore.Categories {

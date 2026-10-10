@@ -107,16 +107,15 @@ var pypiPatterns = []linePattern{
 		`\bdef\s+open\s*\(|`+pyWriteOpen),
 
 	// Dynamic eval. eval/exec need an argument: "run with 'exec()'" is prose.
-	// __import__ and importlib.import_module count only with a computed
-	// name: a literal one is a lazy import of a fixed module. compile()
-	// counts only with a code mode, so a bare `compile(` imported from re
-	// does not.
+	// compile() counts only with a code mode, so a bare `compile(` imported
+	// from re does not. __import__ and importlib.import_module are NOT here:
+	// they load a module by name, which is cap.dynamic_require
+	// (codesmell.ScanDynamicRequire), not evaluation of a string. bentoml
+	// 1.4.34 went upgrade_available -> quarantine on import_module alone.
 	pyPat(CapDynamicEval,
 		`(?:^|[^.\w])(?:eval|exec)\s*\(\s*[^)\s]|`+
-			`(?:^|[^.\w])compile\s*\(`+pyArgs+`['"](?:exec|eval|single)['"]|`+
-			`\b__import__\s*\(|\bimport_module\s*\(`,
-		`\bdef\s+(?:eval|exec|compile)\s*\(|`+
-			`\b(?:__import__|import_module)\s*\(\s*['"][\w.]*['"]\s*[,)]`),
+			`(?:^|[^.\w])compile\s*\(`+pyArgs+`['"](?:exec|eval|single)['"]`,
+		`\bdef\s+(?:eval|exec|compile)\s*\(`),
 
 	pyPat(CapNativeCode, pyImport(`ctypes|cffi`), ""),
 }

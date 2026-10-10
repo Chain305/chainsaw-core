@@ -29,7 +29,10 @@ func (p *debugTelemetryProvider) Supports(string) bool { return true }
 // 3: also reports DynamicRequire (cap.dynamic_require).
 //
 // 4: codesmell redacts a URL's userinfo from every sample before it is stored.
-const debugTelemetryAnalyzerVersion = 4
+//
+// 5: DynamicRequire also covers Python's computed __import__ /
+// importlib.import_module.
+const debugTelemetryAnalyzerVersion = 5
 
 func (p *debugTelemetryProvider) AnalyzerVersion() int { return debugTelemetryAnalyzerVersion }
 

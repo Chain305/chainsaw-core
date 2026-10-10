@@ -315,7 +315,24 @@ func promoteToUpgradeAvailable(
 	if !corroborated {
 		return nil
 	}
-	promoted := risk.EvaluatePackage(ProjectToRiskInput(report), risk.Options{
+	// Re-gate on the input actually being promoted. After the transitive
+	// overlay, eval.DirectScore is the PRE-overlay pass and never saw
+	// sc.transitive_*, while ProjectToRiskInput now folds the stored
+	// counts back in. Gating on eval alone let a root with a transitive
+	// critical CVE promote at scan time (both ceilings are 30, so the
+	// score check below could not tell) and re-score quarantine on every
+	// read of the persisted row — 11 of 300 prod Go rows, 2026-10-10.
+	// The decision: a transitive critical/high/malware finding is risk the
+	// root's own fixed version is not proven to remove, so it vetoes
+	// promotion (supply_chain), on every path.
+	in := ProjectToRiskInput(report)
+	if !risk.UpgradePromotionEligible(risk.EvaluatePackage(in, risk.Options{
+		CategoryWeights:       weights,
+		SignalWeightOverrides: signalOverrides,
+	})) {
+		return nil
+	}
+	promoted := risk.EvaluatePackage(in, risk.Options{
 		CategoryWeights:       weights,
 		SignalWeightOverrides: signalOverrides,
 		SafeUpgradeVersion:    safeVersion,

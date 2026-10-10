@@ -463,7 +463,8 @@ type ArtifactScanSection struct {
 	Telemetry          bool           `json:"telemetry,omitempty"`
 	TelemetrySamples   []ScanLocation `json:"telemetrySamples,omitempty"`
 	// DynamicRequire is the weight-0 cap.dynamic_require observation:
-	// JavaScript require() with a non-literal argument.
+	// JavaScript require(), or Python __import__ / import_module, with a
+	// non-literal argument.
 	DynamicRequire        bool           `json:"dynamicRequire,omitempty"`
 	DynamicRequireSamples []ScanLocation `json:"dynamicRequireSamples,omitempty"`
 

@@ -248,9 +248,9 @@ func buildEvalRules() {
 		{`\bsetTimeout\s*\(\s*["'\x60]`, "setTimeout(string)"},
 		{`\bsetInterval\s*\(\s*["'\x60]`, "setInterval(string)"},
 	})
-	// Python: eval(, exec(, compile(, __import__(. __import__ takes a
-	// string name so it composes with concatenated payloads — the same
-	// threat surface as eval/compile.
+	// Python: eval(, exec(, compile(. __import__ is not here: it loads a
+	// module by name, which is ScanDynamicRequire (cap.dynamic_require), and
+	// a literal __import__('os') is no more eval than `import os`.
 	//
 	// The builtins only: a name after "." is a method. On 31 PyPI packages of
 	// the 2026-10 corpus a method call (re.compile, model.eval, cursor.exec)
@@ -259,7 +259,6 @@ func buildEvalRules() {
 		{`(?:^|[^.\w])eval\s*\(`, "eval"},
 		{`(?:^|[^.\w])exec\s*\(`, "exec"},
 		{`(?:^|[^.\w])compile\s*\(`, "compile"},
-		{`\b__import__\s*\(`, "__import__"},
 	})
 	// Ruby: eval, instance_eval, class_eval, module_eval
 	evalRules.ByLang[LangRuby] = compilePatterns([][2]string{

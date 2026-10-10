@@ -166,7 +166,10 @@ func TestScanClearsEstablishedCrate(t *testing.T) {
 
 // TestClearEstablishedTyposquatHistory uses production rows from 2026-10-07.
 // dbsp is the false positive (299 versions since 2023-08, 24,227 per 90 days,
-// below the download line); the squats carry at most 28 versions.
+// below the download line); the other suspected rows carry at most 28
+// versions. (avada and expres are not squats either: the long-lived rule
+// clears them once their version date is known, see
+// TestClearLongLivedTyposquat.)
 func TestClearEstablishedTyposquatHistory(t *testing.T) {
 	now := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
 	day := func(s string) *time.Time {
@@ -231,5 +234,97 @@ func TestScanClearsLongHistoryCrate(t *testing.T) {
 	}
 	if got := report.SupplyChain.TyposquatStatus; got != "clean" {
 		t.Errorf("dbsp: TyposquatStatus %q, want clean", got)
+	}
+}
+
+// TestClearLongLivedTyposquat: the eleven rev6 stratum E quarantines
+// (2026-10-10), each one edit from a popular name and each a distinct,
+// benign project, carry the dates below. The negatives are the shapes the
+// rule must not clear: npm's holding package left where a squat was removed
+// (chalkk and lodahs, both in prod), a sleeper's fresh release, a squat that
+// lived a year (jeIlyfish), and dates that prove nothing.
+func TestClearLongLivedTyposquat(t *testing.T) {
+	now := time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
+	day := func(s string) *time.Time {
+		d, err := time.Parse("2006-01-02", s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &d
+	}
+	for _, tc := range []struct {
+		name, version string
+		first, pub    *time.Time
+		cleared       bool
+	}{
+		{"pypi hacs (yacs)", "1.0.0a1", day("2016-05-01"), day("2016-05-01"), true},
+		{"pypi pwsgi (uwsgi)", "0.1.10", day("2016-10-31"), day("2017-07-08"), true},
+		{"pypi pyisa (pyvisa)", "1.0.2", day("2018-09-03"), day("2018-09-03"), true},
+		{"pypi tta (ta)", "0.2.0", day("2015-07-29"), day("2015-07-29"), true},
+		{"rubygems bst (ast)", "0.0.3", day("2015-05-04"), day("2015-05-04"), true},
+		{"rubygems jamespath (jmespath)", "0.5.0", day("2013-11-27"), day("2013-11-27"), true},
+		{"rubygems litc (lita)", "1.0.3", day("2009-10-08"), day("2010-02-16"), true},
+		{"rubygems redrock (redlock)", "0.1.2", day("2010-08-19"), day("2010-12-28"), true},
+		{"rubygems set_version (sem_version)", "0.1.2.1", day("2015-02-11"), day("2015-02-11"), true},
+		{"cargo rage 0.11.1 (age)", "0.11.1", day("2018-09-18"), day("2024-12-18"), true},
+		{"cargo rage 0.6.1 (age)", "0.6.1", day("2018-09-18"), day("2024-12-18"), true},
+		{"at both lines", "1.0.0", day("2021-10-11"), day("2025-10-10"), true},
+
+		{"npm chalkk holding package", "0.0.1-security", day("2019-07-24"), day("2019-07-24"), false},
+		{"npm lodahs holding package", "0.0.1-securitY", day("2019-11-25"), day("2019-11-25"), false},
+		{"sleeper: old name, fresh release", "2.0.0", day("2015-01-01"), day("2026-06-01"), false},
+		{"jeIlyfish shape: a year old", "0.7.2", day("2025-10-01"), day("2025-10-01"), false},
+		{"package one day short", "1.0.0", day("2021-10-12"), day("2021-10-12"), false},
+		{"version one day short", "1.0.0", day("2015-01-01"), day("2025-10-11"), false},
+		{"nuget unlisted sentinel", "1.0.0", day("1900-01-01"), day("1900-01-01"), false},
+		{"no version date", "1.0.0", day("2013-11-27"), nil, false},
+		{"no first publish", "1.0.0", nil, day("2013-11-27"), false},
+	} {
+		r := squatReport(nil, "lookalike")
+		r.Identity.Version = tc.version
+		r.Maintenance.FirstPublishedAt = tc.first
+		r.Release.PublishedAt = tc.pub
+		clearEstablishedTyposquat(r, now)
+		cleared := r.SupplyChain.TyposquatStatus == "clean"
+		if cleared != tc.cleared {
+			t.Errorf("%s: cleared=%v, want %v", tc.name, cleared, tc.cleared)
+		}
+		if cleared && (len(r.Observation.Warnings) != 1 || r.Observation.Warnings[0].Code != WarnTyposquatClearedEstablished) {
+			t.Errorf("%s: cleared without the explaining warning: %+v", tc.name, r.Observation.Warnings)
+		}
+	}
+}
+
+// TestScanClearsLongLivedTyposquat goes through Scan: the version date and
+// first release arrive from the metadata provider, after the name-only
+// typosquat provider has flagged.
+func TestScanClearsLongLivedTyposquat(t *testing.T) {
+	first := time.Date(2013, 11, 27, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		pub  time.Time
+		want string
+	}{
+		{first, "clean"},
+		{time.Now().Add(-24 * time.Hour), "suspected"},
+	} {
+		pub := tc.pub
+		squat := &fakeProvider{name: "fake-typosquat", signal: SignalTyposquat, partial: PartialReport{
+			SupplyChain: &SupplyChainSection{TyposquatStatus: "suspected", TyposquatConfidence: "high", TyposquatSimilarTo: "jmespath"},
+		}}
+		meta := &fakeProvider{name: "fake-metadata", signal: SignalMalware, partial: PartialReport{
+			Release:     &ReleaseSection{PublishedAt: &pub},
+			Maintenance: &MaintenanceSection{FirstPublishedAt: &first},
+		}}
+		svc := New(Config{Providers: []Provider{squat, meta}})
+		report, err := svc.Scan(context.Background(), Request{
+			Key:   Key{Ecosystem: "rubygems", Package: "jamespath", Version: "0.5.0"},
+			OrgID: "org-default",
+		})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if got := report.SupplyChain.TyposquatStatus; got != tc.want {
+			t.Errorf("jamespath published %s: TyposquatStatus %q, want %q", pub.Format("2006-01-02"), got, tc.want)
+		}
 	}
 }

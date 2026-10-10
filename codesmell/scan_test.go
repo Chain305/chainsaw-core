@@ -327,13 +327,13 @@ func TestScanEvalPythonMethodsAreNotBuiltins(t *testing.T) {
 	}
 }
 
-func TestScanEvalPythonDunderImport(t *testing.T) {
+// A dynamic import is cap.dynamic_require (ScanDynamicRequire), not eval.
+func TestScanEvalPythonDunderImportIsNotEval(t *testing.T) {
 	files := map[string][]byte{
-		"x.py": []byte("mod = __import__('os')\n"),
+		"x.py": []byte("mod = __import__('os')\nm = __import__(name)\nm = importlib.import_module(self.module)\n"),
 	}
-	r := ScanEval(files)
-	if !r.Fired {
-		t.Fatalf("expected __import__ fire, got %+v", r)
+	if r := ScanEval(files); r.Fired {
+		t.Fatalf("a dynamic import fired UsesEval: %+v", r.Matches)
 	}
 }
 

@@ -81,8 +81,6 @@ func TestScanPyPI(t *testing.T) {
 		{"eval", py("x = eval(expr)\n"), eval, true},
 		{"exec builtin", py("exec(code, ns)\n"), eval, true},
 		{"compile exec mode", py("c = compile(src, '<string>', 'exec')\n"), eval, true},
-		{"__import__ computed", py("m = __import__(name)\n"), eval, true},
-		{"import_module computed", py("m = importlib.import_module(mod)\n"), eval, true},
 		{"import ctypes", py("import ctypes\n"), nat, true},
 		{"from cffi import", py("from cffi import FFI\n"), nat, true},
 		{"compiled .so", map[string]string{"pkg/_speed.cpython-312-x86_64-linux-gnu.so": "\x7fELF"}, nat, true},
@@ -97,6 +95,12 @@ func TestScanPyPI(t *testing.T) {
 		{"re.compile is not eval", py("r = re.compile(r'\\d+')\n"), eval, false},
 		{"literal_eval is not eval", py("v = ast.literal_eval(s)\nv = literal_eval(s)\n"), eval, false},
 		{"literal import_module is not eval", py("m = importlib.import_module('json')\nm = __import__('os.path')\n"), eval, false},
+		// A dynamic import loads a module by name; it is cap.dynamic_require
+		// (codesmell), not eval. bentoml 1.4.34's three hits, verbatim.
+		{"computed import_module is not eval", py("        module = importlib.import_module(self.module)\n"), eval, false},
+		{"computed __import__ is not eval", py("m = __import__(name, fromlist=[cls])\n"), eval, false},
+		{"f-string import_module is not eval", py("mod = importlib.import_module(f\"bentoml._internal.{name}\")\n"), eval, false},
+		{"exec of a dynamic import is still eval", py("exec(__import__(n).payload)\n"), eval, true},
 		{"def eval method is not eval", py("    def eval(self, x):\n        return x\n"), eval, false},
 		{"rST literal eval is not eval", py("    representation (objects where ``eval(repr(x)) == x`` is true).\n"), eval, false},
 		{"rST literal env is not env", py("    already set in ``os.environ``.\n"), env, false},

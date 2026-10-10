@@ -9,7 +9,8 @@ const (
 	SignalCapDebugAccess = "cap.debug_access"
 	SignalCapTelemetry   = "cap.telemetry"
 	// SignalCapDynamicRequire is socket.dev's dynamicRequire: require()
-	// with a non-literal argument. Not eval — that is cap.dynamic_eval*.
+	// with a non-literal argument, and Python's computed __import__ /
+	// import_module. Not eval — that is cap.dynamic_eval*.
 	SignalCapDynamicRequire = "cap.dynamic_require"
 )
 
@@ -52,12 +53,12 @@ func init() {
 		Severity:    SevInfo,
 		Weight:      0,
 		Title:       "Package loads modules by computed name",
-		Description: "JavaScript source calls require() with a non-literal argument (a variable, a path.join, a template with ${}), so which module is loaded is decided at run time.",
+		Description: "JavaScript source calls require() with a non-literal argument (a variable, a path.join, a template with ${}), or Python source calls __import__() or importlib.import_module() with one, so which module is loaded is decided at run time.",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if !in.CapDynamicRequire {
 				return false, "", nil
 			}
-			return true, "Package source calls require() with a computed argument.",
+			return true, "Package source loads a module by a computed name (require, __import__ or import_module).",
 				capEvidence(in.CapDynamicRequireEvidence, 0)
 		},
 	})
