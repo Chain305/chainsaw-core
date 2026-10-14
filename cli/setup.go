@@ -430,6 +430,7 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 	if err := saveConfig(prog.ServerURL, token, prog.OrgID); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
+	rememberOrgSlug(NewAPIClient(prog.ServerURL, token), prog.OrgID)
 	clearProgress()
 	fmt.Printf("Configuration saved to %s\n", configFilePath())
 	completed = true

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"github.com/chain305/chainsaw-core/cli/hook"
 	"github.com/chain305/chainsaw-core/cli/secureio"
@@ -797,6 +798,12 @@ func resolveOrgSlug(cmd *cobra.Command, serverURL, flagValue string) (string, er
 	// prompting (non-TTY scripts shouldn't hang on a select).
 	for _, o := range resp.Orgs {
 		if o.ID == me.OrgID && strings.TrimSpace(o.Slug) != "" {
+			// Record it for the offline install guard (org_slug.go) when it is
+			// the configured org's — the common upgrade path for a login made
+			// before the slug was saved.
+			if me.OrgID == strings.TrimSpace(viper.GetString("org_id")) && strings.TrimSpace(viper.GetString("org_slug")) == "" {
+				_ = saveOrgSlug(strings.TrimSpace(o.Slug))
+			}
 			return o.Slug, nil
 		}
 	}

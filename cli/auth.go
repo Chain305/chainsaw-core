@@ -412,6 +412,11 @@ func runAuthLogin(cmd *cobra.Command, _ []string) error {
 			}
 			if err := NewAPIClient(server, existing).Get("/api/auth/me", &me); err == nil {
 				emit("cli.auth.already_logged_in", nil)
+				// Logins before v0.22.95 saved no org slug; re-running login
+				// records it without a fresh sign-in.
+				if strings.TrimSpace(viper.GetString("org_slug")) == "" && me.OrgID == strings.TrimSpace(viper.GetString("org_id")) {
+					rememberOrgSlug(NewAPIClient(server, existing), me.OrgID)
+				}
 				if useJSON(cmd) {
 					enc := json.NewEncoder(out)
 					enc.SetIndent("", "  ")
@@ -482,6 +487,7 @@ func runAuthLogin(cmd *cobra.Command, _ []string) error {
 	if err := saveConfig(server, token, me.OrgID); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
+	rememberOrgSlug(client, me.OrgID)
 
 	if useJSON(cmd) {
 		enc := json.NewEncoder(out)

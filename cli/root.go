@@ -1024,6 +1024,9 @@ func saveConfig(serverURL, token, orgID string) error {
 
 	viper.Set("server_url", serverURL)
 	viper.Set("org_id", orgID)
+	// org_slug belongs to org_id: a fresh save drops it so a login to another
+	// org never keeps the old org's slug (see org_slug.go). Login re-records it.
+	viper.Set("org_slug", "")
 	// The token is never written to YAML; keep viper's in-memory view in sync
 	// with the credential store so the current process sees the new value.
 	viper.Set("token", "")
@@ -1052,6 +1055,7 @@ func clearConfig() error {
 	viper.Set("token", "")
 	viper.Set("server_url", "")
 	viper.Set("org_id", "")
+	viper.Set("org_slug", "")
 	if err := os.Remove(configFilePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove config: %w", err)
 	}

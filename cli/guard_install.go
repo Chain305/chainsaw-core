@@ -1038,10 +1038,9 @@ func knownRegistry(eco, raw string) bool {
 // proxy repository on the shared host with an arbitrary upstream, so
 // chain305.com/chainproxy/repository/@attacker/… is just another index.
 //
-// The slug is `org_slug` (CHAINSAW_ORG_SLUG, or org_slug: in config.yaml).
-// Nothing writes it yet — `auth login` resolves the slug over the network and
-// does not save it, and the offline guard will not make that call — so until
-// it is set every URL is undeclared: not assessed, malware lane still run.
+// The slug is `org_slug` (CHAINSAW_ORG_SLUG, or org_slug: in config.yaml),
+// recorded by `auth login`, `setup` and `install-hook` (org_slug.go). Without
+// it every URL is undeclared: not assessed, malware lane still run.
 func ownChainsawRepository(u *url.URL) bool {
 	slug, server := strings.TrimSpace(viper.GetString("org_slug")), strings.TrimSpace(cfgServerURL())
 	if slug == "" || server == "" {
