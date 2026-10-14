@@ -380,16 +380,23 @@ func (r *Refresher) runOnce(ctx context.Context) error {
 	return nil
 }
 
-// fetchAll downloads and flattens every configured ecosystem. Partial-
-// failure policy mirrors build.sh: if at least one ecosystem succeeds
-// AND every other failure is logged, the tick succeeds with whatever
-// records came back. If ALL ecosystems fail we return an aggregate
-// error so the caller keeps the prior bundle.
+// fetchAll downloads and flattens every configured ecosystem. If at least
+// one ecosystem succeeds the tick succeeds, and the ecosystems that failed
+// keep the advisories the prior bundle held for them (keepPriorFor). If ALL
+// ecosystems fail we return an aggregate error so the caller keeps the
+// prior bundle whole.
+//
+// Writing only what came back is NOT safe: the bundle is the whole corpus,
+// so a failed ecosystem would vanish from it until the next good tick, and
+// every coordinate scanned meanwhile is stored clean. That happened to
+// crates.io on 2026-10-05 — rsa@0.9.10 (RUSTSEC-2023-0071) and seven other
+// vulnerable crates were stored allow/100 and served that way for ~38h.
 func (r *Refresher) fetchAll(ctx context.Context) ([]Advisory, error) {
 	var (
-		out  []Advisory
-		errs []string
-		any  bool
+		out    []Advisory
+		errs   []string
+		failed []string
+		any    bool
 	)
 	for _, eco := range r.cfg.Ecosystems {
 		eco := strings.TrimSpace(eco)
@@ -399,6 +406,7 @@ func (r *Refresher) fetchAll(ctx context.Context) ([]Advisory, error) {
 		recs, err := r.fetchEcosystem(ctx, eco)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", eco, err))
+			failed = append(failed, eco)
 			r.logger.Warn("osv refresher: ecosystem fetch failed",
 				"ecosystem", eco, "err", err)
 			continue
@@ -409,7 +417,43 @@ func (r *Refresher) fetchAll(ctx context.Context) ([]Advisory, error) {
 	if !any {
 		return nil, fmt.Errorf("all ecosystems failed: %s", strings.Join(errs, "; "))
 	}
-	return out, nil
+	return append(out, r.keepPriorFor(failed)...), nil
+}
+
+// keepPriorFor returns the prior on-disk bundle's advisories for the given
+// (failed) ecosystems. A missing or unreadable prior bundle carries nothing
+// over and says so — the ecosystem then stays absent, which the OSV
+// provider reports as no-corpus rather than as clean.
+func (r *Refresher) keepPriorFor(failed []string) []Advisory {
+	if len(failed) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(failed))
+	for _, eco := range failed {
+		want[CanonicalEcosystem(eco)] = true
+	}
+	f, err := os.Open(r.cfg.Path)
+	if err != nil {
+		r.logger.Warn("osv refresher: no prior bundle to keep failed ecosystems from",
+			"ecosystems", strings.Join(failed, ","), "err", err)
+		return nil
+	}
+	defer f.Close()
+	prior, err := readAdvisories(f)
+	if err != nil {
+		r.logger.Warn("osv refresher: prior bundle unreadable; failed ecosystems dropped",
+			"ecosystems", strings.Join(failed, ","), "err", err)
+		return nil
+	}
+	var kept []Advisory
+	for _, a := range prior {
+		if want[CanonicalEcosystem(a.Ecosystem)] {
+			kept = append(kept, a)
+		}
+	}
+	r.logger.Warn("osv refresher: kept prior advisories for failed ecosystems",
+		"ecosystems", strings.Join(failed, ","), "kept", len(kept))
+	return kept
 }
 
 // fetchEcosystem GETs the per-ecosystem all.zip, walks every JSON file

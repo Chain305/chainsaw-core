@@ -31,6 +31,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chain305/chainsaw-core/intelligence/osv"
@@ -156,6 +157,7 @@ func newOSVProvider(logger *slog.Logger, epss epssReader) *osvProvider {
 			logger.Warn("osv: failed to load bundle", "path", path, "err", loadErr)
 		} else {
 			p.idx = idx
+			publishOSVCorpus(idx)
 			logger.Info("osv: bundle loaded",
 				"path", path,
 				"advisories", idx.Total(),
@@ -440,6 +442,7 @@ func (p *osvProvider) SwapIndex(idx *osv.Index) {
 	p.idxMu.Lock()
 	p.idx = idx
 	p.idxMu.Unlock()
+	publishOSVCorpus(idx)
 	p.logger.Info("osv: bundle hot-swapped",
 		"path", p.path,
 		"advisories", idx.Total(),
@@ -453,6 +456,57 @@ func (p *osvProvider) SwapIndex(idx *osv.Index) {
 }
 
 var _ Provider = (*osvProvider)(nil)
+
+// liveOSVCorpus is the index this process's osv provider serves, and when it
+// went live. Stored rows read it to tell whether a no-corpus answer they
+// carry has since been superseded: see Report.osvCorpusArrived.
+//
+// ponytail: process-global, last publisher wins. Prod runs one osv provider
+// per process; a second Service with a different bundle would make the
+// other's dormant rows due once per swap, not loop (see the CollectedAt bound).
+var liveOSVCorpus atomic.Pointer[publishedOSVCorpus]
+
+type publishedOSVCorpus struct {
+	idx *osv.Index
+	at  time.Time
+}
+
+func publishOSVCorpus(idx *osv.Index) {
+	liveOSVCorpus.Store(&publishedOSVCorpus{idx: idx, at: time.Now()})
+}
+
+// osvCorpusArrived reports a row stored with osv_bundle_dormant — no OSV
+// corpus for its ecosystem when it was scanned — that the live index now
+// covers. Its vulnerability section is a gap, not an answer, and the gap is
+// over, so the row must be rescanned rather than served.
+//
+// 2026-10-05 Feldera Cargo.lock: a refresher tick dropped crates.io from the
+// live index, 1,220 cargo rows were stored dormant and scored allow/100
+// (rsa@0.9.10, RUSTSEC-2023-0071 among them), and nothing re-matched them
+// when the corpus came back: they served the gap verdict until the scheduled
+// refresher reached them ~38h later.
+//
+// Bounded twice, so no deployment churns:
+//   - no live index, or one without the ecosystem (airgapped, no bundle, an
+//     ecosystem OSV does not publish): the warning is still true, never due;
+//   - only rows COLLECTED BEFORE the covering index went live. CollectedAt is
+//     stamped at scan start, so every scan whose osv lookup saw the old index
+//     is caught, and a rescan under the new one is not due again.
+func (r *Report) osvCorpusArrived() bool {
+	if r == nil {
+		return false
+	}
+	live := liveOSVCorpus.Load()
+	if live == nil || !live.idx.HasEcosystem(r.Identity.Ecosystem) || !r.Observation.CollectedAt.Before(live.at) {
+		return false
+	}
+	for _, w := range r.Observation.Warnings {
+		if w.Provider == "osv" && w.Code == warnOSVBundleDormant {
+			return true
+		}
+	}
+	return false
+}
 
 // maxEPSS folds the exploit-prediction score for the matched CVEs onto
 // the report, taking the highest — the same max-wins rule

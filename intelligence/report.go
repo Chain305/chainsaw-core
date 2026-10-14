@@ -1696,15 +1696,22 @@ func (r *Report) Provisional() bool {
 // call Store.Get directly do not — the lockfile scan's AggregateCached served a
 // registry-cancelled `unknown` (pyyaml, guava, markupsafe on 2026-10-05) for
 // the full 24h because only MISSING rows were queued for a scan.
+//
+// Also true for a row stored without an OSV corpus for its ecosystem once the
+// live index covers it (osvCorpusArrived), whatever its age.
 func (r *Report) RetryDue(now time.Time) bool {
-	return r != nil && r.Provisional() &&
+	return r != nil && (r.Provisional() || r.osvCorpusArrived()) &&
 		now.Sub(r.Observation.CollectedAt) >= r.freshFor(DefaultMaxStaleness)
 }
 
 // freshFor is the window a stored report counts as fresh in: maxStale, or a
 // provisional report's backoff step, whichever is shorter. A row written
-// before the streak existed (0) is treated as the first step.
+// before the streak existed (0) is treated as the first step. Zero for a row
+// whose missing OSV corpus has since arrived: see osvCorpusArrived.
 func (r *Report) freshFor(maxStale time.Duration) time.Duration {
+	if r.osvCorpusArrived() {
+		return 0
+	}
 	if !r.Provisional() {
 		return maxStale
 	}

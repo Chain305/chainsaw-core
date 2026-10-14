@@ -178,27 +178,9 @@ func LoadFile(path string) (*Index, error) {
 // ship gzip'd to keep the image layer small, but the test fixtures and
 // `bundle apply --plain` flows pass raw JSON. Both paths succeed.
 func Load(r io.Reader) (*Index, error) {
-	br := bufio.NewReader(r)
-	magic, err := br.Peek(2)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("osv: peek: %w", err)
-	}
-	var src io.Reader = br
-	// gzip magic: 0x1f 0x8b. Anything else is treated as raw JSON so the
-	// loader works on either form without a separate code path.
-	if len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
-		gz, gzErr := gzip.NewReader(br)
-		if gzErr != nil {
-			return nil, fmt.Errorf("osv: gunzip: %w", gzErr)
-		}
-		defer gz.Close()
-		src = gz
-	}
-
-	var advisories []Advisory
-	dec := json.NewDecoder(src)
-	if err := dec.Decode(&advisories); err != nil {
-		return nil, fmt.Errorf("osv: parse advisories: %w", err)
+	advisories, err := readAdvisories(r)
+	if err != nil {
+		return nil, err
 	}
 
 	idx := &Index{
@@ -219,6 +201,33 @@ func Load(r io.Reader) (*Index, error) {
 		idx.ecosystems[CanonicalEcosystem(a.Ecosystem)] = struct{}{}
 	}
 	return idx, nil
+}
+
+// readAdvisories decodes the raw advisory list from a bundle stream. The
+// reader's first two bytes pick gzip vs. plain JSON.
+func readAdvisories(r io.Reader) ([]Advisory, error) {
+	br := bufio.NewReader(r)
+	magic, err := br.Peek(2)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("osv: peek: %w", err)
+	}
+	var src io.Reader = br
+	// gzip magic: 0x1f 0x8b. Anything else is treated as raw JSON so the
+	// loader works on either form without a separate code path.
+	if len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, gzErr := gzip.NewReader(br)
+		if gzErr != nil {
+			return nil, fmt.Errorf("osv: gunzip: %w", gzErr)
+		}
+		defer gz.Close()
+		src = gz
+	}
+
+	var advisories []Advisory
+	if err := json.NewDecoder(src).Decode(&advisories); err != nil {
+		return nil, fmt.Errorf("osv: parse advisories: %w", err)
+	}
+	return advisories, nil
 }
 
 // Lookup returns every advisory affecting (ecosystem, pkg, version).
