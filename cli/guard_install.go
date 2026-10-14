@@ -585,7 +585,9 @@ func serverInstallPreflight(ctx context.Context, specs []packageSpec) ([]guardVe
 	candidates := make([]scanPkg, 0, len(specs))
 	seen := map[string]bool{}
 	for _, spec := range specs {
-		if spec.Ecosystem != "npm" || spec.Name == "" || spec.Version == "" {
+		// Origin: not from the public registry, so never sent as a
+		// registry coordinate (see packageSpec.Origin).
+		if spec.Ecosystem != "npm" || spec.Name == "" || spec.Version == "" || spec.Origin != "" || spec.Local {
 			continue
 		}
 		key := spec.Name + "\x00" + spec.Version
@@ -979,16 +981,29 @@ func expandLockfile(bin string, args []string) []packageSpec {
 		}
 	case "cargo":
 		// `cargo add`/`cargo install`/`cargo build` (no named crate) → scan Cargo.lock.
+		// Git / alternate-registry crates come back as Origin-carrying
+		// specs, which evaluateAll reports not assessed instead of
+		// checking them as their crates.io namesakes; workspace and path
+		// crates come back Local (known-malicious lookup only, silent
+		// otherwise).
 		if data, err := os.ReadFile("Cargo.lock"); err == nil {
-			if deps := parseCargoLock(data); len(deps) > 0 {
-				return depsToSpecs("cargo", deps, nil)
+			deps, nonReg, local := parseCargoLock(data)
+			specs := append(coordsToSpecs("cargo", deps), nonRegistrySpecs("cargo", nonReg)...)
+			for _, c := range local {
+				specs = append(specs, packageSpec{Ecosystem: "cargo", Name: c.Name, Version: c.Version, Local: true})
+			}
+			if len(specs) > 0 {
+				return specs
 			}
 		}
 	case "gem":
-		// `gem install` from a Gemfile.lock (bundler-resolved tree).
+		// `gem install` from a Gemfile.lock (bundler-resolved tree). Same
+		// split: GIT and PATH gems are not rubygems.org gems. Gems under any
+		// GEM remote (mirrors included) stay registry specs.
 		if data, err := os.ReadFile("Gemfile.lock"); err == nil {
-			if deps := parseGemfileLock(data); len(deps) > 0 {
-				return depsToSpecs("rubygems", deps, nil)
+			deps, nonReg := parseGemfileLock(data)
+			if specs := append(depsToSpecs("rubygems", deps, nil), nonRegistrySpecs("rubygems", nonReg)...); len(specs) > 0 {
+				return specs
 			}
 		}
 	case "pip":
@@ -1110,6 +1125,16 @@ func coordsToSpecs(ecosystem string, coords []lockCoordinate) []packageSpec {
 	return specs
 }
 
+// nonRegistrySpecs turns lockfile packages from outside the public registry
+// into Origin-carrying specs. See packageSpec.Origin.
+func nonRegistrySpecs(ecosystem string, deps []nonRegistryDep) []packageSpec {
+	specs := make([]packageSpec, 0, len(deps))
+	for _, d := range deps {
+		specs = append(specs, packageSpec{Ecosystem: ecosystem, Name: d.Name, Version: d.Version, Origin: d.Origin})
+	}
+	return specs
+}
+
 func depsToSpecs(ecosystem string, deps, integrity map[string]string) []packageSpec {
 	specs := make([]packageSpec, 0, len(deps))
 	for name, version := range deps {
@@ -1202,6 +1227,7 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 	// guardPolicyLineBudget lines the rest collapse into a single count. Loud,
 	// and still readable on a 900-package install.
 	policyShown, policySuppressed, mismatchCount := 0, 0, 0
+	notAssessedShown, notAssessedSuppressed := 0, 0
 	policyLine := func(spec packageSpec, reason string) {
 		if policyShown >= guardPolicyLineBudget {
 			policySuppressed++
@@ -1299,6 +1325,21 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 			// this switch printing nothing at all. The one arm that did fire
 			// for guardSeverityPolicy was v.Block.
 			policyLine(v.Spec, v.Reason)
+		case v.Severity == guardSeverityNotAssessed:
+			// A package from outside the public registry (packageSpec.Origin):
+			// nothing was checked, so it must not read as a clean allow. Not
+			// suppressed by --quiet, for the same reason as the policy line —
+			// "nothing looked at this" is not chatter — and bounded the same
+			// way, since a Gemfile.lock on a private gem server can list
+			// hundreds.
+			if notAssessedShown >= guardPolicyLineBudget {
+				notAssessedSuppressed++
+				break
+			}
+			notAssessedShown++
+			fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+				tag, c(ansiYellow, "? not assessed"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason),
+				c(ansiDim, "(allowed, not checked)"))
 		case v.Severity == "":
 			// A clean allow. The only verdict this printer should say nothing
 			// about, and it is now the only one that CAN be silent.
@@ -1319,6 +1360,10 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 		}
 	}
 
+	if notAssessedSuppressed > 0 {
+		fmt.Fprintf(out, "%s  %s  %s\n", tag, c(ansiYellow, "? not assessed"),
+			fmt.Sprintf("and %d more package(s) not from the public registry (allowed, not checked)", notAssessedSuppressed))
+	}
 	if policySuppressed > 0 {
 		fmt.Fprintf(out, "%s  %s  %s\n", tag, c(ansiYellow, "! policy"),
 			fmt.Sprintf("and %d more package(s) matched a policy monitor rule (allowed, not refusals)", policySuppressed))

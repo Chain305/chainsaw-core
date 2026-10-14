@@ -135,6 +135,12 @@ type Package struct {
 	Locations  []Location
 	FilePath   string
 	Identifier PkgIdentifier
+	// Origin is where the lockfile says the package comes from when that is
+	// NOT the ecosystem's public registry (a git repository, an alternate
+	// registry), verbatim from the lockfile. Empty means the public registry.
+	// Consumers must not score a package with an Origin as its public
+	// registry namesake: that is a different package.
+	Origin string
 }
 
 // Location is a byte-span inside a lock file that produced a Package.

@@ -8,8 +8,12 @@
 // to be included ("cargo-audit scans those too"), but cargo-audit matches
 // advisories by crate NAME, which for local code is a coincidence, and
 // scoring them against registry intelligence only produced `unknown` rows:
-// 22 of feldera/feldera's 1,247 on 2026-10-07. git sources carry a `source`
-// and stay in.
+// 22 of 1,247 in one public open-source Cargo.lock on 2026-10-07. git sources carry a `source`
+// and stay in, with Origin set: any `source` that is not crates.io (a git
+// repository, an alternate registry) is a different package from the
+// crates.io crate of the same name and version, and consumers must not score
+// it as that crate (2026-10-14, a public open-source Cargo.lock: 22 git
+// dependencies, 19 reported clean off their crates.io namesakes).
 //
 // Trivy reference: pkg/dependency/parser/rust/cargo/parse.go.
 package cargo
@@ -19,6 +23,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/chain305/chainsaw-core/depparser/origin"
 	ftypes "github.com/chain305/chainsaw-core/fanal"
 )
 
@@ -41,7 +46,17 @@ func Parse(r io.Reader) ([]ftypes.Package, error) {
 		if p.Name == "" || p.Version == "" || p.Source == "" {
 			continue
 		}
-		out = append(out, ftypes.Package{Name: p.Name, Version: p.Version})
+		pkg := ftypes.Package{Name: p.Name, Version: p.Version}
+		if !cratesIO[p.Source] {
+			pkg.Origin = origin.Sanitize(p.Source)
+		}
+		out = append(out, pkg)
 	}
 	return out, nil
+}
+
+// cratesIO is crates.io's index in both forms a Cargo.lock records it.
+var cratesIO = map[string]bool{
+	"registry+https://github.com/rust-lang/crates.io-index": true,
+	"sparse+https://index.crates.io/":                       true,
 }

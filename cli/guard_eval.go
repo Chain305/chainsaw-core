@@ -43,6 +43,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/chain305/chainsaw-core/coverage"
+	"github.com/chain305/chainsaw-core/depparser/origin"
 	"github.com/chain305/chainsaw-core/intelligence"
 	"github.com/chain305/chainsaw-core/malware"
 	"github.com/chain305/chainsaw-core/typosquat"
@@ -292,6 +293,22 @@ type packageSpec struct {
 	// content-file-overwrite attack above but not an attacker who rewrites
 	// the index too). Stated plainly rather than papered over.
 	Integrity string
+
+	// Origin is non-empty for a lockfile package that does NOT come from
+	// the ecosystem's public registry: a git source, an alternate registry,
+	// a private gem server, a path (see nonRegistryDep in pr_scan.go). Such
+	// a spec is never looked up as its registry namesake; evaluateAll
+	// reports it not assessed instead. "" means the public registry.
+	Origin string
+
+	// Local marks a lockfile entry with NO source at all (a Cargo workspace
+	// member or path dependency): first-party code, so it gets no verdict
+	// and no "not assessed" line. It still gets the known-malicious lookup
+	// by name@version, and only that: deleting a crate's `source` line is a
+	// lockfile edit that must not shed a malware-floor refusal, since cargo
+	// would re-resolve the crate from crates.io. No typosquat lane — a
+	// workspace crate's name is the user's own choice, not an install.
+	Local bool
 }
 
 func (s packageSpec) String() string {
@@ -824,6 +841,16 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 		}
 	}
 
+	// A package from outside the public registry stops HERE. The lanes above
+	// key on name@version and only ever produce NEGATIVE evidence, so they
+	// still apply: a lockfile entry whose source string was rewritten to a
+	// git URL must not turn a malware block into "not checked". Everything
+	// below would judge the registry namesake's BYTES (the cargo/gem cache
+	// is keyed by name@version), so evaluateNonRegistry takes over instead.
+	if spec.Origin != "" {
+		return withNotices(pendingWarn)
+	}
+
 	// Offline behavioral analysis: when the package's actual bytes are staged
 	// locally (CHAINSAW_GUARD_ARTIFACT_DIR) or already in a package-manager
 	// cache, run the real detectors over them. This catches a malicious install
@@ -959,11 +986,39 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 		}
 		return verdicts, true
 	}
+	// Packages from outside the public registry (packageSpec.Origin) are
+	// answered first and kept out of the coverage gate: no coverage source
+	// (malware feed, typosquat corpus, CVE data, artifact bytes) applies to
+	// them, so the gate has nothing to say about them — not-applicable,
+	// printed as not assessed, never refused for a source that could not
+	// have covered them anyway. An invalid configuration above still refuses
+	// everything: that is a promise about the configuration, not coverage.
+	registry := make([]packageSpec, 0, len(specs))
+	for _, s := range specs {
+		if s.Local {
+			if res := g.malware.Lookup(ctx, s.Ecosystem, s.Name, s.Version); res.IsKnownMalicious {
+				blocked = true
+				verdicts = append(verdicts, guardVerdict{Spec: s, Block: true, Severity: "malicious",
+					Reason: fmt.Sprintf("known-malicious (%s); the lockfile lists it as a local/workspace crate with no source, which does not stop cargo fetching it from the registry", res.MalwareID)})
+			}
+			continue
+		}
+		if s.Origin == "" {
+			registry = append(registry, s)
+			continue
+		}
+		v := g.evaluateNonRegistry(ctx, s)
+		blocked = blocked || v.Block
+		verdicts = append(verdicts, v)
+	}
+	if len(registry) == 0 {
+		return verdicts, blocked
+	}
 	// One clock read, shared by the ledger and the gate: two calls could
 	// straddle the grace or staleness boundary and disagree.
 	now := time.Now()
 	if d := coverage.Gate(posture, guardLedger(g, now), now); d.Block {
-		for _, s := range specs {
+		for _, s := range registry {
 			verdicts = append(verdicts, guardVerdict{
 				Spec: s, Block: true, Severity: "coverage", Reason: d.Reason,
 			})
@@ -973,7 +1028,7 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 		fmt.Fprintf(os.Stderr, "chainsaw: coverage warning — %s (mode=warn, not blocking)\n", d.Reason)
 	}
 
-	for _, s := range specs {
+	for _, s := range registry {
 		v := g.evaluate(ctx, s)
 		if v.Block {
 			blocked = true
@@ -981,4 +1036,55 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 		verdicts = append(verdicts, v)
 	}
 	return verdicts, blocked
+}
+
+// guardSeverityNotAssessed is the verdict for a package from outside the
+// public registry (packageSpec.Origin): the guard has no evidence about it
+// either way.
+const guardSeverityNotAssessed = "not-assessed"
+
+// evaluateNonRegistry answers for a spec whose lockfile origin is not the
+// public registry (packageSpec.Origin).
+//
+// NEGATIVE LANES STILL RUN. evaluate() runs the known-malicious lookup, the
+// supplemental advisories and the typosquat ladder on name@version and
+// returns before byte acquisition. A hit refuses exactly as it would for a
+// registry package: origin only stops the package borrowing its namesake's
+// CLEAN verdict, never a refusal — otherwise rewriting a lockfile entry's
+// source string would be a way past the malware floor.
+//
+// What it does NOT do is call it clean. Absent a hit it returns the "not
+// assessed" verdict, matching the guard's existing posture for a package it
+// could not assess, which is the degraded-analysis one (acquireIncomplete →
+// the policy decision point with signalsUnavailable, whose built-in rule
+// answers "monitor"; core/policy/builtin/builtin.rego):
+//
+//   - by default NON-BLOCKING and never silent, so it is surfaced and not
+//     counted as clean but does not hard-fail installs that worked yesterday;
+//   - an operator who made signalsUnavailable a refusal (the documented
+//     fail-closed knob) gets a refusal here too, because the policy lane
+//     still runs with SignalsUnavailable set.
+//
+// ponytail: a policy MONITOR is not carried on the verdict — the built-in
+// degraded-analysis rule fires on every non-registry spec and would print a
+// second line saying the same thing. Ceiling: an operator's own monitor rule
+// matching one of these is not shown separately; carry PolicySeverity here if
+// that is ever needed.
+func (g *localGuard) evaluateNonRegistry(ctx context.Context, spec packageSpec) guardVerdict {
+	v := g.evaluate(ctx, spec) // name@version lanes only, see the Origin stop in evaluate
+	if v.Block {
+		v.Reason += " (listed from " + origin.Label(spec.Origin) + ", not the public registry)"
+		return v
+	}
+	reason := nonRegistryReason(spec.Ecosystem, spec.Origin)
+	if v.Severity != "" {
+		// A name-similarity warning still applies to the name.
+		reason += "; " + v.Reason
+	}
+	if pv, ok := guardPolicyLane(ctx, spec, acquireIncomplete, behavioralVerdict{}); ok && pv.Block {
+		pv.Reason = reason + "; " + pv.Reason
+		return pv
+	}
+	v.Spec, v.Severity, v.Reason = spec, guardSeverityNotAssessed, reason
+	return v
 }

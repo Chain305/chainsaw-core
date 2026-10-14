@@ -47,6 +47,10 @@ type Package struct {
 	Version string
 	Lang    ftypes.LangType
 	Source  string // file path the package was parsed from (for diagnostics)
+	// Origin is ftypes.Package.Origin: set when the package is built from
+	// somewhere other than the public registry. Never look such a package up
+	// as its registry namesake.
+	Origin string
 }
 
 // Analyzer is the interface every language parser satisfies. Kept small

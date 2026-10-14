@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	depanalyzer "github.com/chain305/chainsaw-core/depparser/analyzer"
+	"github.com/chain305/chainsaw-core/depparser/origin"
 	ftypes "github.com/chain305/chainsaw-core/fanal"
 	"github.com/chain305/chainsaw-core/policy"
 
@@ -199,6 +200,12 @@ type scanPkg struct {
 	// registry we proxy. Those items go on the wire in the pre-ecosystem
 	// shape and the server falls back to the pre-ecosystem lookup.
 	Ecosystem string `json:"ecosystem,omitempty"`
+
+	// Origin is depanalyzer.Package.Origin: the lockfile source when it is
+	// not the ecosystem's public registry (git, alternate registry). Such a
+	// package is never sent to the server — see scan_origin.go — so it has
+	// no wire form.
+	Origin string `json:"-"`
 }
 
 // ecosystemForLang maps the depparser LangType attached to a parsed package
@@ -252,8 +259,12 @@ func ecosystemForLang(l ftypes.LangType) string {
 // of it: keying on name@version alone collapsed npm's commander@2.20.3 and
 // PyPI's commander 2.20.3 into a single scanned coordinate, so one of the two
 // was never evaluated and the other's CVEs were attributed to both.
-func scanPkgKey(ecosystem, name, version string) string {
-	return ecosystem + "|" + name + "@" + version
+//
+// The origin is part of it too: a git fork that shares name@version with the
+// crates.io crate is a different package, and collapsing the two scored the
+// fork as the crates.io crate (or dropped the crates.io crate).
+func scanPkgKey(ecosystem, name, version, source string) string {
+	return ecosystem + "|" + name + "@" + version + "|" + source
 }
 
 type scanResultItem struct {
@@ -262,10 +273,18 @@ type scanResultItem struct {
 	// Ecosystem echoes the registry the server resolved this row against.
 	// Empty against a server older than the ecosystem field, or for a
 	// coordinate whose ecosystem could not be determined.
-	Ecosystem  string `json:"ecosystem,omitempty"`
-	Repository string `json:"repository,omitempty"`
-	Status     string `json:"status"`
-	Severity   string `json:"severity,omitempty"`
+	Ecosystem string `json:"ecosystem,omitempty"`
+	// Origin is the (sanitized) lockfile source of a package that is not
+	// from the public registry. Set only on the CLI's own rows for such
+	// packages (scan_origin.go); the server never gives them a verdict.
+	Origin string `json:"origin,omitempty"`
+	// OriginReason accompanies Origin: why the row is "not_assessed", or
+	// why it is "malicious" (a known-malicious namesake), with the origin
+	// label.
+	OriginReason string `json:"origin_reason,omitempty"`
+	Repository   string `json:"repository,omitempty"`
+	Status       string `json:"status"`
+	Severity     string `json:"severity,omitempty"`
 	// UnscannedReason is the server's one-phrase explanation of WHY this
 	// coordinate could not be evaluated. Populated only when Status ==
 	// "unscanned"; empty against a server older than the field.
@@ -344,12 +363,20 @@ Coverage:
   build by default; pass --fail-on-unscanned (or set
   CHAINSAW_SCAN_FAIL_ON_UNSCANNED=1) to make it exit 1.
 
+  A package the lockfile pins to a git repository or an alternate registry is
+  a different package from its public-registry namesake, so it is never given
+  the namesake's verdict. It is reported as "not assessed" — never clean, and
+  not "not scanned": --fail-on-unscanned ignores it. Pass --fail-on-not-assessed
+  to make it exit 1. One exception: if the namesake is a known-malicious
+  release, the package is reported malicious and blocks.
+
 Exit codes:
   0   clean — nothing at or above the gate
   1   blocked — findings at or above the threshold (--fail-on, else any
       vulnerable package or high/critical supply-chain condition). Also
       returned when --fail-on-unscanned is set and a package could not be
-      evaluated.
+      evaluated, and when --fail-on-not-assessed is set and a package is not
+      from the public registry.
   2   operational failure (network, server, IO)
   3   configuration or authentication problem
   4   bad invocation (unknown flag, unparseable package ref, --path with
@@ -373,6 +400,7 @@ Examples:
   chainsaw scan --path . --severity high
   chainsaw scan --path . --fail-on critical --json
   chainsaw scan --path . --fail-on-unscanned
+  chainsaw scan --path . --fail-on-not-assessed
   chainsaw scan --path . --format sarif --output results.sarif
   cat specs.txt | chainsaw scan -`,
 	RunE: runScan,
@@ -414,6 +442,13 @@ func init() {
 	// arg" rendered a BOOL flag as `--stdin -`. Once the backticks are gone
 	// UnquoteUsage's `case "bool": name = ""` branch fires and --stdin
 	// correctly shows no argument token.
+	// Opt-in for the same reason as --fail-on-unscanned, and separate from it:
+	// a git dependency is not assessed by construction, so folding it into
+	// that gate would fail every such repo with no remedy short of removing
+	// the dependency. Strict users can refuse them until an origin allow-list
+	// exists.
+	scanCmd.Flags().Bool("fail-on-not-assessed", false,
+		"Exit 1 when a package is not from the public registry (git, alternate registry) and so was not assessed")
 	scanCmd.Flags().Bool("stdin", false, "Read newline-delimited package specs / lockfile paths from stdin (opt-in; same as the '-' arg)")
 	// S6 — the shared 30s client timeout hard-caps a scan this command
 	// advertises as accepting 10,000 packages, with no way to raise it. The
@@ -442,6 +477,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// P8-27 moved that precedence into resolveFailOnUnscanned (scan_gate.go)
 	// unchanged; `false` is this command's documented default.
 	failOnUnscanned := resolveFailOnUnscanned(cmd, false)
+	failOnNotAssessed, _ := cmd.Flags().GetBool("fail-on-not-assessed")
 
 	// P2.9 — stdin batch is STRICTLY opt-in. It engages only when the user
 	// passes --stdin or the conventional `-` arg; a bare `chainsaw scan` must
@@ -638,13 +674,33 @@ func runScan(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "scanning %d package(s)…\n", len(packages))
 	}
 
+	// Packages from a git repository or an alternate registry never take a
+	// verdict from the server: it would answer with their public-registry
+	// namesake's. Their namesakes go in a SEPARATE request whose answer is read
+	// for its malware status only, and they join the results as "malicious"
+	// or "not_assessed" rows (scan_origin.go). Total stays the server's count
+	// of the first request, so total-vulnerable-unscanned is still the clean
+	// count.
+	lookup, nonRegistry := splitNonRegistry(packages)
 	var resp scanAPIResponse
-	if err := client.Post("/api/scan", map[string]any{"packages": packages}, &resp); err != nil {
-		// Return the error so Execute()/classifyCLIError buckets it: 401/403 →
-		// ExitConfigAuth(3), network/IO → ExitOpError(2). A bare os.Exit(2) here
-		// mislabels an auth failure as an operational error (invariant B).
-		return err
+	if len(lookup) > 0 {
+		if err := client.Post("/api/scan", map[string]any{"packages": lookup}, &resp); err != nil {
+			// Return the error so Execute()/classifyCLIError buckets it: 401/403 →
+			// ExitConfigAuth(3), network/IO → ExitOpError(2). A bare os.Exit(2) here
+			// mislabels an auth failure as an operational error (invariant B).
+			return err
+		}
 	}
+	if len(nonRegistry) > 0 {
+		var namesakeResp scanAPIResponse
+		if err := client.Post("/api/scan", map[string]any{"packages": namesakes(nonRegistry)}, &namesakeResp); err != nil {
+			// Fail closed, like the request above: without the answer a
+			// malicious namesake would read as merely "not assessed".
+			return err
+		}
+		resp.Results = append(resp.Results, nonRegistryResults(nonRegistry, maliciousNamesakes(namesakeResp.Results))...)
+	}
+	notAssessed := countNotAssessed(resp.Results)
 
 	// Derive triggered supply-chain conditions for each result — uses
 	// the signals the server merged in from package_metadata. We fold
@@ -722,6 +778,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	//   - It goes to stderr for json/sarif too, so a structured consumer's
 	//     stdout stays pure while a human tailing the job still sees it.
 	warnUnscanned(resp.Results, resp.Unscanned, failOnUnscanned, sentWithoutEcosystem)
+	warnNotAssessed(resp.Results, failOnNotAssessed)
 
 	switch format {
 	case "json":
@@ -752,6 +809,10 @@ func runScan(cmd *cobra.Command, args []string) error {
 		if len(unknownSeverities) > 0 {
 			env["unknownSeverities"] = unknownSeverities
 		}
+		// Conditional for the same byte-compatibility reason; absent means 0.
+		if notAssessed > 0 {
+			env["not_assessed"] = notAssessed
+		}
 		_ = PrintJSONTo(cmd, env)
 	case "sarif":
 		// SARIF is normally redirected to a file via --output; outWriter honors
@@ -759,7 +820,9 @@ func runScan(cmd *cobra.Command, args []string) error {
 		// (not the --severity-filtered view) so a code-scanning ingester sees
 		// every finding the gate considered — --severity is a human display
 		// filter, not a SARIF-scope control.
-		if err := writeScanSARIF(outWriter(cmd), resp.Results); err != nil {
+		sarif := scanResultsToSARIF(resp.Results)
+		addNotAssessedSARIF(&sarif, resp.Results)
+		if err := encodeJSON(outWriter(cmd), sarif); err != nil {
 			// A render failure is operational (unwritable sink) and must
 			// abort BEFORE the gate below: emitting a verdict computed
 			// against a result nobody received is worse than either outcome
@@ -773,6 +836,9 @@ func runScan(cmd *cobra.Command, args []string) error {
 		// Same countUnscanned the warning and the gate use, so stdout,
 		// stderr and the exit code cannot report three different numbers.
 		printScanTable(displayed, hiddenBySeverity, severityFlag, countUnscanned(resp.Results, resp.Unscanned))
+		if notAssessed > 0 {
+			fmt.Printf("%d package(s) not from the public registry were NOT assessed — this scan does not clear them.\n", notAssessed)
+		}
 	}
 
 	emit("cli.scan.completed", map[string]any{
@@ -858,6 +924,10 @@ func runScan(cmd *cobra.Command, args []string) error {
 	if failOnUnscanned && countUnscanned(resp.Results, resp.Unscanned) > 0 {
 		return &ExitCodeError{Code: ExitBlocked, Err: errors.New(
 			"--fail-on-unscanned: one or more packages could not be evaluated (see the warning above)")}
+	}
+	if failOnNotAssessed && notAssessed > 0 {
+		return &ExitCodeError{Code: ExitBlocked, Err: fmt.Errorf(
+			"--fail-on-not-assessed: %d package(s) are not from the public registry and were not assessed (see the note above)", notAssessed)}
 	}
 
 	// The single-ref usage failure, LAST of all the gates. `chainsaw scan
@@ -1138,6 +1208,9 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 			if r.Status == "unscanned" {
 				severity = "NOT SCANNED"
 			}
+			if r.Status == statusNotAssessed {
+				severity = "NOT ASSESSED"
+			}
 		}
 		signals := g.none
 		if len(r.TriggeredConditions) > 0 {
@@ -1165,6 +1238,11 @@ func printScanTable(results []scanResultItem, hiddenBySeverity int, severityFilt
 		name := r.Name
 		if r.Ecosystem != "" {
 			name = r.Name + " (" + r.Ecosystem + ")"
+		}
+		// A fork can share name@version with the registry crate it replaces;
+		// the origin is what tells the two rows apart.
+		if r.Origin != "" {
+			name += " from " + origin.Label(r.Origin)
 		}
 		rows[i] = []string{name, r.Version, severity, cvss, cves, signals}
 	}
@@ -1362,12 +1440,12 @@ func collectFromManifests(dir string) ([]scanPkg, error) {
 			continue
 		}
 		eco := ecosystemForLang(p.Lang)
-		key := scanPkgKey(eco, p.Name, p.Version)
+		key := scanPkgKey(eco, p.Name, p.Version, p.Origin)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		all = append(all, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: eco})
+		all = append(all, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: eco, Origin: p.Origin})
 	}
 	if walkErr != nil {
 		// Partial success: `all` is everything that parsed, and the error says
@@ -1416,16 +1494,16 @@ func collectFromStdin(r io.Reader) ([]scanPkg, error) {
 	}
 	all := make([]scanPkg, 0, 16)
 	seen := make(map[string]bool, 16)
-	add := func(name, version, ecosystem string) {
-		if name == "" || version == "" {
+	add := func(p scanPkg) {
+		if p.Name == "" || p.Version == "" {
 			return
 		}
-		key := scanPkgKey(ecosystem, name, version)
+		key := scanPkgKey(p.Ecosystem, p.Name, p.Version, p.Origin)
 		if seen[key] {
 			return
 		}
 		seen[key] = true
-		all = append(all, scanPkg{Name: name, Version: version, Ecosystem: ecosystem})
+		all = append(all, p)
 	}
 
 	var skipped int
@@ -1454,7 +1532,7 @@ func collectFromStdin(r io.Reader) ([]scanPkg, error) {
 			// code had) and record the failure so the caller can refuse to
 			// exit 0 on an incomplete set.
 			for _, p := range pkgs {
-				add(p.Name, p.Version, p.Ecosystem)
+				add(p)
 			}
 			if perr != nil {
 				var mpe *manifestParseError
@@ -1475,7 +1553,7 @@ func collectFromStdin(r io.Reader) ([]scanPkg, error) {
 		// names no registry, so it goes on the wire in the legacy
 		// ecosystem-less shape — there is nothing to infer from.
 		if pkg, err := parsePackageRef(line); err == nil {
-			add(pkg.Name, pkg.Version, pkg.Ecosystem)
+			add(pkg)
 			continue
 		}
 
@@ -1516,7 +1594,7 @@ func collectFromPath(path string, isDir bool) ([]scanPkg, error) {
 		if p.Name == "" || p.Version == "" {
 			continue
 		}
-		out = append(out, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: ecosystemForLang(p.Lang)})
+		out = append(out, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: ecosystemForLang(p.Lang), Origin: p.Origin})
 	}
 	return out, nil
 }

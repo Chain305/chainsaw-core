@@ -88,15 +88,15 @@ dependencies = [
  "serde",
 ]
 `
-	deps := parseCargoLock([]byte(fixture))
-	if len(deps) != 2 {
-		t.Fatalf("expected 2 packages, got %d: %v", len(deps), deps)
+	// ripgrep has no `source`: it is the workspace member, first-party code
+	// with no crates.io identity, so it is not a registry package (checking
+	// it as crates.io's ripgrep was the lockfile-origin defect).
+	deps, nonReg, local := parseCargoLock([]byte(fixture))
+	if len(deps) != 1 || len(nonReg) != 0 || len(local) != 1 || local[0].Name != "ripgrep" {
+		t.Fatalf("expected serde (registry) and ripgrep (local), got %v / %v / %v", deps, nonReg, local)
 	}
-	if deps["serde"] != "1.0.197" {
-		t.Errorf("serde version = %q, want 1.0.197", deps["serde"])
-	}
-	if deps["ripgrep"] != "13.0.0" {
-		t.Errorf("ripgrep version = %q, want 13.0.0", deps["ripgrep"])
+	if deps[0].Name != "serde" || deps[0].Version != "1.0.197" {
+		t.Errorf("registry package = %+v, want serde@1.0.197", deps[0])
 	}
 }
 
@@ -114,10 +114,12 @@ func TestExpandLockfileCargoAndRubygems(t *testing.T) {
 	cargoLock := `[[package]]
 name = "serde"
 version = "1.0.197"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "anyhow"
 version = "1.0.86"
+source = "sparse+https://index.crates.io/"
 `
 	if err := os.WriteFile(filepath.Join(dir, "Cargo.lock"), []byte(cargoLock), 0o644); err != nil {
 		t.Fatal(err)

@@ -64,6 +64,7 @@ func (poetryAnalyzer) Parse(ctx context.Context, path string) ([]Package, error)
 			Version: fp.Version,
 			Lang:    ftypes.Poetry,
 			Source:  path,
+			Origin:  fp.Origin,
 		})
 	}
 	return out, nil

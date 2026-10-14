@@ -48,6 +48,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/chain305/chainsaw-core/depparser/origin"
 	"github.com/chain305/chainsaw-core/policy"
 	"github.com/chain305/chainsaw-core/policy/dsl"
 	"github.com/chain305/chainsaw-core/policyengine"
@@ -75,12 +76,16 @@ type prScanSignal struct {
 
 // prScanEntry is one added or upgraded dependency in the report.
 type prScanEntry struct {
-	Ecosystem       string         `json:"ecosystem"`
-	Name            string         `json:"name"`
-	Version         string         `json:"version"`
-	PreviousVersion *string        `json:"previous_version"`
-	Signals         []prScanSignal `json:"signals"`
-	Verdict         string         `json:"verdict"` // "allow", "warn", or "block"
+	Ecosystem       string  `json:"ecosystem"`
+	Name            string  `json:"name"`
+	Version         string  `json:"version"`
+	PreviousVersion *string `json:"previous_version"`
+	// Origin is set only for a package the lockfile builds from somewhere
+	// other than the public registry (see nonRegistryDep). Such a row is
+	// not assessed: one prScanNotAssessedSignalID signal, verdict "warn".
+	Origin  string         `json:"origin,omitempty"`
+	Signals []prScanSignal `json:"signals"`
+	Verdict string         `json:"verdict"` // "allow", "warn", or "block"
 }
 
 // prScanSummary is the aggregate counters at the bottom of the report.
@@ -303,11 +308,14 @@ func buildPRScanReport(baseSHA, headSHA, absRepo string) (prScanReport, int, err
 	}
 
 	// Sort for deterministic output.
+	// Origin breaks the tie between a fork and its registry namesake.
 	sort.Slice(report.Added, func(i, j int) bool {
-		return report.Added[i].Ecosystem+report.Added[i].Name < report.Added[j].Ecosystem+report.Added[j].Name
+		a, b := report.Added[i], report.Added[j]
+		return a.Ecosystem+a.Name+"\x00"+a.Origin < b.Ecosystem+b.Name+"\x00"+b.Origin
 	})
 	sort.Slice(report.Upgraded, func(i, j int) bool {
-		return report.Upgraded[i].Ecosystem+report.Upgraded[i].Name < report.Upgraded[j].Ecosystem+report.Upgraded[j].Name
+		a, b := report.Upgraded[i], report.Upgraded[j]
+		return a.Ecosystem+a.Name+"\x00"+a.Origin < b.Ecosystem+b.Name+"\x00"+b.Origin
 	})
 
 	// Build summary.
@@ -521,6 +529,7 @@ type rawEntry struct {
 	Name            string
 	Version         string
 	PreviousVersion *string
+	Origin          string // non-empty: not from the public registry (nonRegistryDep)
 }
 
 // diffManifest returns lists of added and upgraded coordinates by comparing
@@ -529,6 +538,7 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 	eco := strings.SplitN(string(kind), ":", 2)[0]
 
 	var baseCoords, headCoords map[string]string // name → version
+	var baseNonReg, headNonReg []nonRegistryDep  // packages not from the public registry
 	switch kind {
 	case kindNPMPackageLock, kindNPMShrinkwrap:
 		baseCoords, err = parsePackageLockJSON(baseContent)
@@ -573,14 +583,18 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		baseCoords = parseUVLock(baseContent)
 		headCoords = parseUVLock(headContent)
 	case kindGemfileLock:
-		baseCoords = parseGemfileLock(baseContent)
-		headCoords = parseGemfileLock(headContent)
+		baseCoords, baseNonReg = parseGemfileLock(baseContent)
+		headCoords, headNonReg = parseGemfileLock(headContent)
 	case kindGoSum:
 		baseCoords = parseGoSum(baseContent)
 		headCoords = parseGoSum(headContent)
 	case kindCargoLock:
-		baseCoords = parseCargoLock(baseContent)
-		headCoords = parseCargoLock(headContent)
+		// Sourceless (workspace/path) crates are first-party: no row.
+		baseMulti, baseNonReg, _ := parseCargoLock(baseContent)
+		headMulti, headNonReg, _ := parseCargoLock(headContent)
+		added, upgraded = diffLockCoordinates(eco, baseMulti, headMulti)
+		nrAdded, nrUpgraded := diffNonRegistry(eco, baseNonReg, headNonReg)
+		return append(added, nrAdded...), append(upgraded, nrUpgraded...), nil
 	default:
 		return nil, nil, nil
 	}
@@ -598,7 +612,66 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 			upgraded = append(upgraded, rawEntry{Ecosystem: eco, Name: name, Version: headVer, PreviousVersion: &prev})
 		}
 	}
-	return added, upgraded, nil
+	nrAdded, nrUpgraded := diffNonRegistry(eco, baseNonReg, headNonReg)
+	return append(added, nrAdded...), append(upgraded, nrUpgraded...), nil
+}
+
+// diffNonRegistry diffs packages from outside the public registry on (name,
+// origin), never on name alone: a fork and its registry namesake are two
+// packages. The origin carries the git revision, so a moved rev is a new row
+// even at the same version.
+func diffNonRegistry(eco string, base, head []nonRegistryDep) (added, upgraded []rawEntry) {
+	baseVer := make(map[string]string, len(base))
+	for _, d := range base {
+		baseVer[d.Name+"\x00"+d.Origin] = d.Version
+	}
+	for _, d := range head {
+		prev, existed := baseVer[d.Name+"\x00"+d.Origin]
+		if !existed {
+			added = append(added, rawEntry{Ecosystem: eco, Name: d.Name, Version: d.Version, Origin: d.Origin})
+		} else if d.Version != prev {
+			upgraded = append(upgraded, rawEntry{Ecosystem: eco, Name: d.Name, Version: d.Version, PreviousVersion: &prev, Origin: d.Origin})
+		}
+	}
+	return added, upgraded
+}
+
+// diffLockCoordinates diffs lockfiles that hold one name at several versions
+// (Cargo.lock: syn 1.x beside syn 2.x). A head coordinate absent from base is
+// an UPGRADE when base had that name at a version head dropped (the version
+// it replaced), otherwise an ADDITION — a second major line next to the old
+// one is a new dependency, not a bump.
+func diffLockCoordinates(eco string, base, head []lockCoordinate) (added, upgraded []rawEntry) {
+	inBase, inHead, replaced := map[lockCoordinate]bool{}, map[lockCoordinate]bool{}, map[lockCoordinate]bool{}
+	baseVers := map[string][]string{}
+	for _, c := range base {
+		inBase[c] = true
+		baseVers[c.Name] = append(baseVers[c.Name], c.Version)
+	}
+	for _, c := range head {
+		inHead[c] = true
+	}
+	for _, c := range head {
+		if inBase[c] {
+			continue
+		}
+		e := rawEntry{Ecosystem: eco, Name: c.Name, Version: c.Version}
+		for _, v := range baseVers[c.Name] {
+			if prev := (lockCoordinate{Name: c.Name, Version: v}); !inHead[prev] && !replaced[prev] {
+				// Each dropped version is replaced once; Cargo.lock lists
+				// versions ascending, so the lowest new one claims it.
+				replaced[prev] = true
+				e.PreviousVersion = &v
+				break
+			}
+		}
+		if e.PreviousVersion == nil {
+			added = append(added, e)
+		} else {
+			upgraded = append(upgraded, e)
+		}
+	}
+	return added, upgraded
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,63 +1254,161 @@ func parseUVLock(data []byte) map[string]string {
 	return parsePoetryLock(data)
 }
 
-// parseGemfileLock parses Gemfile.lock.  The GEM section lists "    gem (version)"
-// lines under "  specs:".
-func parseGemfileLock(data []byte) map[string]string {
-	if data == nil {
-		return nil
-	}
-	out := make(map[string]string)
-	inSpecs := false
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == "specs:" {
-			inSpecs = true
-			continue
-		}
-		if inSpecs {
-			// Blank line or section header resets.
-			if strings.TrimSpace(line) == "" || (len(line) > 0 && line[0] != ' ') {
-				inSpecs = false
-				continue
-			}
-			// 4-space-indented lines are "    name (version)" or "      dep".
-			if strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "     ") {
-				entry := strings.TrimSpace(line)
-				if idx := strings.Index(entry, " ("); idx > 0 {
-					name := entry[:idx]
-					ver := strings.TrimSuffix(entry[idx+2:], ")")
-					// Strip platform suffix "1.0.0-x86_64-linux".
-					if dashIdx := strings.Index(ver, "-"); dashIdx > 0 {
-						candidate := ver[:dashIdx]
-						// Only strip if it looks like a platform suffix (has letters).
-						if strings.ContainsAny(ver[dashIdx:], "abcdefghijklmnopqrstuvwxyz") {
-							ver = candidate
-						}
-					}
-					if name != "" && ver != "" {
-						out[name] = ver
-					}
-				}
-			}
-		}
-	}
-	return out
+// nonRegistryDep is a lockfile package that does NOT come from the
+// ecosystem's public registry: a git source, an alternate or private
+// registry, a path. Origin is the lockfile's own statement of where it comes
+// from (a Cargo `source`, or a Gemfile.lock section and remote), passed
+// through origin.Sanitize: a source can carry credentials
+// (git+https://user:token@host/...) and Origin is printed and serialised.
+//
+// Such a package is not its registry namesake. Checking it as one is the
+// defect this type exists to prevent: on 2026-10-14 feldera/feldera's 22 git
+// crates had been scored as crates.io namesakes on the server (etl@0.1.0 took
+// an unrelated crate's verdict). Kept apart from the name->version map the
+// registry packages use, so a fork and its namesake never collapse into one
+// entry either.
+type nonRegistryDep struct {
+	Name    string
+	Version string
+	Origin  string
 }
 
-// parseCargoLock parses Cargo.lock.  It is TOML with repeated [[package]]
-// blocks, each carrying `name = "x"` and `version = "y"` lines.  We pair the
-// name and version within each block (line-based, no TOML dependency).
-func parseCargoLock(data []byte) map[string]string {
-	if data == nil {
-		return nil
+// nonRegistryReason is the one sentence every surface prints for a
+// non-registry package. Same wording as the server's lockfile scan
+// (internal/scan/lockfile_scan.go).
+func nonRegistryReason(ecosystem, src string) string {
+	reg := "the public registry"
+	switch ecosystem {
+	case "cargo":
+		reg = "crates.io"
+	case "rubygems":
+		reg = "rubygems.org"
 	}
-	out := make(map[string]string)
-	name, version := "", ""
-	flush := func() {
-		if name != "" && version != "" {
-			out[name] = version
+	return "not from " + reg + ": not assessed (" + origin.Label(src) + ")"
+}
+
+// parseGemfileLock parses Gemfile.lock. Gems are listed as "    gem (version)"
+// lines under "  specs:" in a source section, and the section decides where
+// the gem comes from:
+//
+//   - GEM: a registry gem, whatever its `remote:`. A non-rubygems.org remote
+//     is overwhelmingly a MIRROR of rubygems.org (an enterprise proxy, or
+//     Chainsaw's own /chainproxy repository) serving the public packages, so
+//     treating it as non-registry would take every proxied customer's gems
+//     off the known-malicious floor. Ceiling, stated: a genuinely private gem
+//     server's gem is still checked as its rubygems.org namesake.
+//   - GIT, PATH, or any other source section: returned in nonRegistry and
+//     never checked as a rubygems.org gem.
+func parseGemfileLock(data []byte) (registry map[string]string, nonRegistry []nonRegistryDep) {
+	if data == nil {
+		return nil, nil
+	}
+	registry = make(map[string]string)
+	section, src := "", ""
+	var remotes []string
+	revision := ""
+	isRegistry, inSpecs := false, false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			inSpecs = false
+			continue
 		}
-		name, version = "", ""
+		if line[0] != ' ' {
+			// A new top-level section: GEM, GIT, PATH, PLATFORMS, ...
+			section, remotes, revision, inSpecs = strings.TrimSpace(line), nil, "", false
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if !inSpecs {
+			if v, ok := strings.CutPrefix(trimmed, "remote:"); ok {
+				remotes = append(remotes, strings.TrimSpace(v))
+			} else if v, ok := strings.CutPrefix(trimmed, "revision:"); ok {
+				revision = strings.TrimSpace(v)
+			} else if trimmed == "specs:" {
+				inSpecs = true
+				isRegistry = section == "GEM"
+				src = strings.ToLower(section) + " " + strings.Join(remotes, ", ")
+				if section == "GIT" && len(remotes) == 1 {
+					// The Cargo grammar origin.Label already reads.
+					src = "git+" + remotes[0]
+					if revision != "" {
+						src += "#" + revision
+					}
+				}
+				src = origin.Sanitize(src)
+			}
+			continue
+		}
+		// 4-space-indented lines are "    name (version)"; deeper ones are
+		// that gem's own dependency constraints.
+		if !strings.HasPrefix(line, "    ") || strings.HasPrefix(line, "     ") {
+			continue
+		}
+		idx := strings.Index(trimmed, " (")
+		if idx <= 0 {
+			continue
+		}
+		name := trimmed[:idx]
+		ver := strings.TrimSuffix(trimmed[idx+2:], ")")
+		// Strip platform suffix "1.0.0-x86_64-linux" (only when it has letters).
+		if dashIdx := strings.Index(ver, "-"); dashIdx > 0 && strings.ContainsAny(ver[dashIdx:], "abcdefghijklmnopqrstuvwxyz") {
+			ver = ver[:dashIdx]
+		}
+		if name == "" || ver == "" {
+			continue
+		}
+		if isRegistry {
+			registry[name] = ver
+		} else {
+			nonRegistry = append(nonRegistry, nonRegistryDep{Name: name, Version: ver, Origin: src})
+		}
+	}
+	return registry, nonRegistry
+}
+
+// cargoSourceIsCratesIO reports whether a Cargo.lock `source` is crates.io,
+// through either its git index or its sparse index.
+func cargoSourceIsCratesIO(source string) bool {
+	switch strings.TrimSuffix(source, "/") {
+	case "registry+https://github.com/rust-lang/crates.io-index", "sparse+https://index.crates.io":
+		return true
+	}
+	return false
+}
+
+// parseCargoLock parses Cargo.lock: TOML with repeated [[package]] blocks,
+// each carrying `name`, `version` and (for anything not in this workspace)
+// `source` lines. Line-based, no TOML dependency.
+//
+// The `source` decides what a package is:
+//   - crates.io (git or sparse index): a registry package, in registry —
+//     as coordinates, because one lockfile routinely holds a crate at two
+//     versions (syn 1.x and 2.x) and a name->version map keeps only one.
+//   - no source: a workspace member or path dependency — first-party code
+//     with no registry identity, returned in local. Not a registry package,
+//     but deleting a crate's `source` line is a lockfile edit an attacker
+//     can make (cargo re-resolves it from crates.io), so the guard still
+//     runs the known-malicious lookup on these; see packageSpec.Local.
+//   - anything else (git+, another registry+ or sparse+ index): in
+//     nonRegistry, never checked as its crates.io namesake.
+func parseCargoLock(data []byte) (registry []lockCoordinate, nonRegistry []nonRegistryDep, local []lockCoordinate) {
+	if data == nil {
+		return nil, nil, nil
+	}
+	inPkg := false
+	name, version, source := "", "", ""
+	flush := func() {
+		switch {
+		case !inPkg || name == "" || version == "":
+		case source == "":
+			local = append(local, lockCoordinate{Name: name, Version: version})
+		case cargoSourceIsCratesIO(source):
+			registry = append(registry, lockCoordinate{Name: name, Version: version})
+		default:
+			nonRegistry = append(nonRegistry, nonRegistryDep{Name: name, Version: version, Origin: origin.Sanitize(source)})
+		}
+		name, version, source = "", "", ""
 	}
 	tomlString := func(line, key string) (string, bool) {
 		trimmed := strings.TrimSpace(line)
@@ -1252,20 +1423,24 @@ func parseCargoLock(data []byte) map[string]string {
 		return strings.Trim(rest, "\""), true
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == "[[package]]" {
-			flush() // close out any prior block
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "[") {
+			// Any table header closes the block. Only [[package]] opens
+			// one: [metadata] and [[patch.unused]] entries are not
+			// installed packages.
+			flush()
+			inPkg = trimmed == "[[package]]"
 			continue
 		}
 		if v, ok := tomlString(line, "name"); ok {
 			name = v
-			continue
-		}
-		if v, ok := tomlString(line, "version"); ok {
+		} else if v, ok := tomlString(line, "version"); ok {
 			version = v
+		} else if v, ok := tomlString(line, "source"); ok {
+			source = v
 		}
 	}
 	flush() // final block
-	return out
+	return registry, nonRegistry, local
 }
 
 // parseGoSum parses go.sum.  Each line is: "module version hash".
@@ -1322,6 +1497,17 @@ func evaluatePREntry(e rawEntry) prScanEntry {
 
 	signals := prOfflineSignals(e)
 
+	// A package from outside the public registry is NOT ASSESSED, and the
+	// row says so with a warn-level signal, so it can never read as clean.
+	// The name-based signals above still run (they only ever add
+	// suspicion, so a lockfile entry rewritten to a git source cannot shed
+	// them); pr-scan has no lane that could hand it a namesake's clean
+	// verdict.
+	if e.Origin != "" {
+		out.Origin = e.Origin
+		signals = append([]prScanSignal{{ID: prScanNotAssessedSignalID, Severity: "warn", Reason: nonRegistryReason(e.Ecosystem, e.Origin)}}, signals...)
+	}
+
 	// Policy runs AFTER the offline heuristics, and its output joins the
 	// SAME slice. Two consequences, both deliberate:
 	//
@@ -1351,6 +1537,10 @@ func evaluatePREntry(e rawEntry) prScanEntry {
 
 	return out
 }
+
+// prScanNotAssessedSignalID marks a row for a package from outside the
+// public registry (prScanEntry.Origin): not assessed, rather than scored.
+const prScanNotAssessedSignalID = "origin.not_assessed"
 
 // prOfflineSignals runs a small set of heuristic supply-chain checks that
 // don't require a live server.  Each check returns zero or one signal.
