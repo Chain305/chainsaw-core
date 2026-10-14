@@ -309,13 +309,24 @@ type packageSpec struct {
 	// would re-resolve the crate from crates.io. No typosquat lane — a
 	// workspace crate's name is the user's own choice, not an install.
 	Local bool
+
+	// ExtraIndex is a sanitised `pip --extra-index-url` that is neither PyPI
+	// nor Chainsaw's own server. pip takes the highest version across every
+	// index, so the package may come from either: the spec is still checked
+	// as PyPI's (that candidate is real) and evaluateAll adds a
+	// dependency-confusion warning naming this index.
+	ExtraIndex string
 }
 
 func (s packageSpec) String() string {
-	if s.Version == "" {
-		return fmt.Sprintf("%s:%s", s.Ecosystem, s.Name)
+	name := s.Name
+	if name == "" {
+		name = guardOriginLabel(s.Origin) // a source with no recoverable package name
 	}
-	return fmt.Sprintf("%s:%s@%s", s.Ecosystem, s.Name, s.Version)
+	if s.Version == "" {
+		return fmt.Sprintf("%s:%s", s.Ecosystem, name)
+	}
+	return fmt.Sprintf("%s:%s@%s", s.Ecosystem, name, s.Version)
 }
 
 // guardVerdict is the decision for one spec.
@@ -1034,9 +1045,44 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 			blocked = true
 		}
 		verdicts = append(verdicts, v)
+		if s.ExtraIndex != "" {
+			// Beside the verdict, never instead of it: a refusal stays one.
+			verdicts = append(verdicts, guardVerdict{Spec: s, Severity: guardSeverityDependencyConfusion,
+				Reason: fmt.Sprintf("dependency confusion: pip may install %s from %s (--extra-index-url) — pip takes the highest version across all indexes, and only PyPI's was checked",
+					s.Name, guardOriginLabel(s.ExtraIndex))})
+		}
 	}
 	return verdicts, blocked
 }
+
+// guardOriginLabel is how the guard prints an origin. A git source keeps
+// origin.Label's host/path@ref (a repository path is not a secret). Every
+// other URL — an index, a registry, a tarball or wheel URL — prints its host
+// only: Cloudsmith, Gemfury and friends put the access token IN THE PATH
+// (dl.cloudsmith.io/<token>/…), which origin.Sanitize cannot know to strip.
+// A registry named rather than located (`cargo --registry NAME`, "set by
+// --userconfig") prints as "registry <that>"; a local path as the path.
+func guardOriginLabel(o string) string {
+	lower := strings.ToLower(o)
+	switch {
+	case strings.HasPrefix(o, localOriginPrefix):
+		return strings.TrimPrefix(o, localOriginPrefix)
+	case strings.HasPrefix(lower, "git+") || strings.HasPrefix(lower, "git://") || !strings.Contains(o, "://"):
+		if rest, ok := strings.CutPrefix(o, "registry+"); ok && !strings.Contains(rest, "://") {
+			return "registry " + rest
+		}
+		return origin.Label(o)
+	}
+	if u := registryURL(o); u != nil {
+		return u.Host
+	}
+	return "an unparseable URL"
+}
+
+// guardSeverityDependencyConfusion is the warning for a pip spec that may
+// also come from an undeclared --extra-index-url (packageSpec.ExtraIndex).
+// Non-blocking, printed by the printer's catch-all arm, never --quiet'd.
+const guardSeverityDependencyConfusion = "dependency-confusion"
 
 // guardSeverityNotAssessed is the verdict for a package from outside the
 // public registry (packageSpec.Origin): the guard has no evidence about it
@@ -1071,17 +1117,27 @@ const guardSeverityNotAssessed = "not-assessed"
 // matching one of these is not shown separately; carry PolicySeverity here if
 // that is ever needed.
 func (g *localGuard) evaluateNonRegistry(ctx context.Context, spec packageSpec) guardVerdict {
-	v := g.evaluate(ctx, spec) // name@version lanes only, see the Origin stop in evaluate
+	var v guardVerdict
+	if spec.Name != "" { // a nameless source (`npm i github:x/y`) has no name to look up
+		v = g.evaluate(ctx, spec) // name@version lanes only, see the Origin stop in evaluate
+	}
 	if v.Block {
-		v.Reason += " (listed from " + origin.Label(spec.Origin) + ", not the public registry)"
+		v.Reason += " (listed from " + guardOriginLabel(spec.Origin) + ", not the public registry)"
 		return v
 	}
-	reason := nonRegistryReason(spec.Ecosystem, spec.Origin)
+	reason := nonRegistryReason(spec.Ecosystem, guardOriginLabel(spec.Origin))
+	// A local path (`pip install -e .`, `npm i ../lib`) is first-party code
+	// already on this machine: said plainly, and not put to the operator's
+	// degraded-analysis rule, which exists for packages fetched from elsewhere.
+	local := strings.HasPrefix(spec.Origin, localOriginPrefix)
+	if local {
+		reason = "local path: not assessed (" + strings.TrimPrefix(spec.Origin, localOriginPrefix) + ")"
+	}
 	if v.Severity != "" {
 		// A name-similarity warning still applies to the name.
 		reason += "; " + v.Reason
 	}
-	if pv, ok := guardPolicyLane(ctx, spec, acquireIncomplete, behavioralVerdict{}); ok && pv.Block {
+	if pv, ok := guardPolicyLane(ctx, spec, acquireIncomplete, behavioralVerdict{}); !local && ok && pv.Block {
 		pv.Reason = reason + "; " + pv.Reason
 		return pv
 	}

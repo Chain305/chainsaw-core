@@ -38,3 +38,11 @@ func TestLabel(t *testing.T) {
 		}
 	}
 }
+
+// TestLabelUppercaseGitPrefix: npm and pip accept GIT+HTTPS:// as written; the
+// label must still carry the ref.
+func TestLabelUppercaseGitPrefix(t *testing.T) {
+	if got, want := Label("GIT+HTTPS://github.com/x/y?rev=abcdef0123"), "github.com/x/y@abcdef0"; got != want {
+		t.Errorf("Label = %q, want %q", got, want)
+	}
+}

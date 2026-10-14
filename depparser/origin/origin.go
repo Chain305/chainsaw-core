@@ -63,7 +63,7 @@ func Label(src string) string {
 		return src
 	}
 	label := u.Host + strings.TrimSuffix(u.Path, ".git")
-	if prefix != "git+" {
+	if !strings.EqualFold(prefix, "git+") {
 		return strings.TrimSuffix(label, "/")
 	}
 	ref := u.Fragment

@@ -18,13 +18,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/chain305/chainsaw-core/depparser/origin"
 )
 
 var npmInstallActions = map[string]bool{"install": true, "i": true, "add": true, "ci": true}
@@ -178,43 +185,177 @@ func init() {
 	rootCmd.AddCommand(npmGuardCmd, goGuardCmd, pipGuardCmd, cargoGuardCmd, gemGuardCmd)
 }
 
-// pipValueFlags are pip flags that consume the following argument (so we don't
-// mistake a requirements file or path for a package name).
-var pipValueFlags = map[string]bool{
-	"-r": true, "--requirement": true,
-	"-c": true, "--constraint": true,
-	"-e": true, "--editable": true,
-}
+// pipInstallFlags is `pip install`'s option grammar (its own options plus
+// pip's general ones), read off pip 26.1.2's parser. pipReqFileFlags is the
+// smaller parser pip uses for option lines inside a requirements or
+// constraints file — a different list, so a different set of unique prefixes
+// (`--ex` is --extra-index-url there and ambiguous on the command line).
+// Value sets are a superset across pip versions (--global-option and
+// --build-option are gone from 26 but still consume a value where they exist).
+var pipInstallFlags = newFlagSet(
+	"--abi --all-releases --break-system-packages --build-constraint --cache-dir --cert "+
+		"--check-build-dependencies --client-cert --compile --config-settings --constraint --debug "+
+		"--default-timeout --disable-pip-version-check --dry-run --editable --exists-action "+
+		"--extra-index-url --find-links --force-reinstall --group --help --ignore-installed "+
+		"--ignore-requires-python --implementation --index-url --isolated --keyring-provider "+
+		"--local-log --log --log-file --no-binary --no-build-isolation --no-cache-dir --no-clean "+
+		"--no-color --no-compile --no-dependencies --no-deps --no-index --no-input "+
+		"--no-python-version-warning --no-user --no-warn-conflicts --no-warn-script-location "+
+		"--only-binary --only-final --platform --pre --prefer-binary --prefix --progress-bar --proxy "+
+		"--pypi-url --python --python-version --quiet --report --require-hashes --require-venv "+
+		"--require-virtualenv --requirement --requirements-from-script --resume-retries --retries "+
+		"--root --root-user-action --source --source-dir --source-directory --src --target --timeout "+
+		"--trusted-host --upgrade --upgrade-strategy --uploaded-prior-to --use-deprecated "+
+		"--use-feature --use-pep517 --user --verbose --version",
+	"-r -c -e -t -C -i -f --abi --all-releases --build-constraint --cache-dir --cert --client-cert "+
+		"--config-settings --constraint --default-timeout --editable --exists-action --extra-index-url "+
+		"--find-links --group --implementation --index-url --keyring-provider --local-log --log "+
+		"--log-file --no-binary --only-binary --only-final --platform --prefix --progress-bar --proxy "+
+		"--pypi-url --python --python-version --report --requirement --requirements-from-script "+
+		"--resume-retries --retries --root --root-user-action --source --source-dir --source-directory "+
+		"--src --target --timeout --trusted-host --upgrade-strategy --uploaded-prior-to "+
+		"--use-deprecated --use-feature --global-option --build-option",
+	nil)
+
+var pipReqFileFlags = newFlagSet(
+	"--all-releases --config-settings --constraint --editable --extra-index-url --find-links --hash "+
+		"--index-url --no-binary --no-index --only-binary --only-final --pre --prefer-binary "+
+		"--pypi-url --require-hashes --requirement --trusted-host --use-feature --global-option",
+	"-r -c -e -f -i -C --all-releases --config-settings --constraint --editable --extra-index-url "+
+		"--find-links --hash --index-url --no-binary --only-binary --only-final --pypi-url "+
+		"--requirement --trusted-host --use-feature --global-option",
+	nil)
 
 // parsePipInstall recognizes `pip install [flags] <pkg>...` and returns the named
-// package specs. Skips flags and their values (e.g. `-r requirements.txt`).
+// package specs, plus one per `-e/--editable` source (a path or VCS URL, never a
+// PyPI name). Index flags are applied later, by applyRegistryFlags.
 func parsePipInstall(args []string) ([]packageSpec, bool) {
 	if len(args) == 0 || args[0] != "install" {
 		return nil, false
 	}
+	pos, flags := splitFlags(args[1:], pipInstallFlags)
 	var specs []packageSpec
-	skipNext := false
-	for _, a := range args[1:] {
-		if skipNext {
-			skipNext = false
-			continue
+	for _, f := range flags {
+		if (f.name == "-e" || f.name == "--editable") && f.value != "" {
+			specs = append(specs, pipSourceSpec(f.value))
 		}
-		if strings.HasPrefix(a, "-") {
-			if pipValueFlags[a] {
-				skipNext = true
-			}
-			continue
-		}
+	}
+	for _, a := range pos {
 		specs = append(specs, parsePipSpec(a))
 	}
 	return specs, true
 }
 
+// pipReqName is a bare PEP 508 name with optional extras: the left side of a
+// direct reference ("requests[socks] @ git+https://…").
+var pipReqName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\s*(\[[^\]]*\])?$`)
+
+// isPipSource reports whether a requirement token names a URL, VCS source,
+// path or archive instead of a PyPI project (a project name has no "/", ":"
+// or leading ".").
+func isPipSource(tok string) bool {
+	if strings.Contains(tok, "://") || strings.ContainsAny(tok, `/\`) ||
+		strings.HasPrefix(tok, ".") || strings.HasPrefix(tok, "~") {
+		return true
+	}
+	return pipArchiveExt(tok) != ""
+}
+
+// pipArchiveExt is the archive extension tok ends in, case-insensitively, or "".
+func pipArchiveExt(tok string) string {
+	for _, ext := range []string{".whl", ".tar.gz", ".tgz", ".zip", ".tar.bz2", ".tar.xz", ".tar"} {
+		if hasSuffixFold(tok, ext) {
+			return ext
+		}
+	}
+	return ""
+}
+
+// pipSourceSpec turns a pip source (VCS URL, archive URL, path) into an
+// Origin-carrying spec. The project name (and version) comes from `#egg=`, a
+// wheel filename or an sdist filename when the source gives one, and gets the
+// name@version lanes; otherwise the spec is nameless and is reported by its
+// origin. An archive on PyPI's own hosts (or the user's own Chainsaw
+// repository) is the registry package. A path or file: URL is local,
+// first-party code.
+func pipSourceSpec(src string) packageSpec {
+	s := packageSpec{Ecosystem: "pip"}
+	src = lowerScheme(src)
+	if !strings.Contains(src, "://") || strings.HasPrefix(src, "file:") {
+		s.Origin = localOrigin(src)
+		return s
+	}
+	if i := strings.Index(src, "#"); i >= 0 {
+		for _, kv := range strings.Split(src[i+1:], "&") {
+			if egg, ok := strings.CutPrefix(kv, "egg="); ok {
+				if j := strings.IndexAny(egg, "<>=!~["); j >= 0 {
+					egg = egg[:j]
+				}
+				s.Name = strings.TrimSpace(egg)
+			}
+		}
+		if strings.Contains(src[i:], "egg=") || strings.Contains(src[i:], "subdirectory=") {
+			src = src[:i] // pip metadata, not a git ref
+		}
+	}
+	if s.Name == "" {
+		base := src[strings.LastIndex(src, "/")+1:]
+		if j := strings.IndexAny(base, "?#"); j >= 0 {
+			base = base[:j]
+		}
+		switch ext := pipArchiveExt(base); ext {
+		case "":
+		case ".whl":
+			// {name}-{version}(-{build})?-{py}-{abi}-{plat}.whl
+			if parts := strings.Split(base[:len(base)-len(ext)], "-"); len(parts) >= 5 {
+				s.Name, s.Version = parts[0], parts[1]
+			}
+		default:
+			// sdist {name}-{version}.tar.gz: the version is after the last "-"
+			// (python-dateutil-2.8.2), and starts with a digit.
+			stem := base[:len(base)-len(ext)]
+			if i := strings.LastIndex(stem, "-"); i > 0 && i+1 < len(stem) && stem[i+1] >= '0' && stem[i+1] <= '9' {
+				s.Name, s.Version = stem[:i], stem[i+1:]
+			}
+		}
+		if s.Name != "" && knownRegistry("pip", src) {
+			return s // PyPI's own file: the registry package
+		}
+	}
+	s.Origin = origin.Sanitize(src)
+	return s
+}
+
 // parsePipSpec turns "requests", "requests==2.31.0", "requests>=2.0", or
 // "requests[security]==2.31.0" into a spec. Version is captured only when pinned
 // with "=="; looser specifiers leave it empty (name-based signals still fire).
+// A PEP 508 direct reference ("requests[socks] @ git+https://…") or a bare
+// URL/path is a source, not PyPI's project of that name (pipSourceSpec).
 func parsePipSpec(arg string) packageSpec {
+	arg = strings.TrimSpace(arg)
+	if at := strings.Index(arg, "@"); at > 0 && pipReqName.MatchString(strings.TrimSpace(arg[:at])) {
+		name := strings.TrimSpace(arg[:at])
+		if b := strings.Index(name, "["); b >= 0 {
+			name = strings.TrimSpace(name[:b])
+		}
+		src := strings.TrimSpace(arg[at+1:])
+		if i := strings.IndexAny(src, " \t;"); i >= 0 {
+			src = src[:i] // environment markers
+		}
+		s := pipSourceSpec(src)
+		if s.Name != name {
+			s.Version = "" // a wheel version belongs to the wheel's own name
+		}
+		s.Name = name
+		return s
+	}
+	if tok, _, _ := strings.Cut(strings.TrimSpace(strings.SplitN(arg, ";", 2)[0]), " "); isPipSource(tok) {
+		return pipSourceSpec(tok)
+	}
 	name, version := arg, ""
+	if i := strings.IndexAny(name, " \t;#"); i > 0 {
+		name = name[:i] // inline comments and markers ("pkg ; python_version<'3'")
+	}
 	if i := strings.IndexAny(name, "<>=!~"); i >= 0 {
 		if rest := name[i:]; strings.HasPrefix(rest, "==") {
 			version = strings.TrimLeft(rest, "=")
@@ -565,14 +706,448 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 func guardSpecsFor(bin string, args []string, parse specParser) (specs []packageSpec, recognized, fromLockfile bool) {
 	parseArgs := stripLeadingFlagsForParse(args)
 	specs, recognized = parse(parseArgs)
-	if recognized && len(specs) == 0 {
-		// No named packages (e.g. `npm install`/`npm ci` from a lockfile, or
-		// `pip install -r requirements.txt`) — scan the resolved tree.
-		if expanded := expandLockfile(bin, parseArgs); len(expanded) > 0 {
-			return expanded, true, true
+	if !recognized {
+		return specs, false, false
+	}
+	// pip's -r / -c files are read ONCE here, for their specs and for the
+	// options in them, which pip applies to the whole run. `pip install -r
+	// req.txt pytest` used to leave req.txt unread.
+	var fileFlags []argFlag
+	if bin == "pip" {
+		var fileSpecs []packageSpec
+		fileSpecs, fileFlags = readPipFiles(parseArgs)
+		if len(fileSpecs) > 0 {
+			specs, fromLockfile = append(specs, fileSpecs...), true
 		}
 	}
-	return specs, recognized, false
+	// Scan the resolved tree when no package is named (`npm ci`), or only
+	// local paths are (`pip install -e .`, `cargo install --path .` install
+	// the project's tree as well).
+	if onlyLocalPaths(specs) {
+		var expanded []packageSpec
+		if bin == "pip" {
+			expanded = expandPythonLockfiles()
+		} else {
+			expanded = expandLockfile(bin, parseArgs)
+		}
+		if len(expanded) > 0 {
+			specs, fromLockfile = append(specs, expanded...), true
+		}
+	}
+	// The FULL args (chainsaw's own globals stripped), not parseArgs: npm
+	// takes `npm --registry X install lodash`, and parseArgs starts at the verb.
+	applyRegistryFlags(bin, stripLeadingChainsawGlobals(args), specs, fileFlags)
+	return specs, true, fromLockfile
+}
+
+func onlyLocalPaths(specs []packageSpec) bool {
+	for _, s := range specs {
+		if !strings.HasPrefix(s.Origin, localOriginPrefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// readPipFiles reads every -r / -c / --build-constraint file of a
+// verb-anchored `pip install`, each at most once: specs from requirements
+// files (constraints install nothing), and option lines from both — pip
+// applies a constraints file's --index-url too. A file reached twice (`-r
+// r.txt` ten times inside r.txt, or a.txt and b.txt including each other) is
+// read once, which also ends cycles; the old depth cap alone let ten
+// self-includes fan out to 10^8 specs.
+func readPipFiles(args []string) (specs []packageSpec, flags []argFlag) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	_, cmd := splitFlags(args[1:], pipInstallFlags)
+	visited := map[string]bool{}
+	for _, f := range cmd {
+		if f.value == "" {
+			continue
+		}
+		switch f.name {
+		case "-r", "--requirement":
+			s, ff := readPipFile(f.value, true, visited)
+			specs, flags = append(specs, s...), append(flags, ff...)
+		case "-c", "--constraint", "--build-constraint":
+			_, ff := readPipFile(f.value, false, visited)
+			flags = append(flags, ff...)
+		}
+	}
+	return specs, flags
+}
+
+// readPipFile parses one requirements (wantSpecs) or constraints file. `-e`
+// lines are sources, nested -r / -c files are followed relative to this one,
+// every other option line is returned in flags. A remote file (`-r
+// https://…`) cannot be read offline: it becomes a nameless not-assessed
+// line, and since its options are unknown its host is treated as an index
+// for the run — unread is not the same as harmless.
+func readPipFile(path string, wantSpecs bool, visited map[string]bool) (specs []packageSpec, flags []argFlag) {
+	if strings.Contains(path, "://") {
+		if wantSpecs {
+			specs = append(specs, packageSpec{Ecosystem: "pip", Origin: origin.Sanitize(lowerScheme(path))})
+		}
+		return specs, []argFlag{{name: "--index-url", value: path}}
+	}
+	key := path
+	if abs, err := filepath.Abs(path); err == nil {
+		key = abs
+	}
+	if wantSpecs {
+		key += "\x00r"
+	}
+	if visited[key] {
+		return nil, nil
+	}
+	visited[key] = true
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil
+	}
+	text := strings.ReplaceAll(strings.ReplaceAll(string(data), "\\\r\n", " "), "\\\n", " ") // pip joins "\" continuations
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if i := strings.IndexByte(line, '#'); i >= 0 && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+			line = strings.TrimSpace(line[:i]) // a comment; a URL's #egg= has no space before it
+		}
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "-") {
+			if wantSpecs {
+				specs = append(specs, parsePipSpec(line))
+			}
+			continue
+		}
+		_, lineFlags := splitFlags(strings.Fields(line), pipReqFileFlags)
+		for _, f := range lineFlags {
+			nested := f.value
+			if nested != "" && !strings.Contains(nested, "://") && !filepath.IsAbs(nested) {
+				nested = filepath.Join(filepath.Dir(path), nested)
+			}
+			switch {
+			case f.value == "":
+				flags = append(flags, f)
+			case f.name == "-e" || f.name == "--editable":
+				if wantSpecs {
+					specs = append(specs, pipSourceSpec(f.value))
+				}
+			case f.name == "-r" || f.name == "--requirement":
+				s, ff := readPipFile(nested, wantSpecs, visited)
+				specs, flags = append(specs, s...), append(flags, ff...)
+			case f.name == "-c" || f.name == "--constraint":
+				_, ff := readPipFile(nested, false, visited)
+				flags = append(flags, ff...)
+			default:
+				flags = append(flags, f)
+			}
+		}
+	}
+	return specs, flags
+}
+
+// argFlag is one option parsed out of an argv-style token list.
+type argFlag struct{ name, value string }
+
+// flagSet is one tool's option grammar: every long option its parser knows
+// (booleans included — they decide whether a prefix is ambiguous) and the
+// options whose value is required.
+type flagSet struct {
+	long    []string
+	value   map[string]bool
+	valueIf func(string) bool // extra value rule, may be nil
+}
+
+func newFlagSet(long, values string, valueIf func(string) bool) *flagSet {
+	fs := &flagSet{long: strings.Fields(long), value: map[string]bool{}, valueIf: valueIf}
+	for _, v := range strings.Fields(values) {
+		fs.value[v] = true
+	}
+	return fs
+}
+
+// canonical expands an abbreviated long option the way the tool itself does
+// (pip's optparse, npm's nopt and RubyGems' OptionParser all accept a unique
+// prefix: `--ind=URL` is --index-url, `--reg` is --registry, `--sou` is
+// --source). An exact name, an unknown one and an ambiguous prefix are
+// returned unchanged — the tool refuses an ambiguous one itself, and an
+// unchanged name is boolean to splitFlags, which can over-scan but never hide
+// a package.
+func (fs *flagSet) canonical(name string) string {
+	if len(fs.long) == 0 || slices.Contains(fs.long, name) {
+		return name
+	}
+	match := ""
+	for _, l := range fs.long {
+		if strings.HasPrefix(l, name) {
+			if match != "" {
+				return name
+			}
+			match = l
+		}
+	}
+	if match == "" {
+		return name
+	}
+	return match
+}
+
+func (fs *flagSet) isValue(name string) bool {
+	return fs.value[name] || (fs.valueIf != nil && fs.valueIf(name))
+}
+
+// splitFlags separates options from positional arguments. A long option is
+// first expanded to the one it abbreviates (flagSet.canonical). A value
+// option consumes its value in every spelling — `--f v`, `--f=v`, `-fv`, and
+// a short bundle ending in it (`-qr file`) — so the URL after `--registry`,
+// `-i` or `--git` is never read as a package (the bypass this exists for:
+// `pip install -i https://evil/simple requests` used to check a package
+// called "https://evil/simple" and PyPI's requests).
+//
+// SECURITY: the value sets must list only options whose value is REQUIRED.
+// An option not listed is treated as boolean and its "value" stays
+// positional — that over-scans (a bogus name gets checked) but cannot hide a
+// package. Listing a boolean or optional-value option would swallow the
+// package after it, a bypass; for the same reason a following token that is
+// itself a flag is never taken as a value.
+func splitFlags(args []string, fs *flagSet) (pos []string, flags []argFlag) {
+	next := func(i int) (string, bool) {
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			return args[i+1], true
+		}
+		return "", false
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return append(pos, args[i+1:]...), flags
+		case strings.HasPrefix(a, "--"):
+			name, val, hasEq := strings.Cut(a, "=")
+			name = fs.canonical(name)
+			if v, ok := next(i); ok && !hasEq && fs.isValue(name) {
+				val = v
+				i++
+			}
+			flags = append(flags, argFlag{name, val})
+		case len(a) > 1 && a[0] == '-':
+			for j := 1; j < len(a); j++ {
+				name := "-" + a[j:j+1]
+				if !fs.isValue(name) {
+					flags = append(flags, argFlag{name: name})
+					continue
+				}
+				val := a[j+1:]
+				if v, ok := next(i); ok && val == "" {
+					val = v
+					i++
+				}
+				flags = append(flags, argFlag{name, val})
+				break
+			}
+		default:
+			pos = append(pos, a)
+		}
+	}
+	return pos, flags
+}
+
+// localOriginPrefix marks the Origin of a local path or file (`./dir`,
+// `file:../x`, `cargo install --path .`): first-party code on this machine,
+// reported as a local path and never as an alarm (see evaluateNonRegistry).
+const localOriginPrefix = "file:"
+
+// localOrigin sanitises too: `file://user:token@host/share/x` is a URL.
+func localOrigin(path string) string {
+	path = origin.Sanitize(lowerScheme(path))
+	return localOriginPrefix + strings.TrimPrefix(strings.TrimPrefix(path, "file://"), "file:")
+}
+
+// lowerScheme lowercases everything before "://" (`GIT+HTTPS://…` is
+// git+https), so origin.Label recognises a git source whatever its case.
+func lowerScheme(s string) string {
+	if i := strings.Index(s, "://"); i > 0 {
+		return strings.ToLower(s[:i]) + s[i:]
+	}
+	return s
+}
+
+// hasSuffixFold is a case-insensitive strings.HasSuffix (`X.TGZ`, `x.WHL`).
+func hasSuffixFold(s, suffix string) bool {
+	return len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix)
+}
+
+// publicRegistryHosts are each ecosystem's public registry (plan §3.1, class
+// a). crates.io's git index lives on github.com, so it is matched by URL in
+// knownRegistry instead.
+var publicRegistryHosts = map[string][]string{
+	"npm":      {"registry.npmjs.org", "registry.yarnpkg.com"},
+	"pip":      {"pypi.org", "files.pythonhosted.org", "pypi.python.org"},
+	"cargo":    {"index.crates.io", "crates.io", "static.crates.io"},
+	"rubygems": {"rubygems.org", "index.rubygems.org"},
+}
+
+// registryURL parses a registry URL after any "sparse+" / "registry+" /
+// "git+" prefix; nil when it has no host.
+func registryURL(raw string) *url.URL {
+	raw = lowerScheme(strings.TrimSpace(raw))
+	if i := strings.Index(raw, "+"); i > 0 && i < strings.Index(raw, "://") {
+		raw = raw[i+1:]
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	return u
+}
+
+// hostPort is a URL's lowercased host with its port made explicit, so
+// https://x and https://x:443 compare equal and https://x:8443 does not.
+func hostPort(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	return strings.ToLower(u.Hostname()) + ":" + port
+}
+
+// knownRegistry reports whether a registry URL given on the command line is
+// the ecosystem's public registry (by host, default port) or one of the
+// user's OWN Chainsaw proxy repositories (ownChainsawRepository).
+func knownRegistry(eco, raw string) bool {
+	u := registryURL(raw)
+	if u == nil {
+		return false
+	}
+	if slices.Contains(publicRegistryHosts[eco], strings.ToLower(u.Hostname())) && (u.Port() == "" || u.Port() == "443") {
+		return true
+	}
+	if eco == "cargo" && strings.EqualFold(strings.TrimSuffix(strings.TrimSuffix(u.String(), "/"), ".git"), "https://github.com/rust-lang/crates.io-index") {
+		return true
+	}
+	return ownChainsawRepository(u)
+}
+
+// ownChainsawRepository: same scheme, host and port as the server this CLI
+// is configured for (cfgServerURL: CHAINSAW_SERVER, the saved config, the
+// build's DefaultServer — a `--server` typed on a guard command line is NOT
+// parsed, the guard runs with DisableFlagParsing), and a path under
+// <server path>/repository/@<org slug>/. NOT host-wide: any org can create a
+// proxy repository on the shared host with an arbitrary upstream, so
+// chain305.com/chainproxy/repository/@attacker/… is just another index.
+//
+// The slug is `org_slug` (CHAINSAW_ORG_SLUG, or org_slug: in config.yaml).
+// Nothing writes it yet — `auth login` resolves the slug over the network and
+// does not save it, and the offline guard will not make that call — so until
+// it is set every URL is undeclared: not assessed, malware lane still run.
+func ownChainsawRepository(u *url.URL) bool {
+	slug, server := strings.TrimSpace(viper.GetString("org_slug")), strings.TrimSpace(cfgServerURL())
+	if slug == "" || server == "" {
+		return false
+	}
+	if !strings.Contains(server, "://") {
+		server = "https://" + server
+	}
+	s, err := url.Parse(server)
+	if err != nil || s.Host == "" || !strings.EqualFold(s.Scheme, u.Scheme) || hostPort(s) != hostPort(u) {
+		return false
+	}
+	own := path.Join("/", s.Path, "repository", "@"+slug) + "/"
+	return strings.HasPrefix(path.Clean("/"+u.Path)+"/", own)
+}
+
+// undeclaredRegistry is the Origin a spec takes when a command-line flag
+// sends it to a registry that is neither the public one nor the user's own
+// Chainsaw repository ("" when it is one of those, or raw is empty).
+func undeclaredRegistry(eco, raw string) string {
+	if raw == "" || knownRegistry(eco, raw) {
+		return ""
+	}
+	return origin.Sanitize("registry+" + lowerScheme(raw))
+}
+
+// setByConfig is the Origin for specs whose registry a config FILE or
+// config value on the command line may have changed (npm --userconfig, gem
+// --config-file, cargo --config): the guard does not read it, so it cannot
+// say the registry is the public one.
+func setByConfig(flag string) string { return "registry+(set by " + flag + ")" }
+
+// applyRegistryFlags applies a command line's registry-override flags (and,
+// for pip, the option lines of its -r / -c files) to its registry specs —
+// named and lockfile-expanded alike, since `npm ci --registry X` fetches the
+// whole tree from X. An override to the public registry or to the user's own
+// Chainsaw repository changes nothing. Anything else is an UNDECLARED
+// registry and its specs become non-registry: the malware and typosquat
+// lanes still run on the name, and the rest is reported not assessed. Not a
+// blanket "mirrors are suspicious": a mirror lives in pip.conf / .npmrc /
+// .cargo/config.toml, which the guard does not override; an index on the
+// command line is unusual, and it is exactly the shape of an attack (an agent
+// or a README telling you to `pip install -i https://… requests`).
+//
+// pip --extra-index-url is different: pip takes the highest version across
+// every index (dependency confusion), so PyPI's candidate is real and still
+// checked, and the spec carries ExtraIndex for a warning instead.
+func applyRegistryFlags(bin string, args []string, specs []packageSpec, fileFlags []argFlag) {
+	fs := map[string]*flagSet{"npm": npmFlags, "pip": pipInstallFlags, "cargo": cargoFlags, "gem": gemFlags}[bin]
+	if fs == nil {
+		return
+	}
+	_, flags := splitFlags(args, fs)
+	flags = append(flags, fileFlags...)
+	var primary, extra string
+	scoped := map[string]string{} // npm --@scope:registry
+	for _, f := range flags {
+		var o string
+		switch {
+		case bin == "npm" && f.name == "--registry",
+			bin == "pip" && (f.name == "-i" || f.name == "--index-url" || f.name == "--pypi-url" || f.name == "-f" || f.name == "--find-links"),
+			bin == "cargo" && f.name == "--index",
+			bin == "gem" && (f.name == "-s" || f.name == "--source"):
+			o = undeclaredRegistry(ecosystemFor(bin), f.value)
+		case bin == "cargo" && f.name == "--registry" && f.value != "" && f.value != "crates-io":
+			o = origin.Sanitize("registry+" + f.value) // a name from .cargo/config.toml
+		case bin == "cargo" && f.name == "--config" && (hasSuffixFold(f.value, ".toml") ||
+			strings.Contains(f.value, "source.") || strings.Contains(f.value, "registr")):
+			o = setByConfig("--config")
+		case bin == "npm" && (f.name == "--userconfig" || f.name == "--globalconfig") && f.value != "",
+			bin == "gem" && f.name == "--config-file" && f.value != "":
+			o = setByConfig(f.name)
+		case bin == "npm" && strings.HasPrefix(f.name, "--@") && strings.HasSuffix(f.name, ":registry"):
+			scoped[strings.TrimSuffix(f.name[2:], ":registry")] = undeclaredRegistry("npm", f.value)
+		case bin == "pip" && f.name == "--extra-index-url" && extra == "" && f.value != "" && !knownRegistry("pip", f.value):
+			extra = origin.Sanitize(lowerScheme(f.value))
+		}
+		if primary == "" {
+			primary = o // the first undeclared one: refusing to look past it is the safe side
+		}
+	}
+	for i := range specs {
+		s := &specs[i]
+		if s.Origin != "" || s.Local || s.Name == "" {
+			continue
+		}
+		o := primary
+		if scope, _, ok := strings.Cut(s.Name, "/"); ok && strings.HasPrefix(scope, "@") {
+			if so, ok := scoped[scope]; ok {
+				o = so
+			}
+		}
+		if o != "" {
+			s.Origin = o
+		} else if extra != "" {
+			s.ExtraIndex = extra
+		}
+	}
+}
+
+// ecosystemFor maps a guarded binary to its spec ecosystem.
+func ecosystemFor(bin string) string {
+	if bin == "gem" {
+		return "rubygems"
+	}
+	return bin
 }
 
 var runServerInstallPreflight = serverInstallPreflight
@@ -706,20 +1281,115 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// npmFlags is npm's option grammar: every config key npm 11.19's nopt
+// knows (nopt expands a unique prefix of any of them, `--reg` is
+// --registry), and the ones whose type has no Boolean, which take a value.
+// Per-scope / per-host keys (`--@acme:registry`, `--//host/:_authToken`) are
+// never abbreviated and always carry a value.
+var npmFlags = newFlagSet(
+	"--_auth --access --all --allow-directory --allow-file --allow-git --allow-remote "+
+		"--allow-same-version --allow-scripts --allow-scripts-pending --allow-scripts-pin --also "+
+		"--audit --audit-level --auth-type --before --bin-links --browser --bypass-2fa --ca --cache "+
+		"--cache-max --cache-min --cafile --call --cert --cidr --color --commit-hooks --cpu "+
+		"--dangerously-allow-all-scripts --depth --description --dev --diff --diff-dst-prefix "+
+		"--diff-ignore-all-space --diff-name-only --diff-no-prefix --diff-src-prefix --diff-text "+
+		"--diff-unified --dry-run --editor --engine-strict --expect-result-count --expect-results "+
+		"--expires --fetch-retries --fetch-retry-factor --fetch-retry-maxtimeout "+
+		"--fetch-retry-mintimeout --fetch-timeout --force --foreground-scripts --format-package-lock "+
+		"--fund --git --git-tag-version --global --global-style --globalconfig --heading --https-proxy "+
+		"--if-present --ignore-scripts --include --include-attestations --include-staged "+
+		"--include-workspace-root --init-author-email --init-author-name --init-author-url "+
+		"--init-license --init-module --init-private --init-type --init-version --init.author.email "+
+		"--init.author.name --init.author.url --init.license --init.module --init.version "+
+		"--install-links --install-strategy --json --key --legacy-bundling --legacy-peer-deps --libc "+
+		"--link --local-address --location --lockfile-version --loglevel --logs-dir --logs-max --long "+
+		"--maxsockets --message --min-release-age --min-release-age-exclude --name --node-gyp "+
+		"--node-options --noproxy --offline --omit --omit-lockfile-registry-resolved --only --optional "+
+		"--orgs --orgs-permission --os --otp --pack-destination --package --package-lock "+
+		"--package-lock-only --packages --packages-all --packages-and-scopes-permission --parseable "+
+		"--password --prefer-dedupe --prefer-offline --prefer-online --prefix --preid --production "+
+		"--progress --provenance --provenance-file --proxy --read-only --rebuild-bundle --registry "+
+		"--replace-registry-host --save --save-bundle --save-dev --save-exact --save-optional "+
+		"--save-peer --save-prefix --save-prod --sbom-format --sbom-type --scope --scopes "+
+		"--script-shell --searchexclude --searchlimit --searchopts --searchstaleness --shell "+
+		"--shrinkwrap --sign-git-commit --sign-git-tag --strict-allow-scripts --strict-peer-deps "+
+		"--strict-ssl --tag --tag-version-prefix --timing --token-description --umask --unicode "+
+		"--update-notifier --usage --user-agent --userconfig --version --versions --viewer --which "+
+		"--workspace --workspaces --workspaces-update --yes",
+	"-C -w -L -m -c --_auth --access --allow-directory --allow-file --allow-git --allow-remote "+
+		"--allow-scripts --also --audit-level --auth-type --before --ca --cache --cache-max --cache-min "+
+		"--cafile --call --cert --cidr --cpu --depth --diff --diff-dst-prefix --diff-src-prefix "+
+		"--diff-unified --editor --expect-result-count --expires --fetch-retries --fetch-retry-factor "+
+		"--fetch-retry-maxtimeout --fetch-retry-mintimeout --fetch-timeout --git --globalconfig "+
+		"--heading --https-proxy --include --init-author-email --init-author-name --init-author-url "+
+		"--init-license --init-module --init-type --init-version --init.author.email "+
+		"--init.author.name --init.author.url --init.license --init.module --init.version "+
+		"--install-strategy --key --libc --local-address --location --lockfile-version --loglevel "+
+		"--logs-dir --logs-max --maxsockets --message --min-release-age --min-release-age-exclude "+
+		"--name --node-gyp --node-options --noproxy --omit --only --orgs --orgs-permission --os --otp "+
+		"--pack-destination --package --packages --packages-and-scopes-permission --password "+
+		"--prefix --preid --provenance-file --proxy --registry --replace-registry-host --save-prefix "+
+		"--sbom-format --sbom-type --scope --scopes --script-shell --searchexclude --searchlimit "+
+		"--searchopts --searchstaleness --shell --tag --tag-version-prefix --token-description "+
+		"--umask --user-agent --userconfig --viewer --which --workspace",
+	func(f string) bool { return strings.HasPrefix(f, "--") && strings.Contains(f, ":") })
+
 // parseNpmInstall recognizes `npm install|i|add [flags] <pkg>...` and returns the
-// named package specs. Flags (anything starting with "-") are skipped.
+// named package specs. `--registry` is applied later, by applyRegistryFlags.
 func parseNpmInstall(args []string) ([]packageSpec, bool) {
 	if len(args) == 0 || !npmInstallActions[args[0]] {
 		return nil, false
 	}
+	pos, _ := splitFlags(args[1:], npmFlags)
 	var specs []packageSpec
-	for _, a := range args[1:] {
-		if strings.HasPrefix(a, "-") {
-			continue
-		}
+	for _, a := range pos {
 		specs = append(specs, parseNpmSpec(a))
 	}
 	return specs, true
+}
+
+// npmIsSource reports whether the part of an npm spec after "name@" (or a
+// whole nameless argument) names a git repository, URL, tarball or path rather
+// than a registry version, range or tag — npm-package-arg's grammar: anything
+// with ":" (github:, git+https:, https:, file:, …), "/" (user/repo shorthand),
+// a leading ".", "~/" or "~\\", or a tarball filename. A registry range never
+// has one — and a bare leading "~" IS a range (`lodash@~4.17.0`), so it is
+// not a path.
+func npmIsSource(s string) bool {
+	return strings.ContainsAny(s, ":/") || strings.HasPrefix(s, ".") || npmHomePath(s) ||
+		hasSuffixFold(s, ".tgz") || hasSuffixFold(s, ".tar.gz") || hasSuffixFold(s, ".tar")
+}
+
+func npmHomePath(s string) bool { return strings.HasPrefix(s, "~/") || strings.HasPrefix(s, `~\`) }
+
+// npmSourceSpec is the spec for an npm source. name is the one the user
+// typed ("" when none). A tarball URL in the registry layout
+// (<registry>/<name>/-/<name>-<version>.tgz, scoped too) names the package
+// it serves, and that is the package checked — not the alias in front of it:
+// `npm i x@https://…/evilpkg/-/evilpkg-1.0.0.tgz` is evilpkg's code. On the
+// public registry (or the user's own Chainsaw repository) it IS the registry
+// package; anywhere else it keeps an Origin and gets the name@version lanes.
+// A path or file:/link: spec is local, anything else is sanitised.
+func npmSourceSpec(name, src string) packageSpec {
+	src = lowerScheme(src)
+	if u, err := url.Parse(src); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		if pkg, file, ok := npmTarballCoordinate(u.Path); ok && hasSuffixFold(file, ".tgz") {
+			base := pkg[strings.LastIndex(pkg, "/")+1:]
+			if v, ok := strings.CutPrefix(file[:len(file)-len(".tgz")], base+"-"); ok {
+				s := packageSpec{Ecosystem: "npm", Name: pkg, Version: v}
+				if !knownRegistry("npm", src) {
+					s.Origin = origin.Sanitize(src)
+				}
+				return s
+			}
+		}
+	}
+	if strings.HasPrefix(src, "file:") || strings.HasPrefix(src, "link:") ||
+		(!strings.Contains(src, ":") && !strings.Contains(src, "/")) || // foo.tgz
+		strings.HasPrefix(src, ".") || strings.HasPrefix(src, "/") || npmHomePath(src) {
+		return packageSpec{Ecosystem: "npm", Name: name, Origin: localOrigin(strings.TrimPrefix(strings.TrimPrefix(src, "file:"), "link:"))}
+	}
+	return packageSpec{Ecosystem: "npm", Name: name, Origin: origin.Sanitize(src)}
 }
 
 // parseNpmSpec turns "lodash", "lodash@4.17.21", or "@babel/core@7.24.0" into a
@@ -731,19 +1401,38 @@ func parseNpmInstall(args []string) ([]packageSpec, bool) {
 // checks a name the registry never serves, and when the alias shadows a corpus
 // member (`react`) it also hands the install the typosquat exact-match
 // exemption — while npm writes electorn's code into node_modules/react. The
-// "@npm:" marker is located BEFORE the LastIndex("@") split precisely because
-// the pinned form carries two "@"s.
+// "@npm:" marker is located BEFORE the name split precisely because the
+// pinned form carries two "@"s.
+//
+// The name ends at the FIRST "@" after an optional scope, not the last: a
+// source after it can carry its own "@" (git+ssh://git@host/…). A source spec
+// (`lodash@github:x/lodash`, `lodash@https://…/x.tgz`, `lodash@file:../x`)
+// keeps the name and gets an Origin, so it is never scored as the registry's
+// lodash; a nameless one (`github:x/repo`, `x/repo`, `./dir`,
+// `git@github.com:x/y.git`) is reported by its origin alone.
 func parseNpmSpec(arg string) packageSpec {
 	if i := strings.Index(arg, "@npm:"); i > 0 {
 		if target := arg[i+len("@npm:"):]; target != "" {
 			return parseNpmSpec(target)
 		}
 	}
-	name, version := arg, ""
-	if at := strings.LastIndex(arg, "@"); at > 0 {
-		name, version = arg[:at], arg[at+1:]
+	from := 0
+	if strings.HasPrefix(arg, "@") {
+		from = strings.Index(arg, "/") + 1 // @scope/name: the scope's "@" is not the separator
+	} else if head, _, _ := strings.Cut(arg, "@"); npmIsSource(head) {
+		return npmSourceSpec("", arg) // an unscoped name never has ":" or "/"
 	}
-	return packageSpec{Ecosystem: "npm", Name: name, Version: version}
+	name, rest := arg, ""
+	if at := strings.Index(arg[from:], "@"); at >= 0 && from+at > 0 {
+		name, rest = arg[:from+at], arg[from+at+1:]
+	}
+	if !npmIsSource(rest) {
+		return packageSpec{Ecosystem: "npm", Name: name, Version: rest}
+	}
+	if scheme, _, ok := strings.Cut(rest, ":"); ok && strings.Contains(scheme, ".") {
+		return npmSourceSpec("", arg) // scp-style git@github.com:x/y.git, "git" is a user, not a name
+	}
+	return npmSourceSpec(name, rest)
 }
 
 // parseGoGet recognizes `go get [flags] <module>...` (named modules),
@@ -819,41 +1508,54 @@ func hasVersionedModuleArg(args []string) bool {
 // cargoInstallActions are the cargo subcommands that fetch named crates.
 var cargoInstallActions = map[string]bool{"add": true, "install": true}
 
+// cargoFlags are `cargo install` / `cargo add` options whose value is
+// required, so a `--git` URL or `--path` dir is never read as a crate name.
+// No long-option list: clap refuses abbreviated long options.
+var cargoFlags = newFlagSet("",
+	"--version --vers --git --branch --tag --rev --path --registry --index --root --target "+
+		"--target-dir -j --jobs --features -F --profile --config -Z --color --bin --example --rename "+
+		"--package -p --manifest-path --lockfile-path",
+	nil)
+
 // parseCargoInstall recognizes `cargo add <crate>...` and `cargo install <crate>...`
-// and returns the named crate specs. Flags are skipped; `--version X` consumes its
-// value so it isn't treated as a crate name. Bare `cargo build`/`cargo add` (no
-// crates) is recognized with no specs so expandLockfile scans Cargo.lock.
+// and returns the named crate specs. `--version X` pins every crate named
+// without one. `--git URL` / `--path DIR` make every named crate a git / local
+// source, and with no crate named stand for the one cargo will pick. Bare
+// `cargo build`/`cargo add` (no crates) is recognized with no specs so
+// expandLockfile scans Cargo.lock. `--index` / `--registry` are applied by
+// applyRegistryFlags.
 func parseCargoInstall(args []string) ([]packageSpec, bool) {
 	if len(args) == 0 || !cargoInstallActions[args[0]] {
 		return nil, false
 	}
+	pos, flags := splitFlags(args[1:], cargoFlags)
+	var version, git, ref, src string
+	for _, f := range flags {
+		switch f.name {
+		case "--version", "--vers":
+			version = f.value
+		case "--git":
+			git = f.value
+		case "--branch", "--tag", "--rev":
+			ref = "?" + strings.TrimPrefix(f.name, "--") + "=" + url.QueryEscape(f.value)
+		case "--path":
+			src = localOrigin(f.value)
+		}
+	}
+	if git != "" {
+		src = origin.Sanitize(lowerScheme("git+" + git + ref))
+	}
 	var specs []packageSpec
-	pendingVersion := "" // crate awaiting a `--version X` value
-	skipNext := false
-	for _, a := range args[1:] {
-		if skipNext {
-			skipNext = false
-			// A `--version X` value applies to the most recent crate.
-			if pendingVersion != "" {
-				for i := range specs {
-					if specs[i].Name == pendingVersion {
-						specs[i].Version = a
-					}
-				}
-				pendingVersion = ""
-			}
-			continue
+	for _, a := range pos {
+		s := parseCargoSpec(a)
+		if s.Version == "" {
+			s.Version = version
 		}
-		if strings.HasPrefix(a, "-") {
-			if a == "--version" || a == "--vers" {
-				skipNext = true
-				if len(specs) > 0 {
-					pendingVersion = specs[len(specs)-1].Name
-				}
-			}
-			continue
-		}
-		specs = append(specs, parseCargoSpec(a))
+		s.Origin = src
+		specs = append(specs, s)
+	}
+	if len(specs) == 0 && src != "" {
+		specs = append(specs, packageSpec{Ecosystem: "cargo", Origin: src})
 	}
 	return specs, true
 }
@@ -867,46 +1569,59 @@ func parseCargoSpec(arg string) packageSpec {
 	return packageSpec{Ecosystem: "cargo", Name: strings.TrimSpace(name), Version: version}
 }
 
-// gemValueFlags are `gem install` flags that consume the following argument.
-var gemValueFlags = map[string]bool{"-v": true, "--version": true}
+// gemFlags is `gem install`'s option grammar (RubyGems' OptionParser
+// expands a unique prefix: `--sou` is --source). The optional-value options
+// (`--file [FILE]`, `--document [TYPES]`, `--http-proxy [URL]`) are not value
+// options here — see splitFlags.
+var gemFlags = newFlagSet(
+	"--platform --version --prerelease --no-prerelease --update-sources --no-update-sources "+
+		"--install-dir --bindir --document --build-root --vendor --no-document --env-shebang "+
+		"--no-env-shebang --force --no-force --wrappers --no-wrappers --trust-policy "+
+		"--ignore-dependencies --format-executable --no-format-executable --user-install "+
+		"--no-user-install --development --development-all --conservative --minimal-deps "+
+		"--post-install-message --no-post-install-message --file --without --default --explain "+
+		"--lock --no-lock --suggestions --no-suggestions --local --remote --both --bulk-threshold "+
+		"--clear-sources --source --http-proxy --no-http-proxy --help --verbose --no-verbose --quiet "+
+		"--silent --config-file --backtrace --debug --norc",
+	"-v -s -i -n -P -B --version --source --install-dir --bindir --platform --trust-policy "+
+		"--build-root --config-file --bulk-threshold --without",
+	nil)
 
 // parseGemInstall recognizes `gem install <gem>...` and returns the named gem
 // specs. A `-v X` / `--version X` flag pins the version of the gems named on the
-// same line; a `name:version` form is also honored.
+// same line; a `name:version` form is also honored. `--source` is applied by
+// applyRegistryFlags.
 func parseGemInstall(args []string) ([]packageSpec, bool) {
 	if len(args) == 0 || (args[0] != "install" && args[0] != "i") {
 		return nil, false
 	}
-	var specs []packageSpec
+	pos, flags := splitFlags(args[1:], gemFlags)
 	version := ""
-	skipNext := false
-	for _, a := range args[1:] {
-		if skipNext {
-			skipNext = false
-			version = a
-			continue
+	for _, f := range flags {
+		if f.name == "-v" || f.name == "--version" {
+			version = f.value
 		}
-		if strings.HasPrefix(a, "-") {
-			if gemValueFlags[a] {
-				skipNext = true
-			}
-			continue
-		}
-		specs = append(specs, parseGemSpec(a))
 	}
-	// Apply a trailing `-v X` to specs that didn't carry their own version.
-	if version != "" {
-		for i := range specs {
-			if specs[i].Version == "" {
-				specs[i].Version = version
-			}
+	var specs []packageSpec
+	for _, a := range pos {
+		s := parseGemSpec(a)
+		if s.Version == "" && s.Name != "" {
+			s.Version = version
 		}
+		specs = append(specs, s)
 	}
 	return specs, true
 }
 
-// parseGemSpec turns "rails" or "rails:7.1.0" into a spec.
+// parseGemSpec turns "rails" or "rails:7.1.0" into a spec. A .gem file or a
+// path is a local source, a URL a remote one, and neither is a rubygems.org gem.
 func parseGemSpec(arg string) packageSpec {
+	if strings.Contains(arg, "://") {
+		return packageSpec{Ecosystem: "rubygems", Origin: origin.Sanitize(lowerScheme(arg))}
+	}
+	if strings.ContainsAny(arg, `/\`) || hasSuffixFold(arg, ".gem") {
+		return packageSpec{Ecosystem: "rubygems", Origin: localOrigin(arg)}
+	}
 	name, version := arg, ""
 	if c := strings.LastIndex(arg, ":"); c > 0 {
 		name, version = arg[:c], arg[c+1:]
@@ -1010,95 +1725,66 @@ func expandLockfile(bin string, args []string) []packageSpec {
 		if len(args) == 0 || args[0] != "install" {
 			return nil
 		}
-		var specs []packageSpec
-		for i := 0; i < len(args); i++ {
-			if args[i] != "-r" && args[i] != "--requirement" {
-				continue
-			}
-			if i+1 >= len(args) {
-				break
-			}
-			if data, err := os.ReadFile(args[i+1]); err == nil {
-				specs = append(specs, parseRequirementsLines(data)...)
-			}
-			i++
-		}
-		if len(specs) > 0 {
+		if specs, _ := readPipFiles(args); len(specs) > 0 {
 			// An explicit -r is the user naming their source. It wins over
 			// any lockfile sitting in the same directory, or
 			// `pip install -r constraints.txt` would silently scan the
 			// Pipfile tree instead of the file that was asked for.
 			return specs
 		}
-		// T3 tail — no named package and no -r. Sweep the resolved tree, the
-		// same way `npm install` sweeps package-lock and `cargo build` sweeps
-		// Cargo.lock. Without this a developer in a Poetry or Pipenv project
-		// — which is most modern Python — got a guard that recognised the
-		// command, printed nothing and checked no packages.
-		//
-		// Precedence is FIXED rather than filesystem-order dependent, because
-		// two lockfiles in one directory must resolve the same way on every
-		// run; non-reproducible coverage is the same defect the npm path
-		// avoids by using coordinates instead of a map. Pipenv first (its
-		// presence is the strongest signal the project is pipenv-managed),
-		// then Poetry, then uv.
-		for _, src := range []struct {
-			file  string
-			parse func([]byte) (map[string]string, error)
-		}{
-			{"Pipfile.lock", parsePipfileLock},
-			{"poetry.lock", func(b []byte) (map[string]string, error) { return parsePoetryLock(b), nil }},
-			{"uv.lock", func(b []byte) (map[string]string, error) { return parseUVLock(b), nil }},
-		} {
-			data, err := os.ReadFile(src.file)
-			if err != nil {
-				continue
-			}
-			deps, perr := src.parse(data)
-			if perr != nil {
-				// MALFORMED is fatal: the project declared which tool owns
-				// it, the file is corrupt, and quietly scanning a stale
-				// sibling would report coverage of a tree nobody installs.
-				return nil
-			}
-			if len(deps) == 0 {
-				// EMPTY BUT VALID is NOT the same thing, and conflating the
-				// two was a real gap: pipenv writes
-				// `{"default":{},"develop":{}}` for an empty Pipfile, and a
-				// lockfile whose entries are all VCS/editable (no `version`
-				// key) parses cleanly to zero. A file that says nothing has
-				// not declared ownership of anything, so fall through to the
-				// next candidate — which is also what the npm arm above does
-				// (package-lock -> shrinkwrap -> pnpm -> yarn).
-				continue
-			}
-			return depsToSpecs("pypi", deps, nil)
-		}
-		return nil
+		return expandPythonLockfiles()
 	}
 	return nil
 }
 
-// parseRequirementsLines parses a requirements.txt into specs, capturing BOTH
-// pinned and UNPINNED packages (the shared pr-scan parser drops unpinned ones, but
-// an unpinned malicious name must still be caught). Reuses parsePipSpec for the
-// name/version/extras handling; skips blanks, comments, and option lines (-r, -e).
-func parseRequirementsLines(data []byte) []packageSpec {
-	var specs []packageSpec
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
+// expandPythonLockfiles is the pip sweep for an install that names no
+// package and no -r.
+func expandPythonLockfiles() []packageSpec {
+	// T3 tail — no named package and no -r. Sweep the resolved tree, the
+	// same way `npm install` sweeps package-lock and `cargo build` sweeps
+	// Cargo.lock. Without this a developer in a Poetry or Pipenv project
+	// — which is most modern Python — got a guard that recognised the
+	// command, printed nothing and checked no packages.
+	//
+	// Precedence is FIXED rather than filesystem-order dependent, because
+	// two lockfiles in one directory must resolve the same way on every
+	// run; non-reproducible coverage is the same defect the npm path
+	// avoids by using coordinates instead of a map. Pipenv first (its
+	// presence is the strongest signal the project is pipenv-managed),
+	// then Poetry, then uv.
+	for _, src := range []struct {
+		file  string
+		parse func([]byte) (map[string]string, error)
+	}{
+		{"Pipfile.lock", parsePipfileLock},
+		{"poetry.lock", func(b []byte) (map[string]string, error) { return parsePoetryLock(b), nil }},
+		{"uv.lock", func(b []byte) (map[string]string, error) { return parseUVLock(b), nil }},
+	} {
+		data, err := os.ReadFile(src.file)
+		if err != nil {
 			continue
 		}
-		// Drop inline comments and environment markers ("pkg ; python_version<'3'").
-		if i := strings.IndexAny(line, " \t;#"); i > 0 {
-			line = strings.TrimSpace(line[:i])
+		deps, perr := src.parse(data)
+		if perr != nil {
+			// MALFORMED is fatal: the project declared which tool owns
+			// it, the file is corrupt, and quietly scanning a stale
+			// sibling would report coverage of a tree nobody installs.
+			return nil
 		}
-		if line != "" {
-			specs = append(specs, parsePipSpec(line))
+		if len(deps) == 0 {
+			// EMPTY BUT VALID is NOT the same thing, and conflating the
+			// two was a real gap: pipenv writes
+			// `{"default":{},"develop":{}}` for an empty Pipfile, and a
+			// lockfile whose entries are all VCS/editable (no `version`
+			// key) parses cleanly to zero. A file that says nothing has
+			// not declared ownership of anything, so fall through to the
+			// next candidate — which is also what the npm arm above does
+			// (package-lock -> shrinkwrap -> pnpm -> yarn).
+			continue
 		}
+		return depsToSpecs("pypi", deps, nil)
 	}
-	return specs
+	return nil
 }
 
 // depsToSpecs converts a name→version map (from a lockfile parser) into specs,
