@@ -554,6 +554,11 @@ type osvAffected struct {
 	Package  osvPackage   `json:"package"`
 	Versions []string     `json:"versions"`
 	Ranges   []osvRangeIn `json:"ranges"`
+	// DatabaseSpecific carries RustSec's `informational` kind (unmaintained,
+	// unsound, notice); null on a real vulnerability. See flattenRecord.
+	DatabaseSpecific struct {
+		Informational string `json:"informational"`
+	} `json:"database_specific"`
 }
 
 type osvPackage struct {
@@ -598,6 +603,14 @@ func flattenRecord(rec osvRecord) []Advisory {
 		eco := strings.TrimSpace(aff.Package.Ecosystem)
 		name := strings.TrimSpace(aff.Package.Name)
 		if eco == "" || name == "" {
+			continue
+		}
+		// RustSec informational advisories (unmaintained, unsound, notice)
+		// are not vulnerabilities — cargo-audit warns on them and passes —
+		// but matched here they set isVulnerable and fired
+		// vuln.known_vulnerable: 16 of 26 medium findings on
+		// feldera/feldera's Cargo.lock (2026-10-14). Mirrors build.sh.
+		if strings.TrimSpace(aff.DatabaseSpecific.Informational) != "" {
 			continue
 		}
 		var (
