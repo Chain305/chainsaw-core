@@ -249,3 +249,34 @@ func TestDepsToSpecsPairsIntegrityWithTheRightVersion(t *testing.T) {
 		t.Fatalf("nil integrity map must yield no anchor, got %q", got[0].Integrity)
 	}
 }
+
+// A pip-compile --generate-hashes file reaches the guard with every pin
+// intact (hashes, `# via` comments, markers), and whitespace around `==`
+// still pins: "spaced == 2.0" used to be checked as an unpinned "spaced".
+func TestReadPipFile_PipCompileHashesAndSpacedPins(t *testing.T) {
+	data, err := os.ReadFile("../depparser/parser/python/requirements/testdata/pip-compile-hashes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("idna2==3.6  # via requests\narb===1.0\nspaced == 2.0\nx[a] == 3.0 --hash=sha256:aa\nloose >= 4.0\n")...)
+	p := filepath.Join(t.TempDir(), "requirements.txt")
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	specs, _ := readPipFile(p, true, map[string]bool{})
+	got := map[string]string{}
+	for _, s := range specs {
+		got[s.Name] = s.Version
+	}
+	if len(specs) != 32 || len(got) != 32 {
+		t.Errorf("got %d specs (%d names), want 32: %v", len(specs), len(got), got)
+	}
+	for name, want := range map[string]string{
+		"certifi": "2024.2.2", "uvicorn": "0.29.0", "exceptiongroup": "1.2.0",
+		"idna2": "3.6", "arb": "1.0", "spaced": "2.0", "x": "3.0", "loose": "",
+	} {
+		if v, ok := got[name]; !ok || v != want {
+			t.Errorf("%s = %q (present=%v), want %q", name, v, ok, want)
+		}
+	}
+}

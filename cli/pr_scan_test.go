@@ -953,3 +953,46 @@ func TestParsePackageLockIntegrityJSON_V1(t *testing.T) {
 		t.Fatalf("v1 integrity = %q, want sha512-V1Chalk==", got)
 	}
 }
+
+// pip-compile --generate-hashes output used to give every hashed entry the
+// version "2024.2.2 \" and an inline comment stayed in the version.
+func TestParsePipRequirements_PipCompileHashes(t *testing.T) {
+	data, err := os.ReadFile("../depparser/parser/python/requirements/testdata/pip-compile-hashes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("idna2==3.6  # via requests\narb===1.0\nmarked >= 2.0 ; python_version < \"3.11\"\n")...)
+	got := parsePipRequirements(data)
+	if len(got) != 30 {
+		t.Errorf("got %d packages, want 30: %v", len(got), got)
+	}
+	for name, ver := range got {
+		if strings.ContainsAny(ver, " \t#;\\=") || strings.Contains(ver, "--") {
+			t.Errorf("%s: garbage version %q", name, ver)
+		}
+	}
+	for name, want := range map[string]string{"certifi": "2024.2.2", "uvicorn": "0.29.0", "idna2": "3.6", "arb": "1.0", "marked": "2.0"} {
+		if got[name] != want {
+			t.Errorf("%s = %q, want %q", name, got[name], want)
+		}
+	}
+}
+
+// TestParsePNPMLock_V9QuotedScopedKeys: pnpm v9 quotes scoped package keys;
+// the quotes must not end up in the name or version.
+func TestParsePNPMLock_V9QuotedScopedKeys(t *testing.T) {
+	lock := []byte(`lockfileVersion: '9.0'
+
+packages:
+
+  '@tanstack/react-query@5.28.4':
+    resolution: {integrity: sha512-x}
+
+  lodash@4.17.21:
+    resolution: {integrity: sha512-y}
+`)
+	got := parsePNPMLock(lock)
+	if got["@tanstack/react-query"] != "5.28.4" || got["lodash"] != "4.17.21" || len(got) != 2 {
+		t.Fatalf("parsePNPMLock = %v, want @tanstack/react-query=5.28.4 and lodash=4.17.21", got)
+	}
+}

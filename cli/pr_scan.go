@@ -49,6 +49,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/chain305/chainsaw-core/depparser/origin"
+	"github.com/chain305/chainsaw-core/depparser/parser/python/requirements"
 	"github.com/chain305/chainsaw-core/policy"
 	"github.com/chain305/chainsaw-core/policy/dsl"
 	"github.com/chain305/chainsaw-core/policyengine"
@@ -1085,6 +1086,10 @@ func parsePNPMLock(data []byte) map[string]string {
 			continue
 		}
 		entry := strings.TrimSuffix(line, ":")
+		// v9 quotes scoped keys ('@tanstack/react-query@5.28.4':); without
+		// this the name kept the leading quote and the version the trailing
+		// one, so scoped packages were checked under a garbage name.
+		entry = strings.Trim(entry, `'"`)
 		entry = strings.TrimPrefix(entry, "/")
 		// Split on last "@" to handle scoped packages like "@scope/pkg@1.0.0".
 		idx := strings.LastIndex(entry, "@")
@@ -1160,16 +1165,19 @@ func parsePipRequirements(data []byte) map[string]string {
 		return nil
 	}
 	out := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
-			continue
-		}
+	// Requirements joins "\" continuations and drops comments and --hash
+	// options (pip-compile --generate-hashes output).
+	for _, line := range requirements.Requirements(string(data)) {
+		line, _, _ = strings.Cut(line, ";") // environment marker
+		line = strings.Join(strings.Fields(line), "")
 		// Handle name==version, name>=version etc.
 		for _, sep := range []string{"==", "~=", ">=", "<="} {
 			if idx := strings.Index(line, sep); idx > 0 {
-				name := strings.TrimSpace(line[:idx])
-				ver := strings.TrimSpace(line[idx+len(sep):])
+				name := line[:idx]
+				if b := strings.IndexByte(name, '['); b >= 0 {
+					name = name[:b] // extras
+				}
+				ver := strings.TrimLeft(line[idx+len(sep):], "=") // "===" arbitrary equality
 				// Strip any trailing specifiers (e.g. "1.0.0,<2.0.0").
 				if commaIdx := strings.Index(ver, ","); commaIdx > 0 {
 					ver = ver[:commaIdx]

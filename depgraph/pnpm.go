@@ -10,19 +10,24 @@ import (
 // pnpmLockfile is the subset of pnpm-lock.yaml we parse. pnpm uses one
 // of several top-level layouts across versions 5..9; we handle the
 // common shape (v6+ with "importers" for workspaces, "packages" map
-// keyed by "/name@version" or "/name/version") and the single-project
-// fallback where the root's direct deps live at the top level.
+// keyed by "/name@version" or "/name/version"), the single-project
+// fallback where the root's direct deps live at the top level, and v9,
+// whose keys have no leading "/" and whose dependency edges moved from
+// "packages" into "snapshots" (keyed "name@version(peer@x)").
 type pnpmLockfile struct {
-	LockfileVersion interface{}             `yaml:"lockfileVersion"`
-	Importers       map[string]pnpmImporter `yaml:"importers"`
-	Dependencies    map[string]pnpmDepRef   `yaml:"dependencies"`
-	DevDependencies map[string]pnpmDepRef   `yaml:"devDependencies"`
-	Packages        map[string]pnpmPackage  `yaml:"packages"`
+	LockfileVersion      interface{}             `yaml:"lockfileVersion"`
+	Importers            map[string]pnpmImporter `yaml:"importers"`
+	Dependencies         map[string]pnpmDepRef   `yaml:"dependencies"`
+	DevDependencies      map[string]pnpmDepRef   `yaml:"devDependencies"`
+	OptionalDependencies map[string]pnpmDepRef   `yaml:"optionalDependencies"`
+	Packages             map[string]pnpmPackage  `yaml:"packages"`
+	Snapshots            map[string]pnpmPackage  `yaml:"snapshots"`
 }
 
 type pnpmImporter struct {
-	Dependencies    map[string]pnpmDepRef `yaml:"dependencies"`
-	DevDependencies map[string]pnpmDepRef `yaml:"devDependencies"`
+	Dependencies         map[string]pnpmDepRef `yaml:"dependencies"`
+	DevDependencies      map[string]pnpmDepRef `yaml:"devDependencies"`
+	OptionalDependencies map[string]pnpmDepRef `yaml:"optionalDependencies"`
 }
 
 // pnpmDepRef is the value in an importer's dependencies map. v6+
@@ -78,7 +83,8 @@ type pnpmPackage struct {
 //     edge. Children are looked up by (name, child-version-spec);
 //     unresolved children are skipped.
 //   - Prod flag: honored from pnpm's own "dev" annotation on each
-//     packages entry.
+//     packages entry. v9 dropped it, so there a node is Prod when it is
+//     reachable from a non-dev importer dependency.
 func ParsePnpmLockfile(data []byte) (*Graph, error) {
 	var lf pnpmLockfile
 	if err := yaml.Unmarshal(data, &lf); err != nil {
@@ -89,25 +95,31 @@ func ParsePnpmLockfile(data []byte) (*Graph, error) {
 	}
 
 	g := NewGraph()
+	// v9 has no "dev" annotation, so Prod is derived from reachability
+	// after the edges are wired; every v9 lockfile has a snapshots map
+	// unless it has no packages at all.
+	v9 := len(lf.Snapshots) > 0
 
-	// First pass: one Node per packages entry. packageKey→Key index is
-	// used in pass 2 to resolve dependency references.
-	pkgKeyToGraphKey := make(map[string]Key, len(lf.Packages))
-	for rawKey, pkg := range lf.Packages {
-		name, version := splitPnpmPackageKey(rawKey)
-		if pkg.Name != "" {
-			name = pkg.Name
+	// First pass: one Node per packages (and v9 snapshots) entry.
+	// packageKey→Key index is used in pass 2 to resolve dependency
+	// references.
+	pkgKeyToGraphKey := make(map[string]Key, len(lf.Packages)+len(lf.Snapshots))
+	for _, entries := range []map[string]pnpmPackage{lf.Packages, lf.Snapshots} {
+		for rawKey, pkg := range entries {
+			name, version := splitPnpmPackageKey(rawKey)
+			if pkg.Name != "" {
+				name = pkg.Name
+			}
+			if pkg.Version != "" {
+				version = pkg.Version
+			}
+			if name == "" || version == "" {
+				continue
+			}
+			k := Key{Ecosystem: "npm", Name: name, Version: version}
+			g.AddNode(k, false, !pkg.Dev && !v9)
+			pkgKeyToGraphKey[rawKey] = k
 		}
-		if pkg.Version != "" {
-			version = pkg.Version
-		}
-		if name == "" || version == "" {
-			continue
-		}
-		k := Key{Ecosystem: "npm", Name: name, Version: version}
-		prod := !pkg.Dev
-		g.AddNode(k, false, prod)
-		pkgKeyToGraphKey[rawKey] = k
 	}
 
 	// resolveRef turns a (name, versionOrKey) tuple into a Key by
@@ -115,15 +127,15 @@ func ParsePnpmLockfile(data []byte) (*Graph, error) {
 	// typically written as name: "1.2.3(peer@x)" — which is the VERSION
 	// portion of the /name@version key.
 	resolveRef := func(name, versionOrKey string) (Key, bool) {
-		// Direct /name@version match.
-		fullKey := "/" + name + "@" + versionOrKey
-		if k, ok := pkgKeyToGraphKey[fullKey]; ok {
-			return k, true
-		}
-		// Legacy /name/version match.
-		slashKey := "/" + name + "/" + versionOrKey
-		if k, ok := pkgKeyToGraphKey[slashKey]; ok {
-			return k, true
+		for _, key := range []string{
+			"/" + name + "@" + versionOrKey, // v6
+			name + "@" + versionOrKey,       // v9
+			"/" + name + "/" + versionOrKey, // v5
+			versionOrKey,                    // alias, v9: "string-width@4.2.3"; v6: "/string-width@4.2.3"
+		} {
+			if k, ok := pkgKeyToGraphKey[key]; ok {
+				return k, true
+			}
 		}
 		// Peer-suffix stripped match — pnpm may write "1.2.3" in the
 		// importer but store "/name@1.2.3(peer@x)" in packages.
@@ -154,15 +166,21 @@ func ParsePnpmLockfile(data []byte) (*Graph, error) {
 	if len(lf.Importers) > 0 {
 		for _, imp := range lf.Importers {
 			addRootsFrom(imp.Dependencies, true)
+			addRootsFrom(imp.OptionalDependencies, true)
 			addRootsFrom(imp.DevDependencies, false)
 		}
 	} else {
 		addRootsFrom(lf.Dependencies, true)
+		addRootsFrom(lf.OptionalDependencies, true)
 		addRootsFrom(lf.DevDependencies, false)
 	}
 
-	// Third pass: wire transitive edges.
-	for rawKey, pkg := range lf.Packages {
+	// Third pass: wire transitive edges (v9: from snapshots).
+	edgeSource := lf.Packages
+	if v9 {
+		edgeSource = lf.Snapshots
+	}
+	for rawKey, pkg := range edgeSource {
 		parentKey, ok := pkgKeyToGraphKey[rawKey]
 		if !ok {
 			continue
@@ -189,6 +207,16 @@ func ParsePnpmLockfile(data []byte) (*Graph, error) {
 		addChildEdges(pkg.PeerDependencies, true)
 	}
 
+	if v9 {
+		for _, r := range g.Roots {
+			if g.Nodes[r].Prod {
+				for _, d := range g.Descendants(r) {
+					g.AddNode(d, false, true)
+				}
+			}
+		}
+	}
+
 	return g, nil
 }
 
@@ -200,11 +228,10 @@ func ParsePnpmLockfile(data []byte) (*Graph, error) {
 //	/lodash/4.17.21          → ("lodash", "4.17.21")         [v5]
 //	/@scope/pkg/1.0.0        → ("@scope/pkg", "1.0.0")       [v5]
 //	/pkg@1.0.0(peer@1.0.0)   → ("pkg", "1.0.0")              [strip peer]
+//	lodash@4.17.21           → ("lodash", "4.17.21")         [v9]
+//	@scope/pkg@1.0.0(p@2)    → ("@scope/pkg", "1.0.0")       [v9]
 func splitPnpmPackageKey(k string) (string, string) {
-	if !strings.HasPrefix(k, "/") {
-		return "", ""
-	}
-	rest := k[1:]
+	rest := strings.TrimPrefix(k, "/") // v9 keys have no leading "/"
 	// Strip any peer-dep suffix before splitting — the peer suffix
 	// contains its own "@" which would otherwise confuse the name/version
 	// split.

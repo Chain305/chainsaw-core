@@ -246,6 +246,10 @@ func parsePipInstall(args []string) ([]packageSpec, bool) {
 	return specs, true
 }
 
+// pipOpSpace matches a PEP 440 comparison operator with its surrounding
+// whitespace.
+var pipOpSpace = regexp.MustCompile(`\s*(===|==|~=|!=|<=|>=|<|>)\s*`)
+
 // pipReqName is a bare PEP 508 name with optional extras: the left side of a
 // direct reference ("requests[socks] @ git+https://…").
 var pipReqName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\s*(\[[^\]]*\])?$`)
@@ -352,7 +356,11 @@ func parsePipSpec(arg string) packageSpec {
 	if tok, _, _ := strings.Cut(strings.TrimSpace(strings.SplitN(arg, ";", 2)[0]), " "); isPipSource(tok) {
 		return pipSourceSpec(tok)
 	}
-	name, version := arg, ""
+	// "requests == 2.31.0" pins as tightly as "requests==2.31.0"; without the
+	// collapse the cut below dropped the version and the guard checked a
+	// release other than the one pip installs. Operators are cut points
+	// either way, so the name is unchanged.
+	name, version := pipOpSpace.ReplaceAllString(arg, "$1"), ""
 	if i := strings.IndexAny(name, " \t;#"); i > 0 {
 		name = name[:i] // inline comments and markers ("pkg ; python_version<'3'")
 	}
