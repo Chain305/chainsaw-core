@@ -274,6 +274,11 @@ func TestRegistryMetadataProvider_Cargo(t *testing.T) {
 	if pr.Artifact.Digests.SHA256 != "abcd" {
 		t.Fatalf("sha256: %q", pr.Artifact.Digests.SHA256)
 	}
+	// The registry's own checksum is what a lockfile mirror is compared
+	// with (lockfile_mirror.go publicDigests); nothing else writes it.
+	if got := pr.Artifact.Digests.Registry; len(got) != 1 || got[0] != "sha256:abcd" {
+		t.Fatalf("registry digests: %q", got)
+	}
 	if pr.People == nil || len(pr.People.PublisherIDs) == 0 {
 		t.Fatalf("publisherIds: %+v", pr.People)
 	}

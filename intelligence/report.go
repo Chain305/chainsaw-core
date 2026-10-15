@@ -238,6 +238,14 @@ type ArtifactDigest struct {
 	Declared   string `json:"declared,omitempty"`
 	Actual     string `json:"actual,omitempty"`
 	Verified   bool   `json:"verified,omitempty"`
+	// Registry is what the PUBLIC registry's own metadata declares for
+	// this release ("sha256:<hex>", "sha1:<hex>", or an SRI token), written
+	// only by the registry-metadata provider, which reads fixed public
+	// endpoints. The fields above can instead hold the hash of bytes an
+	// upload or a custom upstream served (provider_checksum), in a row
+	// shared across orgs, so a lockfile hash is compared with this field
+	// alone (internal/scan/lockfile_mirror.go).
+	Registry []string `json:"registry,omitempty"`
 }
 
 // PeopleSection names publishers / maintainers — the identity axis for

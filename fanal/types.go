@@ -141,6 +141,13 @@ type Package struct {
 	// Consumers must not score a package with an Origin as its public
 	// registry namesake: that is a different package.
 	Origin string
+	// Hash is the content hash the lockfile records for the package's
+	// artifact, in origin.NormalizeHash's canonical "<algo>:<lowercase hex>"
+	// form (a Cargo.lock checksum is "sha256:<hex>", an npm integrity
+	// "sha512-<base64>" becomes "sha512:<hex>"). Empty when the format
+	// records none. It decides whether a package from a non-public registry
+	// host is the public release (a mirror) or something else.
+	Hash string
 }
 
 // Location is a byte-span inside a lock file that produced a Package.

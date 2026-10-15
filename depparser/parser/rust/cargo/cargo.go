@@ -32,6 +32,7 @@ type lockfile struct {
 		Name         string   `toml:"name"`
 		Version      string   `toml:"version"`
 		Source       string   `toml:"source"`
+		Checksum     string   `toml:"checksum"`
 		Dependencies []string `toml:"dependencies"`
 	} `toml:"package"`
 }
@@ -47,16 +48,17 @@ func Parse(r io.Reader) ([]ftypes.Package, error) {
 			continue
 		}
 		pkg := ftypes.Package{Name: p.Name, Version: p.Version}
-		if !cratesIO[p.Source] {
+		if origin.Classify("cargo", p.Source) != origin.Public {
 			pkg.Origin = origin.Sanitize(p.Source)
+		}
+		// checksum is the sha256 of the .crate — the same value crates.io
+		// serves as the version's checksum (and an alternate registry's
+		// index as cksum). Cargo.lock v1 kept checksums in a [metadata]
+		// table instead; those are not read.
+		if p.Checksum != "" {
+			pkg.Hash = origin.NormalizeHash("sha256:" + p.Checksum)
 		}
 		out = append(out, pkg)
 	}
 	return out, nil
-}
-
-// cratesIO is crates.io's index in both forms a Cargo.lock records it.
-var cratesIO = map[string]bool{
-	"registry+https://github.com/rust-lang/crates.io-index": true,
-	"sparse+https://index.crates.io/":                       true,
 }

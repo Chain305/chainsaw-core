@@ -75,3 +75,48 @@ source = "registry+https://my-registry.example/index"
 		}
 	}
 }
+
+// TestParseCarriesChecksumAsHash: the lockfile checksum (sha256 of the
+// .crate) is carried in canonical form so a crate from a mirror can be
+// compared with crates.io's digest; a malformed one is dropped, not passed on.
+func TestParseCarriesChecksumAsHash(t *testing.T) {
+	const sum = "3f3fb2fcc6d1b1ef5b1b3a0d5f0f2b8c6a3e6c0bd9d7c4e1b0a2f5e8d7c6b5a4"
+	src := `version = 3
+
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "` + strings.ToUpper(sum) + `"
+
+[[package]]
+name = "mirrored"
+version = "1.0.0"
+source = "sparse+https://artifactory.example/api/cargo/crates/index/"
+checksum = "` + sum + `"
+
+[[package]]
+name = "bad"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "not-a-hash"
+
+[[package]]
+name = "fromgit"
+version = "1.0.0"
+source = "git+https://github.com/x/y?rev=abc#abc"
+`
+	pkgs, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := map[string]string{"serde": "sha256:" + sum, "mirrored": "sha256:" + sum, "bad": "", "fromgit": ""}
+	for _, p := range pkgs {
+		if h, ok := want[p.Name]; !ok || p.Hash != h {
+			t.Errorf("%s: Hash = %q, want %q", p.Name, p.Hash, h)
+		}
+	}
+	if len(pkgs) != len(want) {
+		t.Errorf("got %d packages, want %d", len(pkgs), len(want))
+	}
+}

@@ -1260,9 +1260,11 @@ func (p *registryMetadataProvider) runNPM(ctx context.Context, pkg, ver string) 
 		}
 		if entry.Dist.Shasum != "" {
 			artifact.Digests.SHA1 = entry.Dist.Shasum
+			artifact.Digests.Registry = append(artifact.Digests.Registry, "sha1:"+entry.Dist.Shasum)
 		}
 		if entry.Dist.Integrity != "" {
 			artifact.Digests.Integrity = entry.Dist.Integrity
+			artifact.Digests.Registry = append(artifact.Digests.Registry, strings.Fields(entry.Dist.Integrity)...)
 		}
 	}
 
@@ -1633,6 +1635,9 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 		}
 		if d := picked.Digests; d != nil {
 			artifact.Digests.SHA256 = d["sha256"]
+			if d["sha256"] != "" {
+				artifact.Digests.Registry = []string{"sha256:" + d["sha256"]}
+			}
 			artifact.Digests.MD5 = d["md5"]
 			artifact.Digests.Blake2b256 = d["blake2b_256"]
 		}
@@ -3289,6 +3294,7 @@ func (p *registryMetadataProvider) runCargo(ctx context.Context, pkg, ver string
 	}
 	if pack.Version.Checksum != "" {
 		artifact.Digests.SHA256 = pack.Version.Checksum
+		artifact.Digests.Registry = []string{"sha256:" + pack.Version.Checksum}
 	}
 	artifact.Filename = fmt.Sprintf("%s-%s.crate", pkg, ver)
 
@@ -3531,6 +3537,7 @@ func (p *registryMetadataProvider) runRubyGems(ctx context.Context, pkg, ver str
 	}
 	if pack.SHA != "" {
 		artifact.Digests.SHA256 = pack.SHA
+		artifact.Digests.Registry = []string{"sha256:" + pack.SHA}
 	}
 
 	people := &PeopleSection{}

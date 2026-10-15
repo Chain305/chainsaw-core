@@ -1249,6 +1249,9 @@ func mergeArtifact(dst *ArtifactSection, src ArtifactSection) {
 	if src.Digests.Verified {
 		dst.Digests.Verified = true
 	}
+	if len(src.Digests.Registry) > 0 {
+		dst.Digests.Registry = src.Digests.Registry
+	}
 	// Signature fields are pure projections of the merged Provenance
 	// section produced by provider_signature_verify.go. Pointer +
 	// non-empty checks preserve the three-state contract: a nil patch

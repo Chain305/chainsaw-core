@@ -95,6 +95,7 @@ func (s shim) Parse(_ context.Context, path string) ([]Package, error) {
 			Lang:    s.langType,
 			Source:  path,
 			Origin:  fp.Origin,
+			Hash:    fp.Hash,
 		})
 	}
 	return out, nil

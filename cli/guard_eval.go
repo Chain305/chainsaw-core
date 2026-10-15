@@ -1126,6 +1126,9 @@ func (g *localGuard) evaluateNonRegistry(ctx context.Context, spec packageSpec) 
 		return v
 	}
 	reason := nonRegistryReason(spec.Ecosystem, guardOriginLabel(spec.Origin))
+	if strings.HasPrefix(spec.Origin, "registry+") && strings.Contains(spec.Origin, "://") {
+		reason += "; if it mirrors the public registry, add its host to registry_mirrors"
+	}
 	// A local path (`pip install -e .`, `npm i ../lib`) is first-party code
 	// already on this machine: said plainly, and not put to the operator's
 	// degraded-analysis rule, which exists for packages fetched from elsewhere.

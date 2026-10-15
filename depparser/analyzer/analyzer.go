@@ -51,6 +51,9 @@ type Package struct {
 	// somewhere other than the public registry. Never look such a package up
 	// as its registry namesake.
 	Origin string
+	// Hash is ftypes.Package.Hash: the lockfile's content hash in
+	// "<algo>:<lowercase hex>" form, or "".
+	Hash string
 }
 
 // Analyzer is the interface every language parser satisfies. Kept small

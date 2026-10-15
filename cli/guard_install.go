@@ -987,16 +987,6 @@ func hasSuffixFold(s, suffix string) bool {
 	return len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix)
 }
 
-// publicRegistryHosts are each ecosystem's public registry (plan §3.1, class
-// a). crates.io's git index lives on github.com, so it is matched by URL in
-// knownRegistry instead.
-var publicRegistryHosts = map[string][]string{
-	"npm":      {"registry.npmjs.org", "registry.yarnpkg.com"},
-	"pip":      {"pypi.org", "files.pythonhosted.org", "pypi.python.org"},
-	"cargo":    {"index.crates.io", "crates.io", "static.crates.io"},
-	"rubygems": {"rubygems.org", "index.rubygems.org"},
-}
-
 // registryURL parses a registry URL after any "sparse+" / "registry+" /
 // "git+" prefix; nil when it has no host.
 func registryURL(raw string) *url.URL {
@@ -1022,20 +1012,46 @@ func hostPort(u *url.URL) string {
 }
 
 // knownRegistry reports whether a registry URL given on the command line is
-// the ecosystem's public registry (by host, default port) or one of the
+// the ecosystem's public registry (origin.Classify's alias list: exact host,
+// default port), a host the user declared in registry_mirrors, or one of the
 // user's OWN Chainsaw proxy repositories (ownChainsawRepository).
 func knownRegistry(eco, raw string) bool {
 	u := registryURL(raw)
 	if u == nil {
 		return false
 	}
-	if slices.Contains(publicRegistryHosts[eco], strings.ToLower(u.Hostname())) && (u.Port() == "" || u.Port() == "443") {
+	if origin.Classify(eco, u.String()) == origin.Public {
 		return true
 	}
-	if eco == "cargo" && strings.EqualFold(strings.TrimSuffix(strings.TrimSuffix(u.String(), "/"), ".git"), "https://github.com/rust-lang/crates.io-index") {
+	if origin.MirrorHost(u.String(), registryMirrors()) != "" {
 		return true
 	}
 	return ownChainsawRepository(u)
+}
+
+// registryMirrors is the user's registry_mirrors config: hosts (or
+// host:port) of their Artifactory/Nexus/devpi… that mirror the public
+// registries, from config.yaml (a list) or CHAINSAW_REGISTRY_MIRRORS (comma-
+// or space-separated). An index on one of them is a registry install, not an
+// undeclared registry. Matched exactly by origin.MirrorHost — no suffixes,
+// and never a Chainsaw repository path. An entry that is not a bare host is
+// ignored with a warning rather than widened into a pattern.
+func registryMirrors() []string {
+	var out []string
+	for _, v := range viper.GetStringSlice("registry_mirrors") {
+		for _, h := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }) {
+			n, err := origin.NormalizeMirrorHost(h)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "chainsaw: registry_mirrors: ignoring %v\n", err)
+				continue
+			}
+			out = append(out, n)
+		}
+	}
+	if len(out) > origin.MaxMirrorHosts {
+		out = out[:origin.MaxMirrorHosts]
+	}
+	return out
 }
 
 // ownChainsawRepository: same scheme, host and port as the server this CLI
@@ -1103,6 +1119,7 @@ func applyRegistryFlags(bin string, args []string, specs []packageSpec, fileFlag
 	}
 	_, flags := splitFlags(args, fs)
 	flags = append(flags, fileFlags...)
+	flags = append(flags, configRegistryFlags(bin, flags)...)
 	var primary, extra string
 	scoped := map[string]string{} // npm --@scope:registry
 	for _, f := range flags {
@@ -1147,6 +1164,122 @@ func applyRegistryFlags(bin string, args []string, specs []packageSpec, fileFlag
 			s.ExtraIndex = extra
 		}
 	}
+}
+
+// configRegistryFlags returns the registry settings an install takes from
+// outside its command line but within reach of whoever wrote the command or
+// the repository: the environment (`NPM_CONFIG_REGISTRY=… npm i x` is a flag
+// by another name) and npm's PROJECT .npmrc, which a cloned repository ships.
+// They come back as flags, so applyRegistryFlags decides them exactly like
+// typed ones; a setting the command line (or a pip -r file) already gives is
+// dropped, as the tool itself would. User- and global-level files (~/.npmrc,
+// pip.conf) are the user's own choice and are not read — `chainsaw doctor
+// --bypass-check` reports them. cargo is absent on purpose: `cargo install`
+// ignores project config.
+func configRegistryFlags(bin string, given []argFlag) []argFlag {
+	// pip's short and long spellings of one option are the same setting.
+	same := map[string]string{"-i": "--index-url", "--pypi-url": "--index-url", "-f": "--find-links"}
+	key := func(name string) string {
+		if k, ok := same[name]; ok {
+			return k
+		}
+		return name
+	}
+	seen := map[string]bool{}
+	for _, f := range given {
+		seen[key(f.name)] = true
+	}
+	var out []argFlag
+	add := func(name, value string) {
+		if value = strings.TrimSpace(value); value != "" && !seen[name] {
+			out, seen[name] = append(out, argFlag{name, value}), true
+		}
+	}
+	switch bin {
+	case "npm":
+		// npm's own precedence: environment, then the project .npmrc.
+		for _, kv := range os.Environ() {
+			k, v, _ := strings.Cut(kv, "=")
+			if name, ok := strings.CutPrefix(strings.ToLower(k), "npm_config_"); ok {
+				if n := npmRegistryKey(name); n != "" {
+					add(n, v)
+				}
+			}
+		}
+		for _, kv := range npmProjectRC() {
+			add(kv.name, kv.value)
+		}
+	case "pip":
+		first := func(v string) string { // these take a space-separated list; one decides
+			if f := strings.Fields(v); len(f) > 0 {
+				return f[0]
+			}
+			return ""
+		}
+		add("--index-url", os.Getenv("PIP_INDEX_URL"))
+		add("--extra-index-url", first(os.Getenv("PIP_EXTRA_INDEX_URL")))
+		add("--find-links", first(os.Getenv("PIP_FIND_LINKS")))
+		if p := os.Getenv("PIP_CONFIG_FILE"); p != "" && p != os.DevNull {
+			if body, err := os.ReadFile(p); err == nil {
+				add("--index-url", parsePipIndexURL(string(body)))
+			}
+		}
+	}
+	return out
+}
+
+// npmRegistryKey maps an npm config key (env suffix or .npmrc key, lower
+// case) to the flag applyRegistryFlags reads, or "" for any other key.
+func npmRegistryKey(k string) string {
+	switch {
+	case k == "registry", k == "userconfig", k == "globalconfig":
+		return "--" + k
+	case strings.HasPrefix(k, "@") && strings.HasSuffix(k, ":registry"):
+		return "--" + k
+	}
+	return ""
+}
+
+// npmProjectRC reads the registry keys of npm's project config: .npmrc in the
+// nearest directory, from the working directory up, holding package.json or
+// node_modules (npm's local prefix; the working directory when none does).
+// ${VAR} references are expanded as npm expands them.
+func npmProjectRC() []argFlag {
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	dir := wd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+			break
+		}
+		if _, err := os.Stat(filepath.Join(dir, "node_modules")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			dir = wd
+			break
+		}
+		dir = parent
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".npmrc"))
+	if err != nil {
+		return nil
+	}
+	var out []argFlag
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if n := npmRegistryKey(strings.ToLower(strings.TrimSpace(k))); n != "" {
+			out = append(out, argFlag{n, os.Expand(strings.Trim(strings.TrimSpace(v), `"'`), os.Getenv)})
+		}
+	}
+	return out
 }
 
 // ecosystemFor maps a guarded binary to its spec ecosystem.
