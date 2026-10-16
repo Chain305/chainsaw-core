@@ -772,20 +772,9 @@ func mergeReportPayload(priorPayload []byte, next *Report) ([]byte, error) {
 
 	merged := *next // shallow copy is safe — we replace whole subsections, never mutate the caller's pointer.
 
-	// Scan: preserve the prior ArtifactScanSection when the new report's
-	// Scan section is effectively empty. "Empty" means no scan was
-	// performed AND every signal-bearing field is at its zero value.
-	switch {
-	case scanSectionEmpty(merged.Scan) && !scanSectionEmpty(prior.Scan):
-		merged.Scan = prior.Scan
-	case !merged.Scan.Performed && prior.Scan.Performed:
-		// A bytes-less run that only probed the registry: keep the prior
-		// byte findings and take the fresh registry ones. Replacing the
-		// whole section dropped every artifact fact on such a refresh.
-		fresh := merged.Scan
-		merged.Scan = prior.Scan
-		overlayMetadataFacts(&merged.Scan, fresh)
-	}
+	// Scan: the same carry the scanner applies before evaluating, so the
+	// row and its verdict see the same byte facts (see applyStickyScan).
+	applyStickyScan(&merged, &prior)
 
 	// Vulnerabilities: preserve the prior VulnSection when the new
 	// report has not been scanned (no ScannedAt) and carries no CVE

@@ -912,6 +912,7 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 			priorProvisionalStreak = prior.Observation.ProvisionalStreak
 		}
 		applyStickySupplyChain(report, prior)
+		applyStickyScan(report, prior)
 		// Repo stats are fetched only when the repo is probed, so most
 		// scans carry them from the row; without this the report Scan
 		// returns would show 0 stars that the stored row does not. They

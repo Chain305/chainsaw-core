@@ -199,3 +199,26 @@ func timelineUndated(tl []VersionRelease) bool {
 	}
 	return true
 }
+
+// applyStickyScan keeps the prior ArtifactScanSection when next ran without
+// bytes. Empty (no scan, no signal-bearing field) takes the prior section
+// whole; a bytes-less run that only probed the registry keeps the prior byte
+// findings and takes the fresh registry ones.
+//
+// Called before the evaluation as well as in the store merge, for the reason
+// applyStickySupplyChain is: a carry that lives only in the store binds the
+// row and not the verdict. That split flipped npm protobufjs@8.0.1 between
+// quarantine and warn on every metadata-only refresh (P8-71, Scan section).
+func applyStickyScan(next *Report, prior *Report) {
+	if next == nil || prior == nil {
+		return
+	}
+	switch {
+	case scanSectionEmpty(next.Scan) && !scanSectionEmpty(prior.Scan):
+		next.Scan = prior.Scan
+	case !next.Scan.Performed && prior.Scan.Performed:
+		fresh := next.Scan
+		next.Scan = prior.Scan
+		overlayMetadataFacts(&next.Scan, fresh)
+	}
+}

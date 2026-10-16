@@ -52,6 +52,7 @@ func scanOrder(t *testing.T, prior, next *Report) (evaluated *Report, persisted 
 		t.Fatal(err)
 	}
 	applyStickySupplyChain(next, prior)
+	applyStickyScan(next, prior)
 	ComputeTrustScoreForOrg(next, "")
 	merged, err := mergeReportPayload(priorBytes, next)
 	if err != nil {
@@ -323,6 +324,16 @@ func TestStickyIsAppliedBeforeTheEvaluation(t *testing.T) {
 		t.Error("the sticky carry-forward runs AFTER the risk evaluation. " +
 			"That is the P8-71 defect: the fact reaches the row and not the verdict.")
 	}
+	// The byte-scan section, same invariant (protobufjs@8.0.1).
+	scan := regexp.MustCompile(`applyStickyScan\(report, prior\)`).FindStringIndex(src)
+	if scan == nil {
+		t.Fatal("runFanout no longer revives the prior byte scan before evaluating — " +
+			"if this was renamed, update the guard; do not delete it")
+	}
+	if scan[0] > eval[0] {
+		t.Error("applyStickyScan runs AFTER the risk evaluation: a metadata-only " +
+			"refresh scores without the byte facts its row keeps (P8-71, Scan section).")
+	}
 }
 
 // TestStickyVersionAnomaly_NotRevivedOnUndatedTimeline: a scan that fetched a
@@ -345,5 +356,45 @@ func TestStickyVersionAnomaly_NotRevivedOnUndatedTimeline(t *testing.T) {
 	applyStickySupplyChain(notFetched, prior)
 	if notFetched.SupplyChain.VersionAnomaly == nil || len(notFetched.SupplyChain.VersionAnomalyFlags) == 0 {
 		t.Fatalf("a failed timeline fetch must still revive the prior flag: %+v", notFetched.SupplyChain)
+	}
+}
+
+// TestStickyScanSectionBindsTheVerdict is P8-71 for the byte-scan section.
+//
+// mergeReportPayload keeps the prior ArtifactScanSection when a refresh runs
+// without bytes, but only on the way INTO the row — after the verdict was
+// computed. So a metadata-only refresh of npm protobufjs@8.0.1 (manual publish
+// by a newly added maintainer, postinstall present) evaluated with
+// HasInstallScript=false, sc.takeover_signature could not fire, and the row
+// flipped quarantine -> warn while its own report still showed the script.
+// The next byte scan flipped it back: five flips in prod, 2026-10-02..16.
+func TestStickyScanSectionBindsTheVerdict(t *testing.T) {
+	withPublisherChange := func(r *Report) *Report {
+		r.SupplyChain.PublisherChanged = boolp(true)
+		r.SupplyChain.PublisherAdded = []string{"new-maintainer"}
+		return r
+	}
+	prior := withPublisherChange(npmReport("1"))
+	prior.Scan.Performed = true
+	prior.Scan.HasInstallScript = true
+	prior.Scan.InstallScriptKind = "present"
+
+	unfixed := withPublisherChange(npmReport("1"))
+	ComputeTrustScoreForOrg(unfixed, "")
+	if firedSignalIDs(t, unfixed)["sc.takeover_signature"] {
+		t.Fatal("vacuous: the compound fired without the prior byte scan")
+	}
+
+	// A metadata-only refresh: the registry probe ran, the bytes did not.
+	next := withPublisherChange(npmReport("1"))
+	next.Scan.MetadataProbed = true
+	evaluated, persisted := scanOrder(t, prior, next)
+
+	if !persisted.Scan.HasInstallScript {
+		t.Fatal("persisted report lost the prior install script")
+	}
+	if !firedSignalIDs(t, evaluated)["sc.takeover_signature"] {
+		t.Error("sc.takeover_signature did not fire: the verdict was computed " +
+			"without the byte-scan facts the stored row carries (P8-71, Scan section)")
 	}
 }
