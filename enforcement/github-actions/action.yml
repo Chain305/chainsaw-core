@@ -87,11 +87,14 @@ inputs:
     default: "true"
   version:
     description: >
-      Chainsaw CLI version to install. Use "latest" or pin to a release
-      tag (e.g. "v0.16.0"). The binary is fetched from the public
-      release host; no private-registry auth required.
+      Chainsaw CLI version to install. The default is the release this
+      action pins, and that binary is checked against a SHA-256 baked into
+      this file, so a compromised download host cannot swap it. Any other
+      value ("latest" or another tag) installs through install.sh, which
+      verifies a checksum manifest served by the same host as the binary,
+      and the step warns about it.
     required: false
-    default: "latest"
+    default: "v0.22.100"
   comment-on-pr:
     description: >
       Post a summary comment on the pull request with findings and a
@@ -203,9 +206,23 @@ runs:
       # decision 2026-07-02). We set the opt-out explicitly for clarity; it is
       # also the script default. If you DO opt in on a runner that has cosign, a
       # present-but-invalid signature is always fatal.
+      #
+      # The DEFAULT version is installed without install.sh: the binary is
+      # downloaded directly and checked against the SHA-256 baked below, so
+      # neither a swapped install.sh nor a swapped checksum manifest on the
+      # serving host can change what runs in CI (the Trivy 2026-03 shape:
+      # one host serving both the artifact and its "verification"). Bump the
+      # pin and all five sums together with each CLI release;
+      # scripts/check-doc-version-pins.sh fails when they drift.
       env:
         CHAINSAW_VERSION: ${{ inputs.version }}
         CHAINSAW_REQUIRE_SIGNATURE: "0"
+        CHAINSAW_PINNED_VERSION: v0.22.100
+        CHAINSAW_PINNED_SHA256_LINUX_AMD64: 724e9e451d270a385f2bbca27ffc7dba5ae773394a462579f8d9266739430d94
+        CHAINSAW_PINNED_SHA256_LINUX_ARM64: 68dec7b07e1c752b84cffa66e21902998d03b83576e65a4445db6bcb49ce7fc5
+        CHAINSAW_PINNED_SHA256_DARWIN_AMD64: cd468f54808afc447565299793153cfb106f3513d284a10251de379a67b09dfe
+        CHAINSAW_PINNED_SHA256_DARWIN_ARM64: cf71e534c7873fdb0ba6c867f0f81f243693902099a74273d6e46e08216f6abc
+        CHAINSAW_PINNED_SHA256_WINDOWS_AMD64: 8862c74ee8714835b85bf1b7bbe28d32d0d321925e1124ee4d07041dfb448ad8
       run: |
         set -euo pipefail
         if command -v chainsaw >/dev/null; then
@@ -213,14 +230,43 @@ runs:
           exit 0
         fi
         # Install into an explicit, known dir and add it to the job PATH.
-        # install.sh honours --version (and CHAINSAW_VERSION) — a pinned
-        # `version:` input actually installs that tag; "latest" tracks the
-        # latest served set. Skip shell-rc edits: on a CI runner PATH is set
-        # via $GITHUB_PATH, not ~/.bashrc.
+        # Skip shell-rc edits: on a CI runner PATH is set via $GITHUB_PATH.
         install_dir="$HOME/.chainsaw/bin"
-        curl -fsSL https://chain305.com/install.sh \
-          | CHAINSAW_INSTALL_DIR="$install_dir" CHAINSAW_NO_MODIFY_PATH=1 \
-            bash -s -- --version "$CHAINSAW_VERSION"
+        mkdir -p "$install_dir"
+        if [ "$CHAINSAW_VERSION" = "$CHAINSAW_PINNED_VERSION" ]; then
+          case "${RUNNER_OS}/${RUNNER_ARCH}" in
+            Linux/X64)     asset=chainsaw-linux-amd64;       want=$CHAINSAW_PINNED_SHA256_LINUX_AMD64 ;;
+            Linux/ARM64)   asset=chainsaw-linux-arm64;       want=$CHAINSAW_PINNED_SHA256_LINUX_ARM64 ;;
+            macOS/X64)     asset=chainsaw-darwin-amd64;      want=$CHAINSAW_PINNED_SHA256_DARWIN_AMD64 ;;
+            macOS/ARM64)   asset=chainsaw-darwin-arm64;      want=$CHAINSAW_PINNED_SHA256_DARWIN_ARM64 ;;
+            Windows/X64)   asset=chainsaw-windows-amd64.exe; want=$CHAINSAW_PINNED_SHA256_WINDOWS_AMD64 ;;
+            *) echo "::error::no pinned Chainsaw binary for ${RUNNER_OS}/${RUNNER_ARCH}; set version: to a release tag to use install.sh"; exit 1 ;;
+          esac
+          bin="$install_dir/chainsaw"
+          [ "${RUNNER_OS}" = "Windows" ] && bin="$bin.exe"
+          tmp="$(mktemp)"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp" \
+            "https://chain305.com/downloads/${CHAINSAW_PINNED_VERSION}/${asset}"
+          if command -v sha256sum >/dev/null; then
+            got="$(sha256sum "$tmp" | cut -d' ' -f1)"
+          else
+            got="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+          fi
+          if [ "$got" != "$want" ]; then
+            rm -f "$tmp"
+            echo "::error::${asset} ${CHAINSAW_PINNED_VERSION} sha256 is ${got}, expected ${want} (baked into this action). Refusing to run it."
+            exit 1
+          fi
+          mv "$tmp" "$bin"
+          chmod 0755 "$bin"
+          echo "installed ${asset} ${CHAINSAW_PINNED_VERSION} (sha256 verified against the action's pin)"
+        else
+          echo "::warning::version '${CHAINSAW_VERSION}' is not this action's pinned release (${CHAINSAW_PINNED_VERSION}), so it is installed via install.sh, which checks a manifest served by the same host as the binary. Leave version: at its default for a host-independent check."
+          # install.sh honours --version (and CHAINSAW_VERSION).
+          curl -fsSL https://chain305.com/install.sh \
+            | CHAINSAW_INSTALL_DIR="$install_dir" CHAINSAW_NO_MODIFY_PATH=1 \
+              bash -s -- --version "$CHAINSAW_VERSION"
+        fi
         echo "$install_dir" >> "$GITHUB_PATH"
 
     - name: Configure Chainsaw server

@@ -29,6 +29,10 @@ jobs:
           fetch-depth: 0
 
       - name: Package security scan
+        # Pin to a full commit SHA in production (`@<40-hex sha> # action-v1.x.y`).
+        # A tag can be moved to another commit, and every workflow on it then
+        # runs that commit: xygeni-action@v5 and trivy-action, 2026-03.
+        # `chainsaw scan-actions --fail-on medium` flags unpinned refs.
         uses: Chain305/chainsaw-core/enforcement/github-actions@action-v1
         with:
           mode: warn           # warn | block
