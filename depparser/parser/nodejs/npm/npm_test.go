@@ -105,9 +105,9 @@ func TestParse(t *testing.T) {
 			// node_modules/@fixture/* entries, which npm writes as
 			// {"link": true} symlinks into packages/. The local
 			// workspace member entries (packages/pkg-a, packages/pkg-b)
-			// are first-party source, not installs — Parse currently DOES
-			// emit them; asserted here so the behaviour is a decision, not
-			// an accident.
+			// are first-party source, not installs: emitted with a local
+			// Origin ("file:packages/pkg-a", see TestParseV3Origins) so no
+			// consumer scores them as their npm namesakes.
 			name: "v3 workspaces",
 			file: "v3_workspace.json",
 			want: []wantPkg{
@@ -209,8 +209,10 @@ func TestParseNestedNodeModulesName(t *testing.T) {
 	})
 }
 
-// TestParsePeerMarkedDev pins the existing Dev||Peer propagation.
-func TestParsePeerMarkedDev(t *testing.T) {
+// TestParsePeerNotDev: "peer": true marks a package reached through a peer
+// dependency, which npm installs in production. Counting it as dev dropped 60
+// production packages from the corpus (mattermost 36, efflux-tracker 23).
+func TestParsePeerNotDev(t *testing.T) {
 	const lock = `{
 	  "lockfileVersion": 3,
 	  "packages": {
@@ -222,7 +224,7 @@ func TestParsePeerMarkedDev(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	assertPackages(t, got, []wantPkg{{name: "a", version: "1.0.0", dev: true}})
+	assertPackages(t, got, []wantPkg{{name: "a", version: "1.0.0"}})
 }
 
 // TestParseV1NestedTree exercises the recursive walk with genuinely nested

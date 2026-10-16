@@ -1009,8 +1009,12 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 		if s.Local {
 			if res := g.malware.Lookup(ctx, s.Ecosystem, s.Name, s.Version); res.IsKnownMalicious {
 				blocked = true
+				what := "a local/workspace crate with no source, which does not stop cargo fetching it from the registry"
+				if s.Ecosystem != "cargo" {
+					what = "a local/workspace package, which one lockfile edit turns back into a registry install"
+				}
 				verdicts = append(verdicts, guardVerdict{Spec: s, Block: true, Severity: "malicious",
-					Reason: fmt.Sprintf("known-malicious (%s); the lockfile lists it as a local/workspace crate with no source, which does not stop cargo fetching it from the registry", res.MalwareID)})
+					Reason: fmt.Sprintf("known-malicious (%s); the lockfile lists it as %s", res.MalwareID, what)})
 			}
 			continue
 		}
@@ -1084,6 +1088,17 @@ func guardOriginLabel(o string) string {
 // Non-blocking, printed by the printer's catch-all arm, never --quiet'd.
 const guardSeverityDependencyConfusion = "dependency-confusion"
 
+// guardSeverityArtifactSwap is the refusal for a lockfile entry whose public
+// registry URL names another package's artifact (guardPublicSwap).
+const guardSeverityArtifactSwap = "artifact-swap"
+
+// guardPublicSwap: spec's Origin is the parsers' "url+<URL>" marker with the
+// URL on the ecosystem's public registry.
+func guardPublicSwap(spec packageSpec) bool {
+	u, ok := strings.CutPrefix(spec.Origin, "url+")
+	return ok && origin.Classify(spec.Ecosystem, u) == origin.Public
+}
+
 // guardSeverityNotAssessed is the verdict for a package from outside the
 // public registry (packageSpec.Origin): the guard has no evidence about it
 // either way.
@@ -1125,6 +1140,16 @@ func (g *localGuard) evaluateNonRegistry(ctx context.Context, spec packageSpec) 
 		v.Reason += " (listed from " + guardOriginLabel(spec.Origin) + ", not the public registry)"
 		return v
 	}
+	if guardPublicSwap(spec) {
+		// The lockfile parsers mark a public-registry URL that is not this
+		// name@version's own artifact as "url+<URL>": another package's npm
+		// tarball, another project's wheel on files.pythonhosted.org. An
+		// honest lockfile never does that, and the bytes installed are not
+		// the package checked — refuse, like the server's `high`.
+		return guardVerdict{Spec: spec, Block: true, Unwaivable: true, Severity: guardSeverityArtifactSwap,
+			Reason: "the lockfile installs another package's public artifact under this name (" +
+				strings.TrimPrefix(spec.Origin, "url+") + ")"}
+	}
 	reason := nonRegistryReason(spec.Ecosystem, guardOriginLabel(spec.Origin))
 	if strings.HasPrefix(spec.Origin, "registry+") && strings.Contains(spec.Origin, "://") {
 		reason += "; if it mirrors the public registry, add its host to registry_mirrors"
@@ -1132,9 +1157,13 @@ func (g *localGuard) evaluateNonRegistry(ctx context.Context, spec packageSpec) 
 	// A local path (`pip install -e .`, `npm i ../lib`) is first-party code
 	// already on this machine: said plainly, and not put to the operator's
 	// degraded-analysis rule, which exists for packages fetched from elsewhere.
-	local := strings.HasPrefix(spec.Origin, localOriginPrefix)
+	// A vendored archive by path is third-party code: not local (localCode).
+	local := localCode(spec.Origin)
 	if local {
 		reason = "local path: not assessed (" + strings.TrimPrefix(spec.Origin, localOriginPrefix) + ")"
+	}
+	if file, ok := strings.CutPrefix(spec.Origin, unparsedLockPrefix); ok {
+		reason = file + " could not be parsed: the packages it installs are not assessed"
 	}
 	if v.Severity != "" {
 		// A name-similarity warning still applies to the name.

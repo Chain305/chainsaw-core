@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/chain305/chainsaw-core/depparser/origin"
 )
@@ -33,22 +34,39 @@ import (
 
 const (
 	statusNotAssessed = "not_assessed"
+	// statusArtifactSwap: the lockfile names another package's public
+	// artifact for this one. Severity high, so the default gates block.
+	statusArtifactSwap = "artifact_swap"
 	// statusMalicious is the status of a non-registry row whose namesake is
 	// known-malicious. Its severity is critical, so every gate blocks on it.
 	statusMalicious = "malicious"
 )
 
 // splitNonRegistry separates the coordinates the server can give a verdict
-// for from the ones it must not.
+// for from the ones it must not. A package from a MIRROR of the public
+// registry (origin.RegistryOther) is the public package when the CLI knows
+// the host — the user's own Chainsaw repository or a declared
+// registry_mirrors host (knownRegistry, the install guard's rule) — and is
+// looked up like one: proxied and Artifactory-backed lockfiles record the
+// mirror on every package, so treating them as not assessed would turn the
+// whole tree into a non-blocking blind spot. An undeclared mirror stays not
+// assessed (the server-side lockfile scan decides those by content hash;
+// this path has no public digest to compare with).
 func splitNonRegistry(pkgs []scanPkg) (registry, nonRegistry []scanPkg) {
 	for _, p := range pkgs {
-		if p.Origin != "" {
-			nonRegistry = append(nonRegistry, p)
-		} else {
+		if p.Origin == "" || (p.Version != "" && knownMirror(p.Ecosystem, p.Origin)) {
 			registry = append(registry, p)
+		} else {
+			nonRegistry = append(nonRegistry, p)
 		}
 	}
 	return registry, nonRegistry
+}
+
+// knownMirror: o is a registry-protocol source on a host the CLI accepts as
+// the public registry's mirror.
+func knownMirror(ecosystem, o string) bool {
+	return origin.Classify(ecosystem, o) == origin.RegistryOther && knownRegistry(ecosystem, o)
 }
 
 // namesakes returns the registry coordinates sharing name@version with the
@@ -57,6 +75,9 @@ func namesakes(pkgs []scanPkg) []scanPkg {
 	seen := map[string]bool{}
 	var out []scanPkg
 	for _, p := range pkgs {
+		if p.Version == "" {
+			continue // nothing to look up: no registry release is "name@"
+		}
 		k := scanPkgKey(p.Ecosystem, p.Name, p.Version, "")
 		if !seen[k] {
 			seen[k] = true
@@ -89,9 +110,18 @@ func nonRegistryResults(pkgs []scanPkg, malicious map[string]bool) []scanResultI
 		if malicious[scanPkgKey(p.Ecosystem, p.Name, p.Version, "")] || malicious[scanPkgKey("", p.Name, p.Version, "")] {
 			r.Status, r.Severity, r.MalwareStatus = statusMalicious, "critical", "malicious"
 			r.OriginReason = "same name and version is a known-malicious registry release" + label
+		} else if guardPublicSwap(packageSpec{Ecosystem: p.Ecosystem, Origin: p.Origin}) {
+			// Another package's public artifact under this name (the
+			// parsers' "url+<public URL>" marker): high, as on the server.
+			r.Status, r.Severity = statusArtifactSwap, "high"
+			r.OriginReason = "the lockfile installs another package's public artifact under this name (" +
+				strings.TrimPrefix(p.Origin, "url+") + ")"
 		} else {
 			r.Status = statusNotAssessed
 			r.OriginReason = notAssessedReason(p.Ecosystem) + label
+			if origin.Classify(p.Ecosystem, p.Origin) == origin.RegistryOther {
+				r.OriginReason += "; if it mirrors the public registry, add its host to registry_mirrors"
+			}
 		}
 		out = append(out, r)
 	}

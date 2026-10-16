@@ -43,3 +43,32 @@ short line
 		}
 	}
 }
+
+// TestParseSkipsGoModOnlyVersions: a version with only a "/go.mod" line was
+// read during module graph resolution and never downloaded, so it is not a
+// package. Every module ZIP line is one, several versions of a module
+// included.
+func TestParseSkipsGoModOnlyVersions(t *testing.T) {
+	const in = `github.com/spf13/cobra v1.6.0 h1:AAAA=
+github.com/spf13/cobra v1.6.0/go.mod h1:BBBB=
+github.com/spf13/cobra v1.2.0/go.mod h1:CCCC=
+golang.org/x/sys v0.1.0/go.mod h1:DDDD=
+golang.org/x/text v0.3.0 h1:EEEE=
+golang.org/x/text v0.14.0 h1:FFFF=
+`
+	got, err := Parse(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	var coords []string
+	for _, p := range got {
+		coords = append(coords, p.Name+"@"+p.Version)
+		if p.Hash != "" || p.Origin != "" {
+			t.Errorf("%s@%s: Hash %q Origin %q, want none (h1: is a dirhash; go.sum has no non-registry class)", p.Name, p.Version, p.Hash, p.Origin)
+		}
+	}
+	want := "github.com/spf13/cobra@1.6.0 golang.org/x/text@0.3.0 golang.org/x/text@0.14.0"
+	if g := strings.Join(coords, " "); g != want {
+		t.Fatalf("got %s\nwant %s", g, want)
+	}
+}

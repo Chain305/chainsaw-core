@@ -1,7 +1,10 @@
 package depgraph
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -85,16 +88,35 @@ type pnpmPackage struct {
 //   - Prod flag: honored from pnpm's own "dev" annotation on each
 //     packages entry. v9 dropped it, so there a node is Prod when it is
 //     reachable from a non-dev importer dependency.
+//
+// pnpm 10+ can write two YAML documents (the package manager's own lock,
+// then the project's); every document is read into the one graph. Reading
+// only the first marked no project dependency direct.
 func ParsePnpmLockfile(data []byte) (*Graph, error) {
-	var lf pnpmLockfile
-	if err := yaml.Unmarshal(data, &lf); err != nil {
-		return nil, fmt.Errorf("depgraph/pnpm: yaml unmarshal: %w", err)
+	g := NewGraph()
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	found := false
+	for {
+		var lf pnpmLockfile
+		if err := dec.Decode(&lf); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("depgraph/pnpm: yaml unmarshal: %w", err)
+		}
+		if len(lf.Packages) == 0 && len(lf.Dependencies) == 0 && len(lf.Importers) == 0 {
+			continue
+		}
+		found = true
+		addPnpmDocument(g, lf)
 	}
-	if len(lf.Packages) == 0 && len(lf.Dependencies) == 0 && len(lf.Importers) == 0 {
+	if !found {
 		return nil, fmt.Errorf("depgraph/pnpm: empty lockfile — no packages or importers")
 	}
+	return g, nil
+}
 
-	g := NewGraph()
+// addPnpmDocument adds one YAML document of a pnpm lockfile to g.
+func addPnpmDocument(g *Graph, lf pnpmLockfile) {
 	// v9 has no "dev" annotation, so Prod is derived from reachability
 	// after the edges are wired; every v9 lockfile has a snapshots map
 	// unless it has no packages at all.
@@ -216,8 +238,6 @@ func ParsePnpmLockfile(data []byte) (*Graph, error) {
 			}
 		}
 	}
-
-	return g, nil
 }
 
 // splitPnpmPackageKey parses a packages-map key into (name, version).
@@ -239,8 +259,12 @@ func splitPnpmPackageKey(k string) (string, string) {
 		rest = rest[:paren]
 	}
 	// Prefer the "@version" split but skip the leading "@" of scoped
-	// packages. For a scoped pkg "@scope/pkg@1.0.0", find the LAST "@".
-	at := strings.LastIndex(rest, "@")
+	// packages: the name ends at the FIRST "@" after it. Not the last — a v9
+	// git key ("solady@git+https://git@github.com:…") has one in the URL.
+	at := -1
+	if i := strings.Index(rest[min(1, len(rest)):], "@"); i >= 0 {
+		at = i + min(1, len(rest))
+	}
 	// Detect scoped+@version case: if rest starts with "@" and there's
 	// only one "@" (the leading one), fall through to slash split.
 	if strings.HasPrefix(rest, "@") && strings.Count(rest, "@") == 1 {

@@ -4,10 +4,20 @@
 //
 //	<module-path> <version>[/go.mod] h1:<hash>
 //
-// We emit one Package per <module-path, version> pair, deduped (the
-// "module" and its "/go.mod" stub produce two lines). Versions begin
-// with "v" per Go convention; we strip the leading "v" to match how
-// vuln-scan DBs typically index semver.
+// Only "<module> <version> h1:…" lines are packages: they hash the module
+// ZIP, which exists only for a module the build downloaded. A
+// "<version>/go.mod" line hashes just that version's go.mod file, which the
+// go command reads during module graph resolution (MVS) for every version it
+// considers, including the many it never selects. Emitting those as packages
+// keyed 815 never-built versions on three public go.sum files (the
+// lockfile corpus, 2026-10-15) — kubernetes 103, prometheus 185, vault 527.
+//
+// The h1: value is a dirhash (a hash over the sorted file list of the
+// extracted module), not a hash of a file a registry serves, so it is NOT
+// carried as Package.Hash.
+//
+// Versions begin with "v" per Go convention; we strip the leading "v" to
+// match how vuln-scan DBs typically index semver.
 //
 // Trivy reference: pkg/dependency/parser/golang/sum/parse.go.
 package sum
@@ -28,15 +38,10 @@ func Parse(r io.Reader) ([]ftypes.Package, error) {
 	var out []ftypes.Package
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
-		if len(fields) < 3 {
+		if len(fields) < 3 || strings.HasSuffix(fields[1], "/go.mod") {
 			continue
 		}
-		mod := fields[0]
-		ver := fields[1]
-		// Strip "/go.mod" suffix from the mod-hash variant and the
-		// leading "v" from the version.
-		ver = strings.TrimSuffix(ver, "/go.mod")
-		ver = strings.TrimPrefix(ver, "v")
+		mod, ver := fields[0], strings.TrimPrefix(fields[1], "v")
 		if mod == "" || ver == "" {
 			continue
 		}

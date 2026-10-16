@@ -364,7 +364,9 @@ func TestGuardRedTeamP0b(t *testing.T) {
 			files: map[string]string{"req.txt": "--index-url \\\n    https://evil.example/simple\nrequests==2.31.0 \\\n    --hash=sha256:abc\n"}, want: "not-assessed", pkg: "requests"},
 		{name: "req continuation inside a requirement", bin: "pip", args: []string{"install", "-r", "req.txt"},
 			files: map[string]string{"req.txt": "evilpkg\\\n    ; python_version >= '3'\n"}, want: "blocked", pkg: "evilpkg"},
-		{name: "npm bare FOO.TGZ is a local tarball", bin: "npm", args: []string{"install", "FOO.TGZ"}, want: "local", pkg: ""},
+		// A tarball by path is third-party code (localCode): not assessed,
+		// not "local path".
+		{name: "npm bare FOO.TGZ is a local tarball", bin: "npm", args: []string{"install", "FOO.TGZ"}, want: "not-assessed", pkg: ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { checkSourceCase(t, c) })

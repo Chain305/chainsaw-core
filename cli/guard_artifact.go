@@ -1621,9 +1621,12 @@ func anchorVerdict(data []byte, anchor string) acquireResult {
 	}
 }
 
-// splitSRIEntry splits one SRI entry into its lowercased algorithm and base64
-// digest, dropping the "?option" suffix SRI permits (cacache and npm both emit
-// "?size=…"). ok=false for anything that is not "<algo>-<digest>".
+// splitSRIEntry splits one SRI entry into its algorithm and base64 digest,
+// dropping the "?option" suffix SRI permits (cacache and npm both emit
+// "?size=…"). ok=false for anything that is not "<algo>-<digest>" with a
+// lowercase algorithm: npm's ssri ignores "SHA512-…", so honouring it here
+// would verify bytes against a token npm never checks (a lockfile carrying
+// "SHA512-<public> sha256-<other>" installs whatever matches the sha256).
 func splitSRIEntry(entry string) (algo, b64 string, ok bool) {
 	if q := strings.IndexByte(entry, '?'); q >= 0 {
 		entry = entry[:q]
@@ -1632,7 +1635,10 @@ func splitSRIEntry(entry string) (algo, b64 string, ok bool) {
 	if !cut || algo == "" || b64 == "" {
 		return "", "", false
 	}
-	return strings.ToLower(algo), b64, true
+	if algo != strings.ToLower(algo) {
+		return "", "", false
+	}
+	return algo, b64, true
 }
 
 // decodeSRIDigest decodes an SRI digest, tolerating the unpadded form some

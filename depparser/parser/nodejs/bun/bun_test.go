@@ -32,12 +32,15 @@ func TestParseKeepsDoubleSlashInsideStrings(t *testing.T) {
 	}
 	var got []string
 	for _, p := range pkgs {
-		got = append(got, p.Name+"@"+p.Version)
+		got = append(got, p.Name+"@"+p.Version+" "+p.Origin)
 	}
 	sort.Strings(got)
-	// Workspace and file: entries are first-party code and dropped (feldera's
-	// bun.lock has 8); the github: dependency is third-party and kept.
-	want := []string{"@scope/odd@1.0.0", "apache-arrow@github:Karakatiza666/arrow-js#ddba834", "svelte@5.55.7"}
+	// Workspace and file: directories with no version are first-party code
+	// and dropped (feldera's bun.lock has 8); the github: dependency is
+	// third-party and kept, with no version (Bun records none) and its
+	// source as Origin.
+	want := []string{"@scope/odd@1.0.0 https://registry.example.com/@scope/odd",
+		"apache-arrow@ github:Karakatiza666/arrow-js#ddba834", "svelte@5.55.7 "}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %v, want %v", got, want)
 	}

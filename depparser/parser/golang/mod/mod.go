@@ -6,60 +6,110 @@
 // pulled in by test-only packages; go.mod itself only names direct
 // requires.
 //
-// Ported verbatim from internal/cli/scan.go:parseGoMod. For higher
-// fidelity (replace/exclude directives, toolchain pin), future work can
-// swap this for Trivy's pkg/dependency/parser/golang/mod, which uses
-// golang.org/x/mod/modfile.
+// `replace` directives decide what a require actually builds
+// (docs/PLANS_INTELLIGENCE.md#plan-non-registry-sources §3.4):
+//
+//   - `replace a [vA] => b vB`: the build uses module b at vB, so the
+//     package is b@vB. Go has no registry: a module path that names a VCS
+//     host directly (github.com/cockroachdb/gogoproto) is as public as any
+//     other, served by proxy.golang.org, so a re-keyed module carries no
+//     Origin.
+//   - `replace a [vA] => ../dir`: the build uses a local directory, so the
+//     package keeps a's path and required version and carries the directory
+//     as Origin ("file:../dir"). It used to be scored as the module a@vA —
+//     usually the never-published v0.0.0 (kubernetes' 32 staging modules).
+//
+// A version-specific replace wins over a wildcard one for the same module,
+// as in the go command.
 package mod
 
 import (
-	"bufio"
+	"fmt"
 	"io"
 	"strings"
 
+	"golang.org/x/mod/modfile"
+
+	"github.com/chain305/chainsaw-core/depparser/origin"
 	ftypes "github.com/chain305/chainsaw-core/fanal"
 )
 
 func Parse(r io.Reader) ([]ftypes.Package, error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
+	data, err := io.ReadAll(io.LimitReader(r, 16<<20))
+	if err != nil {
+		return nil, err
+	}
+	// Parse, not ParseLax: ParseLax drops replace directives (it is for
+	// dependencies' go.mod files, where the go command ignores them).
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		// A directive newer than golang.org/x/mod fails the strict parse.
+		// ParseLax reads the rest but DROPS every replace, which would score
+		// each fork and local directory as the upstream module; so the
+		// replace lines are re-parsed strictly on their own, and a file
+		// whose replaces do not parse is refused rather than read without
+		// them. Bump x/mod when Go adds a directive.
+		lax, lerr := modfile.ParseLax("go.mod", data, nil)
+		if lerr != nil {
+			return nil, lerr
+		}
+		reps, rerr := replaces(lax)
+		if rerr != nil {
+			return nil, fmt.Errorf("%w (replace directives unreadable: %v)", err, rerr)
+		}
+		f, lax.Replace = lax, reps
+	}
+	type key struct{ path, version string }
+	repl := map[key]modfile.Replace{}
+	for _, rp := range f.Replace {
+		repl[key{rp.Old.Path, rp.Old.Version}] = *rp
+	}
 	var out []ftypes.Package
-	inRequire := false
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "//") {
-			continue
+	for _, req := range f.Require {
+		pkg := ftypes.Package{Name: req.Mod.Path, Version: normaliseVersion(req.Mod.Version)}
+		rp, ok := repl[key{req.Mod.Path, req.Mod.Version}]
+		if !ok {
+			rp, ok = repl[key{req.Mod.Path, ""}]
 		}
-		if line == "require (" {
-			inRequire = true
-			continue
+		switch {
+		case !ok:
+		case rp.New.Version == "":
+			// A replacement without a version is a filesystem path (the go
+			// command accepts nothing else there).
+			pkg.Origin = origin.Sanitize("file:" + rp.New.Path)
+		default:
+			pkg.Name, pkg.Version = rp.New.Path, normaliseVersion(rp.New.Version)
 		}
-		if line == ")" {
-			inRequire = false
-			continue
-		}
-		if strings.HasPrefix(line, "require ") {
-			// Single-line require.
-			parts := strings.Fields(strings.TrimPrefix(line, "require "))
-			if len(parts) >= 2 {
-				out = append(out, ftypes.Package{Name: parts[0], Version: normaliseVersion(parts[1])})
+		out = append(out, pkg)
+	}
+	return out, nil
+}
+
+// replaces parses the replace directives of a file read with ParseLax,
+// which keeps them in the syntax tree but not in File.Replace: each is
+// written back out as a replace line of a minimal go.mod and parsed strictly.
+func replaces(f *modfile.File) ([]*modfile.Replace, error) {
+	var b strings.Builder
+	b.WriteString("module m\n")
+	for _, st := range f.Syntax.Stmt {
+		switch x := st.(type) {
+		case *modfile.Line:
+			if len(x.Token) > 0 && x.Token[0] == "replace" {
+				b.WriteString(strings.Join(x.Token, " ") + "\n")
 			}
-			continue
-		}
-		if !inRequire {
-			continue
-		}
-		// Strip inline comments.
-		if i := strings.Index(line, "//"); i >= 0 {
-			line = strings.TrimSpace(line[:i])
-		}
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			out = append(out, ftypes.Package{Name: parts[0], Version: normaliseVersion(parts[1])})
+		case *modfile.LineBlock:
+			if len(x.Token) == 1 && x.Token[0] == "replace" {
+				for _, l := range x.Line {
+					b.WriteString("replace " + strings.Join(l.Token, " ") + "\n")
+				}
+			}
 		}
 	}
-	return out, sc.Err()
+	rf, err := modfile.Parse("go.mod", []byte(b.String()), nil)
+	if err != nil {
+		return nil, err
+	}
+	return rf.Replace, nil
 }
 
 // normaliseVersion strips the leading "v" from a Go module version so this

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -22,6 +23,14 @@ func TestGuardRegistryMirrors(t *testing.T) {
 		{name: "pip -i mirror, other port", bin: "pip", args: []string{"install", "-i", "https://artifactory.corp:8443/simple", "requests"}, want: "not-assessed", pkg: "requests"},
 		{name: "npm --registry chainsaw repo on a mirror host", bin: "npm", args: []string{"install", "--registry", "https://artifactory.corp/repository/@other/npmjs/", "lodash"}, want: "not-assessed", pkg: "lodash"},
 		{name: "pip -i mirror, malicious", bin: "pip", args: []string{"install", "-i", "https://artifactory.corp/api/pypi/pypi/simple", "evilpkg"}, want: "blocked", pkg: "evilpkg"},
+		// Gemfile.lock GEM remotes are decided by the same rule.
+		{name: "Gemfile.lock mirror remote", bin: "gem", args: []string{"install"},
+			files: map[string]string{"Gemfile.lock": "GEM\n  remote: https://artifactory.corp/api/gems/gems/\n  specs:\n    rails (7.1.0)\n"}, want: "registry", pkg: "rails"},
+		{name: "Gemfile.lock remote on a suffix of a mirror", bin: "gem", args: []string{"install"},
+			files: map[string]string{"Gemfile.lock": "GEM\n  remote: https://artifactory.corp.evil.example/gems/\n  specs:\n    rails (7.1.0)\n"},
+			want:  "not-assessed", pkg: "rails", inOut: "add its host to registry_mirrors"},
+		{name: "Gemfile.lock remote on a suffix of a mirror, malicious", bin: "gem", args: []string{"install"},
+			files: map[string]string{"Gemfile.lock": "GEM\n  remote: https://artifactory.corp.evil.example/gems/\n  specs:\n    evilpkg (1.0.0)\n"}, want: "blocked", pkg: "evilpkg"},
 	}
 	for _, src := range []string{"config", "env"} {
 		for _, c := range cases {
@@ -92,5 +101,23 @@ func TestGuardConfigRegistries(t *testing.T) {
 			}
 			checkSourceCase(t, c.sourceCase)
 		})
+	}
+}
+
+// TestGuardRefusesPublicArtifactSwap: a lockfile entry whose public-registry
+// URL names another package's artifact (the parsers' "url+<URL>" marker) is
+// refused and cannot be allowlisted; the same marker on another host is the
+// ordinary not-assessed line.
+func TestGuardRefusesPublicArtifactSwap(t *testing.T) {
+	g := sourcesGuard()
+	swap := packageSpec{Ecosystem: "npm", Name: "lodash", Version: "4.17.21", Origin: "url+https://registry.npmjs.org/evil/-/evil-1.0.0.tgz"}
+	v := g.evaluateNonRegistry(context.Background(), swap)
+	if !v.Block || v.Severity != guardSeverityArtifactSwap || guardAllowlistableVerdict(v) {
+		t.Fatalf("swap verdict = %+v, want an unwaivable artifact-swap block", v)
+	}
+	other := swap
+	other.Origin = "url+https://evil.example/x-1.0.0.tgz"
+	if v := g.evaluateNonRegistry(context.Background(), other); v.Block || v.Severity != guardSeverityNotAssessed {
+		t.Fatalf("foreign URL verdict = %+v, want not assessed", v)
 	}
 }

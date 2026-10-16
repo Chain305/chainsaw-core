@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -83,8 +84,28 @@ func normEcosystem(eco string) string {
 }
 
 // archiveSuffixes mark a URL as one artifact (a tarball, wheel, gem, crate…)
-// rather than a registry index.
-var archiveSuffixes = []string{".tgz", ".tar.gz", ".tar.bz2", ".tar.xz", ".zip", ".whl", ".gem", ".crate", ".nupkg", ".jar", ".conda"}
+// rather than a registry index. The tar family is pip's whole
+// ARCHIVE_EXTENSIONS (.tar, .tbz, .txz, .tlz, .tar.lz, .tar.lzma installs
+// as readily as .tar.gz): a vendored `./vendor/evilpkg-1.0.tar` is
+// third-party code, not the project's own (red-team round 2).
+var archiveSuffixes = []string{".tgz", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar", ".tbz", ".txz", ".tlz", ".tar.lz", ".tar.lzma", ".zip", ".whl", ".gem", ".crate", ".nupkg", ".jar", ".conda"}
+
+// IsArchive: p (a path or URL, any "?query" or "#fragment" cut off) names
+// one artifact file — a tarball, wheel, gem, crate… — case-insensitively.
+// A "file:" origin that is an archive is a vendored third-party artifact,
+// not the project's own code.
+func IsArchive(p string) bool {
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	p = strings.ToLower(p)
+	for _, suf := range archiveSuffixes {
+		if strings.HasSuffix(p, suf) {
+			return true
+		}
+	}
+	return false
+}
 
 // Classify decides which Class a lockfile source string is, for ecosystem
 // eco (any spelling ecosystemAliases knows). An empty source is Public: the
@@ -153,10 +174,8 @@ func Classify(eco, source string) Class {
 		}
 		return NonRegistry
 	}
-	for _, suf := range archiveSuffixes {
-		if strings.HasSuffix(p, suf) {
-			return NonRegistry
-		}
+	if IsArchive(p) {
+		return NonRegistry
 	}
 	return RegistryOther
 }
@@ -327,11 +346,18 @@ var hashHexLen = map[string]int{"sha1": 40, "sha256": 64, "sha384": 96, "sha512"
 // "<algo>:<hex>" (also "<algo>=<hex>") or as one SRI token
 // "<algo>-<base64>[?opts]", or "" when it is neither or the length does not
 // fit the algorithm.
+//
+// An SRI token's algorithm must be lowercase: npm's ssri matches
+// /^([a-z0-9]+)-.../ and skips "SHA512-…", so a token npm never checks must
+// not be one we compare (it could vouch for bytes npm does not verify
+// against). "<algo>:<hex>" forms stay case-insensitive.
 func NormalizeHash(s string) string {
 	s = strings.TrimSpace(s)
 	if algo, b64, ok := strings.Cut(s, "-"); ok {
-		algo = strings.ToLower(algo)
-		if n, known := hashHexLen[algo]; known {
+		if n, known := hashHexLen[strings.ToLower(algo)]; known {
+			if algo != strings.ToLower(algo) {
+				return ""
+			}
 			b64, _, _ = strings.Cut(b64, "?")
 			raw, err := base64.StdEncoding.DecodeString(b64)
 			if err != nil || len(raw)*2 != n {
@@ -349,4 +375,90 @@ func NormalizeHash(s string) string {
 		return ""
 	}
 	return algo + ":" + h
+}
+
+// MaxJoinedHashes bounds the distinct tokens JoinHashes keeps. A real
+// release has well under a hundred files; past this the entry reads as
+// carrying no usable hash, which never scores as the public package (a
+// lockfile that hashes other packages makes a missing hash "not assessed").
+const MaxJoinedHashes = 256
+
+// JoinHashes is the Hash of a lockfile entry that records several candidate
+// files of ONE release — a requirements line's --hash options, a poetry
+// `files` list, uv's sdist and wheels, a Pipfile `hashes` list: the
+// installer takes one of them. Each token in canonical form (NormalizeHash),
+// unusable ones dropped, deduplicated, sorted (a deterministic dedupe key),
+// joined by single spaces; "" past MaxJoinedHashes distinct tokens. One hash
+// comes back as itself, so a Cargo checksum's Hash is unchanged. The
+// caller's slice is never reordered.
+func JoinHashes(hashes ...string) string {
+	seen := map[string]bool{}
+	var out []string
+	for _, h := range hashes {
+		if n := hashToken(h); n != "" && !seen[n] {
+			if len(out) == MaxJoinedHashes {
+				return ""
+			}
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, " ")
+}
+
+// SplitHashes returns the canonical tokens of a Hash (JoinHashes form, or a
+// single hash in any form NormalizeHash reads), UnreadableHash placeholders
+// included; other unusable tokens are dropped.
+func SplitHashes(s string) []string {
+	var out []string
+	for _, tok := range strings.Fields(s) {
+		if n := hashToken(tok); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// unreadablePrefix marks a hash the lockfile records but we cannot read or
+// compare (an algorithm NormalizeHash does not know, a file listed with no
+// usable hash). It is kept, never dropped: the installer may verify, or
+// fetch, exactly that file, so a hash list that drops it can "match" the
+// public release on its other tokens while the unreadable one is what gets
+// installed (red-team round 2: "sha1-<public> sha224-<other>" on npm, a uv
+// wheel listed without a hash next to a public sdist). The comparison treats
+// it as uncomparable, so such a list is at best "unpublished", never a match.
+const unreadablePrefix = "unknown:"
+
+// UnreadableHash is the placeholder token for a recorded hash (or file) of
+// algorithm algo that cannot be compared; algo is only a label ("" → "none").
+func UnreadableHash(algo string) string {
+	a := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + 'a' - 'A'
+		}
+		return -1
+	}, algo)
+	if a == "" {
+		a = "none"
+	}
+	if len(a) > 16 {
+		a = a[:16]
+	}
+	return unreadablePrefix + a
+}
+
+// IsUnreadableHash: tok is an UnreadableHash placeholder.
+func IsUnreadableHash(tok string) bool { return strings.HasPrefix(tok, unreadablePrefix) }
+
+// hashToken is the canonical form of one Hash token: NormalizeHash, or the
+// placeholder itself.
+func hashToken(tok string) string {
+	if IsUnreadableHash(tok) {
+		return UnreadableHash(strings.TrimPrefix(tok, unreadablePrefix))
+	}
+	return NormalizeHash(tok)
 }

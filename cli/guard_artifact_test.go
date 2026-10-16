@@ -1411,9 +1411,16 @@ func TestReadCacacheContentAlgoCaseIsPlatformStable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, h[4:]), payload, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Since v0.22.98 an uppercased algorithm is not an SRI token at all, as
+	// in npm's ssri (lowercase-only): honouring it would check bytes against
+	// a hash npm never verifies. Still identical on every platform — it never
+	// reaches the content path — and never a clean acquireOK.
 	b, res := readCacacheContent(cacache, "SHA512-"+b64, "")
-	if res != acquireOK || !bytes.Equal(b, payload) {
-		t.Fatalf("an uppercased algorithm must resolve identically on every platform, got (%d bytes, %v)", len(b), res)
+	if res == acquireOK || len(b) != 0 {
+		t.Fatalf("an uppercased algorithm must be ignored on every platform, got (%d bytes, %v)", len(b), res)
+	}
+	if b, res := readCacacheContent(cacache, "sha512-"+b64, ""); res != acquireOK || !bytes.Equal(b, payload) {
+		t.Fatalf("the lowercase token must resolve, got (%d bytes, %v)", len(b), res)
 	}
 }
 

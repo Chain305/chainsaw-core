@@ -145,8 +145,11 @@ type Package struct {
 	// artifact, in origin.NormalizeHash's canonical "<algo>:<lowercase hex>"
 	// form (a Cargo.lock checksum is "sha256:<hex>", an npm integrity
 	// "sha512-<base64>" becomes "sha512:<hex>"). Empty when the format
-	// records none. It decides whether a package from a non-public registry
-	// host is the public release (a mirror) or something else.
+	// records none. A format that lists several candidate files of the
+	// release (requirements --hash, poetry files, uv sdist and wheels) gives
+	// them all, space-separated and sorted (origin.JoinHashes). It decides
+	// whether a package from a non-public registry host is the public
+	// release (a mirror) or something else.
 	Hash string
 }
 

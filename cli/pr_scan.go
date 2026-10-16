@@ -39,6 +39,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -50,7 +51,17 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/chain305/chainsaw-core/depparser/origin"
+	gosum "github.com/chain305/chainsaw-core/depparser/parser/golang/sum"
+	"github.com/chain305/chainsaw-core/depparser/parser/nodejs/nodesource"
+	npmlock "github.com/chain305/chainsaw-core/depparser/parser/nodejs/npm"
+	"github.com/chain305/chainsaw-core/depparser/parser/nodejs/pnpm"
+	"github.com/chain305/chainsaw-core/depparser/parser/nodejs/yarn"
+	"github.com/chain305/chainsaw-core/depparser/parser/python/pipenv"
+	"github.com/chain305/chainsaw-core/depparser/parser/python/poetry"
 	"github.com/chain305/chainsaw-core/depparser/parser/python/requirements"
+	uvlock "github.com/chain305/chainsaw-core/depparser/parser/python/uv"
+	"github.com/chain305/chainsaw-core/depparser/parser/ruby/bundler"
+	ftypes "github.com/chain305/chainsaw-core/fanal"
 	"github.com/chain305/chainsaw-core/githubactions"
 	"github.com/chain305/chainsaw-core/malware"
 	"github.com/chain305/chainsaw-core/policy"
@@ -571,6 +582,15 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
 		}
+		// Git, tarball and undeclared-registry packages, which the map
+		// above leaves out; workspace members are first-party: no row.
+		if _, baseNonReg, err = parsePackageLockCoordinates(baseContent); err != nil {
+			return nil, nil, fmt.Errorf("%s base: %w", relPath, err)
+		}
+		if _, headNonReg, err = parsePackageLockCoordinates(headContent); err != nil {
+			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
+		}
+		baseNonReg, headNonReg = npmNonLocal(baseNonReg), npmNonLocal(headNonReg)
 	case kindNPMPackageJSON:
 		baseCoords, baseNonReg, err = parsePackageJSONDeps(baseContent)
 		if err != nil {
@@ -580,36 +600,62 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
 		}
-	case kindPNPMLock:
-		baseCoords = parsePNPMLock(baseContent)
-		headCoords = parsePNPMLock(headContent)
-	case kindYarnLock:
-		baseCoords = parseYarnLock(baseContent)
-		headCoords = parseYarnLock(headContent)
-	case kindPipRequirements:
-		baseCoords, baseNonReg = parsePipRequirements(baseContent)
-		headCoords, headNonReg = parsePipRequirements(headContent)
-	case kindPipfileLock:
-		baseCoords, err = parsePipfileLock(baseContent)
+	case kindPNPMLock, kindYarnLock:
+		// Coordinates, not a name->version map: one lockfile holds a name at
+		// several versions, and a fork beside its registry namesake.
+		parse := parseYarnLock
+		if kind == kindPNPMLock {
+			parse = parsePNPMLock
+		}
+		baseMulti, baseNonReg, err := parse(baseContent)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s base: %w", relPath, err)
 		}
-		headCoords, err = parsePipfileLock(headContent)
+		headMulti, headNonReg, err := parse(headContent)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
 		}
-	case kindPoetryLock:
-		baseCoords = parsePoetryLock(baseContent)
-		headCoords = parsePoetryLock(headContent)
-	case kindUVLock:
-		baseCoords = parseUVLock(baseContent)
-		headCoords = parseUVLock(headContent)
+		added, upgraded = diffLockCoordinates(eco, baseMulti, headMulti)
+		// Workspace / link / file: packages are first-party: no row.
+		nrAdded, nrUpgraded := diffNonRegistry(eco, npmNonLocal(baseNonReg), npmNonLocal(headNonReg))
+		return append(added, nrAdded...), append(upgraded, nrUpgraded...), nil
+	case kindPipRequirements:
+		baseCoords, baseNonReg = parsePipRequirementsSources(baseContent)
+		headCoords, headNonReg = parsePipRequirementsSources(headContent)
+	case kindPipfileLock, kindPoetryLock, kindUVLock:
+		// One name can be locked at several versions (uv forks by marker),
+		// so these diff as coordinates, like Cargo.lock. Local packages (the
+		// editable project, path dependencies) are first-party: no row.
+		file := strings.SplitN(string(kind), ":", 2)[1]
+		baseMulti, baseNonReg, _, err := parsePythonLock(file, baseContent)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s base: %w", relPath, err)
+		}
+		headMulti, headNonReg, _, err := parsePythonLock(file, headContent)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
+		}
+		added, upgraded = diffLockCoordinates(eco, baseMulti, headMulti)
+		nrAdded, nrUpgraded := diffNonRegistry(eco, baseNonReg, headNonReg)
+		return append(added, nrAdded...), append(upgraded, nrUpgraded...), nil
 	case kindGemfileLock:
-		baseCoords, baseNonReg = parseGemfileLock(baseContent)
-		headCoords, headNonReg = parseGemfileLock(headContent)
+		if baseCoords, baseNonReg, err = parseGemfileLock(baseContent); err != nil {
+			return nil, nil, fmt.Errorf("%s base: %w", relPath, err)
+		}
+		if headCoords, headNonReg, err = parseGemfileLock(headContent); err != nil {
+			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
+		}
 	case kindGoSum:
-		baseCoords = parseGoSum(baseContent)
-		headCoords = parseGoSum(headContent)
+		baseSum, err := parseGoSum(baseContent)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s base: %w", relPath, err)
+		}
+		headSum, err := parseGoSum(headContent)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
+		}
+		added, upgraded = diffLockCoordinates(eco, baseSum, headSum)
+		return added, upgraded, nil
 	case kindCargoLock:
 		// Sourceless (workspace/path) crates are first-party: no row.
 		baseMulti, baseNonReg, _ := parseCargoLock(baseContent)
@@ -873,6 +919,7 @@ func parsePackageLockIntegrityJSONMode(data []byte, mode lockNameMode) (map[stri
 		Dependencies map[string]struct {
 			Name      string `json:"name"`
 			Version   string `json:"version"`
+			Resolved  string `json:"resolved"`
 			Integrity string `json:"integrity"`
 		} `json:"dependencies"`
 	}
@@ -897,10 +944,29 @@ func parsePackageLockIntegrityJSONMode(data []byte, mode lockNameMode) (map[stri
 			if pkg.Version == "" || path == "" {
 				continue
 			}
+			// Registry packages only. A workspace member or file: directory
+			// (no node_modules/ in its path, nothing remote resolved) is
+			// first-party code, and a git, tarball or undeclared-registry
+			// package is not its npm namesake: parsePackageLockCoordinates
+			// reports those. A registry tarball URL names the package npm
+			// fetches, which is the coordinate (nodesource.Tarball, as the
+			// depparser parser the guard uses re-keys it).
+			real := pkg.Name
+			if real == "" {
+				real = lockEntryNameNested(path)
+			}
+			fetched, version, o := nodesource.Tarball(real, pkg.Version, pkg.Resolved)
+			if (!strings.Contains(path, "node_modules/") && !npmlock.IsRemote(pkg.Resolved)) || !npmOriginIsRegistry(o) {
+				continue
+			}
 			name := pkg.Name
 			if name == "" {
 				name = lockEntryNameFor(mode, path)
 			}
+			if fetched != real {
+				name = fetched
+			}
+			pkg.Version = version
 			if name == "" {
 				continue
 			}
@@ -909,15 +975,26 @@ func parsePackageLockIntegrityJSONMode(data []byte, mode lockNameMode) (map[stri
 		}
 	} else {
 		for key, dep := range root.Dependencies {
-			if dep.Version == "" {
-				continue
-			}
-			name := dep.Name
+			name, version := dep.Name, dep.Version
 			if name == "" {
 				name = key
 			}
-			out[name] = dep.Version
-			record(name, dep.Version, dep.Integrity)
+			if target, ok := strings.CutPrefix(version, "npm:"); ok { // alias "npm:bar@1.2.3"
+				if i := strings.LastIndex(target, "@"); i > 0 {
+					name, version = target[:i], target[i+1:]
+				}
+			}
+			// A v1 git/file/URL dependency records its spec as the version;
+			// like a non-registry `resolved`, it is not a registry package.
+			if version == "" || strings.ContainsAny(version, ":/") {
+				continue
+			}
+			var o string
+			if name, version, o = nodesource.Tarball(name, version, dep.Resolved); !npmOriginIsRegistry(o) {
+				continue
+			}
+			out[name] = version
+			record(name, version, dep.Integrity)
 		}
 	}
 	return out, integrity, nil
@@ -936,116 +1013,61 @@ type lockCoordinate struct {
 	Integrity string
 }
 
-// parsePackageLockCoordinates returns EVERY installed coordinate in a
-// package-lock, without collapsing duplicates.
+// parsePackageLockCoordinates parses a package-lock.json / npm-shrinkwrap.json
+// with core/depparser (the parser the server's lockfile scan uses) and splits
+// it with npmLockSplit:
 //
-// ── WHY THIS EXISTS AND WHY THE MAP FORM CANNOT BE USED HERE ─────────
+//   - registry: every installed coordinate from the public registry, a
+//     declared registry mirror or the user's own Chainsaw repository, with
+//     the lockfile's integrity as its anchor;
+//   - nonRegistry: git, tarball URL and undeclared-registry packages, never
+//     checked as their npm namesakes, and local code ("file:<path>":
+//     workspace members, file: dependencies — npmLockSpecs makes those
+//     Local, npmNonLocal drops them from pr-scan).
 //
-// parsePackageLockIntegrityJSONMode returns map[name]version. A real npm
-// tree installs the SAME NAME AT SEVERAL VERSIONS routinely — a measured
-// ui_new lockfile carries 40 such names (minimatch at four versions,
-// react-is and ansi-styles at three) and a landing lockfile carries 46.
-// Collapsing them through a bare-name map does two bad things at once:
-// it silently drops ~5% of installed coordinates (924 entries became
-// 851), and because Go randomises map iteration, WHICH version survives
-// changes between runs of the same binary over the same file. Parsing
-// one file 25 times produced minimatch@10.2.5 eleven times and
-// minimatch@3.1.5 four times.
+// Not collapsed by name. A real npm tree installs the SAME NAME AT SEVERAL
+// VERSIONS routinely (40 such names in a measured ui_new lockfile); the old
+// map form dropped ~5% of installed coordinates and, because Go randomises
+// map iteration, picked a different survivor each run — a byte scan whose
+// coverage was a coin flip. registry is sorted.
 //
-// For pr-scan's report rows that is survivable: a row is a human-facing
-// finding about a name. For the GUARD it is not. The guard turns each
-// coordinate into a cache key and analyses the bytes it finds, so a
-// collapsed map means the byte scan silently skips real installed
-// packages and is not reproducible run to run — a security control whose
-// coverage is a coin flip and whose gaps never appear twice in a bug
-// report.
+// Conflicting integrity strings for ONE coordinate collapse to no anchor
+// rather than a coin flip: a wrong anchor manufactures a digest mismatch on a
+// clean install, which is worse than no anchor at all. An integrity
+// depparser cannot decode is no anchor either.
 //
-// The integrity map was already keyed name@version for exactly this
-// reason (see the note on record()). The version side was not. This
-// returns coordinates so neither side can collapse.
-func parsePackageLockCoordinates(data []byte) ([]lockCoordinate, error) {
+// An error comes back WITH every package that did parse (npm.Parse reads
+// entry by entry): the guard checks those and reports the file as not
+// fully read; pr-scan counts the failure.
+func parsePackageLockCoordinates(data []byte) (registry []lockCoordinate, nonRegistry []nonRegistryDep, err error) {
 	if data == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	var root struct {
-		Packages map[string]struct {
-			// An aliased dependency records the REAL package in "name" while
-			// the map key holds the alias. Same rule as the map parser: an
-			// explicit name always wins over the path.
-			Name      string `json:"name"`
-			Version   string `json:"version"`
-			Integrity string `json:"integrity"`
-		} `json:"packages"`
-		Dependencies map[string]struct {
-			Name      string `json:"name"`
-			Version   string `json:"version"`
-			Integrity string `json:"integrity"`
-		} `json:"dependencies"`
-	}
-	if err := json.Unmarshal(stripUTF8BOM(data), &root); err != nil {
-		return nil, err
-	}
-
-	// Keyed name@version, so the same name at several versions survives as
-	// several coordinates. Conflicting SRIs for ONE coordinate collapse to
-	// no anchor rather than a coin flip, matching record() in the map
-	// parser: a wrong anchor manufactures a digest mismatch on a clean
-	// install, which is worse than no anchor at all.
-	byCoord := make(map[string]*lockCoordinate)
-	add := func(name, version, sri string) {
-		if name == "" || version == "" {
-			return
-		}
-		k := lockIntegrityKey(name, version)
-		cur, seen := byCoord[k]
+	pkgs, err := npmlock.Parse(bytes.NewReader(stripUTF8BOM(data)))
+	all, nonRegistry := npmLockSplit(pkgs)
+	byCoord := make(map[string]int, len(all))
+	for _, c := range all {
+		k := lockIntegrityKey(c.Name, c.Version)
+		i, seen := byCoord[k]
 		if !seen {
-			byCoord[k] = &lockCoordinate{Name: name, Version: version, Integrity: sri}
-			return
+			byCoord[k] = len(registry)
+			registry = append(registry, c)
+			continue
 		}
-		if cur.Integrity == "" || sri == "" || cur.Integrity == sri {
-			if cur.Integrity == "" {
-				cur.Integrity = sri
-			}
-			return
-		}
-		cur.Integrity = "" // conflicting anchors for one coordinate
-	}
-
-	if len(root.Packages) > 0 {
-		for path, pkg := range root.Packages {
-			if path == "" {
-				continue
-			}
-			name := pkg.Name
-			if name == "" {
-				name = lockEntryNameFor(lockNamesInstalled, path)
-			}
-			add(name, pkg.Version, pkg.Integrity)
-		}
-	} else {
-		for key, dep := range root.Dependencies {
-			name := dep.Name
-			if name == "" {
-				name = key
-			}
-			add(name, dep.Version, dep.Integrity)
+		switch cur := &registry[i]; {
+		case cur.Integrity == "":
+			cur.Integrity = c.Integrity // a copy with no integrity (bundled) adds nothing
+		case c.Integrity != "" && c.Integrity != cur.Integrity:
+			cur.Integrity = "" // conflicting anchors for one coordinate
 		}
 	}
-
-	out := make([]lockCoordinate, 0, len(byCoord))
-	for _, c := range byCoord {
-		out = append(out, *c)
-	}
-	// Stable order: map iteration above is randomised by design, and a
-	// security control whose coverage order varies per run cannot be
-	// diffed between two runs.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
+	sort.Slice(registry, func(i, j int) bool {
+		if registry[i].Name != registry[j].Name {
+			return registry[i].Name < registry[j].Name
 		}
-		return out[i].Version < out[j].Version
+		return registry[i].Version < registry[j].Version
 	})
-	return out, nil
+	return registry, nonRegistry, err
 }
 
 // splitLockIntegrityKey reverses lockIntegrityKey. It splits on the LAST
@@ -1112,94 +1134,29 @@ func npmNonRegistryDep(name, spec string) (nonRegistryDep, bool) {
 	return nonRegistryDep{Name: name, Version: s.Version, Origin: s.Origin}, true
 }
 
-// parsePNPMLock is a best-effort line-oriented parser for pnpm-lock.yaml.
-// We avoid a full YAML dependency; the format has stable patterns:
-//
-//	/package@version:   (leading slash, package name, @ version, colon)
-func parsePNPMLock(data []byte) map[string]string {
-	if data == nil {
-		return nil
-	}
-	out := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		// pnpm lockfile v6: lines like "  /chalk@5.3.0:"
-		// pnpm lockfile v9: lines like "  chalk@5.3.0:" (no leading slash)
-		if !strings.HasSuffix(line, ":") {
-			continue
-		}
-		entry := strings.TrimSuffix(line, ":")
-		// v9 quotes scoped keys ('@tanstack/react-query@5.28.4':); without
-		// this the name kept the leading quote and the version the trailing
-		// one, so scoped packages were checked under a garbage name.
-		entry = strings.Trim(entry, `'"`)
-		entry = strings.TrimPrefix(entry, "/")
-		// Split on last "@" to handle scoped packages like "@scope/pkg@1.0.0".
-		idx := strings.LastIndex(entry, "@")
-		if idx <= 0 {
-			continue
-		}
-		name := entry[:idx]
-		version := entry[idx+1:]
-		if name != "" && version != "" && !strings.Contains(version, "(") {
-			// Deduplicate: keep first seen (lowest version is typically the
-			// resolved one for multiple range entries).
-			if _, exists := out[name]; !exists {
-				out[name] = version
-			}
-		}
-	}
-	return out
+// parsePNPMLock and parseYarnLock read pnpm-lock.yaml and yarn.lock (v1 and
+// berry) with the server's parsers (core/depparser), split by npmLockSplit.
+// They replaced line-scanning parsers that kept one version per name, read
+// only the first YAML document of a pnpm 10 lockfile, keyed aliases by the
+// alias, and checked git, tarball and workspace packages as their registry
+// namesakes. A file that does not parse is an error, counted like any other
+// manifest parse failure, not an empty lockfile — returned with whatever
+// entries did parse.
+func parsePNPMLock(data []byte) ([]lockCoordinate, []nonRegistryDep, error) {
+	return parseJSLock(pnpm.Parse, data)
 }
 
-// parseYarnLock parses yarn.lock (classic v1 format and berry v2/v3).
-// Pattern: lines starting with a quoted name+"@" followed eventually by
-// a "  version" line.
-func parseYarnLock(data []byte) map[string]string {
+func parseYarnLock(data []byte) ([]lockCoordinate, []nonRegistryDep, error) {
+	return parseJSLock(yarn.Parse, data)
+}
+
+func parseJSLock(parse func(io.Reader) ([]ftypes.Package, error), data []byte) ([]lockCoordinate, []nonRegistryDep, error) {
 	if data == nil {
-		return nil
+		return nil, nil, nil
 	}
-	out := make(map[string]string)
-	var currentName string
-	for _, line := range strings.Split(string(data), "\n") {
-		// Entry header: `"pkg@range", "pkg@range2":` or `pkg@range:`
-		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && strings.HasSuffix(strings.TrimSpace(line), ":") {
-			header := strings.TrimSuffix(strings.TrimSpace(line), ":")
-			// Grab first specifier; extract package name before the "@" range.
-			first := strings.SplitN(header, ",", 2)[0]
-			first = strings.Trim(first, `"`)
-			// Find the last "@" that separates name from range — but for
-			// scoped packages "@scope/pkg@range" we want the second "@".
-			if strings.HasPrefix(first, "@") {
-				rest := first[1:]
-				if idx := strings.Index(rest, "@"); idx >= 0 {
-					currentName = "@" + rest[:idx]
-				} else {
-					currentName = ""
-				}
-			} else {
-				if idx := strings.Index(first, "@"); idx >= 0 {
-					currentName = first[:idx]
-				} else {
-					currentName = ""
-				}
-			}
-			continue
-		}
-		if currentName == "" {
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "version ") {
-			ver := strings.TrimPrefix(trimmed, "version ")
-			ver = strings.Trim(ver, `"`)
-			if _, exists := out[currentName]; !exists {
-				out[currentName] = ver
-			}
-			currentName = ""
-		}
-	}
-	return out
+	pkgs, err := parse(bytes.NewReader(data))
+	reg, nonReg := npmLockSplit(pkgs)
+	return reg, nonReg, err
 }
 
 // parsePipRequirements parses a requirements.txt file (simple name==version
@@ -1268,74 +1225,130 @@ func parsePipRequirements(data []byte) (map[string]string, []nonRegistryDep) {
 	return out, nonRegistry
 }
 
-// parsePipfileLock parses Pipfile.lock (JSON with default/develop keys).
-func parsePipfileLock(data []byte) (map[string]string, error) {
+// parsePythonLock parses a Pipfile.lock, poetry.lock or uv.lock (file is the
+// base name) through core/depparser — the parsers the server lockfile scan
+// uses, so the guard, pr-scan and the server read the same packages, sources
+// and versions — and splits them by source the way the install guard decides
+// a lockfile's sources (pythonSource). Dev packages are included: `poetry
+// install` and `pipenv sync --dev` install them. nil data (a file absent at
+// the base ref) is no packages.
+func parsePythonLock(file string, data []byte) (registry []lockCoordinate, nonRegistry []nonRegistryDep, local []lockCoordinate, err error) {
+	if data == nil {
+		return nil, nil, nil, nil
+	}
+	var pkgs []ftypes.Package
+	switch file {
+	case "Pipfile.lock":
+		pkgs, err = pipenv.Parse(bytes.NewReader(stripUTF8BOM(data)))
+	case "poetry.lock":
+		pkgs, _, err = poetry.NewParser().Parse(context.Background(), bytes.NewReader(data))
+	case "uv.lock":
+		pkgs, err = uvlock.Parse(bytes.NewReader(data))
+	default:
+		return nil, nil, nil, fmt.Errorf("not a Python lockfile: %s", file)
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, p := range pkgs {
+		reg, nr, loc := pythonSource(p.Name, p.Version, p.Origin)
+		switch {
+		case reg != nil:
+			registry = append(registry, *reg)
+		case nr != nil:
+			nonRegistry = append(nonRegistry, *nr)
+		case loc != nil:
+			local = append(local, *loc)
+		}
+	}
+	return registry, nonRegistry, local, nil
+}
+
+// pythonSource is the install guard's rule for one Python lockfile package
+// (exactly one result is non-nil):
+//
+//   - no Origin: PyPI, a registry coordinate.
+//   - "file:…": local code (an editable project, a path dependency) —
+//     first-party, like a Cargo path crate (packageSpec.Local). Not a
+//     vendored wheel or sdist by path (localCode): that is third-party code,
+//     not from PyPI.
+//   - an index on another host ("registry+<url>", origin.RegistryOther):
+//     a registry coordinate when knownRegistry vouches for the host (PyPI
+//     under another alias, a registry_mirrors host, the user's own Chainsaw
+//     repository); otherwise not assessed, with the registry_mirrors hint.
+//     The guard has no registry digest to compare a lockfile hash with; the
+//     server decides these by hash.
+//   - anything else (git, an archive URL): not from PyPI.
+func pythonSource(name, version, src string) (reg *lockCoordinate, nonReg *nonRegistryDep, local *lockCoordinate) {
+	c := lockCoordinate{Name: name, Version: version}
+	switch {
+	case src == "":
+		return &c, nil, nil
+	case localCode(src):
+		return nil, nil, &c
+	case origin.Classify("pypi", src) == origin.RegistryOther && knownRegistry("pip", src):
+		return &c, nil, nil
+	}
+	return nil, &nonRegistryDep{Name: name, Version: version, Origin: src}, nil
+}
+
+// parsePipRequirementsSources splits a requirements file for pr-scan: the
+// registry name->version map (parsePipRequirements, ranges included — a diff
+// wants them), and the requirements installed from somewhere else — source
+// lines (`name @ git+…`, VCS and archive URLs), and every index requirement
+// when the file's primary index (`-i` / `--index-url`) is a host the guard
+// does not vouch for (pythonSource). Local paths (`-e ./lib`) get no row, as
+// for Cargo path crates.
+func parsePipRequirementsSources(data []byte) (registry map[string]string, nonRegistry []nonRegistryDep) {
 	if data == nil {
 		return nil, nil
 	}
-	var root map[string]map[string]struct {
-		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(stripUTF8BOM(data), &root); err != nil {
-		return nil, err
-	}
-	out := make(map[string]string)
-	for section, pkgs := range root {
-		if section == "_meta" {
-			continue
+	text := string(data)
+	// The source rows parsePipRequirements returns are rebuilt below from
+	// core/depparser (requirements.Packages), the parser the server uses;
+	// its rows are kept only for sources that parser has no name for (a
+	// bare `git+https://…` line), so nothing is listed twice.
+	registry, lineRows := parsePipRequirements(data)
+	idx := requirements.IndexSource(text)
+	if _, nr, _ := pythonSource("", "", idx); nr != nil {
+		// Every index requirement comes from an index the guard does not
+		// vouch for.
+		names := make([]string, 0, len(registry))
+		for name := range registry {
+			names = append(names, name)
 		}
-		for name, pkg := range pkgs {
-			ver := strings.TrimPrefix(pkg.Version, "==")
-			if ver != "" {
-				out[strings.ToLower(name)] = ver
+		sort.Strings(names)
+		for _, name := range names {
+			nonRegistry = append(nonRegistry, nonRegistryDep{Name: name, Version: registry[name], Origin: idx})
+		}
+		registry = map[string]string{}
+	}
+	for _, p := range requirements.Packages(text) {
+		name := strings.ToLower(p.Name)
+		switch {
+		case p.Origin == idx && idx != "":
+			// an index requirement, decided above
+		case p.Origin == "":
+			if _, ok := registry[name]; !ok && p.Version != "" {
+				registry[name] = p.Version // `name @ <file on PyPI's host>`
+			}
+		default:
+			if _, nr, _ := pythonSource(name, p.Version, p.Origin); nr != nil {
+				nonRegistry = append(nonRegistry, *nr)
 			}
 		}
 	}
-	return out, nil
-}
-
-// parsePoetryLock parses poetry.lock (TOML-ish; we use line scanning since
-// we don't want a TOML dependency).  Pattern: [[package]] blocks with
-// name = "..." and version = "..." fields.
-func parsePoetryLock(data []byte) map[string]string {
-	if data == nil {
-		return nil
+	seen := map[string]bool{}
+	for _, nr := range nonRegistry {
+		seen[strings.ToLower(nr.Name)] = true
 	}
-	out := make(map[string]string)
-	var currentName string
-	inPkg := false
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "[[package]]" {
-			inPkg = true
-			currentName = ""
-			continue
-		}
-		if !inPkg {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "[") {
-			inPkg = false
-			currentName = ""
-			continue
-		}
-		if strings.HasPrefix(trimmed, "name = ") {
-			currentName = strings.Trim(strings.TrimPrefix(trimmed, "name = "), `"`)
-		} else if strings.HasPrefix(trimmed, "version = ") && currentName != "" {
-			ver := strings.Trim(strings.TrimPrefix(trimmed, "version = "), `"`)
-			if ver != "" {
-				out[currentName] = ver
-			}
+	for _, nr := range lineRows {
+		if !seen[strings.ToLower(nr.Name)] {
+			seen[strings.ToLower(nr.Name)] = true
+			nonRegistry = append(nonRegistry, nr)
 		}
 	}
-	return out
-}
-
-// parseUVLock parses uv.lock (TOML-ish, similar structure to poetry.lock).
-// Pattern: [[package]] blocks with name = "..." and version = "...".
-func parseUVLock(data []byte) map[string]string {
-	// uv.lock uses the same [[package]] / name / version layout as poetry.lock.
-	return parsePoetryLock(data)
+	return registry, nonRegistry
 }
 
 // nonRegistryDep is a lockfile package that does NOT come from the
@@ -1367,88 +1380,47 @@ func nonRegistryReason(ecosystem, src string) string {
 		reg = "crates.io"
 	case "rubygems":
 		reg = "rubygems.org"
+	case "pip", "pypi":
+		reg = "PyPI"
 	}
 	return "not from " + reg + ": not assessed (" + origin.Label(src) + ")"
 }
 
-// parseGemfileLock parses Gemfile.lock. Gems are listed as "    gem (version)"
-// lines under "  specs:" in a source section, and the section decides where
-// the gem comes from:
+// parseGemfileLock parses Gemfile.lock with the server's parser
+// (core/depparser/parser/ruby/bundler: one package per gem and version,
+// platform builds folded, every source section classified) and splits the
+// result the way the guard and pr-scan consume it:
 //
-//   - GEM: a registry gem, whatever its `remote:`. A non-rubygems.org remote
-//     is overwhelmingly a MIRROR of rubygems.org (an enterprise proxy, or
-//     Chainsaw's own /chainproxy repository) serving the public packages, so
-//     treating it as non-registry would take every proxied customer's gems
-//     off the known-malicious floor. Ceiling, stated: a genuinely private gem
-//     server's gem is still checked as its rubygems.org namesake.
-//   - GIT, PATH, or any other source section: returned in nonRegistry and
+//   - a rubygems.org GEM gem: registry.
+//   - a GEM gem from another remote (a mirror, a private gem server, a
+//     Bundler 1.x section with several remotes): registry when
+//     knownRegistry accepts the remote — the user's declared registry_mirrors
+//     or their own Chainsaw repository — otherwise nonRegistry, which the
+//     guard reports "not assessed" with the registry_mirrors hint and still
+//     runs the known-malicious lookup on.
+//   - GIT, PATH ("file:" — local), or any other source section: nonRegistry,
 //     never checked as a rubygems.org gem.
-func parseGemfileLock(data []byte) (registry map[string]string, nonRegistry []nonRegistryDep) {
+//
+// A file that does not parse is an error (counted by pr-scan, reported by the
+// guard), never an empty lockfile.
+func parseGemfileLock(data []byte) (registry map[string]string, nonRegistry []nonRegistryDep, err error) {
 	if data == nil {
-		return nil, nil
+		return nil, nil, nil
+	}
+	pkgs, err := bundler.Parse(bytes.NewReader(data))
+	if err != nil {
+		return nil, nil, err
 	}
 	registry = make(map[string]string)
-	section, src := "", ""
-	var remotes []string
-	revision := ""
-	isRegistry, inSpecs := false, false
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			inSpecs = false
+	for _, p := range pkgs {
+		if p.Origin == "" ||
+			(origin.Classify("rubygems", p.Origin) == origin.RegistryOther && knownRegistry("rubygems", p.Origin)) {
+			registry[p.Name] = p.Version
 			continue
 		}
-		if line[0] != ' ' {
-			// A new top-level section: GEM, GIT, PATH, PLATFORMS, ...
-			section, remotes, revision, inSpecs = strings.TrimSpace(line), nil, "", false
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if !inSpecs {
-			if v, ok := strings.CutPrefix(trimmed, "remote:"); ok {
-				remotes = append(remotes, strings.TrimSpace(v))
-			} else if v, ok := strings.CutPrefix(trimmed, "revision:"); ok {
-				revision = strings.TrimSpace(v)
-			} else if trimmed == "specs:" {
-				inSpecs = true
-				isRegistry = section == "GEM"
-				src = strings.ToLower(section) + " " + strings.Join(remotes, ", ")
-				if section == "GIT" && len(remotes) == 1 {
-					// The Cargo grammar origin.Label already reads.
-					src = "git+" + remotes[0]
-					if revision != "" {
-						src += "#" + revision
-					}
-				}
-				src = origin.Sanitize(src)
-			}
-			continue
-		}
-		// 4-space-indented lines are "    name (version)"; deeper ones are
-		// that gem's own dependency constraints.
-		if !strings.HasPrefix(line, "    ") || strings.HasPrefix(line, "     ") {
-			continue
-		}
-		idx := strings.Index(trimmed, " (")
-		if idx <= 0 {
-			continue
-		}
-		name := trimmed[:idx]
-		ver := strings.TrimSuffix(trimmed[idx+2:], ")")
-		// Strip platform suffix "1.0.0-x86_64-linux" (only when it has letters).
-		if dashIdx := strings.Index(ver, "-"); dashIdx > 0 && strings.ContainsAny(ver[dashIdx:], "abcdefghijklmnopqrstuvwxyz") {
-			ver = ver[:dashIdx]
-		}
-		if name == "" || ver == "" {
-			continue
-		}
-		if isRegistry {
-			registry[name] = ver
-		} else {
-			nonRegistry = append(nonRegistry, nonRegistryDep{Name: name, Version: ver, Origin: src})
-		}
+		nonRegistry = append(nonRegistry, nonRegistryDep{Name: p.Name, Version: p.Version, Origin: p.Origin})
 	}
-	return registry, nonRegistry
+	return registry, nonRegistry, nil
 }
 
 // cargoSourceIsCratesIO reports whether a Cargo.lock `source` is crates.io,
@@ -1527,34 +1499,32 @@ func parseCargoLock(data []byte) (registry []lockCoordinate, nonRegistry []nonRe
 	return registry, nonRegistry, local
 }
 
-// parseGoSum parses go.sum.  Each line is: "module version hash".
-// We collect the module@version pairs (ignoring /go.mod lines since those
-// are just the go.mod of each module and don't represent an additional download).
-func parseGoSum(data []byte) map[string]string {
+// parseGoSum returns every module go.sum says was downloaded, with the
+// server's parser (core/depparser/parser/golang/sum): one coordinate per
+// "<module> <version> h1:" line — a "/go.mod" line is a version read during
+// module graph resolution and never built. Coordinates, not a name->version
+// map: an older go.sum holds one module at several versions, and the map kept
+// whichever came first. Versions keep the guard's existing spelling: the
+// leading "v" (as `go get mod@v1.2.3` is typed) and no "+incompatible". A
+// file that does not parse is an error, never an empty go.sum.
+func parseGoSum(data []byte) ([]lockCoordinate, error) {
 	if data == nil {
-		return nil
+		return nil, nil
 	}
-	out := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		// fields[0] = module path, fields[1] = version/go.mod
-		modPath := fields[0]
-		verField := fields[1]
-		// Skip the /go.mod variant — only count the module itself.
-		if strings.HasSuffix(verField, "/go.mod") {
-			continue
-		}
-		// Strip build-metadata suffix (e.g. "+incompatible").
-		ver := strings.SplitN(verField, "+", 2)[0]
-		// go.sum versions start with "v"; keep as-is for fidelity.
-		if _, exists := out[modPath]; !exists {
-			out[modPath] = ver
+	pkgs, err := gosum.Parse(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]lockCoordinate, 0, len(pkgs))
+	seen := map[lockCoordinate]bool{}
+	for _, p := range pkgs {
+		c := lockCoordinate{Name: p.Name, Version: "v" + strings.SplitN(p.Version, "+", 2)[0]}
+		if !seen[c] {
+			seen[c] = true
+			out = append(out, c)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

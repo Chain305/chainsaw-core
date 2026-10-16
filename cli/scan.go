@@ -1436,7 +1436,9 @@ func collectFromManifests(dir string) ([]scanPkg, error) {
 	all := make([]scanPkg, 0, len(regPkgs))
 	seen := make(map[string]bool, len(regPkgs))
 	for _, p := range regPkgs {
-		if p.Name == "" || p.Version == "" {
+		// A git/path/URL dependency often has no version; with its Origin it
+		// is still listed (not assessed), never dropped without a word.
+		if p.Name == "" || (p.Version == "" && p.Origin == "") {
 			continue
 		}
 		eco := ecosystemForLang(p.Lang)
@@ -1591,7 +1593,7 @@ func collectFromPath(path string, isDir bool) ([]scanPkg, error) {
 	}
 	out := make([]scanPkg, 0, len(regPkgs))
 	for _, p := range regPkgs {
-		if p.Name == "" || p.Version == "" {
+		if p.Name == "" || (p.Version == "" && p.Origin == "") {
 			continue
 		}
 		out = append(out, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: ecosystemForLang(p.Lang), Origin: p.Origin})

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/spf13/viper"
 	"sync"
 	"testing"
 )
@@ -418,5 +420,65 @@ source = "git+https://github.com/feldera/etl?rev=cdfb3c7e6581b63d8876c3c1b335b3a
 	}
 	if !strings.Contains(stdout, "NOT ASSESSED") || !strings.Contains(stdout, "github.com/feldera/etl@cdfb3c7") {
 		t.Errorf("table does not show etl as not assessed with its origin:\n%s", stdout)
+	}
+}
+
+// TestScanSplitLooksUpKnownMirrors: a lockfile package from a mirror the CLI
+// knows (a declared registry_mirrors host) is looked up as the public
+// package; an undeclared mirror and a git source stay not assessed, and the
+// undeclared mirror's reason names registry_mirrors. Before, every mirrored
+// package of a proxied or Artifactory-backed lockfile read not_assessed —
+// non-blocking, so the whole tree was a blind spot. Break it like this:
+// return false from knownMirror.
+func TestScanSplitLooksUpKnownMirrors(t *testing.T) {
+	prev := viper.Get("registry_mirrors")
+	t.Cleanup(func() { viper.Set("registry_mirrors", prev) })
+	viper.Set("registry_mirrors", []any{"artifactory.corp"})
+	pkgs := []scanPkg{
+		{Name: "lodash", Version: "4.17.21", Ecosystem: "npm", Origin: "https://artifactory.corp/api/npm/npm/lodash/-/lodash-4.17.21.tgz"},
+		{Name: "chalk", Version: "5.3.0", Ecosystem: "npm", Origin: "https://nexus.other/repository/npm/chalk/-/chalk-5.3.0.tgz"},
+		{Name: "fork", Version: "1.0.0", Ecosystem: "npm", Origin: "git+https://github.com/x/fork.git#abc"},
+		{Name: "debug", Version: "4.3.4", Ecosystem: "npm"},
+	}
+	reg, non := splitNonRegistry(pkgs)
+	if len(reg) != 2 || reg[0].Name != "lodash" || reg[1].Name != "debug" {
+		t.Fatalf("registry = %+v, want lodash (declared mirror) and debug", reg)
+	}
+	if len(non) != 2 {
+		t.Fatalf("nonRegistry = %+v, want chalk and fork", non)
+	}
+	rows := nonRegistryResults(non, nil)
+	if !strings.Contains(rows[0].OriginReason, "registry_mirrors") {
+		t.Errorf("undeclared mirror reason lacks the registry_mirrors hint: %q", rows[0].OriginReason)
+	}
+	if strings.Contains(rows[1].OriginReason, "registry_mirrors") {
+		t.Errorf("a git source is not a mirror, no hint: %q", rows[1].OriginReason)
+	}
+}
+
+// TestScanVersionlessGitDepIsListedNotLookedUp: a git dependency with no
+// version (requirements `pkg @ git+…`) is listed not assessed and never sent
+// to the server as name@"" — neither as a verdict lookup nor as a namesake.
+func TestScanVersionlessGitDepIsListedNotLookedUp(t *testing.T) {
+	pkgs := []scanPkg{{Name: "tool", Ecosystem: "pypi", Origin: "git+https://github.com/x/tool.git"}}
+	reg, non := splitNonRegistry(pkgs)
+	if len(reg) != 0 || len(non) != 1 {
+		t.Fatalf("registry=%+v nonRegistry=%+v", reg, non)
+	}
+	if ns := namesakes(non); len(ns) != 0 {
+		t.Fatalf("namesakes = %+v, want none for a versionless package", ns)
+	}
+	if rows := nonRegistryResults(non, nil); rows[0].Status != statusNotAssessed {
+		t.Fatalf("status = %q", rows[0].Status)
+	}
+}
+
+// TestScanPublicArtifactSwapIsHigh: `chainsaw scan` reports a lockfile entry
+// that names another package's public artifact as high, not not_assessed.
+func TestScanPublicArtifactSwapIsHigh(t *testing.T) {
+	rows := nonRegistryResults([]scanPkg{{Name: "lodash", Version: "4.17.21", Ecosystem: "npm",
+		Origin: "url+https://registry.npmjs.org/evil/-/evil-1.0.0.tgz"}}, nil)
+	if rows[0].Status != statusArtifactSwap || rows[0].Severity != "high" {
+		t.Fatalf("row = %+v, want artifact_swap / high", rows[0])
 	}
 }

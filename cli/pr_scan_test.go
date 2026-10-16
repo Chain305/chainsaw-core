@@ -991,7 +991,14 @@ packages:
   lodash@4.17.21:
     resolution: {integrity: sha512-y}
 `)
-	got := parsePNPMLock(lock)
+	reg, nonReg, err := parsePNPMLock(lock)
+	if err != nil || len(nonReg) != 0 {
+		t.Fatalf("parsePNPMLock: err %v, non-registry %v", err, nonReg)
+	}
+	got := map[string]string{}
+	for _, c := range reg {
+		got[c.Name] = c.Version
+	}
 	if got["@tanstack/react-query"] != "5.28.4" || got["lodash"] != "4.17.21" || len(got) != 2 {
 		t.Fatalf("parsePNPMLock = %v, want @tanstack/react-query=5.28.4 and lodash=4.17.21", got)
 	}

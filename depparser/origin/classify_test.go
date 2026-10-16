@@ -1,6 +1,8 @@
 package origin
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -165,5 +167,109 @@ func TestNormalizeHash(t *testing.T) {
 		if got := NormalizeHash(in); got != want {
 			t.Errorf("NormalizeHash(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestJoinSplitHashes: several candidate files of one release become one
+// deterministic Hash (canonical, deduplicated, sorted); unusable tokens are
+// dropped; a single hash round-trips unchanged.
+func TestJoinSplitHashes(t *testing.T) {
+	a, b := "sha256:"+strings.Repeat("b", 64), "sha256:"+strings.Repeat("a", 64)
+	got := JoinHashes(a, "SHA256="+strings.Repeat("A", 64), "md5:00", "", b)
+	if want := b + " " + a; got != want {
+		t.Fatalf("JoinHashes = %q, want %q", got, want)
+	}
+	if s := SplitHashes(got + " junk"); len(s) != 2 || s[0] != b || s[1] != a {
+		t.Fatalf("SplitHashes = %q", s)
+	}
+	if got := JoinHashes(a); got != a || NormalizeHash(got) != a {
+		t.Fatalf("single hash = %q", got)
+	}
+	if JoinHashes() != "" || len(SplitHashes("")) != 0 {
+		t.Fatal("empty")
+	}
+}
+
+// TestJoinHashesBoundedAndNonMutating: past MaxJoinedHashes distinct tokens
+// the Hash is "" (a crafted lockfile cannot make every entry carry an
+// unbounded string); duplicates do not count toward the cap; the caller's
+// slice is never reordered. Break it like this: drop the cap, or sort the
+// argument slice in place.
+func TestJoinHashesBoundedAndNonMutating(t *testing.T) {
+	tok := func(i int) string { return fmt.Sprintf("sha256:%064x", i) }
+	var hs []string
+	for i := MaxJoinedHashes; i > 0; i-- {
+		hs = append(hs, tok(i), tok(i)) // duplicates
+	}
+	orig := append([]string(nil), hs...)
+	if got := len(SplitHashes(JoinHashes(hs...))); got != MaxJoinedHashes {
+		t.Fatalf("%d distinct tokens: joined %d, want all", MaxJoinedHashes, got)
+	}
+	if !reflect.DeepEqual(hs, orig) {
+		t.Fatal("JoinHashes reordered the caller's slice")
+	}
+	if got := JoinHashes(append(hs, tok(0))...); got != "" {
+		t.Fatalf("%d distinct tokens: Hash = %d bytes, want \"\"", MaxJoinedHashes+1, len(got))
+	}
+}
+
+// TestNormalizeHashUppercaseSRI: npm's ssri reads only a lowercase SRI
+// algorithm and skips "SHA512-…", so such a token must not be one we
+// compare: "SHA512-<public> sha256-<evil>" would otherwise vouch for bytes
+// npm never checks against it. "<algo>:<hex>" stays case-insensitive.
+// Break it like this: lowercase the SRI algorithm before checking it.
+func TestNormalizeHashUppercaseSRI(t *testing.T) {
+	const lodash = "v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="
+	for _, in := range []string{"SHA512-" + lodash, "Sha512-" + lodash} {
+		if got := NormalizeHash(in); got != "" {
+			t.Errorf("NormalizeHash(%q) = %q, want \"\"", in, got)
+		}
+	}
+	if NormalizeHash("sha512-"+lodash) == "" || NormalizeHash("SHA256:"+strings.Repeat("A", 64)) == "" {
+		t.Fatal("lowercase SRI / uppercase <algo>:<hex> must still parse")
+	}
+}
+
+func TestIsArchive(t *testing.T) {
+	for in, want := range map[string]bool{
+		"file:vendor/x-1.0.0.tgz":        true,
+		"file:vend/X-1.0.0.TAR.GZ":       true,
+		"file:dist/pkg-1.0-py3-none.whl": true,
+		"file:x.zip#sha1=abc":            true,
+		"https://h.example/a.gem?t=1":    true,
+		"./vendor/evilpkg-1.0.tar":       true,
+		"file:v/x-1.0.TBZ":               true,
+		"file:v/x-1.0.txz":               true,
+		"file:v/x-1.0.tlz":               true,
+		"file:v/x-1.0.tar.lz":            true,
+		"file:v/x-1.0.tar.lzma":          true,
+		"file:packages/tar":              false,
+		"file:packages/ws":               false,
+		"file:./tgz":                     false,
+		"":                               false,
+	} {
+		if got := IsArchive(in); got != want {
+			t.Errorf("IsArchive(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestUnreadableHashKept: a placeholder for a hash we cannot read survives
+// JoinHashes/SplitHashes (dropping it let "sha1-<public> sha224-<other>"
+// match on the sha1 alone), is canonical and bounded, and dedupes.
+func TestUnreadableHashKept(t *testing.T) {
+	sha1 := "sha1:" + strings.Repeat("a", 40)
+	j := JoinHashes(sha1, UnreadableHash("SHA224"), UnreadableHash("sha224"), "garbage")
+	if j != sha1+" unknown:sha224" {
+		t.Fatalf("JoinHashes = %q", j)
+	}
+	if got := SplitHashes(j); len(got) != 2 || !IsUnreadableHash(got[1]) {
+		t.Fatalf("SplitHashes = %q", got)
+	}
+	if got := UnreadableHash(""); got != "unknown:none" {
+		t.Fatalf("UnreadableHash(\"\") = %q", got)
+	}
+	if got := UnreadableHash("a/b c" + strings.Repeat("x", 40)); len(got) > len("unknown:")+16 || strings.ContainsAny(got[8:], "/ ") {
+		t.Fatalf("UnreadableHash not bounded/sanitised: %q", got)
 	}
 }

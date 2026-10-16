@@ -32,6 +32,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/chain305/chainsaw-core/depparser/origin"
+	"github.com/chain305/chainsaw-core/depparser/parser/python"
 )
 
 var npmInstallActions = map[string]bool{"install": true, "i": true, "add": true, "ci": true}
@@ -347,7 +348,7 @@ func parsePipSpec(arg string) packageSpec {
 			src = src[:i] // environment markers
 		}
 		s := pipSourceSpec(src)
-		if s.Name != name {
+		if !python.SameProject(s.Name, name) {
 			s.Version = "" // a wheel version belongs to the wheel's own name
 		}
 		s.Name = name
@@ -966,6 +967,28 @@ func splitFlags(args []string, fs *flagSet) (pos []string, flags []argFlag) {
 // `file:../x`, `cargo install --path .`): first-party code on this machine,
 // reported as a local path and never as an alarm (see evaluateNonRegistry).
 const localOriginPrefix = "file:"
+
+// unparsedLockPrefix marks the Origin of a spec that stands for a lockfile
+// the guard could not parse (unparsedLockSpec).
+const unparsedLockPrefix = "unparsed-lockfile:"
+
+// unparsedLockSpec stands for every package of a lockfile that does not
+// parse. Those packages are unknown, so the install is not assessed — the
+// posture for a requirements file the guard cannot read: printed, never
+// silent, non-blocking by default, refused when the operator made
+// signalsUnavailable a refusal (evaluateNonRegistry). Skipping the file
+// instead let a guarded `npm ci` pass with nothing checked.
+func unparsedLockSpec(ecosystem, file string) packageSpec {
+	return packageSpec{Ecosystem: ecosystem, Origin: unparsedLockPrefix + file}
+}
+
+// localCode: a "file:" origin that is the project's own code — a directory,
+// a workspace member, a link. A vendored ARCHIVE ("file:vendor/x-1.0.0.tgz",
+// a wheel by path) is not: it is third-party code checked into the repo,
+// reported not assessed like a tarball URL, never Local and never silent.
+func localCode(o string) bool {
+	return strings.HasPrefix(o, localOriginPrefix) && !origin.IsArchive(o)
+}
 
 // localOrigin sanitises too: `file://user:token@host/share/x` is a URL.
 func localOrigin(path string) string {
@@ -1802,7 +1825,8 @@ func expandLockfile(bin string, args []string) []packageSpec {
 		// ("node-sass-legacy/node_modules/color-convert"), which matches
 		// nothing and forced every nested entry into the fallback cache scan.
 		// See lockNameMode in pr_scan.go for why the two modes exist.
-		for _, f := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
+		// npm-shrinkwrap.json first: npm installs from it when both exist.
+		for _, f := range []string{"npm-shrinkwrap.json", "package-lock.json"} {
 			if data, err := os.ReadFile(f); err == nil {
 				// Coordinates, NOT the name->version map. A real npm tree
 				// installs the same name at several versions (40 such names
@@ -1811,27 +1835,53 @@ func expandLockfile(bin string, args []string) []packageSpec {
 				// each run, because Go randomises map iteration. For a byte
 				// scan that means non-reproducible coverage. See
 				// parsePackageLockCoordinates.
-				if coords, perr := parsePackageLockCoordinates(data); perr == nil && len(coords) > 0 {
-					return coordsToSpecs("npm", coords)
+				//
+				// Git, tarball and undeclared-registry packages come back as
+				// Origin-carrying specs (not assessed, malware lane kept);
+				// workspace members and file: directories as Local, like
+				// Cargo's sourceless crates.
+				// A file that only partly parses keeps every package that
+				// did — each still gets the malware lane — beside the
+				// unparsed marker: one bad entry must not hide the tree.
+				deps, nonReg, perr := parsePackageLockCoordinates(data)
+				if perr != nil {
+					return append(npmLockSpecs(deps, nonReg), unparsedLockSpec("npm", f))
+				}
+				if len(deps)+len(nonReg) > 0 {
+					return npmLockSpecs(deps, nonReg)
 				}
 			}
 		}
-		// pnpm / yarn (single-return parsers).
-		if data, err := os.ReadFile("pnpm-lock.yaml"); err == nil {
-			if deps := parsePNPMLock(data); len(deps) > 0 {
-				return depsToSpecs("npm", deps, nil)
-			}
-		}
-		if data, err := os.ReadFile("yarn.lock"); err == nil {
-			if deps := parseYarnLock(data); len(deps) > 0 {
-				return depsToSpecs("npm", deps, nil)
+		// pnpm / yarn, through the server's parsers: every version of a
+		// name, aliases keyed by their target, git / tarball / undeclared-
+		// registry packages as Origin specs (not assessed, never checked as
+		// their namesakes), workspace packages Local. A file that does not
+		// parse is reported (unparsedLockSpec), never skipped.
+		for _, lock := range []struct {
+			file  string
+			parse func([]byte) ([]lockCoordinate, []nonRegistryDep, error)
+		}{{"pnpm-lock.yaml", parsePNPMLock}, {"yarn.lock", parseYarnLock}} {
+			if data, err := os.ReadFile(lock.file); err == nil {
+				reg, nonReg, perr := lock.parse(data)
+				if perr != nil {
+					return append(npmLockSpecs(reg, nonReg), unparsedLockSpec("npm", lock.file))
+				}
+				if specs := npmLockSpecs(reg, nonReg); len(specs) > 0 {
+					return specs
+				}
 			}
 		}
 	case "go":
 		// `go get` (no module) / `go mod download` → scan the resolved go.sum.
+		// go.sum already names what replace directives resolved to (the
+		// replacement module's lines; a path replace has none, it is local).
 		if data, err := os.ReadFile("go.sum"); err == nil {
-			if deps := parseGoSum(data); len(deps) > 0 {
-				return depsToSpecs("go", deps, nil)
+			coords, perr := parseGoSum(data)
+			if perr != nil {
+				return []packageSpec{unparsedLockSpec("go", "go.sum")}
+			}
+			if len(coords) > 0 {
+				return coordsToSpecs("go", coords)
 			}
 		}
 	case "cargo":
@@ -1853,10 +1903,14 @@ func expandLockfile(bin string, args []string) []packageSpec {
 		}
 	case "gem":
 		// `gem install` from a Gemfile.lock (bundler-resolved tree). Same
-		// split: GIT and PATH gems are not rubygems.org gems. Gems under any
-		// GEM remote (mirrors included) stay registry specs.
+		// split: GIT and PATH gems are not rubygems.org gems, and neither is
+		// a gem under a GEM remote knownRegistry does not accept (declare a
+		// mirror in registry_mirrors) — see parseGemfileLock.
 		if data, err := os.ReadFile("Gemfile.lock"); err == nil {
-			deps, nonReg := parseGemfileLock(data)
+			deps, nonReg, perr := parseGemfileLock(data)
+			if perr != nil {
+				return []packageSpec{unparsedLockSpec("rubygems", "Gemfile.lock")}
+			}
 			if specs := append(depsToSpecs("rubygems", deps, nil), nonRegistrySpecs("rubygems", nonReg)...); len(specs) > 0 {
 				return specs
 			}
@@ -1892,37 +1946,40 @@ func expandPythonLockfiles() []packageSpec {
 	// avoids by using coordinates instead of a map. Pipenv first (its
 	// presence is the strongest signal the project is pipenv-managed),
 	// then Poetry, then uv.
-	for _, src := range []struct {
-		file  string
-		parse func([]byte) (map[string]string, error)
-	}{
-		{"Pipfile.lock", parsePipfileLock},
-		{"poetry.lock", func(b []byte) (map[string]string, error) { return parsePoetryLock(b), nil }},
-		{"uv.lock", func(b []byte) (map[string]string, error) { return parseUVLock(b), nil }},
-	} {
-		data, err := os.ReadFile(src.file)
+	//
+	// Sources are decided per package (pythonSource): a git, URL or
+	// undeclared-index package carries its Origin (not assessed, malware lane
+	// kept), local code is Local, and a package from PyPI or a vouched-for
+	// index is a registry spec. One name at several versions (uv forks by
+	// marker) stays several specs.
+	for _, file := range []string{"Pipfile.lock", "poetry.lock", "uv.lock"} {
+		data, err := os.ReadFile(file)
 		if err != nil {
 			continue
 		}
-		deps, perr := src.parse(data)
+		reg, nonReg, local, perr := parsePythonLock(file, data)
 		if perr != nil {
 			// MALFORMED is fatal: the project declared which tool owns
 			// it, the file is corrupt, and quietly scanning a stale
 			// sibling would report coverage of a tree nobody installs.
-			return nil
+			// Nor is it silent: its packages are not assessed.
+			return []packageSpec{unparsedLockSpec("pypi", file)}
 		}
-		if len(deps) == 0 {
-			// EMPTY BUT VALID is NOT the same thing, and conflating the
-			// two was a real gap: pipenv writes
-			// `{"default":{},"develop":{}}` for an empty Pipfile, and a
-			// lockfile whose entries are all VCS/editable (no `version`
-			// key) parses cleanly to zero. A file that says nothing has
-			// not declared ownership of anything, so fall through to the
-			// next candidate — which is also what the npm arm above does
-			// (package-lock -> shrinkwrap -> pnpm -> yarn).
+		specs := append(coordsToSpecs("pypi", reg), nonRegistrySpecs("pypi", nonReg)...)
+		for _, c := range local {
+			specs = append(specs, packageSpec{Ecosystem: "pypi", Name: c.Name, Version: c.Version, Local: true})
+		}
+		if len(specs) == 0 {
+			// EMPTY BUT VALID is NOT the same thing: pipenv writes
+			// `{"default":{},"develop":{}}` for an empty Pipfile. A file
+			// that says nothing has not declared ownership of anything, so
+			// fall through to the next candidate — which is also what the
+			// npm arm above does (package-lock -> shrinkwrap -> pnpm ->
+			// yarn). (A lockfile of only VCS/editable entries used to parse
+			// to zero too; those are now specs with their Origin.)
 			continue
 		}
-		return depsToSpecs("pypi", deps, nil)
+		return specs
 	}
 	return nil
 }

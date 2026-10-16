@@ -199,7 +199,7 @@ func TestRegistryMetadataProvider_NPMScopedPackage(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/@babel/core", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"name":"@babel/core","dist-tags":{"latest":"7.0.0"},"versions":{"7.0.0":{"license":"MIT","dist":{"tarball":"x","shasum":"abc"}}},"time":{"7.0.0":"2018-01-01T00:00:00Z"}}`))
+		_, _ = w.Write([]byte(`{"name":"@babel/core","dist-tags":{"latest":"7.0.0"},"versions":{"7.0.0":{"license":"MIT","dist":{"tarball":"x","shasum":"abc","integrity":"sha512-AAA="}}},"time":{"7.0.0":"2018-01-01T00:00:00Z"}}`))
 	})
 	p, _ := newStubProvider(t, mux)
 	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "npm", Package: "@babel/core", Version: "7.0.0"}}, nil)
@@ -211,6 +211,11 @@ func TestRegistryMetadataProvider_NPMScopedPackage(t *testing.T) {
 	}
 	if pr.Metadata.LicenseExpression != "MIT" {
 		t.Fatalf("license: %q", pr.Metadata.LicenseExpression)
+	}
+	// A scoped package's registry digests are recorded like any other: the
+	// lockfile scan compares a mirror's integrity with exactly these (P1b).
+	if got := pr.Artifact.Digests.Registry; len(got) != 2 || got[0] != "sha1:abc" || got[1] != "sha512-AAA=" {
+		t.Fatalf("Digests.Registry = %v, want [sha1:abc sha512-AAA=]", got)
 	}
 }
 
@@ -2470,5 +2475,52 @@ func TestRunGo_LicenceNotStarvedBySlowProxy(t *testing.T) {
 		if w.Code == WarnLicenseUnavailable {
 			t.Fatalf("licence read was starved by the slow proxy: %+v", w)
 		}
+	}
+}
+
+// muxTransport serves requests straight from a ServeMux, without a listener
+// (the sandboxed test runner cannot bind a port).
+type muxTransport struct{ mux *http.ServeMux }
+
+func (m muxTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	m.mux.ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
+// TestRegistryMetadataProvider_PyPIRegistryDigestsAllFiles: Digests.Registry
+// holds the sha256 of EVERY distribution file of the release (sdist and each
+// wheel, yanked ones too), because a Python lockfile lists the hashes of all
+// the files it may install and the lockfile scan (internal/scan/
+// lockfile_mirror.go) treats PyPI as exact on that basis. Break it like
+// this: store only the picked wheel's digest again.
+func TestRegistryMetadataProvider_PyPIRegistryDigestsAllFiles(t *testing.T) {
+	a, b, c := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/pypi/attrs/23.1.0/json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"info": {"name": "attrs", "version": "23.1.0"}, "urls": [
+			{"filename": "attrs-23.1.0.tar.gz", "packagetype": "sdist", "digests": {"sha256": "` + a + `", "md5": "00"}},
+			{"filename": "attrs-23.1.0-py3-none-any.whl", "packagetype": "bdist_wheel", "digests": {"sha256": "` + b + `"}},
+			{"filename": "attrs-23.1.0-cp312-cp312-win_amd64.whl", "packagetype": "bdist_wheel", "yanked": true, "digests": {"sha256": "` + c + `"}},
+			{"filename": "attrs-23.1.0-nodigest.whl", "packagetype": "bdist_wheel", "digests": {}}
+		]}`))
+	})
+	p := newRegistryMetadataProvider()
+	p.client = &http.Client{Transport: muxTransport{mux}}
+	p.endpoints.pypi = "http://pypi.stub"
+	pr, err := p.Run(context.Background(), Request{Key: Key{Ecosystem: "pypi", Package: "attrs", Version: "23.1.0"}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if pr.Artifact == nil {
+		t.Fatalf("no artifact section; warnings %+v", pr.Warnings)
+	}
+	want := []string{"sha256:" + a, "sha256:" + b, "sha256:" + c}
+	if got := pr.Artifact.Digests.Registry; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("registry digests = %q, want every file's sha256 %q", got, want)
+	}
+	if pr.Artifact.Digests.SHA256 != b {
+		t.Fatalf("picked artifact sha256 = %q, want the wheel's", pr.Artifact.Digests.SHA256)
 	}
 }

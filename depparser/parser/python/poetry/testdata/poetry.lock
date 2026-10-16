@@ -1,0 +1,121 @@
+[[package]]
+name = "discord-ext-menus"
+version = "1.0.0a32+g8686b5d"
+description = "An extension module to make reaction based menus with discord.py"
+optional = false
+python-versions = ">=3.5.3"
+files = []
+develop = false
+
+[package.dependencies]
+"discord.py" = ">=1.2.5"
+
+[package.source]
+type = "git"
+url = "https://github.com/Rapptz/discord-ext-menus.git"
+reference = "master"
+resolved_reference = "8686b5d1bbc1d3c862292eb436ab630d6e9c9b53"
+
+[[package]]
+name = "consul"
+version = "1.0.0"
+description = "Python client for Consul (http://www.consul.io/)"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "consul-1.0.0-py3-none-any.whl", hash = "sha256:c3bbc67dda94d9bd5b7e422f8acdd9d07faba618c14a3dc524b0cfcb65bf158e"},
+    {file = "consul-1.0.0.tar.gz", hash = "sha256:4a99483fc7f4dbfd400e6aec7dc02d98aced8d6dbadf98ca7a6c11ee2aef0078"},
+]
+
+[package.dependencies]
+aiohttp = ">=3.8.3"
+packaging = ">=21.0"
+requests = "*"
+six = ">=1.4"
+
+[package.source]
+type = "legacy"
+url = "https://devpi.pyn.ru/hh/hhdev/+simple"
+reference = "hhdev"
+
+[[package]]
+name = "aiohappyeyeballs"
+version = "2.6.1"
+description = "Happy Eyeballs for asyncio"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "aiohappyeyeballs-2.6.1-py3-none-any.whl", hash = "sha256:f349ba8f4b75cb25c99c5c2d84e997e485204d2902a9597802b0371f09331fb8"},
+    {file = "aiohappyeyeballs-2.6.1.tar.gz", hash = "sha256:c3f9d0113123803ccadfdf3f0faa505bc78e6a72d1cc4806cbd719826e943558"},
+]
+
+[package.source]
+type = "legacy"
+url = "https://devpi.pyn.ru/root/pypi/+simple"
+reference = "pypi-mirror"
+
+[[package]]
+name = "absl-py"
+version = "2.4.0"
+description = "Abseil Python Common Libraries, see https://github.com/abseil/abseil-py."
+optional = false
+python-versions = ">=3.10"
+groups = ["dev"]
+files = [
+    {file = "absl_py-2.4.0-py3-none-any.whl", hash = "sha256:88476fd881ca8aab94ffa78b7b6c632a782ab3ba1cd19c9bd423abc4fb4cd28d"},
+    {file = "absl_py-2.4.0.tar.gz", hash = "sha256:8c6af82722b35cf71e0f4d1d47dcaebfff286e27110a99fc359349b247dfb5d4"},
+]
+
+[package.source]
+type = "legacy"
+url = "https://pypi.org/simple"
+reference = "pypi-public"
+
+# Not in the corpus: poetry's remaining source types, in poetry's syntax.
+[[package]]
+name = "localdir"
+version = "0.1.0"
+description = ""
+optional = false
+python-versions = "*"
+files = []
+develop = true
+
+[package.source]
+type = "directory"
+url = "../localdir"
+
+[[package]]
+name = "localfile"
+version = "0.2.0"
+description = ""
+optional = false
+python-versions = "*"
+files = [
+    {file = "localfile-0.2.0.tar.gz", hash = "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+]
+
+[package.source]
+type = "file"
+url = "dist/localfile-0.2.0.tar.gz"
+
+[[package]]
+name = "fromurl"
+version = "0.3.0"
+description = ""
+optional = false
+python-versions = "*"
+files = [
+    {file = "fromurl-0.3.0.tar.gz", hash = "sha256:3333333333333333333333333333333333333333333333333333333333333333"},
+]
+
+[package.source]
+type = "url"
+url = "https://example.com/fromurl-0.3.0.tar.gz"
+
+[metadata]
+lock-version = "2.1"
+python-versions = ">=3.10"
+content-hash = "x"

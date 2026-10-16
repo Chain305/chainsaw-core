@@ -123,3 +123,65 @@ func TestParsePnpmLockfile_V9(t *testing.T) {
 		t.Errorf("mime-db: want Prod=true (under axios), got %+v", n)
 	}
 }
+
+// pnpm 10+ writes the package manager's own lock as a first YAML document.
+// Only that document used to be read, so no project dependency was direct.
+func TestParsePnpmLockfile_TwoDocuments(t *testing.T) {
+	const lock = `---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    packageManagerDependencies:
+      pnpm:
+        specifier: 10.18.0
+        version: 10.18.0
+
+packages:
+
+  pnpm@10.18.0:
+    resolution: {integrity: sha512-x}
+
+snapshots:
+
+  pnpm@10.18.0: {}
+
+---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      lodash:
+        specifier: ^4.17.21
+        version: 4.17.21
+
+packages:
+
+  lodash@4.17.21:
+    resolution: {integrity: sha512-y}
+
+snapshots:
+
+  lodash@4.17.21: {}
+`
+	g, err := ParsePnpmLockfile([]byte(lock))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if n := g.Nodes[mk("lodash", "4.17.21")]; n == nil || !n.Direct {
+		t.Fatalf("lodash from the second document: node %+v, want direct", n)
+	}
+	if _, ok := g.Nodes[mk("pnpm", "10.18.0")]; !ok {
+		t.Fatal("pnpm from the first document is missing")
+	}
+}
+
+func TestSplitPnpmPackageKey_URLWithAt(t *testing.T) {
+	n, v := splitPnpmPackageKey("solady@git+https://git@github.com:Vectorized/solady.git#eb227ea")
+	if n != "solady" {
+		t.Fatalf("name = %q (%q), want solady", n, v)
+	}
+}

@@ -191,7 +191,10 @@ func TestMalformedLockfileStopsTheSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if specs := expandLockfile("pip", []string{"install"}); len(specs) != 0 {
-		t.Fatalf("a corrupt Pipfile.lock fell through to a sibling: %+v", specs)
+	// Not a sibling, and not silence: one spec standing for the unparsed
+	// file, which the guard reports not assessed.
+	specs := expandLockfile("pip", []string{"install"})
+	if len(specs) != 1 || specs[0].Origin != unparsedLockPrefix+"Pipfile.lock" || specs[0].Name != "" {
+		t.Fatalf("a corrupt Pipfile.lock fell through to a sibling or was skipped: %+v", specs)
 	}
 }

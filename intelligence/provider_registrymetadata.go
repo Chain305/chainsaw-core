@@ -1638,14 +1638,22 @@ func (p *registryMetadataProvider) runPyPI(ctx context.Context, pkg, ver string)
 		}
 		if d := picked.Digests; d != nil {
 			artifact.Digests.SHA256 = d["sha256"]
-			if d["sha256"] != "" {
-				artifact.Digests.Registry = []string{"sha256:" + d["sha256"]}
-			}
 			artifact.Digests.MD5 = d["md5"]
 			artifact.Digests.Blake2b256 = d["blake2b_256"]
 		}
 		if t, ok := parseTime(picked.UploadTime); ok {
 			release.PublishedAt = &t
+		}
+	}
+	// Digests.Registry: the sha256 of EVERY distribution file of the
+	// release (sdist and every wheel, yanked files included — still
+	// installable when pinned), not only the picked one. A lockfile lists
+	// the hashes of every file it may install, and the lockfile scan
+	// compares that whole list with this set (internal/scan/
+	// lockfile_mirror.go, which treats PyPI as exact because of it).
+	for _, u := range pack.URLs {
+		if sum := u.Digests["sha256"]; sum != "" {
+			artifact.Digests.Registry = append(artifact.Digests.Registry, "sha256:"+sum)
 		}
 	}
 
@@ -3540,7 +3548,6 @@ func (p *registryMetadataProvider) runRubyGems(ctx context.Context, pkg, ver str
 	}
 	if pack.SHA != "" {
 		artifact.Digests.SHA256 = pack.SHA
-		artifact.Digests.Registry = []string{"sha256:" + pack.SHA}
 	}
 
 	people := &PeopleSection{}
@@ -3600,8 +3607,23 @@ func (p *registryMetadataProvider) runRubyGems(ctx context.Context, pkg, ver str
 
 	// Pull the gem's full version timeline (separate endpoint from the
 	// per-version JSON). Fail-soft: any error surfaces as a Warning.
-	timeline, latest, tlWarn := p.fetchRubyGemsTimeline(ctx, pkg)
+	timeline, latest, platformSHAs, tlWarn := p.fetchRubyGemsTimeline(ctx, pkg, ver)
 	applyTimeline(&pr, timeline, latest, tlWarn)
+	// Digests.Registry is every .gem rubygems.org publishes under this
+	// version number: the default-platform gem (the v2 `sha`) and each
+	// platform gem (nokogiri 1.16.0-x86_64-linux, -arm64-darwin, ...), read
+	// off the versions list already fetched for the timeline — no extra
+	// request. A Gemfile.lock CHECKSUMS sha256 names one of these files.
+	//
+	// All or nothing: written only when the versions list carried this
+	// version, so a present set is the COMPLETE set of published files and
+	// a lockfile sha256 outside it is not a published gem of this version.
+	// When the list failed or lacks the version, the default-platform sha
+	// alone would make a genuine platform gem's checksum look foreign, so
+	// Registry stays empty (lockfile hash not compared).
+	if len(platformSHAs) > 0 {
+		artifact.Digests.Registry = registryDigestSet(append([]string{pack.SHA}, platformSHAs...))
+	}
 	enrichRepoStars(ctx, p, &pr)
 	return pr, nil
 }
@@ -3609,30 +3631,56 @@ func (p *registryMetadataProvider) runRubyGems(ctx context.Context, pkg, ver str
 // fetchRubyGemsTimeline returns the full version timeline for a gem
 // from /api/v1/versions/{gem}.json. The endpoint returns an unordered
 // array of `{number, created_at}` records.
-func (p *registryMetadataProvider) fetchRubyGemsTimeline(ctx context.Context, pkg string) ([]VersionRelease, string, *Warning) {
-	doc := p.fetchRubyGemsTimelineDoc(ctx, pkg)
-	return doc.timeline, doc.latest, doc.wrapped(p)
+//
+// It also returns the sha256 of every .gem published as version ver (one
+// per platform), which the same records carry.
+func (p *registryMetadataProvider) fetchRubyGemsTimeline(ctx context.Context, pkg, ver string) ([]VersionRelease, string, []string, *Warning) {
+	doc, shas := p.fetchRubyGemsTimelineDoc(ctx, pkg)
+	return doc.timeline, doc.latest, shas[ver], doc.wrapped(p)
+}
+
+// registryDigestSet is the de-duplicated "sha256:<lowercase hex>" set of
+// shas, anything that is not 64 hex digits dropped.
+func registryDigestSet(shas []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range shas {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if _, err := hex.DecodeString(s); err != nil || len(s) != 64 || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, "sha256:"+s)
+	}
+	return out
 }
 
 // fetchRubyGemsTimelineDoc is the fetch+parse half, returning the RAW
 // fetch warning. See timelineDoc.
-func (p *registryMetadataProvider) fetchRubyGemsTimelineDoc(ctx context.Context, pkg string) timelineDoc {
+// The second result maps each version number to the sha256 of every gem
+// published under it (the records are one per platform).
+func (p *registryMetadataProvider) fetchRubyGemsTimelineDoc(ctx context.Context, pkg string) (timelineDoc, map[string][]string) {
 	endpoint := fmt.Sprintf("%s/api/v1/versions/%s.json", p.endpoints.rubygems, url.PathEscape(pkg))
 	var versions []struct {
 		Number     string `json:"number"`
 		CreatedAt  string `json:"created_at"`
 		Prerelease bool   `json:"prerelease"`
+		SHA        string `json:"sha"`
 	}
 	warn, err := p.fetchJSON(ctx, endpoint, "application/json", &versions)
 	if err != nil || warn != nil {
-		return timelineDoc{endpoint: endpoint, warn: warn, err: err}
+		return timelineDoc{endpoint: endpoint, warn: warn, err: err}, nil
 	}
 	timeline := make([]VersionRelease, 0, len(versions))
+	shas := map[string][]string{}
 	var latest string
 	var latestT time.Time
 	for _, v := range versions {
 		if v.Number == "" {
 			continue
+		}
+		if v.SHA != "" {
+			shas[v.Number] = append(shas[v.Number], v.SHA)
 		}
 		rel := VersionRelease{Version: v.Number}
 		if t, ok := parseTime(v.CreatedAt); ok {
@@ -3645,7 +3693,7 @@ func (p *registryMetadataProvider) fetchRubyGemsTimelineDoc(ctx context.Context,
 		}
 		timeline = append(timeline, rel)
 	}
-	return timelineDoc{timeline: timeline, latest: latest, endpoint: endpoint}
+	return timelineDoc{timeline: timeline, latest: latest, endpoint: endpoint}, shas
 }
 
 // rubyGemsYankedBanner is the sentence rubygems.org prints on the version page
@@ -6544,7 +6592,7 @@ func (p *registryMetadataProvider) probeCargoPackage(pkg string) packageProbe {
 
 func (p *registryMetadataProvider) probeRubyGemsPackage(pkg string) packageProbe {
 	return func(ctx context.Context) ([]string, string, *Warning) {
-		doc := p.fetchRubyGemsTimelineDoc(ctx, pkg)
+		doc, _ := p.fetchRubyGemsTimelineDoc(ctx, pkg)
 		return timelineVersions(doc.timeline), doc.endpoint, doc.probeWarning()
 	}
 }

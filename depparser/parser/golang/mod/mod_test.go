@@ -222,6 +222,62 @@ golang.org/x/sys v0.15.0/go.mod h1:DDDD=
 	}
 }
 
+// TestParseReplace: a module replace is scored as the replacement module (no
+// Origin — Go has no non-registry module paths), a path replace keeps the
+// required coordinate with the directory as Origin, and a version-specific
+// replace applies only to that version and wins over a wildcard. Directives
+// from hashicorp/vault and kubernetes/kubernetes go.mod.
+func TestParseReplace(t *testing.T) {
+	const in = `module github.com/hashicorp/vault
+
+go 1.25.4
+
+replace github.com/hashicorp/vault/api => ./api
+
+replace github.com/99designs/keyring => github.com/Jeffail/keyring v1.2.3
+
+replace google.golang.org/grpc v1.84.0 => google.golang.org/grpc v1.83.2
+
+replace github.com/ma314smith/signedxml v1.1.1 => github.com/moov-io/signedxml v1.1.1
+
+replace (
+	k8s.io/api => ./staging/src/k8s.io/api
+	example.com/both => example.com/wild v1.0.0
+	example.com/both v1.2.0 => example.com/specific v1.2.1
+)
+
+require (
+	github.com/hashicorp/vault/api v1.23.0
+	github.com/99designs/keyring v1.2.2 // indirect
+	google.golang.org/grpc v1.84.0
+	github.com/ma314smith/signedxml v1.1.0
+	k8s.io/api v0.0.0
+	example.com/both v1.2.0
+	github.com/spf13/cobra v1.6.0
+)
+`
+	got, err := gomod.Parse(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	var rows []string
+	for _, p := range got {
+		rows = append(rows, p.Name+"@"+p.Version+" "+p.Origin)
+	}
+	want := []string{
+		"github.com/hashicorp/vault/api@1.23.0 file:./api",
+		"github.com/Jeffail/keyring@1.2.3 ",
+		"google.golang.org/grpc@1.83.2 ",
+		"github.com/ma314smith/signedxml@1.1.0 ", // replace is for v1.1.1 only
+		"k8s.io/api@0.0.0 file:./staging/src/k8s.io/api",
+		"example.com/specific@1.2.1 ",
+		"github.com/spf13/cobra@1.6.0 ",
+	}
+	if strings.Join(rows, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(rows, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 func index(pkgs []ftypes.Package) map[string]string {
 	out := make(map[string]string, len(pkgs))
 	for _, p := range pkgs {
@@ -237,4 +293,46 @@ func fmtPkgs(pkgs []ftypes.Package) string {
 	}
 	sort.Strings(parts)
 	return "[" + strings.Join(parts, " ") + "]"
+}
+
+// TestParseReplaceOnLaxFallback: a directive newer than x/mod fails the strict
+// parse and the parser falls back to ParseLax, which drops replaces. Red-team
+// finding: every fork and local directory was then scored as upstream. The
+// replaces are re-read; a fallback file whose replaces do not parse is refused.
+func TestParseReplaceOnLaxFallback(t *testing.T) {
+	const in = `module example.com/app
+
+go 1.30
+
+frobnicate example.com/tool
+
+replace example.com/fork => github.com/attacker/fork v1.0.1
+
+replace (
+	example.com/local => ../local
+)
+
+require (
+	example.com/fork v1.0.0
+	example.com/local v0.0.0
+	example.com/plain v1.2.3
+)
+`
+	got, err := gomod.Parse(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	var rows []string
+	for _, p := range got {
+		rows = append(rows, p.Name+"@"+p.Version+" "+p.Origin)
+	}
+	want := "github.com/attacker/fork@1.0.1 \nexample.com/local@0.0.0 file:../local\nexample.com/plain@1.2.3 "
+	if strings.Join(rows, "\n") != want {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(rows, "\n"), want)
+	}
+
+	bad := strings.Replace(in, "replace example.com/fork => github.com/attacker/fork v1.0.1", "replace example.com/fork => github.com/attacker/fork v1.0.1 extra", 1)
+	if _, err := gomod.Parse(strings.NewReader(bad)); err == nil {
+		t.Fatal("a fallback go.mod with an unreadable replace parsed; want an error, not requires without replaces")
+	}
 }

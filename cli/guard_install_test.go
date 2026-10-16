@@ -196,7 +196,7 @@ func TestExpandLockfileCarriesNpmIntegrity(t *testing.T) {
 	  "lockfileVersion": 3,
 	  "packages": {
 	    "": {"name": "root", "version": "1.0.0"},
-	    "node_modules/chalk": {"version": "4.1.2", "integrity": "sha512-Chalk=="},
+	    "node_modules/chalk": {"version": "4.1.2", "integrity": "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA=="},
 	    "node_modules/nolock": {"version": "0.1.0"}
 	  }
 	}`
@@ -212,8 +212,8 @@ func TestExpandLockfileCarriesNpmIntegrity(t *testing.T) {
 		switch s.Name {
 		case "chalk":
 			found = true
-			if s.Integrity != "sha512-Chalk==" {
-				t.Fatalf("chalk spec integrity = %q, want sha512-Chalk== — the anchor is dropped between the lockfile and the guard", s.Integrity)
+			if s.Integrity != "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA==" {
+				t.Fatalf("chalk spec integrity = %q, want sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA== — the anchor is dropped between the lockfile and the guard", s.Integrity)
 			}
 		case "nolock":
 			if s.Integrity != "" {

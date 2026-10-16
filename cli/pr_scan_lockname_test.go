@@ -368,14 +368,14 @@ func TestParsePackageLockCoordinates_DuplicateNamesAllSurvive(t *testing.T) {
 	  "lockfileVersion": 3,
 	  "packages": {
 	    "": {"name": "root", "version": "1.0.0"},
-	    "node_modules/color-convert": {"version": "2.0.1", "integrity": "sha512-AAAA=="},
-	    "node_modules/pkg-a/node_modules/color-convert": {"version": "1.9.3", "integrity": "sha512-BBBB=="},
-	    "node_modules/pkg-b/node_modules/color-convert": {"version": "0.5.3", "integrity": "sha512-CCCC=="},
-	    "node_modules/solo": {"version": "3.0.0", "integrity": "sha512-DDDD=="}
+	    "node_modules/color-convert": {"version": "2.0.1", "integrity": "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="},
+	    "node_modules/pkg-a/node_modules/color-convert": {"version": "1.9.3", "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="},
+	    "node_modules/pkg-b/node_modules/color-convert": {"version": "0.5.3", "integrity": "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ=="},
+	    "node_modules/solo": {"version": "3.0.0", "integrity": "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="}
 	  }
 	}`)
 
-	coords, err := parsePackageLockCoordinates(lock)
+	coords, _, err := parsePackageLockCoordinates(lock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,10 +385,10 @@ func TestParsePackageLockCoordinates_DuplicateNamesAllSurvive(t *testing.T) {
 		got[c.Name+"@"+c.Version] = c.Integrity
 	}
 	for _, want := range []struct{ coord, sri string }{
-		{"color-convert@2.0.1", "sha512-AAAA=="},
-		{"color-convert@1.9.3", "sha512-BBBB=="},
-		{"color-convert@0.5.3", "sha512-CCCC=="},
-		{"solo@3.0.0", "sha512-DDDD=="},
+		{"color-convert@2.0.1", "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="},
+		{"color-convert@1.9.3", "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="},
+		{"color-convert@0.5.3", "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ=="},
+		{"solo@3.0.0", "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="},
 	} {
 		sri, ok := got[want.coord]
 		if !ok {
@@ -408,7 +408,7 @@ func TestParsePackageLockCoordinates_DuplicateNamesAllSurvive(t *testing.T) {
 	// so guard coverage was a coin flip and a gap never reproduced twice.
 	first := fmt.Sprintf("%v", coords)
 	for i := 0; i < 20; i++ {
-		again, err := parsePackageLockCoordinates(lock)
+		again, _, err := parsePackageLockCoordinates(lock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -426,11 +426,11 @@ func TestParsePackageLockCoordinates_ConflictingAnchorsCollapse(t *testing.T) {
 	lock := []byte(`{
 	  "lockfileVersion": 3,
 	  "packages": {
-	    "node_modules/dup": {"version": "1.0.0", "integrity": "sha512-AAAA=="},
-	    "node_modules/x/node_modules/dup": {"version": "1.0.0", "integrity": "sha512-ZZZZ=="}
+	    "node_modules/dup": {"version": "1.0.0", "integrity": "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="},
+	    "node_modules/x/node_modules/dup": {"version": "1.0.0", "integrity": "sha512-/LLMVyas0ljjAtoYiPqYiL8VWXzUUdThrmU5+n20DZv+a+ClRoevUzw5JxU+Ieh5/c87ytoTBV9G1FiKfNJdmg=="}
 	  }
 	}`)
-	coords, err := parsePackageLockCoordinates(lock)
+	coords, _, err := parsePackageLockCoordinates(lock)
 	if err != nil {
 		t.Fatal(err)
 	}

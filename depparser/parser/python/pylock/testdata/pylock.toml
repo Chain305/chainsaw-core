@@ -1,0 +1,53 @@
+# PEP 751 layout, as `pip lock` / `uv export --format pylock.toml` write it.
+lock-version = "1.0"
+environments = ["sys_platform == 'linux'"]
+requires-python = ">=3.10"
+created-by = "pip"
+
+[[packages]]
+name = "attrs"
+version = "25.1.0"
+index = "https://pypi.org/simple"
+
+[[packages.wheels]]
+name = "attrs-25.1.0-py3-none-any.whl"
+upload-time = 2025-01-25T11:30:10.164985+00:00
+url = "https://files.pythonhosted.org/packages/fc/30/d4986a882011f9df997a55e6becd864812ccfcd821d64aac8570ee39f719/attrs-25.1.0-py3-none-any.whl"
+size = 63152
+hashes = {sha256 = "c75a69e28a550a7e93789579c22aa26b0f5b83b75dc4e08fe092980051e1090a"}
+
+[packages.sdist]
+name = "attrs-25.1.0.tar.gz"
+url = "https://files.pythonhosted.org/packages/49/7c/fdf464bcc51d23881d110abd74b512a42b3d5d376a55a831b44c603ae17f/attrs-25.1.0.tar.gz"
+size = 810562
+hashes = {sha256 = "1c97078a80c814273a76b2a298a932eb681c87415c11dee0a6921de7f1b02c3e"}
+
+[[packages]]
+name = "Corp.Utils"
+version = "1.4.0"
+index = "https://token:x@artifactory.example.com/artifactory/api/pypi/pypi-internal/simple"
+
+[[packages.wheels]]
+url = "https://artifactory.example.com/artifactory/api/pypi/pypi-internal/packages/corp_utils-1.4.0-py3-none-any.whl"
+hashes = {sha256 = "5555555555555555555555555555555555555555555555555555555555555555"}
+
+[[packages]]
+name = "noindex"
+version = "2.0"
+
+[[packages.wheels]]
+url = "https://mirror.example.org/packages/noindex-2.0-py3-none-any.whl"
+hashes = {sha256 = "6666666666666666666666666666666666666666666666666666666666666666"}
+
+[[packages]]
+name = "from-vcs"
+vcs = {type = "git", url = "https://github.com/example/from-vcs.git", requested-revision = "main", commit-id = "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567"}
+
+[[packages]]
+name = "from-dir"
+directory = {path = "./libs/from-dir", editable = true}
+
+[[packages]]
+name = "from-archive"
+version = "0.5"
+archive = {url = "https://downloads.example.com/from_archive-0.5.tar.gz", hashes = {sha256 = "7777777777777777777777777777777777777777777777777777777777777777"}}

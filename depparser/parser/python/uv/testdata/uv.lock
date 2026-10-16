@@ -1,0 +1,78 @@
+version = 1
+revision = 3
+requires-python = ">=3.11, <3.14"
+
+[manifest]
+members = [
+    "hathor",
+    "htr-lib",
+]
+
+[[package]]
+name = "aiohappyeyeballs"
+version = "2.3.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/c3/112f2f992aeb321de483754c1c5acab08c8ac3388c9c7e6f3e4f45ec1c42/aiohappyeyeballs-2.3.5.tar.gz", hash = "sha256:6fa48b9f1317254f122a07a131a86b71ca6946ca989ce6326fff54a99a920105", size = 16791, upload-time = "2024-08-07T13:04:51.83Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/b4/0983e94060405eb51f23be493e3f5c28003f7ebc5efcd0803c1cb23ea407/aiohappyeyeballs-2.3.5-py3-none-any.whl", hash = "sha256:4d6dea59215537dbc746e93e779caea8178c866856a721c9c660d7a5a7b8be03", size = 12139, upload-time = "2024-08-07T13:04:49.382Z" },
+]
+
+[[package]]
+name = "hathor"
+version = "0.72.0"
+source = { editable = "." }
+
+[[package]]
+name = "hathor-ct-crypto"
+source = { editable = "htr-rs/crates/hathor-ct-crypto" }
+
+[[package]]
+name = "hathorlib"
+version = "0.15.0"
+source = { editable = "hathorlib" }
+
+[[package]]
+name = "rocksdb"
+version = "0.10.1"
+source = { git = "https://github.com/hathornetwork/python-rocksdb.git#8c20974458995ab7a1a64e046a40311e58450ffd" }
+[[package]]
+name = "tensorrt-cu12-bindings"
+version = "10.12.0.36"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-10.12.0.36-cp312-none-manylinux_2_28_x86_64.whl", hash = "sha256:fb3a2ce96c7472a46bbee2030ce6a54fd6a32deda401c1c67d9de057550e0171" },
+    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-10.12.0.36-cp312-none-manylinux_2_31_aarch64.whl", hash = "sha256:f5128b8b2a379e65c09745ba97df58abf3a418cbfd6508d37f76121d9bdd3bc8" },
+    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-10.12.0.36-cp312-none-win_amd64.whl", hash = "sha256:408af91113c22f58f2f08404bfc1548baa8d78ce6126bd543acdc9d5819662ff" },
+]
+
+
+# Not in the corpus: uv's remaining source kinds, in uv's own syntax.
+[[package]]
+name = "from-url"
+version = "1.0"
+source = { url = "https://example.com/dist/from_url-1.0.tar.gz" }
+sdist = { hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
+
+[[package]]
+name = "pypi-url"
+version = "2.0"
+source = { url = "https://files.pythonhosted.org/packages/aa/bb/pypi_url-2.0-py3-none-any.whl" }
+
+[[package]]
+name = "local-path"
+version = "0.1"
+source = { path = "../wheels/local_path-0.1-py3-none-any.whl" }
+
+[[package]]
+name = "local-dir"
+version = "0.2"
+source = { directory = "libs/local-dir" }
+
+[[package]]
+name = "workspace-root"
+source = { virtual = "." }
+
+[[package]]
+name = "private-index"
+version = "3.0"
+source = { registry = "https://user:secret@nexus.example/repository/pypi/simple" }

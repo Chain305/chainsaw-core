@@ -1,0 +1,97 @@
+{
+  "name": "fx-origins",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "fx-origins",
+      "version": "1.0.0",
+      "workspaces": [
+        "workspaces/*"
+      ],
+      "dependencies": {
+        "date-fns": "^4.4.0"
+      }
+    },
+    "node_modules/react-is-18": {
+      "name": "react-is",
+      "version": "18.3.1",
+      "resolved": "https://registry.npmjs.org/react-is/-/react-is-18.3.1.tgz",
+      "integrity": "sha512-/LLMVyas0ljjAtoYiPqYiL8VWXzUUdThrmU5+n20DZv+a+ClRoevUzw5JxU+Ieh5/c87ytoTBV9G1FiKfNJdmg==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/date-fns": {
+      "version": "4.4.0",
+      "resolved": "https://registry.npmjs.org/date-fns/-/date-fns-4.4.0.tgz",
+      "integrity": "sha512-+1UMbeh68lH1SegH83CGWwpb6OHHbpSgr3+s5Eww5M4CAgswBpoWS0AjTOfEJ33HiYKz1hdj/KTFprzXHmq/6w==",
+      "license": "MIT",
+      "peer": true
+    },
+    "node_modules/@babel/core/node_modules/semver": {
+      "version": "6.3.1",
+      "resolved": "https://registry.npmjs.org/semver/-/semver-6.3.1.tgz",
+      "integrity": "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="
+    },
+    "node_modules/@babel/eslint-parser/node_modules/semver": {
+      "version": "6.3.1",
+      "resolved": "https://registry.npmjs.org/semver/-/semver-6.3.1.tgz",
+      "integrity": "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA==",
+      "dev": true
+    },
+    "node_modules/react-native-sound": {
+      "version": "0.11.2",
+      "resolved": "git+ssh://git@github.com/jitsi/react-native-sound.git#bc92152667a628120374c1324fc9e44f697c3192",
+      "integrity": "sha512-hsmPboNohRqzRjDL5ogOlWc0A28+/SE26e0PxBYBPCAEAwX0satLbeyd4zd99EdNTmrMavfd7Ao2ATFEIByckA==",
+      "license": "MIT"
+    },
+    "node_modules/private-lib": {
+      "version": "1.0.0",
+      "resolved": "git+https://ci-user:ghp_notarealtoken@github.com/acme/private-lib.git#0123456789abcdef0123456789abcdef01234567"
+    },
+    "node_modules/strophe.js": {
+      "version": "1.5.0",
+      "resolved": "https://github.com/jitsi/strophejs/releases/download/v1.5-jitsi-3/strophe.js-1.5.0.tgz",
+      "integrity": "sha512-LNtsu2qioXofCESHqEmLF12DuIK7itMMjxe9aSeQOENz8rCXBY/khV8OKO2xaWBy0QxpQs7nyb7RHefVu9ZlfA==",
+      "license": "MIT"
+    },
+    "node_modules/vendored": {
+      "version": "0.1.0",
+      "resolved": "file:vend/vendored-0.1.0.tgz",
+      "integrity": "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ=="
+    },
+    "node_modules/ms": {
+      "version": "2.1.3",
+      "resolved": "https://chain305.com/chainproxy/repository/@acme/npmjs/ms/-/ms-2.1.3.tgz",
+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+      "license": "MIT"
+    },
+    "node_modules/has-flag": {
+      "version": "4.0.0",
+      "resolved": "https://artifactory.example.com/artifactory/api/npm/npm-remote/has-flag/-/has-flag-4.0.0.tgz",
+      "integrity": "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==",
+      "license": "MIT"
+    },
+    "node_modules/libnpmaccess": {
+      "resolved": "workspaces/libnpmaccess",
+      "link": true
+    },
+    "workspaces/libnpmaccess": {
+      "version": "11.0.0",
+      "license": "ISC"
+    },
+    "node_modules/@npmcli/arborist": {
+      "resolved": "workspaces/arborist",
+      "link": true
+    },
+    "workspaces/arborist": {
+      "name": "@npmcli/arborist",
+      "version": "10.0.3",
+      "license": "ISC"
+    },
+    "workspaces/no-version": {
+      "name": "no-version"
+    }
+  }
+}

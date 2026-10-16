@@ -86,7 +86,9 @@ func (s shim) Parse(_ context.Context, path string) ([]Package, error) {
 	}
 	out := make([]Package, 0, len(fpkgs))
 	for _, fp := range fpkgs {
-		if fp.Dev || fp.Name == "" || fp.Version == "" {
+		// A package from a source (git, path, URL) often has no version;
+		// it is kept, with its Origin, rather than dropped without a word.
+		if fp.Dev || fp.Name == "" || (fp.Version == "" && fp.Origin == "") {
 			continue
 		}
 		out = append(out, Package{
@@ -129,6 +131,7 @@ func init() {
 
 	// Node
 	Register(shim{ftypes.Npm, exact("package-lock.json"), npm.Parse})
+	Register(shim{ftypes.Npm, exact("npm-shrinkwrap.json"), npm.Parse}) // same format
 	Register(shim{ftypes.Yarn, exact("yarn.lock"), yarn.Parse})
 	Register(shim{ftypes.Pnpm, exact("pnpm-lock.yaml"), pnpm.Parse})
 	Register(shim{ftypes.Bun, exact("bun.lock"), bun.Parse})

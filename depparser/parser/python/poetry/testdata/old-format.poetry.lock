@@ -1,0 +1,52 @@
+[[package]]
+category = "dev"
+description = "A small Python module for determining appropriate platform-specific dirs, e.g. a \"user data dir\"."
+name = "appdirs"
+optional = false
+python-versions = "*"
+version = "1.4.4"
+
+[[package]]
+category = "main"
+description = ""
+name = "nixops"
+optional = false
+python-versions = "^3.7"
+version = "2.0.0"
+
+[package.dependencies]
+PrettyTable = "^0.7.2"
+pluggy = "^0.13.1"
+typeguard = "^2.7.1"
+typing-extensions = "^3.7.4"
+
+[package.source]
+reference = "0330ead36be75c0b0f80cf84c227f13380daf414"
+type = "git"
+url = "https://github.com/NixOS/nixops.git"
+
+[[package]]
+category = "main"
+description = ""
+name = "nixos-modules-contrib"
+optional = false
+python-versions = "^3.7"
+version = "0.1.0"
+
+[package.dependencies]
+nixops = "rev master"
+
+[package.source]
+reference = "6e4d21f47f0c40023a56a9861886bde146476198"
+type = "git"
+url = "https://github.com/nix-community/nixos-modules-contrib.git"
+
+[metadata]
+content-hash = "x"
+python-versions = "^3.7"
+
+[metadata.files]
+appdirs = [
+    {file = "appdirs-1.4.4-py2.py3-none-any.whl", hash = "sha256:a841dacd6b99318a741b166adb07e19ee71a274450e68237b4650ca1055ab128"},
+    {file = "appdirs-1.4.4.tar.gz", hash = "sha256:7d5d0167b2b1ba821647616af46a749d1c653740dd0d2415100fe26e27afdf41"},
+]

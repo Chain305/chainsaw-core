@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	"github.com/chain305/chainsaw-core/malware"
 	"github.com/chain305/chainsaw-core/typosquat"
 )
@@ -77,9 +79,10 @@ source = "git+https://github.com/someone/tokio?branch=fix#fedcba9876543210"
 `
 
 // guardOriginGemfileLock: a rubygems.org GEM section, a second GEM section on
-// a mirror (bundler 2.x writes one section per remote; a mirror serves the
-// PUBLIC gems, so its gems are registry gems), a GIT section and a PATH
-// section.
+// a Chainsaw proxy repository this CLI is not configured for (bundler 2.x
+// writes one section per remote; an undeclared remote may be a private gem
+// server, so its gems are not assessed — known-malicious lookup kept), a GIT
+// section and a PATH section.
 const guardOriginGemfileLock = `GIT
   remote: https://github.com/someone/rack.git
   revision: 0123456789abcdef0123456789abcdef01234567
@@ -179,6 +182,7 @@ func TestGuardLockfileNonRegistryNeverReachesRegistryCheck(t *testing.T) {
 		wantNotAsmt  map[string]int // name -> count of not-assessed verdicts
 		absent       []string       // names that must produce no verdict at all
 		notAssessTxt string
+		attempted    int // specs reaching byte acquisition: the registry ones
 	}{
 		{
 			name: "cargo", bin: "cargo", args: []string{"build"}, file: "Cargo.lock", content: guardOriginCargoLock,
@@ -187,13 +191,18 @@ func TestGuardLockfileNonRegistryNeverReachesRegistryCheck(t *testing.T) {
 			wantNotAsmt:  map[string]int{"etl": 1, "internal-crate": 1, "tokio": 1},
 			absent:       []string{"my-workspace-member"},
 			notAssessTxt: "not from crates.io: not assessed",
+			attempted:    5,
 		},
 		{
+			// internal_gem is malicious through the undeclared remote (the
+			// known-malicious lane runs on every origin) but, not being a
+			// registry package, never reaches byte acquisition.
 			name: "gem", bin: "gem", args: []string{"install"}, file: "Gemfile.lock", content: guardOriginGemfileLock,
 			wantMalware:  map[string]int{"rails": 1, "rake": 1, "internal_gem": 1},
 			wantClean:    map[string]int{"rack": 1},
 			wantNotAsmt:  map[string]int{"rack": 1, "local_gem": 1},
 			notAssessTxt: "not from rubygems.org: not assessed",
+			attempted:    3,
 		},
 	}
 	for _, tc := range cases {
@@ -218,7 +227,8 @@ func TestGuardLockfileNonRegistryNeverReachesRegistryCheck(t *testing.T) {
 					gotMal[v.Spec.Name]++
 				case v.Severity == "" && !v.Block:
 					gotClean[v.Spec.Name]++
-				case v.Severity == guardSeverityNotAssessed && strings.Contains(v.Reason, tc.notAssessTxt):
+				case v.Severity == guardSeverityNotAssessed &&
+					(strings.Contains(v.Reason, tc.notAssessTxt) || strings.HasPrefix(v.Reason, "local path: not assessed")):
 					gotNA[v.Spec.Name]++
 					if v.Block {
 						t.Errorf("%s: not-assessed verdict must not refuse by default: %+v", v.Spec, v)
@@ -251,14 +261,8 @@ func TestGuardLockfileNonRegistryNeverReachesRegistryCheck(t *testing.T) {
 			// byte acquisition is counted. Only registry specs may get there.
 			clean := &localGuard{detectors: map[string]*typosquat.Detector{}, malware: malware.NewIndex(nil)}
 			clean.evaluateAll(context.Background(), specs)
-			wantAttempted := 0
-			for _, m := range []map[string]int{tc.wantMalware, tc.wantClean} {
-				for _, c := range m {
-					wantAttempted += c
-				}
-			}
-			if clean.scanAttempted != wantAttempted {
-				t.Errorf("specs reaching byte acquisition = %d, want %d (registry packages only)", clean.scanAttempted, wantAttempted)
+			if clean.scanAttempted != tc.attempted {
+				t.Errorf("specs reaching byte acquisition = %d, want %d (registry packages only)", clean.scanAttempted, tc.attempted)
 			}
 		})
 	}
@@ -352,8 +356,8 @@ func TestPRScanNonRegistryRowsNotAssessed(t *testing.T) {
 		},
 		{
 			name: "gem", kind: kindGemfileLock, content: guardOriginGemfileLock,
-			registry: map[string]int{"rack": 1, "rails": 1, "rake": 1, "internal_gem": 1},
-			nonReg:   map[string]int{"rack": 1, "local_gem": 1},
+			registry: map[string]int{"rack": 1, "rails": 1, "rake": 1},
+			nonReg:   map[string]int{"rack": 1, "local_gem": 1, "internal_gem": 1},
 			reason:   "not from rubygems.org: not assessed",
 		},
 	}
@@ -460,34 +464,62 @@ source = "git+https://github.com/x/unused-patch#abc"
 	}
 }
 
-// TestParseGemfileLockOrigin pins the section classification: only GIT and
-// PATH (and unknown source sections) are non-registry; every GEM section is a
-// registry source, mirrors and multi-remote bundler 1.x sections included.
+// TestParseGemfileLockOrigin pins the section classification: GIT, PATH
+// and unknown source sections are non-registry; a GEM section is the
+// registry when its remotes are rubygems.org, or a remote knownRegistry
+// accepts (a declared registry_mirrors host, the user's own Chainsaw
+// repository); any other remote — a Bundler 1.x section listing one beside
+// rubygems.org included — is not assessed.
 func TestParseGemfileLockOrigin(t *testing.T) {
+	const proxyLock = "GEM\n  remote: " + testChainsawServer + "/repository/@acme/rubygems/\n  specs:\n    rails (7.1.0)\n"
 	cases := []struct {
 		name     string
 		lock     string
+		mirrors  []any
+		ownSlug  string
 		registry map[string]string
 		nonReg   []nonRegistryDep
 	}{
 		{
 			name:     "bundler 2: one section per source",
 			lock:     guardOriginGemfileLock,
-			registry: map[string]string{"rack": "3.0.8", "rails": "7.1.0", "rake": "13.0.6", "internal_gem": "1.2.3"},
+			registry: map[string]string{"rack": "3.0.8", "rails": "7.1.0", "rake": "13.0.6"},
 			nonReg: []nonRegistryDep{
 				{"rack", "3.0.8", "git+https://github.com/someone/rack.git#0123456789abcdef0123456789abcdef01234567"},
-				{"local_gem", "0.1.0", "path vendor/gems/local_gem"},
+				{"local_gem", "0.1.0", "file:vendor/gems/local_gem"},
+				{"internal_gem", "1.2.3", "registry+https://chain305.com/chainproxy/repository/@acme/rubygems/"},
 			},
 		},
 		{
-			name:     "http rubygems.org without a trailing slash; platform suffix stripped",
-			lock:     "GEM\n  remote: http://rubygems.org\n  specs:\n    nokogiri (1.16.0-x86_64-linux)\n",
+			name:     "http rubygems.org without a trailing slash; platform builds are one version",
+			lock:     "GEM\n  remote: http://rubygems.org\n  specs:\n    nokogiri (1.16.0)\n    nokogiri (1.16.0-x86_64-linux)\n    nokogiri (1.16.0-arm64-darwin)\n",
 			registry: map[string]string{"nokogiri": "1.16.0"},
 		},
 		{
-			name:     "bundler 1.x: several remotes in one GEM section stay registry",
-			lock:     "GEM\n  remote: https://rubygems.org/\n  remote: https://gems.internal.example/\n  specs:\n    rails (7.1.0)\n    internal_gem (1.2.3)\n",
-			registry: map[string]string{"rails": "7.1.0", "internal_gem": "1.2.3"},
+			name: "bundler 1.x: several remotes in one GEM section, one not rubygems.org",
+			lock: "GEM\n  remote: https://rubygems.org/\n  remote: https://gems.internal.example/\n  specs:\n    rails (7.1.0)\n    internal_gem (1.2.3)\n",
+			nonReg: []nonRegistryDep{
+				{"rails", "7.1.0", "registry+https://gems.internal.example/"},
+				{"internal_gem", "1.2.3", "registry+https://gems.internal.example/"},
+			},
+		},
+		{
+			name:     "a declared registry_mirrors host is the registry",
+			lock:     "GEM\n  remote: https://artifactory.corp/api/gems/gems-remote/\n  specs:\n    rails (7.1.0)\n",
+			mirrors:  []any{"artifactory.corp"},
+			registry: map[string]string{"rails": "7.1.0"},
+		},
+		{
+			name:     "the user's own Chainsaw repository is the registry",
+			lock:     proxyLock,
+			ownSlug:  "acme",
+			registry: map[string]string{"rails": "7.1.0"},
+		},
+		{
+			name:    "another org's Chainsaw repository is not",
+			lock:    proxyLock,
+			ownSlug: "other-org",
+			nonReg:  []nonRegistryDep{{"rails", "7.1.0", "registry+" + testChainsawServer + "/repository/@acme/rubygems/"}},
 		},
 		{
 			name:   "an unknown source section is not rubygems.org",
@@ -497,7 +529,19 @@ func TestParseGemfileLockOrigin(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reg, nonReg := parseGemfileLock([]byte(tc.lock))
+			prevM, prevS, prevU := viper.Get("registry_mirrors"), viper.GetString("org_slug"), viper.GetString("server_url")
+			t.Cleanup(func() {
+				viper.Set("registry_mirrors", prevM)
+				viper.Set("org_slug", prevS)
+				viper.Set("server_url", prevU)
+			})
+			viper.Set("registry_mirrors", tc.mirrors)
+			viper.Set("org_slug", tc.ownSlug)
+			viper.Set("server_url", testChainsawServer)
+			reg, nonReg, err := parseGemfileLock([]byte(tc.lock))
+			if err != nil {
+				t.Fatal(err)
+			}
 			if len(reg) != len(tc.registry) {
 				t.Errorf("registry = %v, want %v", reg, tc.registry)
 			}
@@ -518,10 +562,39 @@ func TestParseGemfileLockOrigin(t *testing.T) {
 	}
 }
 
-// TestGuardGemMirrorKeepsTheMalwareFloor: a GEM section whose remote is a
-// mirror (here Chainsaw's own proxy) serves the PUBLIC gems. Treating it as
-// non-registry would skip the known-malicious floor for every proxied
-// customer, so a known-malicious gem listed there must still be refused.
+// TestParseGoSumCoordinates: the guard and pr-scan read go.sum through the
+// server's parser — only module ZIP lines, every version of a module — in
+// the guard's version spelling.
+func TestParseGoSumCoordinates(t *testing.T) {
+	got, err := parseGoSum([]byte(`github.com/docker/docker v25.0.14+incompatible h1:AAAA=
+github.com/docker/docker v25.0.14+incompatible/go.mod h1:BBBB=
+golang.org/x/text v0.3.0 h1:CCCC=
+golang.org/x/text v0.14.0 h1:DDDD=
+golang.org/x/text v0.14.0/go.mod h1:EEEE=
+golang.org/x/sys v0.1.0/go.mod h1:FFFF=
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []lockCoordinate{
+		{Name: "github.com/docker/docker", Version: "v25.0.14"},
+		{Name: "golang.org/x/text", Version: "v0.3.0"},
+		{Name: "golang.org/x/text", Version: "v0.14.0"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestGuardGemMirrorKeepsTheMalwareFloor: a GEM section whose remote is not
+// rubygems.org (here a Chainsaw proxy repository the CLI is not configured
+// for) is not assessed, but the known-malicious lookup still runs on its
+// gems: a known-malicious gem listed there must still be refused.
 func TestGuardGemMirrorKeepsTheMalwareFloor(t *testing.T) {
 	dir := guardOriginChdir(t)
 	lock := "GEM\n  remote: https://chain305.com/chainproxy/repository/@acme/rubygems/\n  specs:\n    evil_gem (0.0.1)\n"
