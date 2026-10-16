@@ -80,6 +80,7 @@ func TestSupportMatrixMatchesMarkdown(t *testing.T) {
 		"http tarball dependency":       ConditionHTTPTarballDependency,
 		"wildcard dependency range":     ConditionWildcardDependencyRange,
 		"bad dependency semver":         ConditionBadDependencySemver,
+		"non-registry source":           ConditionNonRegistrySource,
 		"uses eval":                     ConditionUsesEval,
 		"network access":                ConditionNetworkAccess,
 		"shell access":                  ConditionShellAccess,

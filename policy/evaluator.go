@@ -11,6 +11,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 
+	"github.com/chain305/chainsaw-core/depparser/origin"
 	"github.com/chain305/chainsaw-core/typosquat"
 )
 
@@ -142,6 +143,15 @@ type EvaluationContext struct {
 	HTTPTarballDependency   bool
 	WildcardDependencyRange bool
 	BadDependencySemver     bool
+
+	// Non-registry sources (Conditions.NonRegistrySource and friends). Set
+	// by the install guard and pr-scan from the lockfile / command-line
+	// origin; zero on every server surface, none of which sees such a
+	// package. NonRegistryOrigin is origin.Location of the sanitised origin
+	// ("" for a registry package).
+	NonRegistrySource         bool
+	NonRegistrySourceUnpinned bool
+	NonRegistryOrigin         string
 
 	// Socket-gap Wave 3 context fields. Each mirrors the per-scanner
 	// bool on ArtifactScanSection, hydrated by the providers in
@@ -1798,6 +1808,22 @@ func matchesConditions(ctx EvaluationContext, cond Conditions) bool {
 			return false
 		}
 	}
+	// Non-registry sources.
+	if cond.NonRegistrySource != nil {
+		if *cond.NonRegistrySource != ctx.NonRegistrySource {
+			return false
+		}
+	}
+	if cond.NonRegistrySourceUnpinned != nil {
+		if *cond.NonRegistrySourceUnpinned != (ctx.NonRegistrySource && ctx.NonRegistrySourceUnpinned) {
+			return false
+		}
+	}
+	if hasMeaningfulValues(cond.NonRegistryOriginNotIn) {
+		if !ctx.NonRegistrySource || nonRegistryOriginAllowed(cond.NonRegistryOriginNotIn, ctx.NonRegistryOrigin) {
+			return false
+		}
+	}
 	if cond.WildcardDependencyRange != nil {
 		if *cond.WildcardDependencyRange != ctx.WildcardDependencyRange {
 			return false
@@ -2320,4 +2346,14 @@ func blockAfterGraceReason(policy Policy, resolvedAs string) string {
 	default:
 		return "blocked after grace by policy: " + policy.ID
 	}
+}
+
+// nonRegistryOriginAllowed: loc matches one of the allow-list patterns.
+func nonRegistryOriginAllowed(patterns []string, loc string) bool {
+	for _, p := range patterns {
+		if origin.MatchLocation(strings.TrimSpace(p), loc) {
+			return true
+		}
+	}
+	return false
 }

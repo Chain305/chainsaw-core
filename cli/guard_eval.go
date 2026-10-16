@@ -301,6 +301,12 @@ type packageSpec struct {
 	// reports it not assessed instead. "" means the public registry.
 	Origin string
 
+	// Hash is the lockfile's content hash for a non-registry spec
+	// (origin.JoinHashes form), "" when none was recorded or the spec did
+	// not come from a lockfile. Read only for the nonRegistrySourceUnpinned
+	// policy fact (origin.Pinned) — never a byte anchor; that is Integrity.
+	Hash string
+
 	// Local marks a lockfile entry with NO source at all (a Cargo workspace
 	// member or path dependency): first-party code, so it gets no verdict
 	// and no "not assessed" line. It still gets the known-malicious lookup
@@ -1174,5 +1180,15 @@ func (g *localGuard) evaluateNonRegistry(ctx context.Context, spec packageSpec) 
 		return pv
 	}
 	v.Spec, v.Severity, v.Reason = spec, guardSeverityNotAssessed, reason
+	if !local {
+		// A monitor rule about the SOURCE (the non-registry-source recipe in
+		// monitor mode) rides along as its own "! policy" line instead of
+		// being dropped. Evaluated as if analysis completed, so the builtin
+		// degraded-analysis rule — which fires on every non-registry spec
+		// and would only repeat "not assessed" — does not take the slot.
+		if mv, ok := guardPolicyLane(ctx, spec, acquireOK, behavioralVerdict{}); ok && !mv.Block {
+			v.PolicySeverity, v.PolicyReason = mv.Severity, mv.Reason
+		}
+	}
 	return v
 }

@@ -440,9 +440,9 @@ source = "git+https://github.com/x/unused-patch#abc"
 		}
 	}
 	wantNonReg := []nonRegistryDep{
-		{"etl", "0.1.0", "git+https://github.com/feldera/etl?rev=cdfb3c7e#cdfb3c7e1a2b3c4d5e6f"},
-		{"internal-crate", "2.0.0", "registry+https://my-registry.example/index"},
-		{"tokio", "1.38.0", "git+https://github.com/someone/tokio?branch=fix#fedcba9876543210"},
+		{"etl", "0.1.0", "git+https://github.com/feldera/etl?rev=cdfb3c7e#cdfb3c7e1a2b3c4d5e6f", ""},
+		{"internal-crate", "2.0.0", "registry+https://my-registry.example/index", ""},
+		{"tokio", "1.38.0", "git+https://github.com/someone/tokio?branch=fix#fedcba9876543210", ""},
 	}
 	if len(nonReg) != len(wantNonReg) {
 		t.Fatalf("nonRegistry = %+v, want %+v", nonReg, wantNonReg)
@@ -454,7 +454,7 @@ source = "git+https://github.com/x/unused-patch#abc"
 	}
 	labels := map[string]string{
 		"etl":            "github.com/feldera/etl@cdfb3c7",
-		"internal-crate": "my-registry.example/index",
+		"internal-crate": "my-registry.example", // host only: a registry path can carry a token
 		"tokio":          "github.com/someone/tokio@fedcba9",
 	}
 	for _, d := range nonReg {
@@ -485,9 +485,9 @@ func TestParseGemfileLockOrigin(t *testing.T) {
 			lock:     guardOriginGemfileLock,
 			registry: map[string]string{"rack": "3.0.8", "rails": "7.1.0", "rake": "13.0.6"},
 			nonReg: []nonRegistryDep{
-				{"rack", "3.0.8", "git+https://github.com/someone/rack.git#0123456789abcdef0123456789abcdef01234567"},
-				{"local_gem", "0.1.0", "file:vendor/gems/local_gem"},
-				{"internal_gem", "1.2.3", "registry+https://chain305.com/chainproxy/repository/@acme/rubygems/"},
+				{"rack", "3.0.8", "git+https://github.com/someone/rack.git#0123456789abcdef0123456789abcdef01234567", ""},
+				{"local_gem", "0.1.0", "file:vendor/gems/local_gem", ""},
+				{"internal_gem", "1.2.3", "registry+https://chain305.com/chainproxy/repository/@acme/rubygems/", ""},
 			},
 		},
 		{
@@ -499,8 +499,8 @@ func TestParseGemfileLockOrigin(t *testing.T) {
 			name: "bundler 1.x: several remotes in one GEM section, one not rubygems.org",
 			lock: "GEM\n  remote: https://rubygems.org/\n  remote: https://gems.internal.example/\n  specs:\n    rails (7.1.0)\n    internal_gem (1.2.3)\n",
 			nonReg: []nonRegistryDep{
-				{"rails", "7.1.0", "registry+https://gems.internal.example/"},
-				{"internal_gem", "1.2.3", "registry+https://gems.internal.example/"},
+				{"rails", "7.1.0", "registry+https://gems.internal.example/", ""},
+				{"internal_gem", "1.2.3", "registry+https://gems.internal.example/", ""},
 			},
 		},
 		{
@@ -519,12 +519,12 @@ func TestParseGemfileLockOrigin(t *testing.T) {
 			name:    "another org's Chainsaw repository is not",
 			lock:    proxyLock,
 			ownSlug: "other-org",
-			nonReg:  []nonRegistryDep{{"rails", "7.1.0", "registry+" + testChainsawServer + "/repository/@acme/rubygems/"}},
+			nonReg:  []nonRegistryDep{{"rails", "7.1.0", "registry+" + testChainsawServer + "/repository/@acme/rubygems/", ""}},
 		},
 		{
 			name:   "an unknown source section is not rubygems.org",
 			lock:   "PLUGIN SOURCE\n  remote: https://github.com/x/plugin.git\n  revision: abc\n  specs:\n    bundler-plugin (0.1.0)\n",
-			nonReg: []nonRegistryDep{{"bundler-plugin", "0.1.0", "plugin source https://github.com/x/plugin.git"}},
+			nonReg: []nonRegistryDep{{"bundler-plugin", "0.1.0", "plugin source https://github.com/x/plugin.git", ""}},
 		},
 	}
 	for _, tc := range cases {
@@ -672,17 +672,19 @@ func TestPRScanCargoMultiVersion(t *testing.T) {
 
 // TestPRScanGitRevMoveIsANewRow: a git dependency whose revision moves keeps
 // its version string, but it is different code. Diffing on (name, origin)
-// makes it a new not-assessed row instead of nothing.
+// makes it a not-assessed row instead of nothing — since P1c a "source
+// changed" upgrade of the same dependency, not a new one.
 func TestPRScanGitRevMoveIsANewRow(t *testing.T) {
 	lock := func(rev string) []byte {
 		return []byte("[[package]]\nname = \"etl\"\nversion = \"0.1.0\"\nsource = \"git+https://github.com/feldera/etl?rev=" + rev + "#" + rev + "\"\n")
 	}
 	added, upgraded, err := diffManifest(kindCargoLock, "Cargo.lock", lock("aaaaaaaa"), lock("bbbbbbbb"))
-	if err != nil || len(upgraded) != 0 {
-		t.Fatalf("err=%v upgraded=%v", err, upgraded)
+	if err != nil || len(added) != 0 {
+		t.Fatalf("err=%v added=%v", err, added)
 	}
-	if len(added) != 1 || added[0].Origin == "" || !strings.Contains(added[0].Origin, "bbbbbbbb") {
-		t.Fatalf("a moved git rev must surface as a new non-registry row, got %+v", added)
+	if len(upgraded) != 1 || upgraded[0].Origin == "" || !strings.Contains(upgraded[0].Origin, "bbbbbbbb") ||
+		upgraded[0].SourceChange != "source changed: github.com/feldera/etl@aaaaaaa → github.com/feldera/etl@bbbbbbb" {
+		t.Fatalf("a moved git rev must surface as a source-changed non-registry row, got %+v", upgraded)
 	}
 	if added, _, _ := diffManifest(kindCargoLock, "Cargo.lock", lock("aaaaaaaa"), lock("aaaaaaaa")); len(added) != 0 {
 		t.Fatalf("an unchanged git dep must not be a row, got %+v", added)

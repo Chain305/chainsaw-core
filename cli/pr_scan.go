@@ -563,6 +563,10 @@ type rawEntry struct {
 	Version         string
 	PreviousVersion *string
 	Origin          string // non-empty: not from the public registry (nonRegistryDep)
+	Hash            string // nonRegistryDep.Hash
+	// SourceChange is "source changed: <base> → <head>" when this row is a
+	// dependency whose source differs from base (markSourceChanges).
+	SourceChange string
 }
 
 // diffManifest returns lists of added and upgraded coordinates by comparing
@@ -617,8 +621,11 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		}
 		added, upgraded = diffLockCoordinates(eco, baseMulti, headMulti)
 		// Workspace / link / file: packages are first-party: no row.
-		nrAdded, nrUpgraded := diffNonRegistry(eco, npmNonLocal(baseNonReg), npmNonLocal(headNonReg))
-		return append(added, nrAdded...), append(upgraded, nrUpgraded...), nil
+		baseNonReg, headNonReg = npmNonLocal(baseNonReg), npmNonLocal(headNonReg)
+		nrAdded, nrUpgraded := diffNonRegistry(eco, baseNonReg, headNonReg)
+		added, upgraded = markSourceChanges(eco, withRegistry(baseNonReg, baseMulti, nil), withRegistry(headNonReg, headMulti, nil),
+			append(added, nrAdded...), append(upgraded, nrUpgraded...))
+		return added, upgraded, nil
 	case kindPipRequirements:
 		baseCoords, baseNonReg = parsePipRequirementsSources(baseContent)
 		headCoords, headNonReg = parsePipRequirementsSources(headContent)
@@ -637,7 +644,9 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		}
 		added, upgraded = diffLockCoordinates(eco, baseMulti, headMulti)
 		nrAdded, nrUpgraded := diffNonRegistry(eco, baseNonReg, headNonReg)
-		return append(added, nrAdded...), append(upgraded, nrUpgraded...), nil
+		added, upgraded = markSourceChanges(eco, withRegistry(baseNonReg, baseMulti, nil), withRegistry(headNonReg, headMulti, nil),
+			append(added, nrAdded...), append(upgraded, nrUpgraded...))
+		return added, upgraded, nil
 	case kindGemfileLock:
 		if baseCoords, baseNonReg, err = parseGemfileLock(baseContent); err != nil {
 			return nil, nil, fmt.Errorf("%s base: %w", relPath, err)
@@ -654,6 +663,8 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
 		}
+		// No source changes: go.sum names module paths only, and a Go module
+		// is fetched from its path (a go.mod replace is not diffed here).
 		added, upgraded = diffLockCoordinates(eco, baseSum, headSum)
 		return added, upgraded, nil
 	case kindCargoLock:
@@ -662,7 +673,9 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		headMulti, headNonReg, _ := parseCargoLock(headContent)
 		added, upgraded = diffLockCoordinates(eco, baseMulti, headMulti)
 		nrAdded, nrUpgraded := diffNonRegistry(eco, baseNonReg, headNonReg)
-		return append(added, nrAdded...), append(upgraded, nrUpgraded...), nil
+		added, upgraded = markSourceChanges(eco, withRegistry(baseNonReg, baseMulti, nil), withRegistry(headNonReg, headMulti, nil),
+			append(added, nrAdded...), append(upgraded, nrUpgraded...))
+		return added, upgraded, nil
 	default:
 		return nil, nil, nil
 	}
@@ -681,7 +694,113 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		}
 	}
 	nrAdded, nrUpgraded := diffNonRegistry(eco, baseNonReg, headNonReg)
-	return append(added, nrAdded...), append(upgraded, nrUpgraded...), nil
+	added, upgraded = markSourceChanges(eco, withRegistry(baseNonReg, nil, baseCoords), withRegistry(headNonReg, nil, headCoords),
+		append(added, nrAdded...), append(upgraded, nrUpgraded...))
+	return added, upgraded, nil
+}
+
+// withRegistry is every dependency of one side of a diff with its source:
+// nonReg as they are, and the registry packages (coords or m) with Origin ""
+// — the public registry, or a mirror the user vouches for, which the
+// parsers already count as the registry.
+func withRegistry(nonReg []nonRegistryDep, coords []lockCoordinate, m map[string]string) []nonRegistryDep {
+	out := append([]nonRegistryDep(nil), nonReg...)
+	for _, c := range coords {
+		out = append(out, nonRegistryDep{Name: c.Name, Version: c.Version})
+	}
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		out = append(out, nonRegistryDep{Name: n, Version: m[n]})
+	}
+	return out
+}
+
+// sourceKey is what "the same source" means for markSourceChanges: "" for
+// the registry; the host for another registry (a version bump there moves
+// the tarball URL, not the source; a different host is a different
+// registry); the label otherwise — a repository with its ref, a tarball
+// URL, a path — so a moved commit is a changed source.
+func sourceKey(eco, src string) string {
+	if src == "" {
+		return ""
+	}
+	if origin.Classify(eco, src) == origin.RegistryOther {
+		if h := origin.Host(src); h != "" {
+			return "registry " + h
+		}
+	}
+	return origin.Label(src)
+}
+
+// sourceLabel names a source in a "source changed" reason (originLabel).
+func sourceLabel(eco, src string) string {
+	if src == "" {
+		return "the public registry"
+	}
+	return originLabel(eco, src)
+}
+
+// originLabel prints a lockfile origin in a reason: the host alone for a
+// registry-protocol source (a private registry's access token rides in its
+// PATH, dl.cloudsmith.io/<token>/…, where Sanitize cannot see it), and
+// origin.Label otherwise — a git source keeps the repository and ref a
+// reviewer needs.
+func originLabel(eco, src string) string {
+	if origin.Classify(eco, src) == origin.RegistryOther {
+		if h := origin.Host(src); h != "" {
+			return h
+		}
+	}
+	return origin.Label(src)
+}
+
+// markSourceChanges finds the dependencies whose SOURCE changed between base
+// and head: registry -> repository/URL/private registry, the reverse (the
+// dependency-confusion direction: a private package now resolved publicly),
+// or one non-registry source for another (another repository, a moved ref,
+// another registry host), whether or not the version moved.
+//
+// Every such change is already a row: the diffs key on source, so the head
+// package is an "added" row (drawing sc.new_dep, as if it were new). It is
+// not given a second row: the added row whose name had a source in base that
+// head dropped becomes an UPGRADE from that base version, with SourceChange
+// set. A source head still has (a fork added beside its registry namesake)
+// is a new dependency, not a change. Each dropped base source is claimed
+// once. base and head are every dependency of each side (withRegistry); the
+// row's Origin stays the head origin, which is what policy evaluates.
+func markSourceChanges(eco string, base, head []nonRegistryDep, added, upgraded []rawEntry) ([]rawEntry, []rawEntry) {
+	type nameSource struct{ name, key string }
+	inHead := make(map[nameSource]bool, len(head))
+	for _, d := range head {
+		inHead[nameSource{d.Name, sourceKey(eco, d.Origin)}] = true
+	}
+	dropped := map[string][]nonRegistryDep{}
+	for _, d := range base {
+		if !inHead[nameSource{d.Name, sourceKey(eco, d.Origin)}] {
+			dropped[d.Name] = append(dropped[d.Name], d)
+		}
+	}
+	if len(dropped) == 0 {
+		return added, upgraded
+	}
+	kept := make([]rawEntry, 0, len(added))
+	for _, e := range added {
+		ds := dropped[e.Name]
+		if len(ds) == 0 {
+			kept = append(kept, e)
+			continue
+		}
+		dropped[e.Name] = ds[1:]
+		prev := ds[0].Version
+		e.PreviousVersion = &prev
+		e.SourceChange = "source changed: " + sourceLabel(eco, ds[0].Origin) + " → " + sourceLabel(eco, e.Origin)
+		upgraded = append(upgraded, e)
+	}
+	return kept, upgraded
 }
 
 // diffNonRegistry diffs packages from outside the public registry on (name,
@@ -696,9 +815,9 @@ func diffNonRegistry(eco string, base, head []nonRegistryDep) (added, upgraded [
 	for _, d := range head {
 		prev, existed := baseVer[d.Name+"\x00"+d.Origin]
 		if !existed {
-			added = append(added, rawEntry{Ecosystem: eco, Name: d.Name, Version: d.Version, Origin: d.Origin})
+			added = append(added, rawEntry{Ecosystem: eco, Name: d.Name, Version: d.Version, Origin: d.Origin, Hash: d.Hash})
 		} else if d.Version != prev {
-			upgraded = append(upgraded, rawEntry{Ecosystem: eco, Name: d.Name, Version: d.Version, PreviousVersion: &prev, Origin: d.Origin})
+			upgraded = append(upgraded, rawEntry{Ecosystem: eco, Name: d.Name, Version: d.Version, PreviousVersion: &prev, Origin: d.Origin, Hash: d.Hash})
 		}
 	}
 	return added, upgraded
@@ -1256,6 +1375,7 @@ func parsePythonLock(file string, data []byte) (registry []lockCoordinate, nonRe
 		case reg != nil:
 			registry = append(registry, *reg)
 		case nr != nil:
+			nr.Hash = p.Hash
 			nonRegistry = append(nonRegistry, *nr)
 		case loc != nil:
 			local = append(local, *loc)
@@ -1334,6 +1454,7 @@ func parsePipRequirementsSources(data []byte) (registry map[string]string, nonRe
 			}
 		default:
 			if _, nr, _ := pythonSource(name, p.Version, p.Origin); nr != nil {
+				nr.Hash = p.Hash
 				nonRegistry = append(nonRegistry, *nr)
 			}
 		}
@@ -1368,11 +1489,13 @@ type nonRegistryDep struct {
 	Name    string
 	Version string
 	Origin  string
+	Hash    string // the lockfile's content hash, "" when none; see packageSpec.Hash
 }
 
 // nonRegistryReason is the one sentence every surface prints for a
 // non-registry package. Same wording as the server's lockfile scan
-// (internal/scan/lockfile_scan.go).
+// (internal/scan/lockfile_scan.go). src is printed by originLabel: host
+// only for a registry-protocol source.
 func nonRegistryReason(ecosystem, src string) string {
 	reg := "the public registry"
 	switch ecosystem {
@@ -1383,7 +1506,7 @@ func nonRegistryReason(ecosystem, src string) string {
 	case "pip", "pypi":
 		reg = "PyPI"
 	}
-	return "not from " + reg + ": not assessed (" + origin.Label(src) + ")"
+	return "not from " + reg + ": not assessed (" + originLabel(ecosystem, src) + ")"
 }
 
 // parseGemfileLock parses Gemfile.lock with the server's parser
@@ -1418,7 +1541,7 @@ func parseGemfileLock(data []byte) (registry map[string]string, nonRegistry []no
 			registry[p.Name] = p.Version
 			continue
 		}
-		nonRegistry = append(nonRegistry, nonRegistryDep{Name: p.Name, Version: p.Version, Origin: p.Origin})
+		nonRegistry = append(nonRegistry, nonRegistryDep{Name: p.Name, Version: p.Version, Origin: p.Origin, Hash: p.Hash})
 	}
 	return registry, nonRegistry, nil
 }
@@ -1453,7 +1576,7 @@ func parseCargoLock(data []byte) (registry []lockCoordinate, nonRegistry []nonRe
 		return nil, nil, nil
 	}
 	inPkg := false
-	name, version, source := "", "", ""
+	name, version, source, checksum := "", "", "", ""
 	flush := func() {
 		switch {
 		case !inPkg || name == "" || version == "":
@@ -1462,9 +1585,9 @@ func parseCargoLock(data []byte) (registry []lockCoordinate, nonRegistry []nonRe
 		case cargoSourceIsCratesIO(source):
 			registry = append(registry, lockCoordinate{Name: name, Version: version})
 		default:
-			nonRegistry = append(nonRegistry, nonRegistryDep{Name: name, Version: version, Origin: origin.Sanitize(source)})
+			nonRegistry = append(nonRegistry, nonRegistryDep{Name: name, Version: version, Origin: origin.Sanitize(source), Hash: origin.JoinHashes("sha256:" + checksum)})
 		}
-		name, version, source = "", "", ""
+		name, version, source, checksum = "", "", "", ""
 	}
 	tomlString := func(line, key string) (string, bool) {
 		trimmed := strings.TrimSpace(line)
@@ -1493,6 +1616,8 @@ func parseCargoLock(data []byte) (registry []lockCoordinate, nonRegistry []nonRe
 			version = v
 		} else if v, ok := tomlString(line, "source"); ok {
 			source = v
+		} else if v, ok := tomlString(line, "checksum"); ok {
+			checksum = v
 		}
 	}
 	flush() // final block
@@ -1550,6 +1675,14 @@ func evaluatePREntry(e rawEntry) prScanEntry {
 	}
 
 	signals := prOfflineSignals(e)
+
+	// A changed source is a warn whichever way it moved: to a fork or a
+	// private registry the package is no longer the one reviewed before,
+	// and from a private source to the public registry is the
+	// dependency-confusion shape. After the not-assessed signal, if any.
+	if e.SourceChange != "" {
+		signals = append([]prScanSignal{{ID: prScanSourceChangedSignalID, Severity: "warn", Reason: e.SourceChange}}, signals...)
+	}
 
 	// A package from outside the public registry is NOT ASSESSED, and the
 	// row says so with a warn-level signal, so it can never read as clean.
@@ -1675,6 +1808,10 @@ func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded 
 // prScanNotAssessedSignalID marks a row for a package from outside the
 // public registry (prScanEntry.Origin): not assessed, rather than scored.
 const prScanNotAssessedSignalID = "origin.not_assessed"
+
+// prScanSourceChangedSignalID marks a row whose source differs from base
+// (rawEntry.SourceChange).
+const prScanSourceChangedSignalID = "origin.source_changed"
 
 // prOfflineSignals runs a small set of heuristic supply-chain checks that
 // don't require a live server.  Each check returns zero or one signal.
@@ -1840,6 +1977,7 @@ func prScanPolicyInput(e rawEntry, signals []prScanSignal) policy.Input {
 		PackageVersion:   e.Version,
 		GitDependency:    gitOrigin(e.Ecosystem, e.Origin),
 	}
+	setNonRegistryFacts(&in, e.Ecosystem, e.Origin, e.Hash)
 	for _, s := range signals {
 		if s.ID == prScanTyposquatSignalID {
 			in.IsSuspectedTyposquat = true

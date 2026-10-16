@@ -135,6 +135,10 @@ func Classify(eco, source string) Class {
 	if s == "" {
 		return Public
 	}
+	s, ok := NormalizeURL(s)
+	if !ok {
+		return NonRegistry
+	}
 	eco = normEcosystem(eco)
 	prefix, rest := splitPrefix(s)
 	prefix = strings.ToLower(prefix)
@@ -246,7 +250,11 @@ func isChainsawRepository(p string) bool {
 // Host is the host (with any non-default port) of a URL source, lowercased,
 // for "via <host>" labels; "" for a non-URL source.
 func Host(source string) string {
-	_, rest := splitPrefix(strings.TrimSpace(source))
+	src, ok := NormalizeURL(strings.TrimSpace(source))
+	if !ok {
+		return ""
+	}
+	_, rest := splitPrefix(src)
 	u, err := url.Parse(rest)
 	if err != nil || u.Host == "" {
 		return ""
@@ -312,7 +320,11 @@ func MirrorHost(source string, mirrors []string) string {
 	if len(mirrors) == 0 {
 		return ""
 	}
-	_, rest := splitPrefix(strings.TrimSpace(source))
+	src, ok := NormalizeURL(strings.TrimSpace(source))
+	if !ok {
+		return ""
+	}
+	_, rest := splitPrefix(src)
 	u, err := url.Parse(rest)
 	if err != nil || u.Host == "" || isChainsawRepository(u.Path) {
 		return ""

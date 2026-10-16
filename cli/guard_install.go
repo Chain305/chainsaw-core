@@ -1011,9 +1011,13 @@ func hasSuffixFold(s, suffix string) bool {
 }
 
 // registryURL parses a registry URL after any "sparse+" / "registry+" /
-// "git+" prefix; nil when it has no host.
+// "git+" prefix, read as the package manager reads it
+// (origin.NormalizeURL); nil when it has no host or no agreed reading.
 func registryURL(raw string) *url.URL {
-	raw = lowerScheme(strings.TrimSpace(raw))
+	raw, ok := origin.NormalizeURL(lowerScheme(strings.TrimSpace(raw)))
+	if !ok {
+		return nil
+	}
 	if i := strings.Index(raw, "+"); i > 0 && i < strings.Index(raw, "://") {
 		raw = raw[i+1:]
 	}
@@ -1699,8 +1703,12 @@ func parseCargoInstall(args []string) ([]packageSpec, bool) {
 			version = f.value
 		case "--git":
 			git = f.value
-		case "--branch", "--tag", "--rev":
+		case "--branch", "--tag":
 			ref = "?" + strings.TrimPrefix(f.name, "--") + "=" + url.QueryEscape(f.value)
+		case "--rev":
+			// Cargo.lock's own form, ?rev=<rev>#<commit>: origin.Pinned reads
+			// the fragment, never ?rev= (npm ignores the query).
+			ref = "?rev=" + url.QueryEscape(f.value) + "#" + url.QueryEscape(f.value)
 		case "--path":
 			src = localOrigin(f.value)
 		}
@@ -2013,7 +2021,7 @@ func coordsToSpecs(ecosystem string, coords []lockCoordinate) []packageSpec {
 func nonRegistrySpecs(ecosystem string, deps []nonRegistryDep) []packageSpec {
 	specs := make([]packageSpec, 0, len(deps))
 	for _, d := range deps {
-		specs = append(specs, packageSpec{Ecosystem: ecosystem, Name: d.Name, Version: d.Version, Origin: d.Origin})
+		specs = append(specs, packageSpec{Ecosystem: ecosystem, Name: d.Name, Version: d.Version, Origin: d.Origin, Hash: d.Hash})
 	}
 	return specs
 }

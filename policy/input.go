@@ -149,6 +149,15 @@ type Input struct {
 	WildcardDependencyRange bool `json:"wildcardDependencyRange,omitempty"`
 	BadDependencySemver     bool `json:"badDependencySemver,omitempty"`
 
+	// Non-registry sources (plan_non_registry_sources §3.6): set by the
+	// install guard and pr-scan. nonRegistryOrigin is the host/path an
+	// allow-list matches (origin.Location of the sanitised origin: no
+	// scheme, userinfo, query or ref), e.g. "github.com/myorg/repo"; Rego
+	// matches it with glob.match(pattern, ["/"], input.nonRegistryOrigin).
+	NonRegistrySource         bool   `json:"nonRegistrySource,omitempty"`
+	NonRegistrySourceUnpinned bool   `json:"nonRegistrySourceUnpinned,omitempty"`
+	NonRegistryOrigin         string `json:"nonRegistryOrigin,omitempty"`
+
 	// Wave 3 — code-smell scanners.
 	UsesEval            bool `json:"usesEval,omitempty"`
 	NetworkAccess       bool `json:"networkAccess,omitempty"`
@@ -249,6 +258,9 @@ func ContextToInput(surface SurfaceTag, ctx EvaluationContext) Input {
 		HTTPTarballDependency:        ctx.HTTPTarballDependency,
 		WildcardDependencyRange:      ctx.WildcardDependencyRange,
 		BadDependencySemver:          ctx.BadDependencySemver,
+		NonRegistrySource:            ctx.NonRegistrySource,
+		NonRegistrySourceUnpinned:    ctx.NonRegistrySourceUnpinned,
+		NonRegistryOrigin:            ctx.NonRegistryOrigin,
 		UsesEval:                     ctx.UsesEval,
 		NetworkAccess:                ctx.NetworkAccess,
 		ShellAccess:                  ctx.ShellAccess,

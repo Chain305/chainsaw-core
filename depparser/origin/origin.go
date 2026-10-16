@@ -34,6 +34,19 @@ func Sanitize(src string) string {
 	if src == "" {
 		return ""
 	}
+	src, ok := NormalizeURL(src)
+	if !ok {
+		// Unparseable: strip userinfo but keep a backslash in its place, so
+		// the stored Origin stays unparseable for every later reader
+		// (Location "", Classify NonRegistry) instead of becoming a clean
+		// URL on the host after the backslash.
+		return userinfo.ReplaceAllStringFunc(src, func(m string) string {
+			if strings.Contains(m, `\`) {
+				return `://\@`
+			}
+			return "://"
+		})
+	}
 	prefix, rest := splitPrefix(src)
 	u, err := url.Parse(rest)
 	if err != nil || u.Host == "" {
@@ -79,6 +92,41 @@ func Label(src string) string {
 		label += "@" + ref
 	}
 	return label
+}
+
+// NormalizeURL reads a source the way the package manager will. npm, yarn,
+// pnpm, cargo and conda parse URLs WHATWG-style, and for http(s) WHATWG
+// drops every ASCII tab, CR and LF and reads "\" as "/" before the query:
+// https://evil.invalid\@github.com/x is a request to evil.invalid. net/url
+// refuses it, and every fallback that then cut "user@" off it (Sanitize's
+// userinfo strip) left a clean github.com URL; a "\" in the path ("..\")
+// parses, and is a dot segment only to the client (red-team P1c C1). So
+// for an http(s) URL (after any "git+" / "registry+" / "sparse+" / "url+"
+// prefix) NormalizeURL returns it rewritten that way; every URL parse on a
+// lockfile or command-line source must go through it first.
+//
+// Any other source containing a backslash (ssh://, git://, file:, scp
+// syntax…) has no one agreed reading: ok=false, and callers treat it as
+// unparseable — non-registry, Location "", matching no allow-list.
+func NormalizeURL(src string) (string, bool) {
+	if !strings.ContainsAny(src, "\\\t\r\n") {
+		return src, true
+	}
+	s := strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, src)
+	prefix, rest := splitPrefix(s)
+	if low := strings.ToLower(rest); strings.HasPrefix(low, "http:") || strings.HasPrefix(low, "https:") {
+		end := strings.IndexAny(rest, "?#")
+		if end < 0 {
+			end = len(rest)
+		}
+		return prefix + strings.ReplaceAll(rest[:end], `\`, "/") + rest[end:], true
+	}
+	return src, !strings.Contains(src, `\`)
 }
 
 // splitPrefix separates a "git+" / "registry+" / "sparse+" style prefix from

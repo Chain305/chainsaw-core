@@ -66,6 +66,10 @@
     "wildcardDependencyRange": { "type": "boolean" },
     "badDependencySemver":     { "type": "boolean" },
 
+    "nonRegistrySource":         { "type": "boolean" },
+    "nonRegistrySourceUnpinned": { "type": "boolean" },
+    "nonRegistryOrigin":         { "type": "string" },
+
     "usesEval":            { "type": "boolean" },
     "networkAccess":       { "type": "boolean" },
     "shellAccess":         { "type": "boolean" },

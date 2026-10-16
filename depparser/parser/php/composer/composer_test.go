@@ -136,3 +136,17 @@ func TestPackagistNotificationURLDoesNotVouchForDist(t *testing.T) {
 		t.Errorf("Packagist code-host dist / no dist must stay Packagist: %v", got)
 	}
 }
+
+// TestDistBackslashHost (red-team P1c C1): a dist URL whose host net/url
+// and a WHATWG client disagree on records the host the client fetches from.
+func TestDistBackslashHost(t *testing.T) {
+	pkgs, err := Parse(strings.NewReader(`{"packages":[{"name":"monolog/monolog","version":"3.7.0",
+"dist":{"type":"zip","url":"https://evil.example\\@api.github.com/repos/Seldaek/monolog/zipball/abc"},
+"notification-url":"https://packagist.org/downloads/"}]}`))
+	if err != nil || len(pkgs) != 1 {
+		t.Fatalf("got %+v, %v", pkgs, err)
+	}
+	if o := pkgs[0].Origin; origin.Host(o) != "evil.example" || origin.Classify("composer", o) == origin.Public {
+		t.Errorf("Origin %q, want a non-Packagist origin on evil.example", o)
+	}
+}

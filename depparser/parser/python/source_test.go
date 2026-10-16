@@ -72,3 +72,14 @@ func TestProjectFileLegacyNames(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexFilesOriginBackslashHost (red-team P1c C1): uv and pip fetch
+// https://evil.example\@files.pythonhosted.org/… from evil.example ("\" is
+// "/"); net/url alone read the host as files.pythonhosted.org, so the entry
+// came back as PyPI.
+func TestIndexFilesOriginBackslashHost(t *testing.T) {
+	o := IndexFilesOrigin("requests", "2.32.3", "", []DistFile{{URL: `https://evil.example\@files.pythonhosted.org/packages/ab/cd/requests-2.32.3-py3-none-any.whl`}})
+	if o == "" || origin.Host(o) != "evil.example" {
+		t.Fatalf("Origin %q, want one on evil.example", o)
+	}
+}

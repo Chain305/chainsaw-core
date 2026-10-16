@@ -57,6 +57,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/chain305/chainsaw-core/depparser/origin"
 	"github.com/chain305/chainsaw-core/policy"
 	"github.com/chain305/chainsaw-core/policy/builtin"
 	"github.com/chain305/chainsaw-core/policy/dsl"
@@ -276,6 +277,7 @@ func guardPolicyInput(spec packageSpec, acq acquireResult, bv behavioralVerdict)
 		// install (which is all signalsUnavailable can say).
 		GitDependency: gitOrigin(spec.Ecosystem, spec.Origin),
 	}
+	setNonRegistryFacts(&in, spec.Ecosystem, spec.Origin, spec.Hash)
 	// Behavioral findings that did not themselves block are still
 	// facts a rule may want to raise on (e.g. an org that treats any
 	// install script as blocking on the runtime surface).
@@ -287,6 +289,36 @@ func guardPolicyInput(spec packageSpec, acq acquireResult, bv behavioralVerdict)
 		in.HasInstallScript = true
 	}
 	return in
+}
+
+// setNonRegistryFacts projects an Origin (packageSpec.Origin /
+// rawEntry.Origin) and the lockfile hash recorded with it onto the
+// non_registry_sources policy facts (docs/PLANS_INTELLIGENCE.md
+// #plan-non-registry-sources §3.6), shared by the install guard and
+// pr-scan so both answer the same way:
+//
+//   - nonRegistrySource: git, a URL tarball, a vendored archive, a package
+//     from a registry this CLI does not vouch for. NOT local code
+//     (localCode: a workspace/link/path directory), NOT an unparsed-lockfile
+//     placeholder (an unknown, which is signalsUnavailable's business), and
+//     NOT a registry-shaped source on a host knownRegistry accepts (a
+//     registry_mirrors host, the user's own Chainsaw repository).
+//   - nonRegistrySourceUnpinned: that source is mutable (origin.Pinned).
+//   - nonRegistryOrigin: origin.Location of the sanitised origin — host/path,
+//     never userinfo, query or ref — for allow-lists in Rego
+//     (glob.match(pattern, ["/"], input.nonRegistryOrigin)).
+//
+// Never touches signalsUnavailable or the coverage gate.
+func setNonRegistryFacts(in *policy.Input, eco, o, hash string) {
+	if o == "" || localCode(o) || strings.HasPrefix(o, unparsedLockPrefix) {
+		return
+	}
+	if origin.Classify(eco, o) == origin.RegistryOther && knownRegistry(eco, o) {
+		return
+	}
+	in.NonRegistrySource = true
+	in.NonRegistrySourceUnpinned = !origin.Pinned(o, hash)
+	in.NonRegistryOrigin = origin.Location(o)
 }
 
 // gitOrigin reports whether a non-registry Origin is a git repository —

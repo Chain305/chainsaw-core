@@ -281,7 +281,7 @@ func TestPRScanPolicy_MissingConfiguredBundleIsCounted(t *testing.T) {
 //
 // This list is the load-bearing part of the "same Rego, every surface"
 // claim. policy.Input carries ~70 fields; pr-scan reads a git diff, so
-// it can fill six. A rule an operator wrote against the proxy keyed on
+// it can fill nine. A rule an operator wrote against the proxy keyed on
 // input.cvss, input.isKnownMalicious, or input.hasInstallScript is
 // UNDEFINED here and silently never fires — a merge gate that looks
 // configured and enforces nothing.
@@ -293,6 +293,9 @@ var prScanPopulatedInputFields = []string{
 	"ecosystem",
 	"gitDependency",
 	"isSuspectedTyposquat",
+	"nonRegistryOrigin",
+	"nonRegistrySource",
+	"nonRegistrySourceUnpinned",
 	"package",
 	"surface",
 	"version",

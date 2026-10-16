@@ -140,7 +140,7 @@ to mis-state what Chainsaw covers, so they are listed apart.
 The sixteen: npm, PyPI, Maven, Cargo, Composer, RubyGems, NuGet, Go, Hugging
 Face, CocoaPods, Swift, Pub (Dart), Docker/OCI, APT, Yum, DNF.
 
-Coverage across them is **not uniform** — of 53 policy conditions, npm supports
+Coverage across them is **not uniform** — of 54 policy conditions, npm supports
 43 fully and APT supports 12, because an upstream that publishes no maintainer
 metadata cannot produce a maintainer signal. The matrix is compiled into the
 binary ([`policy/proxy_matrix.go`](policy/proxy_matrix.go)), queryable at

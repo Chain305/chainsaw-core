@@ -40,9 +40,9 @@ func npmLockSplit(pkgs []ftypes.Package) (registry []lockCoordinate, nonRegistry
 				registry = append(registry, lockCoordinate{Name: p.Name, Version: p.Version, Integrity: hashToSRI(p.Hash)})
 			}
 		case origin.Classify("npm", o) == origin.RegistryOther:
-			nonRegistry = append(nonRegistry, nonRegistryDep{Name: p.Name, Version: p.Version, Origin: "registry+" + o})
+			nonRegistry = append(nonRegistry, nonRegistryDep{Name: p.Name, Version: p.Version, Origin: "registry+" + o, Hash: p.Hash})
 		default:
-			nonRegistry = append(nonRegistry, nonRegistryDep{Name: p.Name, Version: p.Version, Origin: o})
+			nonRegistry = append(nonRegistry, nonRegistryDep{Name: p.Name, Version: p.Version, Origin: o, Hash: p.Hash})
 		}
 	}
 	return registry, nonRegistry
@@ -73,7 +73,7 @@ func npmLockSpecs(registry []lockCoordinate, nonRegistry []nonRegistryDep) []pac
 			}
 			continue
 		}
-		specs = append(specs, packageSpec{Ecosystem: "npm", Name: d.Name, Version: d.Version, Origin: d.Origin})
+		specs = append(specs, packageSpec{Ecosystem: "npm", Name: d.Name, Version: d.Version, Origin: d.Origin, Hash: d.Hash})
 	}
 	return specs
 }

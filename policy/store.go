@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/chain305/chainsaw-core/depparser/origin"
 	"github.com/chain305/chainsaw-core/pgstore"
 	"github.com/chain305/chainsaw-core/tenancy"
 )
@@ -335,6 +336,34 @@ type Conditions struct {
 	// fingerprint of a machine-generated manifest or a typo that
 	// silently resolves to "latest".
 	BadDependencySemver *bool `json:"badDependencySemver,omitempty" yaml:"badDependencySemver,omitempty"`
+
+	// Non-registry sources (docs/PLANS_INTELLIGENCE.md
+	// #plan-non-registry-sources §3.6). Facts about where a LOCKFILE or
+	// install command takes a package from, set by the install guard and
+	// pr-scan; the proxy never serves such a package (SupportNone for every
+	// proxy row). Never the degraded-analysis input (signalsUnavailable) and
+	// never the coverage gate.
+
+	// NonRegistrySource fires when the package comes from somewhere other
+	// than the public registry or a mirror the org vouches for: git, a URL
+	// tarball, a vendored archive (file:x.tgz), an undeclared private
+	// registry. Not local first-party code (a workspace/link/path
+	// directory) and not a declared registry_mirrors host or the org's own
+	// Chainsaw repository.
+	NonRegistrySource *bool `json:"nonRegistrySource,omitempty" yaml:"nonRegistrySource,omitempty"`
+
+	// NonRegistrySourceUnpinned fires when that source is mutable: git
+	// without a full commit SHA (a branch, a tag, a short SHA, no ref), or
+	// a URL / archive / private-registry package without a lockfile content
+	// hash (origin.Pinned). false on a registry package.
+	NonRegistrySourceUnpinned *bool `json:"nonRegistrySourceUnpinned,omitempty" yaml:"nonRegistrySourceUnpinned,omitempty"`
+
+	// NonRegistryOriginNotIn is an allow-list of origin locations
+	// (origin.Location form, glob: "github.com/myorg/*",
+	// "git.corp.example/**"). The condition holds when the package is from a
+	// non-registry source AND its location matches NONE of the patterns.
+	// Validated at save (origin.ValidateLocationPattern).
+	NonRegistryOriginNotIn []string `json:"nonRegistryOriginNotIn,omitempty" yaml:"nonRegistryOriginNotIn,omitempty"`
 
 	// Socket-gap Wave 3 — Tier-2 source-code scanner conditions.
 	// Each bool gates against the corresponding ArtifactScanSection
@@ -1146,6 +1175,9 @@ func validatePolicy(policy Policy) error {
 		return errors.New("policy must include at least one condition or scoped target")
 	}
 	if err := rejectStandaloneContextOnlyConditions(policy); err != nil {
+		return err
+	}
+	if err := validateNonRegistryOriginNotIn(policy.Conditions.NonRegistryOriginNotIn); err != nil {
 		return err
 	}
 	switch policy.Decision {
@@ -2074,6 +2106,10 @@ func hasPolicyCondition(conditions Conditions) bool {
 		conditions.WildcardDependencyRange != nil || conditions.BadDependencySemver != nil {
 		return true
 	}
+	if conditions.NonRegistrySource != nil || conditions.NonRegistrySourceUnpinned != nil ||
+		hasMeaningfulValues(conditions.NonRegistryOriginNotIn) {
+		return true
+	}
 	// Wave 3.
 	if conditions.UsesEval != nil || conditions.NetworkAccess != nil ||
 		conditions.ShellAccess != nil || conditions.FilesystemAccess != nil ||
@@ -2132,6 +2168,22 @@ func hasPolicyScope(scope Scope) bool {
 		hasMeaningfulValues(scope.TargetRepos) ||
 		hasMeaningfulValues(scope.TargetRequestingCountry) ||
 		hasMeaningfulValues(scope.TargetRequestingIP)
+}
+
+// validateNonRegistryOriginNotIn rejects an allow-list entry that could
+// never match a location (empty, scheme- or userinfo-bearing, bad glob):
+// such an entry would make the condition fire for every non-registry source
+// while reading as an allow-list.
+func validateNonRegistryOriginNotIn(patterns []string) error {
+	if len(patterns) > origin.MaxLocationPatterns {
+		return fmt.Errorf("nonRegistryOriginNotIn: at most %d patterns", origin.MaxLocationPatterns)
+	}
+	for _, p := range patterns {
+		if err := origin.ValidateLocationPattern(p); err != nil {
+			return fmt.Errorf("nonRegistryOriginNotIn: %w", err)
+		}
+	}
+	return nil
 }
 
 func hasMeaningfulValues(values []string) bool {

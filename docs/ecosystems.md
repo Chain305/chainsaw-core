@@ -31,28 +31,28 @@ server-side scanning rather than the local `pr-scan` path.
 ## 3. The registry proxy and risk engine — 16 ecosystems
 
 Coverage is **not uniform**, and pretending otherwise would be the dishonest
-way to present this. Of the **53 policy conditions**, each ecosystem
+way to present this. Of the **54 policy conditions**, each ecosystem
 supports a different subset — an upstream that publishes no maintainer metadata
 cannot produce a maintainer signal.
 
 | Ecosystem | Full | Partial | Not supported |
 |---|---:|---:|---:|
-| npm | 43 | 4 | 6 |
-| PyPI | 45 | 4 | 4 |
-| Maven | 19 | 16 | 18 |
-| Cargo | 35 | 3 | 15 |
-| Composer | 34 | 4 | 15 |
-| RubyGems | 36 | 5 | 12 |
-| NuGet | 24 | 12 | 17 |
-| Go | 29 | 2 | 22 |
-| Hugging Face | 20 | 3 | 30 |
-| CocoaPods | 25 | 3 | 25 |
-| Swift | 20 | 9 | 24 |
-| Pub (Dart) | 18 | 12 | 23 |
-| Docker / OCI | 15 | 2 | 36 |
-| APT | 12 | 2 | 39 |
-| Yum | 13 | 2 | 38 |
-| DNF | 13 | 2 | 38 |
+| npm | 43 | 4 | 7 |
+| PyPI | 45 | 4 | 5 |
+| Maven | 19 | 16 | 19 |
+| Cargo | 35 | 3 | 16 |
+| Composer | 34 | 4 | 16 |
+| RubyGems | 36 | 5 | 13 |
+| NuGet | 24 | 12 | 18 |
+| Go | 29 | 2 | 23 |
+| Hugging Face | 20 | 3 | 31 |
+| CocoaPods | 25 | 3 | 26 |
+| Swift | 20 | 9 | 25 |
+| Pub (Dart) | 18 | 12 | 24 |
+| Docker / OCI | 15 | 2 | 37 |
+| APT | 12 | 2 | 40 |
+| Yum | 13 | 2 | 39 |
+| DNF | 13 | 2 | 39 |
 
 **Partial** means the condition is wired but the underlying signal is
 incomplete in practice — Swift licence-to-SPDX mapping, for example, or
@@ -71,7 +71,7 @@ on an unsupported condition, and at evaluation time a rule skipped for this
 reason emits a `policy.rule.skipped` audit event — so an inert rule is visible
 rather than silent.
 
-## The 53 policy conditions
+## The 54 policy conditions
 
 ```
 Scorecard                           HasHiddenUnicode                    EnvVarAccess
@@ -91,5 +91,11 @@ ImportTimeExecution                 BadDependencySemver                 AgentToo
 MaliciousIOC                        UsesEval                            MCPServerDeclared
 BuildRsExecutes                     NetworkAccess                       PromptTemplateInjection
 PublisherChanged                    ShellAccess                         MaintainerAccountAge
-VersionAnomaly                      FilesystemAccess
+VersionAnomaly                      FilesystemAccess                    NonRegistrySource
 ```
+
+`NonRegistrySource` (the `nonRegistrySource`, `nonRegistrySourceUnpinned` and
+`nonRegistryOriginNotIn` conditions) is "not supported" on every row on
+purpose: it describes where a lockfile or an install command takes a package
+from — git, a URL tarball, an undeclared registry — and the proxy only ever
+serves registry packages. The install guard and `chainsaw pr-scan` evaluate it.

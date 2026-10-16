@@ -117,6 +117,17 @@ const (
 	ConditionWildcardDependencyRange ConditionType = "WildcardDependencyRange"
 	ConditionBadDependencySemver     ConditionType = "BadDependencySemver"
 
+	// ConditionNonRegistrySource covers the three non_registry_sources
+	// conditions (nonRegistrySource, nonRegistrySourceUnpinned,
+	// nonRegistryOriginNotIn; docs/PLANS_INTELLIGENCE.md
+	// #plan-non-registry-sources §3.6). They are facts about where a
+	// LOCKFILE or an install command takes a package from, set by the
+	// install guard and pr-scan. The proxy only ever serves registry
+	// coordinates, so the column is SupportNone on every row: a rule using
+	// it is inert at the proxy by construction, and live at the runtime
+	// (guard) and pr surfaces.
+	ConditionNonRegistrySource ConditionType = "NonRegistrySource"
+
 	// Socket-gap Wave 3 — Tier-2 source-code scanners (see
 	// SOCKET_GAP_IMPLEMENTATION_PLAN.md §10). All nine ride the
 	// Wave-0 shared artifact map. Detection-only signals; no new
@@ -222,6 +233,7 @@ func AllConditions() []ConditionType {
 		ConditionHTTPTarballDependency,
 		ConditionWildcardDependencyRange,
 		ConditionBadDependencySemver,
+		ConditionNonRegistrySource,
 		ConditionUsesEval,
 		ConditionNetworkAccess,
 		ConditionShellAccess,
@@ -393,6 +405,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportFull,
 		ConditionWildcardDependencyRange: SupportFull,
 		ConditionBadDependencySemver:     SupportFull,
+		ConditionNonRegistrySource:       SupportNone, // the proxy never serves a non-registry source; guard + pr-scan only
 		// Wave 3: source-code scanners all apply to npm tarballs.
 		ConditionUsesEval:            SupportFull,
 		ConditionNetworkAccess:       SupportFull,
@@ -462,6 +475,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportFull,
 		ConditionWildcardDependencyRange: SupportFull,
 		ConditionBadDependencySemver:     SupportFull,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: PyPI sdists ship source.
 		ConditionUsesEval:            SupportFull,
 		ConditionNetworkAccess:       SupportFull,
@@ -558,6 +572,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportPartial,
 		ConditionBadDependencySemver:     SupportPartial,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: Maven jars ship .class files, not source — the
 		// source-text scanners only fire when a -sources.jar is
 		// proxied. NativeBinaryPresent fires reliably when a jar
@@ -654,6 +669,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportNone,
 		ConditionBadDependencySemver:     SupportNone,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: shared artifact map runs over Dart source text, but
 		// the scanners' regex heuristics are JS/Python-tuned and
 		// pub-artifact scanning is not verified end-to-end → Partial.
@@ -733,6 +749,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportFull,
 		ConditionBadDependencySemver:     SupportFull,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: crate tarballs ship .rs source.
 		ConditionUsesEval:            SupportNone, // Rust has no runtime eval
 		ConditionNetworkAccess:       SupportFull,
@@ -804,6 +821,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportFull,
 		ConditionWildcardDependencyRange: SupportPartial,
 		ConditionBadDependencySemver:     SupportPartial,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: Composer packages ship PHP source.
 		ConditionUsesEval:            SupportFull,
 		ConditionNetworkAccess:       SupportFull,
@@ -874,6 +892,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportFull,
 		ConditionBadDependencySemver:     SupportFull,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: gems ship .rb source.
 		ConditionUsesEval:            SupportFull,
 		ConditionNetworkAccess:       SupportFull,
@@ -935,6 +954,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportNone,
 		ConditionBadDependencySemver:     SupportNone,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: NuGet packages ship .dll (compiled) primarily.
 		// Source-text scanners only fire when the .nupkg bundles
 		// a src/ tree; NativeBinaryPresent fires reliably.
@@ -1002,6 +1022,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportNone,
 		ConditionBadDependencySemver:     SupportFull,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: Go modules ship .go source.
 		ConditionUsesEval:            SupportNone, // Go has no runtime eval
 		ConditionNetworkAccess:       SupportFull,
@@ -1063,6 +1084,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportNone,
 		ConditionBadDependencySemver:     SupportNone,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: HuggingFace artifacts are model weights — none of
 		// the source scanners apply. Every cell is None.
 		ConditionUsesEval:            SupportNone,
@@ -1123,6 +1145,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportNone,
 		ConditionBadDependencySemver:     SupportNone,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: CocoaPods ship source + (often) binary frameworks.
 		// NativeBinaryPresent is downgraded to Partial because binary
 		// frameworks are the NORM in CocoaPods — firing on every pod
@@ -1186,6 +1209,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportNone,
 		ConditionBadDependencySemver:     SupportNone,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: Swift packages ship .swift source (when source
 		// packages, not binary xcframeworks).
 		ConditionUsesEval:            SupportNone,
@@ -1246,6 +1270,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportNone,
 		ConditionBadDependencySemver:     SupportNone,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: Docker images are binary layers — this scanner
 		// family does not walk OCI layers. All None.
 		ConditionUsesEval:            SupportNone,
@@ -1307,6 +1332,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:   SupportNone,
 		ConditionWildcardDependencyRange: SupportNone,
 		ConditionBadDependencySemver:     SupportNone,
+		ConditionNonRegistrySource:       SupportNone,
 		// Wave 3: APT packages are binary .deb blobs — source
 		// scanners don't apply.
 		ConditionUsesEval:            SupportNone,
@@ -1366,6 +1392,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:      SupportNone,
 		ConditionWildcardDependencyRange:    SupportNone,
 		ConditionBadDependencySemver:        SupportNone,
+		ConditionNonRegistrySource:          SupportNone,
 		// Wave 3: RPM packages are binary — source scanners N/A.
 		ConditionUsesEval:            SupportNone,
 		ConditionNetworkAccess:       SupportNone,
@@ -1424,6 +1451,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionHTTPTarballDependency:      SupportNone,
 		ConditionWildcardDependencyRange:    SupportNone,
 		ConditionBadDependencySemver:        SupportNone,
+		ConditionNonRegistrySource:          SupportNone,
 		// Wave 3: RPM packages are binary — source scanners N/A.
 		ConditionUsesEval:            SupportNone,
 		ConditionNetworkAccess:       SupportNone,
@@ -1625,6 +1653,9 @@ func ConditionsUsedBy(c Conditions) []ConditionType {
 	}
 	if c.BadDependencySemver != nil {
 		used = append(used, ConditionBadDependencySemver)
+	}
+	if c.NonRegistrySource != nil || c.NonRegistrySourceUnpinned != nil || len(c.NonRegistryOriginNotIn) > 0 {
+		used = append(used, ConditionNonRegistrySource)
 	}
 	// Wave 3 — Tier-2 source-code scanners.
 	if c.UsesEval != nil {
