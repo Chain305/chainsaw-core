@@ -64,15 +64,18 @@ func init() {
 	// Publisher change + install script = takeover signature.
 	// This is why we keep a low individual weight on install_script_only
 	// (most packages legitimately have install scripts) but escalate
-	// aggressively when a NEW publisher introduces one. Compound weight
-	// puts the package well into quarantine territory on its own.
+	// aggressively when a NEW publisher ships a version that has one.
+	// It fires on a script that is PRESENT, not only one newly introduced:
+	// a takeover that reuses an existing postinstall is the same attack
+	// (owner decision 2026-10-17, protobufjs@8.0.1). Compound weight puts
+	// the package well into quarantine territory on its own.
 	CompoundRules = append(CompoundRules, CompoundRule{
 		ID:          CompoundSCTakeoverSignature,
 		Category:    CategorySupplyChain,
 		Severity:    SevCritical,
 		Weight:      -55,
 		Title:       "Publisher change combined with install script",
-		Description: "A different publisher set introduced an install-time lifecycle script in this version — the fingerprint of an account-takeover-and-drop-payload attack.",
+		Description: "A different publisher set released this version, and it runs an install-time lifecycle script — the fingerprint of an account-takeover-and-drop-payload attack.",
 		Fires: func(in Input, fired map[string]FiredSignal) (bool, string, map[string]any) {
 			if !in.PublisherChanged {
 				return false, "", nil
