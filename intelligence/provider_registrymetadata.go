@@ -138,6 +138,9 @@ type registryMetadataProvider struct {
 	client    *http.Client
 	endpoints registryEndpoints
 	now       func() time.Time
+	// ociStatus reports an image digest's signature status; it feeds the
+	// Docker provenance downgrade. Nil (no provenance checker) disables it.
+	ociStatus func(ctx context.Context, image, digest string) provenance.Status
 }
 
 func newRegistryMetadataProvider() *registryMetadataProvider {
@@ -5737,7 +5740,125 @@ func (p *registryMetadataProvider) runDocker(ctx context.Context, pkg, ver strin
 	if tagWarn != nil && tagWarn.Code == "not_found" && !isOCIDigestPin(ver) {
 		pr.Warnings = append(pr.Warnings, *versionNotFoundByProbeWarning(p, tagURL, repoURL, pkg, ver, -1))
 	}
+	reqDigest := tag.Digest
+	if isOCIDigestPin(ver) {
+		reqDigest = strings.ToLower(strings.Replace(ver, "-", ":", 1))
+	}
+	if d := p.dockerProvenanceDowngrade(ctx, pkg, namespace, image, reqDigest); d != nil {
+		if pr.SupplyChain == nil {
+			pr.SupplyChain = &SupplyChainSection{}
+		}
+		pr.SupplyChain.ProvenanceDowngrade = d
+	}
 	return pr, nil
+}
+
+// dockerProvenanceDowngradeMinPrior: an image's nearest K lower version tags
+// must all carry a verified signature. Stricter than npm's 2 because a
+// Docker Hub tag listing is one page and tags are re-pointed.
+const dockerProvenanceDowngradeMinPrior = 3
+
+// dockerHubTag is one row of Docker Hub's tag listing. Digest is what the tag
+// points at (the index, for a multi-arch image); Images are its platforms.
+type dockerHubTag struct {
+	Name        string `json:"name"`
+	Digest      string `json:"digest"`
+	LastUpdated string `json:"last_updated"`
+	Images      []struct {
+		Digest string `json:"digest"`
+	} `json:"images"`
+}
+
+// dockerProvenanceDowngrade is npmProvenanceDowngrade for Docker Hub: the
+// requested image has no signature although the K version tags below it,
+// pushed before it, were all verified. A stolen Hub token (the Trivy
+// 0.69.5/0.69.6 pushes, GHSA-69fq-xp46-6x23) cannot sign with the project's
+// CI identity.
+//
+// Conservative by construction: the requested digest must be on the newest
+// page of tags under a stable version name (so a nightly or an untagged
+// digest is never judged), priors are lower versions on that page deduped by
+// digest (an alias is one release, not two), and a platform digest is judged
+// by the index its tag points at, which is what cosign signs. Priors are
+// checked first, nearest first, stopping at the first unsigned one, so an
+// image that never signed costs one check.
+func (p *registryMetadataProvider) dockerProvenanceDowngrade(ctx context.Context, pkg, namespace, image, digest string) *ProvenanceDowngrade {
+	if p.ociStatus == nil || digest == "" {
+		return nil
+	}
+	var page struct {
+		Results []dockerHubTag `json:"results"`
+	}
+	u := fmt.Sprintf("%s/v2/repositories/%s/%s/tags/?page_size=25&ordering=last_updated", p.endpoints.docker, url.PathEscape(namespace), url.PathEscape(image))
+	if warn, err := p.fetchJSON(ctx, u, "application/json", &page); err != nil || warn != nil {
+		return nil
+	}
+	stable := func(name string) string {
+		sv := "v" + strings.TrimPrefix(name, "v")
+		if !semver.IsValid(sv) || semver.Prerelease(sv) != "" || semver.Build(sv) != "" {
+			return ""
+		}
+		return sv
+	}
+	// The requested release: its highest stable name and earliest push.
+	var cur, index string
+	var at time.Time
+	for _, t := range page.Results {
+		hit := t.Digest == digest
+		for _, im := range t.Images {
+			hit = hit || im.Digest == digest
+		}
+		sv := stable(t.Name)
+		when, ok := parseTime(t.LastUpdated)
+		if !hit || sv == "" || !ok {
+			continue
+		}
+		if cur == "" || semver.Compare(sv, cur) > 0 {
+			cur, index = sv, t.Digest
+		}
+		if at.IsZero() || when.Before(at) {
+			at = when
+		}
+	}
+	if cur == "" || index == "" {
+		return nil
+	}
+	type prior struct {
+		sv, name, digest string
+		at               time.Time
+	}
+	seen := map[string]bool{index: true}
+	var priors []prior
+	for _, t := range page.Results {
+		sv := stable(t.Name)
+		when, ok := parseTime(t.LastUpdated)
+		if sv == "" || !ok || !when.Before(at) || semver.Compare(sv, cur) >= 0 || t.Digest == "" {
+			continue
+		}
+		priors = append(priors, prior{sv, t.Name, t.Digest, when})
+	}
+	// Nearest lower version first; of aliases (1.2, 1.2.0) the fuller name.
+	sort.Slice(priors, func(i, j int) bool {
+		if c := semver.Compare(priors[i].sv, priors[j].sv); c != 0 {
+			return c > 0
+		}
+		return len(priors[i].name) > len(priors[j].name)
+	})
+	var run []attestedRelease
+	for _, pr := range priors {
+		if seen[pr.digest] {
+			continue
+		}
+		seen[pr.digest] = true
+		if len(run) == dockerProvenanceDowngradeMinPrior || p.ociStatus(ctx, pkg, pr.digest) != provenance.StatusVerified {
+			break
+		}
+		run = append(run, attestedRelease{pr.name, pr.at, true})
+	}
+	if len(run) < dockerProvenanceDowngradeMinPrior || p.ociStatus(ctx, pkg, index) != provenance.StatusMissing {
+		return nil
+	}
+	return attestedRun(run, dockerProvenanceDowngradeMinPrior)
 }
 
 // ociDigestHexLen maps an OCI digest algorithm to the exact number of hex

@@ -110,6 +110,19 @@ func TestSeededPolicyStillBlocksBidiOverride(t *testing.T) {
 	}
 }
 
+// GlassWorm's 2026-03 wave encodes its payload as a run of variation
+// selectors. The scanner records that kind only for a run (>= 4), never for
+// the single selector an emoji carries, so it is safe to refuse.
+func TestSeededPolicyBlocksVariationSelectorPayload(t *testing.T) {
+	requireMonorepoTree(t, "configs")
+	for _, path := range seedConfigPaths {
+		res := evaluateSeeded(t, path, hiddenUnicodeContext("vs-payload", "variation_selector"))
+		if res.Action != policy.ModeBlock {
+			t.Errorf("%s: a variation-selector payload resolved to %q, want block", path, res.Action)
+		}
+	}
+}
+
 // A package with no hidden Unicode at all must be untouched by either rule.
 // Without this, a rule that matched everything would pass both tests above.
 func TestSeededHiddenUnicodePoliciesDoNotFireOnCleanPackages(t *testing.T) {

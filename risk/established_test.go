@@ -67,7 +67,7 @@ func TestDampEstablishedSet(t *testing.T) {
 // TestTakeoverIndicatorSet pins the signals that suspend the damper.
 func TestTakeoverIndicatorSet(t *testing.T) {
 	want := []string{
-		SignalSCAppCredentialExfil, SignalSCDependencyCredential, SignalSCEnvVarAppeared,
+		SignalSCAppCredentialExfil, SignalSCDefenderTamper, SignalSCDependencyCredential, SignalSCEnvVarAppeared,
 		SignalSCExfilSinkUsed, SignalSCFilesystemAppeared, SignalSCImportTimeShell,
 		SignalSCInstallScriptEvalEnc, SignalSCInstallScriptNetwork, SignalSCKnownMalicious,
 		SignalSCMaintainerAccountVeryYoung, SignalSCMaintainerAccountYoung, SignalSCManifestConfusion,

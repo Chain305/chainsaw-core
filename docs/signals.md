@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **94 risk signals**. Each is scored, not merely
+Chainsaw registers **98 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,19 +23,22 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 64 |
+| Supply chain | 68 |
 | Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 8 |
 | Quality | 6 |
-| **Total** | **94** |
+| **Total** | **98** |
 
 
-## Supply chain (64)
+## Supply chain (68)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
+| `action.comment_trigger_unguarded` | high | 0.00 | Comment-triggered workflow is not restricted to members |
 | `action.malicious` | high | -50.00 | GitHub Action ref flagged as malicious |
+| `action.pwn_request` | high | 0.00 | Privileged workflow runs pull request code |
+| `action.script_injection` | high | 0.00 | Attacker-written text interpolated into a shell step |
 | `action.typosquat` | high | -40.00 | GitHub Action name resembles a popular Action |
 | `action.unknown_publisher` | low | -5.00 | GitHub Action from unknown publisher |
 | `action.unpinned_ref` | medium | -15.00 | Unpinned GitHub Action reference |
@@ -62,6 +65,7 @@ a configured server.
 | `sc.deprecated_by_maintainer` | medium | -15.00 | Deprecated by maintainer |
 | `sc.git_url_dependency` | low | -8.00 | Git URL dependency |
 | `sc.app_credential_exfil` | high | -25.00 | Code sends another application's credentials |
+| `sc.defender_tamper` | high | -20.00 | Code disables or excludes Windows Defender |
 | `sc.dependency_credential` | high | -25.00 | Dependency spec embeds a credential |
 | `sc.exfil_sink_used` | high | -30.00 | Code sends data to an exfiltration endpoint |
 | `sc.hidden_unicode` | medium | -20.00 | Hidden Unicode in source |

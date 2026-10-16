@@ -341,7 +341,7 @@ func ScanReferencedBody(body string) Kind {
 	//    actual decode-and-eval (eval(Buffer.from / atob) or hex-escaped string
 	//    blob, via strongEvalEncoded), or a high-volume javascript-obfuscator
 	//    hex-identifier blob.
-	if strongEvalEncoded(body) || looksObfuscatedJS(body) {
+	if strongEvalEncoded(body) || looksObfuscatedJS(body) || looksXorLoader(body) {
 		return KindFetchesRemote
 	}
 	// 1b. Host recon plus a send: the dependency-confusion beacon. It never
@@ -424,6 +424,57 @@ func looksObfuscatedJS(body string) bool {
 	const threshold = 24
 	hits := jsObfuscatorIdentRE.FindAllStringIndex(body, threshold+1)
 	return len(hits) > threshold
+}
+
+// xorDecodeRE is a string XOR-decoded into characters: the XOR sits inside
+// String.fromCharCode(...), or a charCodeAt(...)^ feeds a fromCharCode within
+// the same short span. A CRC/hash XORs charCodeAt into a number and never
+// turns it back into text.
+var xorDecodeRE = regexp.MustCompile(`fromCharCode\s*\([^;]{0,120}\^|charCodeAt\s*\([^)]{0,40}\)\s*\^.{0,200}?fromCharCode`)
+
+// computedExecRE is eval / the Function constructor run on a COMPUTED value
+// (or a literal concatenated with one) — never the `new Function("return
+// this")` global-object shim every webpack and UMD bundle carries.
+var computedExecRE = regexp.MustCompile(`\b(?:eval|Function)\s*\(\s*(?:[^"'\x60\s)]|["'][^"'\n]{0,80}["']\s*\+)|\(\s*0\s*,\s*eval\s*\)`)
+
+// looksXorLoader is the @7nohe/openapi-react-query-codegen shape: a 6.4 MB
+// preinstall script that XOR-decodes one huge string and hands it to the
+// Function constructor. No fetch, no base64, no _0x identifiers, so none of
+// the other arms sees it. All three parts are required — size (>1 MiB, or a
+// >=64 KiB string literal), an XOR decode to text, and exec of a computed
+// value — because each alone is ordinary in a large bundle.
+func looksXorLoader(body string) bool {
+	if !strings.Contains(body, "fromCharCode") {
+		return false
+	}
+	if len(body) <= 1<<20 && !hasLongStringLiteral(body, 64<<10) {
+		return false
+	}
+	return computedExecRE.MatchString(body) && xorDecodeRE.MatchString(body)
+}
+
+// hasLongStringLiteral reports a quoted run of at least min bytes. It is a
+// tokeniser for quotes and backslash escapes only; a stray quote inside a
+// regex literal can mis-pair, which is why it is one gate of three.
+func hasLongStringLiteral(body string, min int) bool {
+	for i := 0; i < len(body); i++ {
+		q := body[i]
+		if q != '"' && q != '\'' && q != '`' {
+			continue
+		}
+		j := i + 1
+		for j < len(body) && body[j] != q {
+			if body[j] == '\\' {
+				j++
+			}
+			j++
+		}
+		if j-i-1 >= min {
+			return true
+		}
+		i = j
+	}
+	return false
 }
 
 // looksPython is a cheap heuristic to gate the python exec+fetch coupling so we

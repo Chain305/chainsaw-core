@@ -1,8 +1,8 @@
 // Package hiddenunicode detects visually-invisible or bidi-override Unicode
 // characters embedded in source files — the GlassWorm hidden-payload pattern
 // where malicious code is concealed inside identifiers, strings, or comments
-// using zero-width space/joiner, right-to-left override, or Unicode tag
-// characters.
+// using zero-width space/joiner, right-to-left override, Unicode tag
+// characters, or runs of variation selectors.
 //
 // The scanner is PURE: it operates on an in-memory map of file bytes, so the
 // caller owns artifact-unpack decisions. That keeps this package independent
@@ -25,14 +25,32 @@ import (
 	"unicode/utf8"
 )
 
-// Kind labels the three families of suspect code points the scanner groups
+// Kind labels the four families of suspect code points the scanner groups
 // hits by. These names are stable and appear verbatim in policy JSON
 // (`hiddenUnicodeKinds`), so renaming breaks wire-format.
 const (
 	KindZeroWidth    = "zero_width"
 	KindBidiOverride = "bidi_override"
 	KindTag          = "tag"
+	// KindVariationSelector is a RUN of variation selectors, never a lone
+	// one: see minVariationSelectorRun.
+	KindVariationSelector = "variation_selector"
 )
+
+// minVariationSelectorRun is the shortest run of consecutive variation
+// selectors (U+FE00–FE0F, U+E0100–E01EF, mixed) recorded as
+// KindVariationSelector. Text uses at most one selector per base character —
+// emoji presentation (U+FE0F), keycaps, ZWJ sequences, CJK ideographic
+// variation sequences — so a run of two is already unusual and four is
+// data. GlassWorm's 2026-03 wave encodes one payload byte per selector, so
+// its payload is a run of hundreds.
+const minVariationSelectorRun = 4
+
+// isVariationSelector reports U+FE00–FE0F (VS1–16) and U+E0100–E01EF
+// (VS17–256): together exactly 256 code points, one per byte value.
+func isVariationSelector(r rune) bool {
+	return (r >= 0xFE00 && r <= 0xFE0F) || (r >= 0xE0100 && r <= 0xE01EF)
+}
 
 // Hit records a single suspect rune occurrence.
 type Hit struct {
@@ -40,7 +58,8 @@ type Hit struct {
 	Offset int
 	// Rune is the offending code point.
 	Rune rune
-	// Kind is one of KindZeroWidth, KindBidiOverride, KindTag.
+	// Kind is one of KindZeroWidth, KindBidiOverride, KindTag,
+	// KindVariationSelector.
 	Kind string
 }
 
@@ -123,8 +142,10 @@ func isAllowedExt(path string) bool {
 	return ok
 }
 
-// NormalizeKind classifies a rune into one of the three kinds or returns ""
-// when the rune is not suspect. Ranges intentionally match the PR 8 spec:
+// NormalizeKind classifies a rune into one of the three per-rune kinds or
+// returns "" when the rune is not suspect. KindVariationSelector is not
+// returned: a lone selector is ordinary text, and only a run is recorded
+// (scanBytes). Ranges intentionally match the PR 8 spec:
 //
 //   - zero_width:    U+200B, U+200C, U+200D, U+200E, U+200F
 //   - bidi_override: U+202A–U+202E, U+2066–U+2069
@@ -275,14 +296,30 @@ func scanWithLimits(files map[string][]byte, lim limits) Result {
 // width 1 so we always make forward progress; invalid UTF-8 is ignored rather
 // than flagged (attackers don't need invalid UTF-8 to hide — the whole point
 // of the suspect ranges is that they *are* valid UTF-8).
+//
+// Variation selectors are buffered and recorded only once a run reaches
+// minVariationSelectorRun; every member of such a run is a hit.
 func scanBytes(data []byte) []Hit {
-	var hits []Hit
+	var hits, vsRun []Hit
+	flushRun := func() {
+		if len(vsRun) >= minVariationSelectorRun {
+			hits = append(hits, vsRun...)
+		}
+		vsRun = vsRun[:0]
+	}
 	for i := 0; i < len(data); {
 		r, width := utf8.DecodeRune(data[i:])
 		if r == utf8.RuneError && width == 1 {
+			flushRun()
 			i++
 			continue
 		}
+		if isVariationSelector(r) {
+			vsRun = append(vsRun, Hit{Offset: i, Rune: r, Kind: KindVariationSelector})
+			i += width
+			continue
+		}
+		flushRun()
 		// Fast path: ASCII bytes cannot match any suspect range.
 		if r < 0x200B {
 			i += width
@@ -293,6 +330,7 @@ func scanBytes(data []byte) []Hit {
 		}
 		i += width
 	}
+	flushRun()
 	return hits
 }
 
@@ -341,6 +379,9 @@ func ZeroWidthThreshold() int {
 //     legitimate use in package code, so ONE is enough.
 //   - tag (U+E0000–E007F) is likewise a concealment vector with no benign use
 //     once emoji flag sequences are filtered out. ONE is enough.
+//   - variation_selector is only ever recorded for a run of
+//     minVariationSelectorRun or more — already the payload shape — so it
+//     is adverse like tag.
 //   - zero_width is usually benign — minified bundles, emoji ZWJ, i18n
 //     fixtures — so it must clear ZeroWidthThreshold on its own.
 //
@@ -356,7 +397,8 @@ func Adverse(hits int, kinds []string) bool {
 	}
 	for _, k := range kinds {
 		if k != KindZeroWidth {
-			// A bidi override or tag character is present: one is enough.
+			// A bidi override, tag character or variation-selector run is
+			// present: one is enough.
 			return true
 		}
 	}

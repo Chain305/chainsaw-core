@@ -219,6 +219,7 @@ var socketConceptMap = map[string]conceptMapping{
 	"sc.import_time_shell":     {Socket: []string{"shellAccess"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is narrower: a shell spawned at Python module top level, not anywhere", Cadence: cadR24B},
 	"sc.dependency_credential": {Socket: []string{"gitDependency", "httpDependency"}, Bucket: bucketArtifact, Grade: gradePartia, Note: "ours is narrower: the URL dependency also embeds a credential", Cadence: cadR24B},
 	"sc.app_credential_exfil":  {Socket: nil, Grade: gradeNone, Note: "was PARTIAL (inferred) to malware; rev5 co-fire 0 rows, rev6 0 (ours 1 row) (< 5). Ours: an app's private credential store read and sent from one file", Cadence: cadR24B},
+	"sc.defender_tamper":       {Socket: nil, Grade: gradeNone, Note: "new 2026-10-15, no Socket equivalent claimed. Ours: Set-/Add-MpPreference disabling or excluding Defender in shipping code (@apexacc/audit)", Cadence: cadR24B},
 	// EXACT for the npm-only half: since 7c473d3b it fires on exactly the
 	// hooks a registry install runs (preinstall/install/postinstall), which
 	// is socket's installScripts on npm. rev5 non-malicious npm: 6 both, 0
@@ -362,6 +363,11 @@ var socketConceptMap = map[string]conceptMapping{
 	"action.unknown_publisher": {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
 	"action.typosquat":         {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
 	"action.malicious":         {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
+	// Workflow-structure lint (weight 0). Socket's gha* family is a separate
+	// product surface; no corpus rows.
+	"action.pwn_request":               {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
+	"action.comment_trigger_unguarded": {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
+	"action.script_injection":          {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
 }
 
 // ─── declined surfaces: G-3 and the 2026-10-03 decisions ────────────────────

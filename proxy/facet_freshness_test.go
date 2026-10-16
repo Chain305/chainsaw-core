@@ -637,3 +637,63 @@ func TestClientConditionalsNeverReachUpstream(t *testing.T) {
 		}
 	}
 }
+
+// TestMutableIndexDocumentsBeyondNpmAndPip covers the formats whose index
+// documents were cached forever until 2026-10-14: a Composer client that
+// went through the proxy during laravel-lang's 1.5h compromise (every
+// Packagist tag re-pointed) kept the imposter commit SHAs after Packagist
+// reverted them. Each format pairs its mutable index with the
+// content-addressed artifacts that must stay immutable beside it.
+//
+// Verified by deletion: removing any one format arm from isMutableDocument
+// fails that format's mutable rows; making an arm return true
+// unconditionally fails its immutable rows.
+func TestMutableIndexDocumentsBeyondNpmAndPip(t *testing.T) {
+	const sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	mutable := []struct{ format, path string }{
+		{"composer", "packages.json"},
+		{"composer", "p2/laravel-lang/lang.json"},
+		{"composer", "p2/laravel-lang/lang~dev.json"},
+		{"composer", "p/laravel-lang/lang.json"},
+		{"docker", "v2/library/nginx/manifests/latest"},
+		{"docker", "v2/myorg/team/app/manifests/1.2.3"},
+		{"docker", "v2/library/nginx/tags/list"},
+		{"maven", "org/apache/commons/commons-lang3/maven-metadata.xml"},
+		{"maven", "org/apache/commons/commons-lang3/maven-metadata.xml.sha1"},
+		{"gradle", "com/google/guava/guava/maven-metadata.xml"},
+		{"apt", "dists/bookworm/InRelease"},
+		{"apt", "dists/bookworm/Release"},
+		{"apt", "dists/bookworm/Release.gpg"},
+		{"apt", "debian/dists/bookworm/main/binary-amd64/Packages.xz"},
+		{"apt", "Packages.gz"}, // flat repository
+		{"yum", "repodata/repomd.xml"},
+		{"yum", "9/BaseOS/x86_64/os/repodata/repomd.xml.asc"},
+		{"dnf", "repodata/primary.xml.gz"}, // un-hashed legacy layout
+	}
+	for _, tc := range mutable {
+		if !isMutableDocument(tc.format, tc.path) {
+			t.Errorf("isMutableDocument(%q, %q) = false, want true", tc.format, tc.path)
+		}
+	}
+
+	immutable := []struct{ format, path string }{
+		{"composer", "dists/laravel-lang/lang/15.0.0/encoded/aHR0cHM6Ly9hcGkuZ2l0aHViLmNvbS9yZXBvcy9sYXJhdmVsLWxhbmcvbGFuZy96aXBiYWxsL2FiYzEyMw/laravel-lang-lang-15.0.0.zip"},
+		{"composer", "p/provider-2024$" + sha + ".json"},
+		{"composer", "p/laravel-lang/lang$" + sha + ".json"},
+		{"docker", "v2/library/nginx/manifests/sha256:" + sha},
+		{"docker", "v2/library/nginx/blobs/sha256:abc"},
+		{"maven", "org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar"},
+		{"maven", "org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.pom.sha1"},
+		{"gradle", "com/google/guava/guava/33.0.0-jre/guava-33.0.0-jre.jar"},
+		{"apt", "pool/main/c/curl/curl_7.88.1-10_amd64.deb"},
+		{"apt", "dists/bookworm/main/binary-amd64/by-hash/SHA256/" + sha},
+		{"yum", "Packages/c/curl-8.6.0-1.el9.x86_64.rpm"},
+		{"yum", "repodata/" + sha + "-primary.xml.gz"},
+		{"dnf", "repodata/" + sha[:40] + "-filelists.xml.gz"},
+	}
+	for _, tc := range immutable {
+		if isMutableDocument(tc.format, tc.path) {
+			t.Errorf("isMutableDocument(%q, %q) = true, want false", tc.format, tc.path)
+		}
+	}
+}

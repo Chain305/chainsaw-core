@@ -61,6 +61,7 @@ import (
 	"github.com/chain305/chainsaw-core/policy/builtin"
 	"github.com/chain305/chainsaw-core/policy/dsl"
 	"github.com/chain305/chainsaw-core/policyengine"
+	"github.com/chain305/chainsaw-core/risk"
 )
 
 // Severity strings this lane and the byte scan emit.
@@ -270,6 +271,10 @@ func guardPolicyInput(spec packageSpec, acq acquireResult, bv behavioralVerdict)
 		// test would have silently exempted it — a fact nothing asks
 		// about is a fact that allows the install.
 		SignalsUnavailable: acq.degraded(),
+		// Its own fact, so an org can refuse `pip install git+…` with
+		// `block if gitDependency` without refusing every degraded-analysis
+		// install (which is all signalsUnavailable can say).
+		GitDependency: gitOrigin(spec.Ecosystem, spec.Origin),
 	}
 	// Behavioral findings that did not themselves block are still
 	// facts a rule may want to raise on (e.g. an org that treats any
@@ -282,6 +287,26 @@ func guardPolicyInput(spec packageSpec, acq acquireResult, bv behavioralVerdict)
 		in.HasInstallScript = true
 	}
 	return in
+}
+
+// gitOrigin reports whether a non-registry Origin is a git repository —
+// what the gitDependency policy condition means. risk.ClassifyDepURL is the
+// existing classifier (git+…, git://, git@…, github:/gitlab:/bitbucket:/
+// gist:); npm also reads a bare user/repo as a GitHub repository, and a spec
+// like that keeps it as its Origin (npmSourceSpec).
+func gitOrigin(eco, o string) bool {
+	if o == "" || strings.HasPrefix(o, localOriginPrefix) {
+		return false
+	}
+	if risk.ClassifyDepURL(o) == risk.DepURLGit {
+		return true
+	}
+	// The user/repo shorthand never has a scheme, a leading "." / "/" / "~",
+	// or a tarball name.
+	repo, _, _ := strings.Cut(o, "#")
+	return strings.EqualFold(eco, "npm") && strings.Count(repo, "/") == 1 &&
+		!strings.Contains(repo, ":") && !strings.HasPrefix(repo, ".") && !strings.HasPrefix(repo, "/") && !npmHomePath(repo) &&
+		!hasSuffixFold(repo, ".tgz") && !hasSuffixFold(repo, ".tar.gz") && !hasSuffixFold(repo, ".tar")
 }
 
 // guardPolicyLane runs the policy decision point and translates its

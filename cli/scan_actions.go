@@ -8,7 +8,8 @@ package cli
 // are printed in human-readable text by default (with terminal colors when
 // stderr is a TTY) or as JSON when --format=json is passed.
 //
-// Exit code 1 when any high-severity finding is reported, 0 otherwise — so
+// Exit code 1 when any finding at or above --fail-on (default high) is
+// reported, 0 otherwise — so
 // CI jobs can `chainsaw scan-actions . && echo ok` to gate on supply-chain
 // signals from Actions usage. Document this in the help text so users
 // don't get surprised.
@@ -19,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -35,18 +37,26 @@ var scanActionsCmd = &cobra.Command{
 	GroupID: GrpScan,
 	Short:   "Scan GitHub Actions workflows for supply-chain risk",
 	Long: `Scan one or more GitHub Actions workflow YAML files for supply-chain
-issues — unpinned refs, typosquats, unknown publishers, and known-malicious
-actions.
+issues — unpinned refs, typosquats, unknown publishers, known-malicious
+actions, and dangerous trigger shapes: a pull_request_target/workflow_run job
+that checks out and runs the pull request head, a comment-triggered job with
+secrets or a publish step and no author_association guard, and untrusted event
+text interpolated into a run: step.
 
 <path> may be either a directory (the command walks <path>/.github/workflows/)
 or a single workflow YAML file.
+
+Known-malicious actions come from a built-in seed plus, when present, a GitHub
+Actions OSV snapshot (GHSA JSON files) in the github-actions-osv/ directory
+beside the guard cache. Nothing is fetched.
 
 Output formats (--format, a global flag): text (the default), json, sarif.
 --json is sugar for --format=json. Every format honours --output.
 
 Exit codes:
-  0 — no high-severity findings (low/medium are still reported)
-  1 — at least one high-severity finding (suitable for ` + "`set -e`" + ` CI gates)`,
+  0 — no finding at or above --fail-on (lower findings are still reported)
+  1 — at least one finding at or above --fail-on, default high (suitable for
+      ` + "`set -e`" + ` CI gates; --fail-on medium also gates unpinned tag refs)`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		code, err := runScanActions(cmd, args)
@@ -81,6 +91,7 @@ func init() {
 	// (root.go), which keeps text/sarif legal while table|json validation
 	// applies again. runScanActions folds the root default "table" onto this
 	// command's human format "text", so the rendered output is unchanged.
+	scanActionsCmd.Flags().String("fail-on", "high", "Lowest finding severity that exits 1: high, medium or low")
 	rootCmd.AddCommand(scanActionsCmd)
 }
 
@@ -155,28 +166,38 @@ func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 		return 0, fmt.Errorf("unknown format %q — supported values: text, json, sarif", format)
 	}
 
+	failOn, _ := cmd.Flags().GetString("fail-on")
+	failRank := scanActionsSeverityRank(failOn)
+	if failOn == "" {
+		failRank = scanActionsSeverityRank("high")
+	}
+	if failRank == 0 {
+		return 0, fmt.Errorf("unknown --fail-on %q — supported values: high, medium, low", failOn)
+	}
+
 	target := args[0]
-	refs, workflowCount, err := parseTargetForScanActions(target)
+	refs, lint, workflowCount, err := parseTargetForScanActions(target)
 	if err != nil {
 		return 0, err
 	}
+	errOut := cmd.ErrOrStderr()
 
 	deps := githubactions.ScanDeps{
 		// NewGitHubActionsDetector, not NewDetector: a detector with no
 		// loaded ecosystem returns a zero result for every Action and the
 		// scan reports clean. See its doc comment.
 		Typosquat: githubactions.NewTyposquatAdapter(typosquat.NewGitHubActionsDetector(nil)),
-		Malware:   githubactions.NewMalwareAdapter(malware.NewGitHubActionsFeed()),
+		Malware:   githubactions.NewMalwareAdapter(scanActionsFeed(errOut)),
 		// KnownPublishers nil -> Scan uses DefaultKnownPublishers().
 	}
 	findings, err := githubactions.Scan(context.Background(), refs, deps)
 	if err != nil {
 		return 0, fmt.Errorf("scan: %w", err)
 	}
+	findings = append(findings, lint...)
 
 	report := buildScanActionsReport(findings, workflowCount, len(refs))
 	out := cmd.OutOrStdout()
-	errOut := cmd.ErrOrStderr()
 
 	switch format {
 	case "json":
@@ -216,10 +237,54 @@ func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 		writeScanActionsText(outWriterOr(cmd, out), colorProbe, report)
 	}
 
-	if report.Summary.High > 0 {
-		return 1, nil
+	for _, f := range report.Findings {
+		if scanActionsSeverityRank(f.Severity) >= failRank {
+			return 1, nil
+		}
 	}
 	return 0, nil
+}
+
+// scanActionsSeverityRank orders --fail-on thresholds and finding
+// severities: low 1, medium 2, high 3; anything else 0.
+func scanActionsSeverityRank(sev string) int {
+	switch strings.ToLower(strings.TrimSpace(sev)) {
+	case "low":
+		return 1
+	case "medium":
+		return 2
+	case "high":
+		return 3
+	}
+	return 0
+}
+
+// scanActionsOSVDirName is the directory, beside the guard's known-malicious
+// cache (CHAINSAW_GUARD_DB, default <user-cache>/chainsaw/), holding a GitHub
+// Actions OSV snapshot: GHSA/OSV JSON files, flat or in the
+// github/advisory-database year/month layout.
+const scanActionsOSVDirName = "github-actions-osv"
+
+// scanActionsFeed is the static seed plus, when present, the local GitHub
+// Actions OSV snapshot. It never touches the network: the CLI is offline by
+// default and GHSA's GraphQL API needs a token, so the server does the
+// fetching and the CLI reads files. A snapshot that exists but cannot be
+// read is reported on errOut rather than silently ignored — a scan that
+// says clean must not have quietly dropped its advisories.
+func scanActionsFeed(errOut io.Writer) *malware.GitHubActionsFeed {
+	feed := malware.NewGitHubActionsFeed()
+	db := guardDBPath()
+	if db == "" {
+		return feed
+	}
+	dir := filepath.Join(filepath.Dir(db), scanActionsOSVDirName)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return feed
+	}
+	if err := feed.Refresh(context.Background(), malware.NewLocalOSVDirectorySource(dir, guardLogger)); err != nil {
+		fmt.Fprintf(errOut, "chainsaw: GitHub Actions advisory snapshot %s not loaded: %v\n", dir, err)
+	}
+	return feed
 }
 
 // parseTargetForScanActions accepts either a directory or a single workflow
@@ -232,27 +297,40 @@ func runScanActions(cmd *cobra.Command, args []string) (int, error) {
 // workflow whose steps are all `run:` produces no refs, so it contributed no
 // SourceFile, so a directory of them counted zero workflows and the report
 // said "no workflows found" about files it had just parsed.
-func parseTargetForScanActions(target string) ([]githubactions.ActionRef, int, error) {
+//
+// It also returns each file's githubactions.LintWorkflow findings (the
+// dangerous-trigger shapes), which come from the workflow's structure rather
+// than from its `uses:` refs.
+func parseTargetForScanActions(target string) ([]githubactions.ActionRef, []githubactions.Finding, int, error) {
 	info, err := os.Stat(target)
 	if err != nil {
-		return nil, 0, fmt.Errorf("stat %s: %w", target, err)
+		return nil, nil, 0, fmt.Errorf("stat %s: %w", target, err)
 	}
+	files := []string{target}
+	var refs []githubactions.ActionRef
 	if info.IsDir() {
-		refs, files, err := githubactions.ParseWorkflowDirFiles(target)
-		if err != nil {
-			return nil, 0, err
+		if refs, files, err = githubactions.ParseWorkflowDirFiles(target); err != nil {
+			return nil, nil, 0, err
 		}
-		return refs, len(files), nil
 	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		return nil, 0, fmt.Errorf("read %s: %w", target, err)
+	var lint []githubactions.Finding
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("read %s: %w", path, err)
+		}
+		if !info.IsDir() {
+			if refs, err = githubactions.ParseWorkflowFile(path, data); err != nil {
+				return nil, nil, 0, err
+			}
+		}
+		found, err := githubactions.LintWorkflow(path, data)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		lint = append(lint, found...)
 	}
-	refs, err := githubactions.ParseWorkflowFile(target, data)
-	if err != nil {
-		return nil, 0, err
-	}
-	return refs, 1, nil
+	return refs, lint, len(files), nil
 }
 
 // buildScanActionsReport projects []githubactions.Finding into the wire

@@ -307,4 +307,132 @@ jobs:
 	}
 }
 
+// runScanActionsJSON runs scan-actions over target with --format json and
+// the given --fail-on ("" leaves the flag at its default).
+func runScanActionsJSON(t *testing.T, target, failOn string) (int, scanActionsReport, error) {
+	t.Helper()
+	cmd := newScanActionsTestCmd()
+	cmd.Flags().String("fail-on", "high", "")
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	_ = cmd.Flags().Set("format", "json")
+	if failOn != "" {
+		_ = cmd.Flags().Set("fail-on", failOn)
+	}
+	code, err := runScanActions(cmd, []string{target})
+	var report scanActionsReport
+	if err == nil {
+		if jerr := json.Unmarshal(out.Bytes(), &report); jerr != nil {
+			t.Fatalf("decode report: %v\nbody=%s", jerr, out.String())
+		}
+	}
+	return code, report, err
+}
+
+// TestScanActions_FailOn: action.unpinned_ref is medium, so with the old
+// high-only gate tag pinning could not be enforced in CI at all.
+func TestScanActions_FailOn(t *testing.T) {
+	fixture := filepath.Join("..", "githubactions", "testdata", "simple.yml")
+	for _, tc := range []struct {
+		failOn string
+		want   int
+	}{
+		{"", 0}, // default high: unchanged behaviour
+		{"high", 0},
+		{"medium", 1},
+		{"MEDIUM", 1},
+		{"low", 1},
+	} {
+		code, _, err := runScanActionsJSON(t, fixture, tc.failOn)
+		if err != nil {
+			t.Fatalf("--fail-on %q: %v", tc.failOn, err)
+		}
+		if code != tc.want {
+			t.Errorf("--fail-on %q: exit %d, want %d", tc.failOn, code, tc.want)
+		}
+	}
+	if _, _, err := runScanActionsJSON(t, fixture, "critical"); err == nil {
+		t.Error("--fail-on critical: want a usage error")
+	}
+}
+
+// TestScanActions_DangerousTriggers: the workflow-structure lint reaches the
+// CLI report, its exit code, the risk block and SARIF.
+func TestScanActions_DangerousTriggers(t *testing.T) {
+	fixture := filepath.Join("..", "githubactions", "testdata", "dangerous_triggers.yml")
+	code, report, err := runScanActionsJSON(t, fixture, "")
+	if err != nil {
+		t.Fatalf("runScanActions: %v", err)
+	}
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	want := []string{"action.pwn_request", "action.comment_trigger_unguarded", "action.script_injection"}
+	for _, sig := range want {
+		var found bool
+		for _, f := range report.Findings {
+			if f.Signal == sig && f.Severity == "high" && f.Line > 0 && strings.HasSuffix(f.File, "dangerous_triggers.yml") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no high %s finding in %+v", sig, report.Findings)
+		}
+		if !strings.Contains(strings.Join(report.Risk.Signals, ","), sig) {
+			t.Errorf("risk.signals %v missing %s", report.Risk.Signals, sig)
+		}
+	}
+	var sarif bytes.Buffer
+	if err := writeScanActionsSARIF(&sarif, report); err != nil {
+		t.Fatal(err)
+	}
+	for _, sig := range want {
+		if !strings.Contains(sarif.String(), `"ruleId": "`+sig+`"`) {
+			t.Errorf("SARIF has no result for %s", sig)
+		}
+	}
+}
+
+// TestScanActions_LocalAdvisorySnapshot: the CLI used only the three-entry
+// static seed. A GitHub Actions OSV snapshot next to the guard cache must be
+// loaded — offline, no network.
+func TestScanActions_LocalAdvisorySnapshot(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv(guardDBEnv, filepath.Join(cache, "known_malicious.json"))
+	wf := filepath.Join(t.TempDir(), "ci.yml")
+	const yml = "on: [push]\njobs:\n  b:\n    steps:\n      - uses: evil-org/evil-action@v2.0.0\n"
+	if err := os.WriteFile(wf, []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	malicious := func(r scanActionsReport) bool {
+		for _, f := range r.Findings {
+			if f.Signal == "action.malicious" {
+				return true
+			}
+		}
+		return false
+	}
+	if _, r, err := runScanActionsJSON(t, wf, ""); err != nil || malicious(r) {
+		t.Fatalf("before snapshot: err=%v malicious=%v", err, malicious(r))
+	}
+
+	dir := filepath.Join(cache, scanActionsOSVDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	adv := `{"id":"GHSA-test-snap","summary":"evil","affected":[{"package":{"ecosystem":"GitHub Actions","name":"evil-org/evil-action"},` +
+		`"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"3.0.0"}]}]}]}`
+	if err := os.WriteFile(filepath.Join(dir, "GHSA-test-snap.json"), []byte(adv), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, r, err := runScanActionsJSON(t, wf, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !malicious(r) || code != 1 {
+		t.Fatalf("after snapshot: malicious=%v exit=%d, want true/1; findings=%+v", malicious(r), code, r.Findings)
+	}
+}
+
 // scan-actions end

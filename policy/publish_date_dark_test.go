@@ -164,21 +164,24 @@ func TestDarkPublishDateIsRecordOnly(t *testing.T) {
 	}
 }
 
-// TestAPTCooldownEmitsExactlyOneSkipRecord — the double-report guard.
+// TestAPTPackageAgeEmitsExactlyOneSkipRecord — the double-report guard.
 //
-// ConditionCooldown is SupportNone for APT, so detectUnsupported
+// ConditionPackageAge is SupportNone for APT, so detectUnsupported
 // already discards the whole policy and emits `policy.rule.skipped`
 // (RuleEvaluated=false). If the publish-date emitter also fired, the
 // operator would read one rule as both discarded and evaluated — the
-// exact conflation the two audit actions exist to remove.
-func TestAPTCooldownEmitsExactlyOneSkipRecord(t *testing.T) {
+// exact conflation the two audit actions exist to remove. (This used
+// CooldownDays until apt's Cooldown cell became partial, keyed on the pool
+// file's Last-Modified; that half is now the evaluated case below.)
+func TestAPTPackageAgeEmitsExactlyOneSkipRecord(t *testing.T) {
 	ctx := aptRequest()
 	ctx.VersionReleaseDate = nil
+	ctx.PackageReleaseDate = nil
 
 	withPublishDateMetric(func(rec *recordingPublishDateMetric) {
 		auditor, _ := evalWithAuditor([]Policy{{
 			ID: "pol-apt", Status: StatusEnabled, Mode: ModeBlock,
-			Conditions: Conditions{CooldownDays: intPtr(7)},
+			Conditions: Conditions{PackageAge: intPtr(30)},
 		}}, ctx)
 
 		unsupported := auditor.byReason(SkipReasonUnsupportedEcosystem)
@@ -188,13 +191,33 @@ func TestAPTCooldownEmitsExactlyOneSkipRecord(t *testing.T) {
 			t.Fatalf("unsupported_ecosystem events = %d, want 1 (%+v)", len(unsupported), unsupported)
 		}
 		if len(darkDate) != 0 {
-			t.Errorf("publish_date_unavailable events = %d, want 0 — APT cooldown is "+
+			t.Errorf("publish_date_unavailable events = %d, want 0 — APT package-age is "+
 				"already reported as a hard skip; two records for one rule tells the "+
 				"operator it both did and did not run", len(darkDate))
 		}
 		if n := len(rec.all()); n != 0 {
-			t.Errorf("%d metric samples for an APT cooldown policy that was discarded "+
+			t.Errorf("%d metric samples for an APT package-age policy that was discarded "+
 				"before it ever consulted a date", n)
+		}
+	})
+}
+
+// An APT cooldown policy is evaluated (Cooldown is partial there), so a
+// missing pool-file date is one dark-date record, never a discard.
+func TestAPTCooldownIsEvaluatedNotDiscarded(t *testing.T) {
+	ctx := aptRequest()
+	ctx.VersionReleaseDate = nil
+
+	withPublishDateMetric(func(_ *recordingPublishDateMetric) {
+		auditor, _ := evalWithAuditor([]Policy{{
+			ID: "pol-apt", Status: StatusEnabled, Mode: ModeBlock,
+			Conditions: Conditions{CooldownDays: intPtr(7)},
+		}}, ctx)
+		if n := len(auditor.byReason(SkipReasonUnsupportedEcosystem)); n != 0 {
+			t.Fatalf("unsupported_ecosystem events = %d, want 0: apt cooldown must not be discarded", n)
+		}
+		if n := len(auditor.byReason(SkipReasonPublishDateUnavailable)); n != 1 {
+			t.Errorf("publish_date_unavailable events = %d, want 1", n)
 		}
 	})
 }

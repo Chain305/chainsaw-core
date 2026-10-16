@@ -111,6 +111,25 @@ func AppCredentialSend(files map[string][]byte) string {
 	return ""
 }
 
+// defenderTamperRE is PowerShell turning a Microsoft Defender protection off
+// or carving an exclusion out of it. Get-MpPreference (a read) and any
+// Set-MpPreference that does not disable something are not matched.
+var defenderTamperRE = regexp.MustCompile(`(?i)\bSet-MpPreference\s+-Disable\w+|\bAdd-MpPreference\s+-Exclusion\w+`)
+
+// DefenderTamper returns "cmdlet -Parameter (file)" when a shipping file
+// disables Defender or adds an exclusion to it.
+func DefenderTamper(files map[string][]byte) string {
+	for _, name := range sortedNames(files) {
+		if isNonShippingPath(name) {
+			continue
+		}
+		if m := defenderTamperRE.FindString(capped(files[name])); m != "" {
+			return strings.Join(strings.Fields(m), " ") + " (" + name + ")"
+		}
+	}
+	return ""
+}
+
 func capped(b []byte) string {
 	if len(b) > maxFileSize {
 		b = b[:maxFileSize]

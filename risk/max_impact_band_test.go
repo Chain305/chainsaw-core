@@ -114,6 +114,9 @@ func loneFireFixtures() map[string]Input {
 		SignalSCAppCredentialExfil: set(func(in *Input) {
 			in.AppCredentialSend = ".codex/auth.json (worker.js)"
 		}),
+		SignalSCDefenderTamper: set(func(in *Input) {
+			in.DefenderTamper = "Set-MpPreference -DisableRealtimeMonitoring (lib/audit.js)"
+		}),
 		SignalSCImportTimeShell: set(func(in *Input) {
 			in.ImportTimeKind = "top_level_shell"
 		}),

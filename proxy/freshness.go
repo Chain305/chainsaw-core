@@ -26,7 +26,21 @@ const (
 	// upstream; a sustained rise anywhere else means the origin is
 	// unreachable and cached metadata is drifting.
 	revalidationStaleServed = "stale_served"
+	// revalidationRepointPinned — the new body moved an existing
+	// version to a different commit and the format kept serving the
+	// cached entry instead (Composer re-pointed tags; see
+	// internal/formats/composer/repoint.go). Any non-zero rate is worth
+	// a look: it is either a compromised package or a maintainer
+	// force-moving an old tag.
+	revalidationRepointPinned = "repoint_pinned"
 )
+
+// RecordRepointPinned counts one revalidation in which a format
+// transformer refused an upstream re-point of an existing version.
+// Exported because the transformers live outside this module.
+func RecordRepointPinned(ecosystem string) {
+	recordMetadataRevalidation(ecosystem, revalidationRepointPinned)
+}
 
 // metadataRevalidationRecorder is the observability seam, installed via
 // SetMetadataRevalidationRecorder. nil is a no-op, matching
@@ -71,7 +85,10 @@ func recordMetadataRevalidation(ecosystem, result string) {
 // the format string and the logical path — the same two inputs
 // needsEncodingRepair keys on. The npm and pip arms below mirror
 // isNpmMetadataPath and isPipMetadataPath deliberately; keep them in
-// sync.
+// sync. The composer, docker, maven/gradle, apt and yum/dnf arms are
+// NARROWER than their internal/server counterparts: they name only the
+// index documents that change at the origin, never the digest- or
+// version-addressed files beside them.
 //
 // # Why the default is false
 //
@@ -115,9 +132,84 @@ func isMutableDocument(format, logicalPath string) bool {
 		}
 		return lower == "simple" || lower == "simple/" || strings.HasPrefix(lower, "simple/")
 
+	case "composer":
+		// packages.json and the p2/ documents change on every tag push
+		// (and on every tag RE-point — laravel-lang, 2026-05-22). The v1
+		// provider files under p/ are immutable only when the path carries
+		// their content hash ("p/vendor/name$<sha256>.json"). Dist zips
+		// live under dists/ and are content-addressed by commit SHA.
+		if lower == "packages.json" || strings.HasPrefix(lower, "p2/") {
+			return true
+		}
+		return strings.HasPrefix(lower, "p/") && !strings.Contains(lower, "$")
+
+	case "docker":
+		// v2/<name>/manifests/<ref>: a tag moves, a digest
+		// ("sha256:...") never does; tags can never contain ':'. Blobs
+		// are always digest-addressed. tags/list grows with every push.
+		segments := strings.Split(lower, "/")
+		if len(segments) < 4 || segments[0] != "v2" {
+			return false
+		}
+		n := len(segments)
+		if segments[n-2] == "manifests" {
+			return !strings.Contains(segments[n-1], ":")
+		}
+		return segments[n-2] == "tags" && segments[n-1] == "list"
+
+	case "maven", "gradle":
+		// maven-metadata.xml (and its .sha1/.md5/... sidecars) lists the
+		// versions and moves <latest>/<release>; everything else under a
+		// version directory is a published, immutable file.
+		return strings.Contains(baseName(lower), "maven-metadata.xml")
+
+	case "apt":
+		// dists/<suite>/{InRelease,Release,Release.gpg,.../Packages*} are
+		// rewritten on every archive update; dists/.../by-hash/ files are
+		// named by their own digest and pool/ holds the .debs. The bare
+		// index names also cover flat repositories, which have no dists/.
+		if strings.Contains(lower, "/by-hash/") || strings.HasPrefix(lower, "pool/") || strings.Contains(lower, "/pool/") {
+			return false
+		}
+		if strings.HasPrefix(lower, "dists/") || strings.Contains(lower, "/dists/") {
+			return true
+		}
+		name := baseName(lower)
+		return name == "release" || name == "inrelease" || name == "release.gpg" ||
+			strings.HasPrefix(name, "packages") || strings.HasPrefix(name, "sources")
+
+	case "yum", "dnf":
+		// repodata/repomd.xml points at the current index files. Modern
+		// createrepo names those "<checksum>-primary.xml.gz", so they are
+		// immutable; the legacy un-prefixed names are rewritten in place.
+		if !strings.HasPrefix(lower, "repodata/") && !strings.Contains(lower, "/repodata/") {
+			return false
+		}
+		name := baseName(lower)
+		if i := strings.IndexByte(name, '-'); i >= 40 && isHexString(name[:i]) {
+			return false
+		}
+		return true
+
 	default:
 		return false
 	}
+}
+
+func baseName(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+func isHexString(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // metadataExpired reports whether a cached entry has outlived the

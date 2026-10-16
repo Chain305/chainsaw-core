@@ -86,9 +86,12 @@ func (p *installScriptsProvider) NeedsArtifact() bool { return true }
 // Rust-aware fetch test, so both detectors are a new generation.
 // 7/8 (2026-10-03): ScanReferencedBody, shared by both detectors, learned
 // the host-recon beacon.
+// 9/10 (2026-10-15): npm reads the root binding.gyp (implicit node-gyp hook
+// and its `<!(...)` commands), and referenced bodies gained the XOR-loader
+// rule plus the tail of files past the 2 MiB cap.
 const (
-	installScriptsAnalyzerRegex = 7
-	installScriptsAnalyzerAST   = 8
+	installScriptsAnalyzerRegex = 9
+	installScriptsAnalyzerAST   = 10
 )
 
 // AnalyzerVersion follows the detector actually in force.
@@ -180,6 +183,8 @@ func (p *installScriptsProvider) run(ctx context.Context, req Request, prior *Re
 		} else {
 			result, detector = installscripts.NPM(manifest), InstallScriptDetectorRegex
 		}
+		result = installscripts.BindingGyp(result, manifest, rootBindingGyp(files))
+		detector += InstallScriptDetectorGypSuffix
 	case "pip", "pypi":
 		setupPy := FirstMatch(files, "setup.py")
 		pyproject := FirstMatch(files, "pyproject.toml")
@@ -361,7 +366,7 @@ func scanReferencedScripts(h *ArtifactHandle, scriptBody string) []refScriptHit 
 	if len(refs) == 0 {
 		return nil
 	}
-	srcFiles := sourceFilesFor(h)
+	srcFiles := bundledScriptBodies(h)
 	if len(srcFiles) == 0 {
 		return nil
 	}
@@ -515,6 +520,37 @@ func sourceFilesFor(h *ArtifactHandle) map[string][]byte {
 		return legacyWalkArtifact(h, wantsBundledScript)
 	}
 	return res.Files.SelectLower(wantsBundledScript)
+}
+
+// bundledScriptBodies is sourceFilesFor with each truncated file's tail joined
+// on (artifactmap.ArtifactFile.WithTail): a large loader's decoder and exec
+// call sit past the 2 MiB head. Kept apart from sourceFilesFor so the other
+// source scanners keep their measured head-only input.
+func bundledScriptBodies(h *ArtifactHandle) map[string][]byte {
+	res := h.SharedArtifactMap()
+	if len(res.Files) == 0 {
+		return legacyWalkArtifact(h, wantsBundledScript)
+	}
+	out := make(map[string][]byte, len(res.Files)/4+1)
+	for key, f := range res.Files {
+		if wantsBundledScript(f.Path) {
+			out[key] = f.WithTail()
+		}
+	}
+	return out
+}
+
+// rootBindingGyp concatenates every binding.gyp npm would extract to the
+// package root (installscripts.IsRootBindingGyp), so a benign decoy under a
+// second top-level directory cannot shadow the real one.
+func rootBindingGyp(files map[string][]byte) []byte {
+	var out []byte
+	for name, body := range files {
+		if installscripts.IsRootBindingGyp(name) {
+			out = append(append(out, body...), '\n')
+		}
+	}
+	return out
 }
 
 // wantsBundledScript matches the extensions an install hook can invoke as a

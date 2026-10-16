@@ -21,6 +21,7 @@
 package iocscan
 
 import (
+	"net/netip"
 	"regexp"
 	"strings"
 )
@@ -195,6 +196,47 @@ func findExfilHost(body string) string {
 	return ""
 }
 
+// ipURLRE is http:// followed by a dotted-quad and then something that ends a
+// host, so 1.2.3.4.nip.io (a hostname) is not read as an address.
+var ipURLRE = regexp.MustCompile(`http://(\d{1,3}(?:\.\d{1,3}){3})(?:[:/?#"'\x60\s)]|$)`)
+
+// notC2Prefixes are addresses a package talks to for ordinary reasons: the
+// shared-address, benchmarking and documentation ranges, plus 0/8 and 240/4.
+// Private, loopback, link-local and multicast are checked by netip.
+var notC2Prefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+// wellKnownResolvers are public DNS services connectivity checks hit.
+var wellKnownResolvers = map[string]bool{"8.8.8.8": true, "1.1.1.1": true, "9.9.9.9": true}
+
+// findPublicIPURL returns the first "http://<public IPv4>" in body, or "".
+// helpersutils-dev-tools (2026-09) beaconed to http://5.189.173.113:8899 on
+// require; a hard-coded public address is a C2 the hostname list cannot name.
+func findPublicIPURL(body string) string {
+	for _, m := range ipURLRE.FindAllStringSubmatch(body, -1) {
+		a, err := netip.ParseAddr(m[1])
+		if err != nil || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() ||
+			a.IsMulticast() || wellKnownResolvers[m[1]] {
+			continue
+		}
+		reserved := false
+		for _, p := range notC2Prefixes {
+			reserved = reserved || p.Contains(a)
+		}
+		if !reserved {
+			return "http://" + m[1]
+		}
+	}
+	return ""
+}
+
 // Scan reports the strongest IOC across a package's source files.
 func Scan(files map[string][]byte) Result {
 	// Stealer evidence is tracked in two buckets, shipping and non-shipping,
@@ -243,6 +285,12 @@ func Scan(files map[string][]byte) Result {
 				hit.Weak = true
 				hit.Detail += " (test/docs/vendored path — not shipping code)"
 				weakExfil = &hit
+			}
+		} else if !isNonShippingPath(name) && (netSendRE.MatchString(body) || nodeSendRE.MatchString(body)) {
+			// A public IP literal counts only coupled: addresses are named in
+			// configs and comments far more often than hostnames on the list.
+			if ip := findPublicIPURL(body); ip != "" {
+				return Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + ip, Coupled: true}
 			}
 		}
 		if netSendRE.MatchString(body) {

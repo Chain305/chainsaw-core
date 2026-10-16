@@ -18,6 +18,7 @@ package githubactions
 // internal/intelligence/*.go before adding the dependency.
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/chain305/chainsaw-core/intelligence"
@@ -170,6 +171,15 @@ func actionInputFields(in risk.Input) map[string]any {
 	if len(in.ActionRefMaliciousRefs) > 0 {
 		out["ActionRefMaliciousRefs"] = in.ActionRefMaliciousRefs
 	}
+	if in.ActionPwnRequest {
+		out["ActionPwnRequestLocs"] = in.ActionPwnRequestLocs
+	}
+	if in.ActionCommentTriggerUnguarded {
+		out["ActionCommentTriggerUnguardedLocs"] = in.ActionCommentTriggerUnguardedLocs
+	}
+	if in.ActionScriptInjection {
+		out["ActionScriptInjectionLocs"] = in.ActionScriptInjectionLocs
+	}
 	if len(out) == 0 {
 		return nil
 	}
@@ -185,6 +195,11 @@ func refString(ref ActionRef) string {
 		return ref.Raw
 	}
 	if ref.Owner == "" && ref.Name == "" {
+		// A LintWorkflow finding is about the workflow, not a `uses:`;
+		// its location is the only identity it has.
+		if ref.SourceFile != "" {
+			return fmt.Sprintf("%s:%d", ref.SourceFile, ref.SourceLine)
+		}
 		return ""
 	}
 	s := ref.Owner + "/" + ref.Name

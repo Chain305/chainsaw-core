@@ -29,7 +29,8 @@ func (p *iocscanProvider) NeedsArtifact() bool { return true }
 // 3: exfil_host hits carry MaliciousIOCCoupled (the file also sends) and
 // MaliciousIOCAtEntry (a coupled hit in an install/import entrypoint).
 // 4: DependencyCredential, AppCredentialSend.
-const iocscanAnalyzerVersion = 4
+// 5: DefenderTamper; bare public-IPv4 http:// C2 as exfil_host.
+const iocscanAnalyzerVersion = 5
 
 func (p *iocscanProvider) AnalyzerVersion() int { return iocscanAnalyzerVersion }
 
@@ -45,8 +46,9 @@ func (p *iocscanProvider) Run(ctx context.Context, req Request, prior *Report) (
 	scan := &ArtifactScanSection{
 		DependencyCredential: iocscan.DependencyCredential(dependencySpecFilesFor(req.Artifact)),
 		AppCredentialSend:    iocscan.AppCredentialSend(src),
+		DefenderTamper:       iocscan.DefenderTamper(src),
 	}
-	indicators := scan.DependencyCredential != "" || scan.AppCredentialSend != ""
+	indicators := scan.DependencyCredential != "" || scan.AppCredentialSend != "" || scan.DefenderTamper != ""
 	scan.Performed = indicators
 	none := PartialReport{}
 	if indicators {

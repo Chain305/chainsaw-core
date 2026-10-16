@@ -269,11 +269,11 @@ type Conditions struct {
 
 	// Hidden Unicode payload conditions (PR 8). HasHiddenUnicode is the
 	// bool toggle; HiddenUnicodeKinds optionally narrows the match to a
-	// subset of {"zero_width","bidi_override","tag"} using intersection
+	// subset of {"zero_width","bidi_override","tag","variation_selector"} using intersection
 	// semantics (at least one matching kind must be present in the
 	// scanner's Result.Kinds for the rule to fire).
 	HasHiddenUnicode   *bool    `json:"hasHiddenUnicode,omitempty" yaml:"hasHiddenUnicode,omitempty"`     // nil=any, true=artifact had >=threshold suspect runes
-	HiddenUnicodeKinds []string `json:"hiddenUnicodeKinds,omitempty" yaml:"hiddenUnicodeKinds,omitempty"` // subset of zero_width/bidi_override/tag
+	HiddenUnicodeKinds []string `json:"hiddenUnicodeKinds,omitempty" yaml:"hiddenUnicodeKinds,omitempty"` // subset of zero_width/bidi_override/tag/variation_selector
 
 	// PublishVelocityAnomaly fires when the publisher of the incoming version
 	// has published more than PublishVelocityThreshold24h versions (across any

@@ -79,7 +79,7 @@ func analyzeArtifact(ecosystem string, archive []byte) behavioralVerdict {
 	switch strings.ToLower(ecosystem) {
 	case "npm":
 		if pj := rootFileBytes(files, "package.json"); pj != nil {
-			scan := installscripts.NPM(pj)
+			scan := installscripts.BindingGyp(installscripts.NPM(pj), pj, rootBindingGyp(files))
 			if v := installVerdict(scan); v.Block {
 				return v
 			} else if v.Severity != "" {
@@ -177,6 +177,9 @@ func analyzeArtifact(ecosystem string, archive []byte) behavioralVerdict {
 // file location instead of treating every hit as a payload:
 //
 //   - tag runes (U+E0000–E007F): BLOCK anywhere — no benign use exists.
+//   - variation_selector (a run of >=4 selectors, the GlassWorm 2026-03
+//     byte encoding): BLOCK anywhere — the scanner never records the lone
+//     selector an emoji carries.
 //   - bidi_override in a code file: BLOCK (the Trojan-Source shape; i18n
 //     catalogs were already suppressed). In a data file: WARN — data files
 //     don't execute, but a bidi mark that reaches a human reviewer is still
@@ -213,6 +216,9 @@ func hiddenUnicodeVerdict(hu hiddenunicode.Result) behavioralVerdict {
 			case hiddenunicode.KindTag:
 				return behavioralVerdict{Block: true, Severity: "behavioral-high",
 					Reason: fmt.Sprintf("hidden-unicode payload (tag characters in %s)", path)}
+			case hiddenunicode.KindVariationSelector:
+				return behavioralVerdict{Block: true, Severity: "behavioral-high",
+					Reason: fmt.Sprintf("hidden-unicode payload (variation selector run in %s)", path)}
 			case hiddenunicode.KindBidiOverride:
 				if isCode {
 					return behavioralVerdict{Block: true, Severity: "behavioral-high",
@@ -305,7 +311,8 @@ func referencedScriptVerdict(files artifactmap.ArtifactFileMap, scriptBody strin
 			}
 			seen[name] = struct{}{}
 			resolved++
-			switch installscripts.ScanReferencedBody(string(src[name])) {
+			// WithTail: a loader past the 2 MiB cap keeps its decoder at the end.
+			switch installscripts.ScanReferencedBody(string(files[name].WithTail())) {
 			case installscripts.KindFetchesRemote, installscripts.KindEvalEncoded:
 				return behavioralVerdict{Block: true, Severity: "behavioral-high", Reason: "referenced install script fetches or hides executable payload"}
 			case installscripts.KindMutatesDependency:
@@ -314,6 +321,19 @@ func referencedScriptVerdict(files artifactmap.ArtifactFileMap, scriptBody strin
 		}
 	}
 	return warning
+}
+
+// rootBindingGyp concatenates every binding.gyp npm's strip:1 extract lands at
+// the package root (installscripts.IsRootBindingGyp); a nested one is never
+// loaded as the package's own.
+func rootBindingGyp(files artifactmap.ArtifactFileMap) []byte {
+	var out []byte
+	for name, f := range files {
+		if installscripts.IsRootBindingGyp(name) {
+			out = append(append(out, f.Bytes...), '\n')
+		}
+	}
+	return out
 }
 
 func sourceFileMap(files artifactmap.ArtifactFileMap) map[string][]byte {

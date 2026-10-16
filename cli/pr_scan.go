@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -50,9 +51,12 @@ import (
 
 	"github.com/chain305/chainsaw-core/depparser/origin"
 	"github.com/chain305/chainsaw-core/depparser/parser/python/requirements"
+	"github.com/chain305/chainsaw-core/githubactions"
+	"github.com/chain305/chainsaw-core/malware"
 	"github.com/chain305/chainsaw-core/policy"
 	"github.com/chain305/chainsaw-core/policy/dsl"
 	"github.com/chain305/chainsaw-core/policyengine"
+	"github.com/chain305/chainsaw-core/risk"
 	"github.com/chain305/chainsaw-core/typosquat"
 )
 
@@ -118,6 +122,10 @@ func init() {
 newly added or upgraded dependency coordinate (name@version). For each
 coordinate the offline signal engine emits supply-chain signals; the final
 verdict is "allow", "warn", or "block".
+
+Changed GitHub Actions workflows (.github/workflows/*.yml, action.yml) are
+inspected too: every added or changed uses: ref gets the scan-actions
+signals (action.*), and a known-compromised action blocks.
 
 Intended as a required-status-check companion to chainsaw scan-repo: scan-repo
 catches committed bypass config; pr-scan catches newly introduced packages.
@@ -268,7 +276,8 @@ func buildPRScanReport(baseSHA, headSHA, absRepo string) (prScanReport, int, err
 
 	for _, rel := range changedFiles {
 		eco, ok := classifyManifest(rel)
-		if !ok {
+		workflow := !ok && isWorkflowFile(rel)
+		if !ok && !workflow {
 			continue
 		}
 
@@ -288,6 +297,18 @@ func buildPRScanReport(baseSHA, headSHA, absRepo string) (prScanReport, int, err
 		if headContent == nil {
 			// File genuinely absent at head — removed by this PR. Removals are
 			// risk-reduction, so there is nothing to evaluate.
+			continue
+		}
+
+		if workflow {
+			added, upgraded, parseErr := diffWorkflow(rel, baseContent, headContent)
+			if parseErr != nil {
+				fmt.Fprintf(os.Stderr, "pr-scan: parse %s: %v\n", rel, parseErr)
+				parseFailures++
+				continue
+			}
+			report.Added = append(report.Added, added...)
+			report.Upgraded = append(report.Upgraded, upgraded...)
 			continue
 		}
 
@@ -551,11 +572,11 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
 		}
 	case kindNPMPackageJSON:
-		baseCoords, err = parsePackageJSONDeps(baseContent)
+		baseCoords, baseNonReg, err = parsePackageJSONDeps(baseContent)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s base: %w", relPath, err)
 		}
-		headCoords, err = parsePackageJSONDeps(headContent)
+		headCoords, headNonReg, err = parsePackageJSONDeps(headContent)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s head: %w", relPath, err)
 		}
@@ -566,8 +587,8 @@ func diffManifest(kind manifestKind, relPath string, baseContent, headContent []
 		baseCoords = parseYarnLock(baseContent)
 		headCoords = parseYarnLock(headContent)
 	case kindPipRequirements:
-		baseCoords = parsePipRequirements(baseContent)
-		headCoords = parsePipRequirements(headContent)
+		baseCoords, baseNonReg = parsePipRequirements(baseContent)
+		headCoords, headNonReg = parsePipRequirements(headContent)
 	case kindPipfileLock:
 		baseCoords, err = parsePipfileLock(baseContent)
 		if err != nil {
@@ -1048,25 +1069,47 @@ func splitLockIntegrityKey(key string) (name, version string, ok bool) {
 // dependencies block included — and the report said added: 0, parse_errors: 0,
 // exit 0. Returning the error routes it through buildPRScanReport's parseFailures
 // counter and the exit-30 escalation.
-func parsePackageJSONDeps(data []byte) (map[string]string, error) {
+//
+// A git or URL spec ("x": "github:o/r", "git+https://…", "o/r", a tarball
+// URL) is returned in nonRegistry, never as the registry's x.
+func parsePackageJSONDeps(data []byte) (map[string]string, []nonRegistryDep, error) {
 	if data == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var root struct {
 		Dependencies    map[string]string `json:"dependencies"`
 		DevDependencies map[string]string `json:"devDependencies"`
 	}
 	if err := json.Unmarshal(stripUTF8BOM(data), &root); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make(map[string]string)
-	for k, v := range root.Dependencies {
-		out[k] = v
+	var nonRegistry []nonRegistryDep
+	for _, deps := range []map[string]string{root.Dependencies, root.DevDependencies} {
+		for k, v := range deps {
+			if dep, ok := npmNonRegistryDep(k, v); ok {
+				nonRegistry = append(nonRegistry, dep)
+				continue
+			}
+			out[k] = v
+		}
 	}
-	for k, v := range root.DevDependencies {
-		out[k] = v
+	return out, nonRegistry, nil
+}
+
+// npmNonRegistryDep classifies a package.json spec with the guard's own npm
+// grammar (npmIsSource / npmSourceSpec). file:, link:, workspace: and npm:
+// aliases are left as they were: local code, or a registry coordinate under
+// another name (plan §3.4: re-key, not "not assessed").
+func npmNonRegistryDep(name, spec string) (nonRegistryDep, bool) {
+	if !npmIsSource(spec) || risk.ClassifyDepURL(spec) == risk.DepURLOther {
+		return nonRegistryDep{}, false
 	}
-	return out, nil
+	s := npmSourceSpec(name, spec)
+	if s.Origin == "" || strings.HasPrefix(s.Origin, localOriginPrefix) {
+		return nonRegistryDep{}, false
+	}
+	return nonRegistryDep{Name: name, Version: s.Version, Origin: s.Origin}, true
 }
 
 // parsePNPMLock is a best-effort line-oriented parser for pnpm-lock.yaml.
@@ -1159,15 +1202,48 @@ func parseYarnLock(data []byte) map[string]string {
 	return out
 }
 
-// parsePipRequirements parses a requirements.txt file (simple name==version lines).
-func parsePipRequirements(data []byte) map[string]string {
+// parsePipRequirements parses a requirements.txt file (simple name==version
+// lines). A VCS, URL or archive source (`-e git+…`, `pkg @ git+…`, a bare
+// `git+…`) is returned in nonRegistry, through the guard's own pip grammar
+// (parsePipSpec / pipSourceSpec): it used to vanish, as an option line or a
+// line with no "==". A local path is first-party code: no row, like a
+// sourceless crate.
+func parsePipRequirements(data []byte) (map[string]string, []nonRegistryDep) {
 	if data == nil {
-		return nil
+		return nil, nil
 	}
 	out := make(map[string]string)
+	var nonRegistry []nonRegistryDep
+	source := func(s packageSpec) {
+		switch {
+		case s.Origin == "" && s.Name != "" && s.Version != "":
+			out[strings.ToLower(s.Name)] = s.Version // an archive on PyPI's own hosts
+		case s.Origin != "" && !strings.HasPrefix(s.Origin, localOriginPrefix):
+			name := s.Name
+			if name == "" {
+				name = origin.Label(s.Origin) // a nameless source is known by its origin
+			}
+			nonRegistry = append(nonRegistry, nonRegistryDep{Name: name, Version: s.Version, Origin: s.Origin})
+		}
+	}
+	// Requirements drops option lines, so `-e` sources are read here.
+	for _, line := range strings.Split(string(data), "\n") {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "-e") || strings.HasPrefix(t, "--editable") {
+			_, flags := splitFlags(strings.Fields(t), pipReqFileFlags)
+			for _, f := range flags {
+				if (f.name == "-e" || f.name == "--editable") && f.value != "" {
+					source(pipSourceSpec(f.value))
+				}
+			}
+		}
+	}
 	// Requirements joins "\" continuations and drops comments and --hash
 	// options (pip-compile --generate-hashes output).
 	for _, line := range requirements.Requirements(string(data)) {
+		if s := parsePipSpec(line); s.Origin != "" || strings.Contains(line, "://") {
+			source(s)
+			continue
+		}
 		line, _, _ = strings.Cut(line, ";") // environment marker
 		line = strings.Join(strings.Fields(line), "")
 		// Handle name==version, name>=version etc.
@@ -1189,7 +1265,7 @@ func parsePipRequirements(data []byte) map[string]string {
 			}
 		}
 	}
-	return out
+	return out, nonRegistry
 }
 
 // parsePipfileLock parses Pipfile.lock (JSON with default/develop keys).
@@ -1533,17 +1609,97 @@ func evaluatePREntry(e rawEntry) prScanEntry {
 	// ever raise the verdict, never lower one the heuristics set.
 	signals = append(signals, prScanPolicyLane(context.Background(), e, signals)...)
 	out.Signals = signals
+	out.Verdict = prScanVerdict(signals)
+	return out
+}
 
+// prScanVerdict is the max over a row's signal severities.
+func prScanVerdict(signals []prScanSignal) string {
+	verdict := "allow"
 	for _, s := range signals {
 		if s.Severity == "block" {
-			out.Verdict = "block"
-			break
-		} else if s.Severity == "warn" && out.Verdict == "allow" {
-			out.Verdict = "warn"
+			return "block"
+		} else if s.Severity == "warn" {
+			verdict = "warn"
 		}
 	}
+	return verdict
+}
 
-	return out
+// isWorkflowFile reports whether a changed path is a GitHub Actions workflow
+// (.github/workflows/*.yml|yaml) or an action's own metadata (action.yml),
+// whose `uses:` refs pull third-party code into CI.
+func isWorkflowFile(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	base := path.Base(rel)
+	if base == "action.yml" || base == "action.yaml" {
+		return true
+	}
+	ext := path.Ext(base)
+	return (ext == ".yml" || ext == ".yaml") && strings.Contains("/"+rel, "/.github/workflows/")
+}
+
+// diffWorkflow returns one row per remote `uses:` ref the PR added or
+// changed, scored by the scan-actions scanner (githubactions.Scan) and
+// carrying its action.* signal ids. A ref whose owner/name was in base at
+// another ref (a SHA pin moved to a tag) is an upgrade. action.malicious
+// blocks; every other action signal warns, like pr-scan's own heuristics. An
+// unparseable head is an error (counted); an unparseable or absent base
+// makes every head ref new.
+func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded []prScanEntry, err error) {
+	headRefs, err := githubactions.ParseWorkflowFile(rel, headContent)
+	if err != nil {
+		return nil, nil, err
+	}
+	baseRefs, _ := githubactions.ParseWorkflowFile(rel, baseContent)
+	seen, prev := map[string]bool{}, map[string]string{}
+	for _, r := range baseRefs {
+		seen[strings.TrimSpace(r.Raw)] = true
+		if key := strings.ToLower(r.Owner + "/" + r.Name); r.Kind == githubactions.KindRemote && prev[key] == "" {
+			prev[key] = r.Version
+		}
+	}
+	var changed []githubactions.ActionRef
+	for _, r := range headRefs {
+		if raw := strings.TrimSpace(r.Raw); r.Kind == githubactions.KindRemote && !seen[raw] {
+			seen[raw] = true
+			changed = append(changed, r)
+		}
+	}
+	if len(changed) == 0 {
+		return nil, nil, nil
+	}
+	findings, err := githubactions.Scan(context.Background(), changed, githubactions.ScanDeps{
+		// The same wiring as scan-actions (scan_actions.go); both offline.
+		Typosquat: githubactions.NewTyposquatAdapter(typosquat.NewGitHubActionsDetector(nil)),
+		Malware:   githubactions.NewMalwareAdapter(malware.NewGitHubActionsFeed()),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	signals := map[string][]prScanSignal{}
+	for _, f := range findings {
+		sev := "warn"
+		if f.Signal == githubactions.SignalActionMalicious {
+			sev = "block"
+		}
+		raw := strings.TrimSpace(f.Ref.Raw)
+		signals[raw] = append(signals[raw], prScanSignal{ID: f.Signal, Severity: sev, Reason: f.Message})
+	}
+	for _, r := range changed {
+		sigs := signals[strings.TrimSpace(r.Raw)]
+		if sigs == nil {
+			sigs = []prScanSignal{}
+		}
+		e := prScanEntry{Ecosystem: "github_actions", Name: r.Owner + "/" + r.Name, Version: r.Version, Signals: sigs, Verdict: prScanVerdict(sigs)}
+		if p, ok := prev[strings.ToLower(e.Name)]; ok {
+			e.PreviousVersion = &p
+			upgraded = append(upgraded, e)
+		} else {
+			added = append(added, e)
+		}
+	}
+	return added, upgraded, nil
 }
 
 // prScanNotAssessedSignalID marks a row for a package from outside the
@@ -1712,6 +1868,7 @@ func prScanPolicyInput(e rawEntry, signals []prScanSignal) policy.Input {
 		RepositoryFormat: strings.ToLower(e.Ecosystem),
 		PackageName:      e.Name,
 		PackageVersion:   e.Version,
+		GitDependency:    gitOrigin(e.Ecosystem, e.Origin),
 	}
 	for _, s := range signals {
 		if s.ID == prScanTyposquatSignalID {

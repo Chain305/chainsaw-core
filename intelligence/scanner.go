@@ -1426,6 +1426,9 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 	if src.AppCredentialSend != "" {
 		dst.AppCredentialSend = src.AppCredentialSend
 	}
+	if src.DefenderTamper != "" {
+		dst.DefenderTamper = src.DefenderTamper
+	}
 	if src.BuildRsExecutes {
 		dst.BuildRsExecutes = true
 		if len(src.BuildRsPrimitives) > 0 {

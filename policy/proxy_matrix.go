@@ -1278,7 +1278,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionEPSS:                       SupportFull,
 		ConditionCVE:                        SupportFull,
 		ConditionPackageAge:                 SupportNone,
-		ConditionCooldown:                   SupportNone, // same metadata dep as PackageAge (per-version vs per-package release date)
+		ConditionCooldown:                   SupportPartial, // pool file Last-Modified; mirrors can make it look younger
 		ConditionLicense:                    SupportFull,
 		ConditionHasProvenance:              SupportFull, // InRelease → Packages → .deb
 		ConditionTyposquat:                  SupportNone, // low-risk

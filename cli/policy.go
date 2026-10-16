@@ -323,15 +323,21 @@ var validVersionAnomalyKinds = map[string]struct{}{
 	"semver_regression":    {},
 	"major_skip":           {},
 	"timestamp_regression": {},
+	// Version-delta kinds (metadiff.FlagInstallScriptAppeared /
+	// FlagSizeJump). Today they only lengthen the release-age hold; no
+	// producer writes them to a report's version-anomaly flags yet.
+	"install_script_appeared": {},
+	"size_jump":               {},
 }
 
 // validHiddenUnicodeKinds enumerates the accepted values for the
 // hiddenUnicodeKinds condition. Kept in sync with
 // internal/hiddenunicode.Kind* — change there, change here.
 var validHiddenUnicodeKinds = map[string]struct{}{
-	"zero_width":    {},
-	"bidi_override": {},
-	"tag":           {},
+	"zero_width":         {},
+	"bidi_override":      {},
+	"tag":                {},
+	"variation_selector": {},
 }
 
 // addSupplyChainConditionFlags registers the convenience flags for the
@@ -345,7 +351,7 @@ func addSupplyChainConditionFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("version-anomaly", false, "Condition: metadiff flagged any version-sequence anomaly")
 	cmd.Flags().String("version-anomaly-kinds", "", "Comma-separated subset: semver_regression,major_skip,timestamp_regression")
 	cmd.Flags().Bool("has-hidden-unicode", false, "Condition: artifact contains >=threshold hidden/unicode payload runes")
-	cmd.Flags().String("hidden-unicode-kinds", "", "Comma-separated subset: zero_width,bidi_override,tag")
+	cmd.Flags().String("hidden-unicode-kinds", "", "Comma-separated subset: zero_width,bidi_override,tag,variation_selector")
 	cmd.Flags().Bool("publish-velocity-anomaly", false, "Condition: publisher exceeded publish velocity threshold in 24h")
 	cmd.Flags().Int("publish-velocity-threshold-24h", 0, "Override default 24h publish-velocity threshold (>=1)")
 }

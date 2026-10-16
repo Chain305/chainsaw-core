@@ -707,11 +707,24 @@ type CacheConfig struct {
 // within minutes rather than never, and — because revalidation is
 // conditional (If-None-Match) — the steady-state cost of a miss on an
 // unchanged packument is a 304, not a ~190KB re-fetch.
+//
+// The same 600s applies to composer, docker (tag manifests), maven/gradle
+// (maven-metadata.xml), apt (dists/) and yum/dnf (repodata/): until
+// 2026-10-14 their index documents were cached forever, so a Packagist tag
+// re-pointed during a compromise and then reverted kept serving the
+// imposter commit through the proxy.
 var builtinMetadataTTLSeconds = map[string]int{
-	"npm":  600,
-	"yarn": 600,
-	"bun":  600,
-	"pip":  600,
+	"npm":      600,
+	"yarn":     600,
+	"bun":      600,
+	"pip":      600,
+	"composer": 600,
+	"docker":   600,
+	"maven":    600,
+	"gradle":   600,
+	"apt":      600,
+	"yum":      600,
+	"dnf":      600,
 }
 
 // RemoteDefaults defines fallback remote URLs per format.

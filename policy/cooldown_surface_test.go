@@ -55,9 +55,12 @@ func TestProxyMatrix_CooldownAndPackageAgeSupportDiverge(t *testing.T) {
 
 		switch {
 		case eco == EcoAPT:
-			// apt has no arm in either half of the release-date switch.
-			if age != SupportNone || cool != SupportNone {
-				t.Errorf("apt: want both None, got packageAge=%s cooldown=%s", age, cool)
+			// apt has no arm in the release-date switch, so no package date;
+			// cooldown reads the pool file's Last-Modified backfill (partial:
+			// a mirror can make it look younger). None would make
+			// detectUnsupported skip every cooldown policy on apt.
+			if age != SupportNone || cool != SupportPartial {
+				t.Errorf("apt: want packageAge=None cooldown=Partial, got packageAge=%s cooldown=%s", age, cool)
 			}
 			continue
 		case creationDateEcos[eco]:

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/chain305/chainsaw-core/installscripts"
+	"github.com/chain305/chainsaw-core/intelligence/artifactmap"
 )
 
 // buildZip produces a zip from a set of (name, body) pairs — matches
@@ -694,5 +695,62 @@ os.system('/tmp/s2')
 	}
 	if partial.Scan == nil || !partial.Scan.InstallScriptFetches {
 		t.Fatalf("pip bundled helper download+os.system must escalate to fetches; got %+v", partial.Scan)
+	}
+}
+
+// Phantom Gyp: no scripts at all, a root binding.gyp whose `<!(node index.js)`
+// runs during `node-gyp rebuild`, and the payload in index.js. A nested
+// deps/*/binding.gyp is never loaded by npm and must not count.
+func TestInstallScriptsProvider_BindingGypPhantomHook(t *testing.T) {
+	p := newInstallScriptsProvider()
+	run := func(files map[string]string) *ArtifactScanSection {
+		t.Helper()
+		partial, err := p.Run(context.Background(), Request{
+			Key:      Key{Ecosystem: "npm", Package: "phantom", Version: "1.0.0"},
+			Artifact: &ArtifactHandle{Bytes: buildTGZ(t, files)},
+		}, nil)
+		if err != nil || partial.Scan == nil {
+			t.Fatalf("Run: %v %+v", err, partial)
+		}
+		return partial.Scan
+	}
+	gyp := `{"targets":[{"target_name":"a","sources":["<!(node index.js > /dev/null && echo a.c)"]}]}`
+	scan := run(map[string]string{
+		"package/package.json": `{"name":"phantom","version":"1.0.0"}`,
+		"package/binding.gyp":  gyp,
+		"package/index.js":     shaiHuludSetupBun,
+	})
+	if !scan.HasInstallScript || !scan.InstallScriptFetches || scan.InstallScriptKind != "fetches_remote" {
+		t.Fatalf("phantom gyp hook: got %+v, want fetches_remote", scan)
+	}
+
+	scan = run(map[string]string{
+		"package/package.json":              `{"name":"phantom","version":"1.0.0"}`,
+		"package/deps/vendored/binding.gyp": gyp,
+		"package/index.js":                  shaiHuludSetupBun,
+	})
+	if scan.HasInstallScript || scan.InstallScriptKind != "none" {
+		t.Fatalf("nested binding.gyp is not an npm install hook: got %+v", scan)
+	}
+}
+
+// A referenced loader larger than the 2 MiB per-file cap whose decoder and
+// Function call sit in the tail.
+func TestInstallScriptsProvider_TruncatedXorLoaderFires(t *testing.T) {
+	p := newInstallScriptsProvider()
+	loader := `var k="k";var d="` + strings.Repeat("Q", 3*artifactmap.PerFileCap) +
+		`";var o="";for(var i=0;i<d.length;i++){o+=String.fromCharCode(d.charCodeAt(i)^k.charCodeAt(0))}Function(o)();`
+	partial, err := p.Run(context.Background(), Request{
+		Key: Key{Ecosystem: "npm", Package: "xor", Version: "1.0.0"},
+		Artifact: &ArtifactHandle{Bytes: buildTGZ(t, map[string]string{
+			"package/package.json":   `{"name":"xor","version":"1.0.0","scripts":{"preinstall":"node 3FWCvzduYZg.js"}}`,
+			"package/3FWCvzduYZg.js": loader,
+		})},
+	}, nil)
+	if err != nil || partial.Scan == nil {
+		t.Fatalf("Run: %v %+v", err, partial)
+	}
+	if !partial.Scan.InstallScriptFetches || partial.Scan.InstallScriptKind != "fetches_remote" {
+		t.Fatalf("tail-only XOR loader: got %+v, want fetches_remote", partial.Scan)
 	}
 }

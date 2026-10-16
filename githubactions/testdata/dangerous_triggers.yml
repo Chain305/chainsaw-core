@@ -1,0 +1,22 @@
+name: dangerous
+on:
+  pull_request_target:
+  issue_comment:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: title
+        run: echo "${{ github.event.pull_request.title }}"
+      - uses: actions/setup-node@v4
+      - name: publish
+        if: github.event_name == 'issue_comment'
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

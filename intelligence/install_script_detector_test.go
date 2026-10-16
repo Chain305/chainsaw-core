@@ -31,8 +31,8 @@ func TestInstallScriptsProvider_StampsTheDetectorThatRan(t *testing.T) {
 		flag    string // CHAINSAW_FF_INSTALLSCRIPT_AST
 		want    string
 	}{
-		{"npm", npm, "false", InstallScriptDetectorRegex},
-		{"npm", npm, "true", InstallScriptDetectorAST},
+		{"npm", npm, "false", InstallScriptDetectorRegex + InstallScriptDetectorGypSuffix},
+		{"npm", npm, "true", InstallScriptDetectorAST + InstallScriptDetectorGypSuffix},
 		{"pypi", pip, "false", InstallScriptDetectorRegex},
 		{"pypi", pip, "true", InstallScriptDetectorAST},
 		{"rubygems", gem, "true", ""},
@@ -152,6 +152,9 @@ func TestDiffSupplyChain_DetectorChangeGuard(t *testing.T) {
 		wantAppeared bool
 	}{
 		{"regex -> ast: skipped", InstallScriptDetectorRegex, InstallScriptDetectorAST, false},
+		// A gyp-only package's implicit hook is newly SEEN, not newly added.
+		{"regex -> regex+gyp: skipped", InstallScriptDetectorRegex, InstallScriptDetectorRegex + InstallScriptDetectorGypSuffix, false},
+		{"same gyp-aware detector: compared", InstallScriptDetectorAST + InstallScriptDetectorGypSuffix, InstallScriptDetectorAST + InstallScriptDetectorGypSuffix, true},
 		{"pre-ledger -> regex: still compared", "", InstallScriptDetectorRegex, true},
 		{"ast -> pre-ledger: still compared", InstallScriptDetectorAST, "", true},
 		{"same detector: compared", InstallScriptDetectorRegex, InstallScriptDetectorRegex, true},

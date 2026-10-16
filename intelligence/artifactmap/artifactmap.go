@@ -63,6 +63,24 @@ type ArtifactFile struct {
 	Bytes []byte
 	Size  int64
 	Kind  Kind
+	// Tail is the last TailCap bytes of a source file longer than PerFileCap
+	// (nil otherwise). A multi-MiB loader keeps its decoder and exec call at
+	// the end, past the head; WithTail joins the two for scanners needing both.
+	Tail []byte
+}
+
+// WithTail returns Bytes followed by Tail, with a newline marking the gap when
+// the two are not contiguous. It allocates only when Tail is set.
+func (f ArtifactFile) WithTail() []byte {
+	if len(f.Tail) == 0 {
+		return f.Bytes
+	}
+	out := make([]byte, 0, len(f.Bytes)+1+len(f.Tail))
+	out = append(out, f.Bytes...)
+	if int64(len(f.Bytes)+len(f.Tail)) < f.Size {
+		out = append(out, '\n')
+	}
+	return append(out, f.Tail...)
 }
 
 // ArtifactFileMap is keyed by the lower-cased archive-internal path so
@@ -98,6 +116,12 @@ const (
 	// and costs behavioral coverage, which is the worse failure for a
 	// detection tool.
 	MaxRetainedBytes = 256 * 1024 * 1024
+	// TailCap is how much of a truncated source file's END is kept (Tail).
+	TailCap = 256 * 1024
+	// maxTailScan bounds how far past PerFileCap an entry is streamed to reach
+	// its tail. A tar.gz entry is inflated to its end regardless (tar.Next
+	// discards it), a zip entry is not, so this caps the extra work there.
+	maxTailScan = 64 * 1024 * 1024
 )
 
 // Options tunes a Build. Zero values fall back to the constants above.
@@ -220,11 +244,11 @@ func buildFromTar(r io.Reader, opts Options, res *Result, expandGem bool) {
 			}
 			continue
 		}
-		body, err := io.ReadAll(io.LimitReader(tr, opts.PerFileCap))
+		body, tail, err := readEntry(tr, name, opts)
 		if err != nil {
 			continue
 		}
-		addFile(res, name, body, hdr.Size)
+		addFile(res, name, body, tail, hdr.Size)
 	}
 }
 
@@ -249,13 +273,56 @@ func buildFromZip(payload []byte, opts Options, res *Result) {
 		if err != nil {
 			continue
 		}
-		body, rerr := io.ReadAll(io.LimitReader(rc, opts.PerFileCap))
+		body, tail, rerr := readEntry(rc, name, opts)
 		rc.Close()
 		if rerr != nil {
 			continue
 		}
-		addFile(res, name, body, int64(f.UncompressedSize64))
+		addFile(res, name, body, tail, int64(f.UncompressedSize64))
 	}
+}
+
+// readEntry reads the first PerFileCap bytes of an entry and, for a source
+// file that runs past them, its last TailCap bytes too.
+func readEntry(r io.Reader, name string, opts Options) (head, tail []byte, err error) {
+	head, err = io.ReadAll(io.LimitReader(r, opts.PerFileCap))
+	if err != nil || int64(len(head)) < opts.PerFileCap {
+		return head, nil, err
+	}
+	if _, src := sourceExts[strings.ToLower(path.Ext(name))]; !src || isBinary(head) {
+		return head, nil, nil
+	}
+	return head, readTail(r), nil
+}
+
+// readTail keeps the last TailCap bytes of r. It returns nil when r runs past
+// maxTailScan or fails, since what it holds then is not the file's end.
+func readTail(r io.Reader) []byte {
+	buf := make([]byte, 0, 2*TailCap)
+	chunk := make([]byte, 32*1024)
+	var total int64
+	lr := io.LimitReader(r, maxTailScan+1)
+	for {
+		n, err := lr.Read(chunk)
+		total += int64(n)
+		if len(buf)+n > cap(buf) {
+			buf = append(buf[:0], buf[len(buf)-TailCap:]...)
+		}
+		buf = append(buf, chunk[:n]...)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil
+		}
+	}
+	if total > maxTailScan || len(buf) == 0 {
+		return nil
+	}
+	if len(buf) > TailCap {
+		buf = buf[len(buf)-TailCap:]
+	}
+	return append([]byte(nil), buf...)
 }
 
 // sanitizePath strips leading slashes / drive letters and rejects
@@ -281,7 +348,7 @@ func sanitizePath(name string) string {
 	return clean
 }
 
-func addFile(res *Result, name string, body []byte, declaredSize int64) {
+func addFile(res *Result, name string, body, tail []byte, declaredSize int64) {
 	size := declaredSize
 	if size <= 0 {
 		size = int64(len(body))
@@ -292,8 +359,9 @@ func addFile(res *Result, name string, body []byte, declaredSize int64) {
 		Bytes: body,
 		Size:  size,
 		Kind:  kind,
+		Tail:  tail,
 	}
-	res.TotalBytes += int64(len(body))
+	res.TotalBytes += int64(len(body) + len(tail))
 }
 
 // classify inspects the path extension and, for ambiguous cases, the
@@ -371,12 +439,13 @@ func isBinary(data []byte) bool {
 
 // WantsInstallManifest reports whether name is a manifest the
 // installscripts parsers understand. Mirrors the pre-refactor filter in
-// provider_installscripts.go.
+// provider_installscripts.go, plus binding.gyp: npm runs `node-gyp rebuild`
+// for a package that ships one (installscripts.BindingGyp).
 func WantsInstallManifest(name string) bool {
 	base := strings.ToLower(path.Base(strings.TrimSpace(name)))
 	switch base {
 	case "package.json", "setup.py", "pyproject.toml",
-		"cargo.toml", "build.rs", "composer.json":
+		"cargo.toml", "build.rs", "composer.json", "binding.gyp":
 		return true
 	}
 	return strings.HasSuffix(base, ".gemspec")

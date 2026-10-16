@@ -221,7 +221,7 @@ func TestBuildPRScanReport_UsesMergeBase(t *testing.T) {
 func TestParsePackageJSONDeps_MalformedReturnsError(t *testing.T) {
 	// A Go TYPE error on the shared unmarshal: devDependencies as an array.
 	body := []byte(`{"dependencies":{"chalk":"4.1.2"},"devDependencies":[]}`)
-	got, err := parsePackageJSONDeps(body)
+	got, _, err := parsePackageJSONDeps(body)
 	if err == nil {
 		t.Fatalf("malformed package.json must return an error; got %v", got)
 	}
@@ -259,7 +259,7 @@ func TestBuildPRScanReport_MalformedPackageJSONExits30(t *testing.T) {
 // file used to be enough to make pr-scan drop the manifest and report exit 0.
 func TestParsePackageJSONDeps_BOMIsTolerated(t *testing.T) {
 	body := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"dependencies":{"evil-pkg":"1.0.0"}}`)...)
-	got, err := parsePackageJSONDeps(body)
+	got, _, err := parsePackageJSONDeps(body)
 	if err != nil {
 		t.Fatalf("BOM-prefixed package.json should parse: %v", err)
 	}

@@ -69,3 +69,17 @@ func TestDemoPolicies_DescriptionsMakeNoAbsoluteModeClaim(t *testing.T) {
 		}
 	}
 }
+
+// ModeQuarantine records the match and ALLOWS the download
+// (server_repo_pipeline.go, `case policy.ModeQuarantine`), so a demo rule
+// telling the operator to "switch Mode to 'quarantine'" to stop brand-new
+// versions advises a mode that stops nothing.
+func TestDemoPolicies_NoAdviceToSwitchToQuarantine(t *testing.T) {
+	t.Parallel()
+
+	for _, p := range DemoPolicies() {
+		if strings.Contains(strings.ToLower(p.Description), "mode to 'quarantine'") {
+			t.Errorf("demo policy %q advises switching Mode to 'quarantine', which allows the download; advise 'block'", p.Name)
+		}
+	}
+}

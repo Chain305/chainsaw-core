@@ -62,3 +62,31 @@ func TestAppCredentialSend(t *testing.T) {
 		})
 	}
 }
+
+// @apexacc/audit (2026-09) turned off Defender and Smart App Control through
+// PowerShell from its install path.
+func TestDefenderTamper(t *testing.T) {
+	cases := []struct {
+		name string
+		file string
+		body string
+		want string
+	}{
+		{"realtime monitoring off", "package/scripts/setup.js",
+			"execSync('powershell -c \"Set-MpPreference -DisableRealtimeMonitoring $true\"')",
+			"Set-MpPreference -DisableRealtimeMonitoring (package/scripts/setup.js)"},
+		{"exclusion path, any case", "pkg/install.py",
+			"subprocess.run(['powershell', 'add-mppreference -ExclusionPath C:\\\\Users'])",
+			"add-mppreference -ExclusionPath (pkg/install.py)"},
+		{"reading preferences is not tampering", "package/a.js", "exec('Get-MpPreference')", ""},
+		{"enabling is not tampering", "package/a.js", "exec('Set-MpPreference -SignatureUpdateInterval 4')", ""},
+		{"docs", "package/docs/windows.md", "Set-MpPreference -DisableRealtimeMonitoring $true", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DefenderTamper(map[string][]byte{tc.file: []byte(tc.body)}); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -931,7 +931,7 @@ func scanSectionEmpty(s ArtifactScanSection) bool {
 		return false
 	}
 	if s.ImportTimeExecution || s.MaliciousIOC || s.BuildRsExecutes ||
-		s.DependencyCredential != "" || s.AppCredentialSend != "" {
+		s.DependencyCredential != "" || s.AppCredentialSend != "" || s.DefenderTamper != "" {
 		return false
 	}
 	if s.TrivialPackage || s.TooManyFiles || s.NonExistentAuthor ||

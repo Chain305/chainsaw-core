@@ -113,6 +113,9 @@ type Input struct {
 	// also sends.
 	DependencyCredential string
 	AppCredentialSend    string
+	// DefenderTamper: a shipping file disables Windows Defender or adds an
+	// exclusion to it (detail string, empty = no hit).
+	DefenderTamper string
 
 	// ImportTimeKind is core/pysource's verdict on what a Python package does
 	// at module top level, i.e. on import or install: top_level_shell,
@@ -451,6 +454,15 @@ type Input struct {
 	ActionRefTyposquats        []string
 	ActionRefMalicious         bool // any Action ref appears in the malicious-Action feed
 	ActionRefMaliciousRefs     []string
+
+	// Workflow-structure lint (githubactions.LintWorkflow). The *Locs slices
+	// carry "file:line" of each finding.
+	ActionPwnRequest                  bool // pull_request_target/workflow_run checks out the PR head, then runs
+	ActionPwnRequestLocs              []string
+	ActionCommentTriggerUnguarded     bool // comment-triggered job holds secrets/OIDC/publish, no author_association guard
+	ActionCommentTriggerUnguardedLocs []string
+	ActionScriptInjection             bool // attacker-written ${{ }} text interpolated into a run: step
+	ActionScriptInjectionLocs         []string
 
 	// --- Runtime capability grading (Gap 2 / Socket-parity) ---
 	// These fields are populated by the capability scanner

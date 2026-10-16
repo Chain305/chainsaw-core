@@ -137,6 +137,27 @@ func TestAnalyzeArtifact_HiddenUnicodeTagCharBlocksAnywhere(t *testing.T) {
 	}
 }
 
+// TestAnalyzeArtifact_HiddenUnicodeVariationSelectorPayloadBlocks: the
+// GlassWorm (2026-03) encoding — a run of variation selectors, one per
+// payload byte — has no benign form, so it blocks like tag characters.
+func TestAnalyzeArtifact_HiddenUnicodeVariationSelectorPayloadBlocks(t *testing.T) {
+	v := analyzeArtifact("npm", makeTGZ(t, map[string]string{
+		"package/package.json": `{"name":"glass","version":"1.0.0"}`,
+		"package/index.js":     "const s='" + strings.Repeat("\uFE01\U000E0150", 150) + "';eval(decode(s));\n",
+	}))
+	if !v.Block || !strings.Contains(v.Reason, "variation selector") {
+		t.Fatalf("expected BLOCK for a variation-selector payload, got %+v", v)
+	}
+	// Control: emoji presentation selectors, one per base character, are text.
+	v = analyzeArtifact("npm", makeTGZ(t, map[string]string{
+		"package/package.json": `{"name":"emoji","version":"1.0.0"}`,
+		"package/index.js":     "module.exports = ['❤\uFE0F', '☺\uFE0F', '1\uFE0F⃣', '✌\uFE0F'];\n",
+	}))
+	if v.Block || v.Severity != "" {
+		t.Fatalf("emoji presentation selectors must produce no verdict, got %+v", v)
+	}
+}
+
 // TestAnalyzeArtifact_HiddenUnicodeBidiInI18nSuppressed: bidi marks in a
 // translation catalog are legitimate mixed-direction text — fully clean.
 func TestAnalyzeArtifact_HiddenUnicodeBidiInI18nSuppressed(t *testing.T) {

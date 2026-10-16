@@ -167,3 +167,35 @@ func TestActionMaliciousFires(t *testing.T) {
 		})
 	}
 }
+
+// TestActionWorkflowLintSignals: the three workflow-lint signals are
+// registered at weight 0 with no ceiling (they report; they do not move a
+// verdict until a replay sets a weight) and fire only on their own field.
+func TestActionWorkflowLintSignals(t *testing.T) {
+	for _, c := range []struct {
+		id string
+		in Input
+	}{
+		{SignalActionPwnRequest, Input{ActionPwnRequest: true, ActionPwnRequestLocs: []string{"ci.yml:9"}}},
+		{SignalActionCommentTriggerUnguarded, Input{ActionCommentTriggerUnguarded: true, ActionCommentTriggerUnguardedLocs: []string{"ci.yml:9"}}},
+		{SignalActionScriptInjection, Input{ActionScriptInjection: true, ActionScriptInjectionLocs: []string{"ci.yml:9"}}},
+	} {
+		sig, ok := Registry[c.id]
+		if !ok {
+			t.Fatalf("%s not registered", c.id)
+		}
+		if sig.Weight != 0 || sig.MaxImpact != 0 || sig.Severity != SevHigh || sig.Category != CategorySupplyChain {
+			t.Errorf("%s: weight=%v max=%v sev=%v cat=%v, want weight 0, no ceiling, high, supply chain", c.id, sig.Weight, sig.MaxImpact, sig.Severity, sig.Category)
+		}
+		if fired, _, _ := sig.Fires(Input{}); fired {
+			t.Errorf("%s fired on zero input", c.id)
+		}
+		fired, msg, ev := sig.Fires(c.in)
+		if !fired || msg == "" {
+			t.Errorf("%s did not fire on its field", c.id)
+		}
+		if locs, _ := ev["locations"].([]string); len(locs) != 1 || locs[0] != "ci.yml:9" {
+			t.Errorf("%s evidence = %v", c.id, ev)
+		}
+	}
+}

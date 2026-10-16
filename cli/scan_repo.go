@@ -31,10 +31,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/chain305/chainsaw-core/depparser/origin"
 )
 
 type scanFinding struct {
@@ -83,6 +86,7 @@ var scanRepoCandidateBasenames = map[string]bool{
 	"pip.conf":            true,
 	"pip.ini":             true,
 	"pyproject.toml":      true,
+	"package.json":        true,
 	"pom.xml":             true,
 	"build.gradle":        true,
 	"build.gradle.kts":    true,
@@ -122,7 +126,8 @@ route package traffic around Chainsaw: committed .npmrc / .yarnrc.yml /
 .bunfig.toml registries, pip/poetry index-url, Maven <repository>, NuGet
 packageSources, Cargo [source.*] replace-with entries, GOPROXY overrides,
 Dockerfile images without the Chainsaw prefix, CocoaPods non-Chainsaw
-sources, SPM .package(url:) direct dependencies.
+sources, SPM .package(url:) direct dependencies, and git dependencies in
+requirements*.txt, pyproject.toml and package.json.
 
 Exit codes:
   0  the tree is clean
@@ -352,10 +357,32 @@ func inspectFile(rel, base, text string) []scanFinding {
 				}
 			}
 		}
+		_, sources := parsePipRequirements([]byte(text))
+		for _, d := range sources {
+			if gitOrigin("pip", d.Origin) {
+				add("pip", "requirements-git-dependency", gitDependencyDetail(d))
+			}
+		}
 	case base == "pyproject.toml":
 		if strings.Contains(text, "[[tool.poetry.source]]") || strings.Contains(text, "[[tool.uv.index]]") {
 			if !strings.Contains(text, "chainsaw") {
 				add("pip", "pyproject-source-override", "pyproject.toml declares a non-Chainsaw package source")
+			}
+		}
+		// A grep, like the rule above: PEP 508 `name @ git+…` and Poetry /
+		// uv `{ git = "…" }` tables.
+		for _, ln := range strings.Split(text, "\n") {
+			if t := strings.TrimSpace(ln); !strings.HasPrefix(t, "#") && (strings.Contains(t, "git+") || pyprojectGitKey.MatchString(t)) {
+				add("pip", "pyproject-git-dependency", "pyproject.toml declares a git dependency "+gitDependencyRemedy)
+				break
+			}
+		}
+	case base == "package.json":
+		if _, sources, err := parsePackageJSONDeps([]byte(text)); err == nil {
+			for _, d := range sources {
+				if gitOrigin("npm", d.Origin) {
+					add("npm", "package-json-git-dependency", gitDependencyDetail(d))
+				}
 			}
 		}
 	case base == "pom.xml":
@@ -416,6 +443,17 @@ func inspectFile(rel, base, text string) []scanFinding {
 	}
 
 	return out
+}
+
+// pyprojectGitKey matches a Poetry / uv dependency table's git key.
+var pyprojectGitKey = regexp.MustCompile(`[{,]\s*git\s*=\s*["']`)
+
+// gitDependencyRemedy is what every git-dependency finding tells the reader.
+const gitDependencyRemedy = "— it is fetched straight from the repository, never through the Chainsaw proxy, so nothing scans it. " +
+	"Publish it to a registry the proxy fronts, or pin a full commit SHA and review that commit."
+
+func gitDependencyDetail(d nonRegistryDep) string {
+	return fmt.Sprintf("%s comes from git (%s) %s", d.Name, origin.Label(d.Origin), gitDependencyRemedy)
 }
 
 // dockerImageRoutesThroughChainsaw recognises image refs that either

@@ -47,7 +47,13 @@ package intelligence
 // The nil-returning closures reproduce the old `if cfg.X != nil` guards: a
 // nil result is skipped order-preservingly by buildRegisteredProviders.
 
-import "github.com/chain305/chainsaw-core/supplychain"
+import (
+	"context"
+
+	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/provenance"
+	"github.com/chain305/chainsaw-core/supplychain"
+)
 
 func init() { registerCoreProvidersInOrder() }
 
@@ -114,7 +120,15 @@ func registerCoreProvidersInOrder() {
 	// CORE: registry metadata — runs unconditionally; Supports() gates it.
 	RegisterProvider(ProviderRegistration{
 		Name: "registrymetadata", Tier: TierCore, Order: 8,
-		Factory: func(BootstrapConfig) Provider { return newRegistryMetadataProvider() },
+		Factory: func(cfg BootstrapConfig) Provider {
+			p := newRegistryMetadataProvider()
+			if c := cfg.ProvenanceChecker; c != nil {
+				p.ociStatus = func(ctx context.Context, image, digest string) provenance.Status {
+					return c.Check(httpclient.RefineEgressCaller(ctx, httpclient.EgressCallerRefreshProvenance), "docker", image, digest).Status
+				}
+			}
+			return p
+		},
 	})
 
 	// ---- Tier-2 (artifact-bound, run in parallel when req.Artifact set) ----

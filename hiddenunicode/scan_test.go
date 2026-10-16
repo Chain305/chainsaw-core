@@ -268,3 +268,89 @@ func TestZeroWidthThresholdEnvOverride(t *testing.T) {
 		t.Errorf("with the bar at 2, two zero-width hits must be adverse")
 	}
 }
+
+// glassWormSelectors encodes payload the GlassWorm way: one variation
+// selector per byte, bytes 0-15 as U+FE00-FE0F and 16-255 as
+// U+E0100-E01EF.
+func glassWormSelectors(payload []byte) string {
+	var b []rune
+	for _, c := range payload {
+		if c < 16 {
+			b = append(b, rune(0xFE00+int(c)))
+		} else {
+			b = append(b, rune(0xE0100+int(c)-16))
+		}
+	}
+	return string(b)
+}
+
+// TestScanVariationSelectorPayload is the GlassWorm (2026-03) shape: a
+// string of hundreds of variation selectors, decoded and handed to eval.
+func TestScanVariationSelectorPayload(t *testing.T) {
+	payload := make([]byte, 300)
+	for i := range payload {
+		payload[i] = byte(i) // covers both selector blocks
+	}
+	src := "const s = '" + glassWormSelectors(payload) + "';\n" +
+		"eval(Buffer.from([...s].map(c => { const p = c.codePointAt(0); return p >= 0xE0100 ? p - 0xE0100 + 16 : p - 0xFE00 })).toString());\n"
+	res := Scan(map[string][]byte{"index.js": []byte(src)})
+	if len(res.Kinds) != 1 || res.Kinds[0] != KindVariationSelector {
+		t.Fatalf("Kinds = %v, want [%s]", res.Kinds, KindVariationSelector)
+	}
+	if got := res.KindHits[KindVariationSelector]; got != 300 {
+		t.Errorf("KindHits[variation_selector] = %d, want 300", got)
+	}
+	if !Adverse(res.Hits, res.Kinds) {
+		t.Errorf("a variation-selector payload must be adverse")
+	}
+}
+
+// TestScanVariationSelectorBenignText: legitimate text carries at most one
+// selector per base character — emoji presentation (U+FE0F), text
+// presentation (U+FE0E), keycaps, ZWJ sequences, CJK ideographic variation
+// sequences, and the literal emoji tables emoji-regex style packages ship.
+// None of it is a payload.
+func TestScanVariationSelectorBenignText(t *testing.T) {
+	files := map[string][]byte{
+		// ❤️ ☺️ ✌️ 1️⃣ #️⃣ 👨‍👩‍👧 🏳️‍🌈
+		"README.md": []byte("Made with ❤\uFE0F ☺\uFE0F ✌\uFE0F 1\uFE0F\u20E3 #\uFE0F\u20E3 " +
+			"\U0001F468\u200D\U0001F469\u200D\U0001F467 \U0001F3F3\uFE0F\u200D\U0001F308 by us\n"),
+		// 葛 U+845B with IVS U+E0100 / U+E0101, 辻 U+8FBB with U+E0100.
+		"names.txt": []byte("葛\U000E0100城 葛\U000E0101飾 辻\U000E0100 渡\U000E0103邊\n"),
+		// An emoji-regex style data table: one selector per entry, keycaps,
+		// ZWJ sequences with a selector on each component (🏳️‍⚧️, 👁️‍🗨️),
+		// and a regex class listing both presentation selectors — FE0E FE0F,
+		// the longest run legitimate text produces here.
+		"emoji-data.js": []byte("module.exports = [\"☺\uFE0F\",\"☹\uFE0F\",\"☠\uFE0F\",\"❣\uFE0F\"," +
+			"\"0\uFE0F\u20E3\",\"1\uFE0F\u20E3\",\"*\uFE0F\u20E3\",\"\U0001F3F3\uFE0F\u200D⚧\uFE0F\"," +
+			"\"\U0001F441\uFE0F\u200D\U0001F5E8\uFE0F\",\"❤\uFE0F\u200D\U0001F525\",\"☺\uFE0E\"];\n" +
+			"const re = /[☺☹☠❣❤][\uFE0E\uFE0F]?/u;\n"),
+	}
+	res := Scan(files)
+	if n := res.KindHits[KindVariationSelector]; n != 0 || containsKind(res.Kinds, KindVariationSelector) {
+		t.Fatalf("benign emoji / IVS text produced %d variation_selector hits: %+v", n, res.PerFile)
+	}
+}
+
+// TestScanVariationSelectorRunBoundary pins the run length: three in a row
+// is still text, four is data. Mixed blocks count as one run.
+func TestScanVariationSelectorRunBoundary(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"three", "x\uFE00\uFE01\uFE02y", 0},
+		{"four", "x\uFE00\uFE01\uFE02\uFE03y", 4},
+		{"four mixed blocks", "x\uFE0F\U000E0100\uFE00\U000E01EFy", 4},
+		{"run at end of file", "x\U000E0110\U000E0111\U000E0112\U000E0113", 4},
+		{"two runs of three", "\uFE00\uFE01\uFE02a\uFE03\uFE04\uFE05", 0},
+		{"just past the blocks", "︐︐︐︐\U000E01F0\U000E01F0\U000E01F0\U000E01F0", 0},
+	}
+	for _, tc := range cases {
+		res := Scan(map[string][]byte{"f.js": []byte(tc.body)})
+		if got := res.KindHits[KindVariationSelector]; got != tc.want {
+			t.Errorf("%s: %d variation_selector hits, want %d (%+v)", tc.name, got, tc.want, res.PerFile)
+		}
+	}
+}

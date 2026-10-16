@@ -54,7 +54,9 @@ func (p *hiddenUnicodeProvider) NeedsArtifact() bool { return true }
 // 4 (2026-10-09): emoji ZWJ sequences, directional marks in number/date formats, lone
 // characters in entity tables, and isolated tag characters in test vectors
 // are suppressed.
-const hiddenUnicodeAnalyzerVersion = 4
+// 5 (2026-10-14): runs of >= 4 variation selectors (GlassWorm 2026-03) are
+// reported as variation_selector.
+const hiddenUnicodeAnalyzerVersion = 5
 
 func (p *hiddenUnicodeProvider) AnalyzerVersion() int { return hiddenUnicodeAnalyzerVersion }
 

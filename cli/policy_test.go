@@ -50,6 +50,10 @@ func TestValidateKinds(t *testing.T) {
 	if err := validateKinds("version-anomaly-kinds", []string{"semver_regression"}, validVersionAnomalyKinds); err != nil {
 		t.Fatalf("valid kind rejected: %v", err)
 	}
+	// metadiff.FlagInstallScriptAppeared / FlagSizeJump.
+	if err := validateKinds("version-anomaly-kinds", []string{"install_script_appeared", "size_jump"}, validVersionAnomalyKinds); err != nil {
+		t.Fatalf("version-delta kinds rejected: %v", err)
+	}
 	err := validateKinds("version-anomaly-kinds", []string{"semver_regression", "bogus"}, validVersionAnomalyKinds)
 	if err == nil {
 		t.Fatalf("expected error for unknown kind")
@@ -64,6 +68,9 @@ func TestValidateKinds(t *testing.T) {
 	// Hidden-unicode kinds: same shape.
 	if err := validateKinds("hidden-unicode-kinds", []string{"zero_width"}, validHiddenUnicodeKinds); err != nil {
 		t.Fatalf("valid hidden-unicode kind rejected: %v", err)
+	}
+	if err := validateKinds("hidden-unicode-kinds", []string{"variation_selector"}, validHiddenUnicodeKinds); err != nil {
+		t.Fatalf("variation_selector (GlassWorm selector payloads) rejected: %v", err)
 	}
 	if err := validateKinds("hidden-unicode-kinds", []string{"not_a_kind"}, validHiddenUnicodeKinds); err == nil {
 		t.Fatalf("expected error for unknown hidden-unicode kind")

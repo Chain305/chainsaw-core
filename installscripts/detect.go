@@ -22,6 +22,7 @@ package installscripts
 
 import (
 	"encoding/json"
+	"path"
 	"regexp"
 	"strings"
 
@@ -140,6 +141,110 @@ func NPM(packageJSON []byte) Result {
 		}
 	}
 	return finish("npm", hasScript, body.String())
+}
+
+// gypCommandRE finds a gyp command expansion: `<!(cmd)` / `<!@(cmd)`, the
+// late-phase `>!(...)` forms, and `<!pymod_do_main(module args)`, which
+// imports module from the .gyp file's own directory. gyp runs all of them
+// while it LOADS binding.gyp, before anything is compiled.
+var gypCommandRE = regexp.MustCompile(`[<>]!@?(pymod_do_main)?\(`)
+
+// GypCommands returns the shell commands a binding.gyp runs, innermost
+// parentheses kept. A pymod_do_main call is rendered as `python module.py
+// args` so ReferencedScripts resolves the bundled module.
+func GypCommands(bindingGyp []byte) []string {
+	const maxCommands, maxLen = 64, 4096
+	s := string(bindingGyp)
+	var out []string
+	for _, m := range gypCommandRE.FindAllStringSubmatchIndex(s, maxCommands) {
+		depth := 1
+		for i := m[1]; i < len(s) && i < m[1]+maxLen; i++ {
+			if s[i] == '(' {
+				depth++
+			} else if s[i] == ')' {
+				depth--
+			}
+			if depth == 0 {
+				cmd := strings.TrimSpace(s[m[1]:i])
+				if m[2] >= 0 {
+					mod, args, _ := strings.Cut(cmd, " ")
+					cmd = strings.TrimSpace("python " + mod + ".py " + args)
+				}
+				out = append(out, cmd)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// IsRootBindingGyp reports whether an archive path is a binding.gyp npm would
+// see: directly under the tarball's top-level directory (npm extracts with
+// strip:1, so a depth-0 entry is dropped and a nested one is a vendored
+// dependency node-gyp never loads as the package's own).
+func IsRootBindingGyp(name string) bool {
+	name = path.Clean(strings.TrimPrefix(strings.TrimSpace(name), "./"))
+	dir, base := path.Split(name)
+	return strings.EqualFold(base, "binding.gyp") && dir != "" && strings.Count(dir, "/") == 1
+}
+
+// BindingGyp folds a package's root binding.gyp into an npm Result.
+//
+// npm adds `"install": "node-gyp rebuild"` to any package that ships a root
+// binding.gyp and declares neither install nor preinstall (unless
+// `"gypfile": false`), and the registry reports hasInstallScript for it. NPM
+// reads package.json alone, so such a package read as script-free while gyp
+// ran its `<!(...)` commands at install — the Miasma "Phantom Gyp" shape, a
+// 157-byte binding.gyp holding `<!(node index.js ...)` and no scripts.
+//
+// The commands are appended to ScriptBody so callers' ReferencedScripts scan
+// resolves `node index.js`, and are classified inline like any hook string.
+// They are read only when node-gyp runs: the implicit hook, or a declared
+// hook naming node-gyp.
+func BindingGyp(r Result, packageJSON, bindingGyp []byte) Result {
+	if len(bindingGyp) == 0 {
+		return r
+	}
+	var manifest struct {
+		Scripts map[string]json.RawMessage `json:"scripts"`
+		Gypfile *bool                      `json:"gypfile"`
+	}
+	if json.Unmarshal(packageJSON, &manifest) != nil {
+		return r
+	}
+	implicit := !jsTruthy(manifest.Scripts["install"]) && !jsTruthy(manifest.Scripts["preinstall"]) &&
+		(manifest.Gypfile == nil || *manifest.Gypfile)
+	if !implicit && !strings.Contains(r.ScriptBody, "node-gyp") {
+		return r
+	}
+	cmds := strings.Join(GypCommands(bindingGyp), "\n")
+	out := r
+	out.Ecosystem, out.HasInstallScript = "npm", true
+	if implicit {
+		out.ScriptBody += "node-gyp rebuild\n"
+	}
+	if cmds != "" {
+		out.ScriptBody += cmds + "\n"
+	}
+	if k := classifyBody(cmds); kindRank(k) > kindRank(out.Kind) {
+		out.Kind = k
+	}
+	if kindRank(out.Kind) < kindRank(KindPresent) {
+		out.Kind = KindPresent
+	}
+	out.InstallScriptFetchesRemote = out.Kind == KindFetchesRemote
+	out.EvalEncoded = out.Kind == KindEvalEncoded
+	return out
+}
+
+// jsTruthy reports whether a package.json value is truthy the way npm's
+// `!scripts.install` test reads it.
+func jsTruthy(raw json.RawMessage) bool {
+	switch strings.TrimSpace(string(raw)) {
+	case "", "null", "false", `""`, "0":
+		return false
+	}
+	return true
 }
 
 // pipInstallMarkers are the setup.py / setup.cfg keys whose presence

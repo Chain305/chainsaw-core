@@ -28,6 +28,7 @@ const (
 	SignalSCImportTimeShell         = "sc.import_time_shell"
 	SignalSCDependencyCredential    = "sc.dependency_credential"
 	SignalSCAppCredentialExfil      = "sc.app_credential_exfil"
+	SignalSCDefenderTamper          = "sc.defender_tamper"
 	SignalSCInstallScriptOnly       = "sc.install_script_only"
 	SignalSCInstallScriptOnlyNPM    = "sc.install_script_only_npm"
 	SignalSCShellAppeared           = "sc.shell_access_appeared"
@@ -468,6 +469,26 @@ func init() {
 				return false, "", nil
 			}
 			return true, "Reads and sends: " + in.AppCredentialSend, nil
+		},
+		TakeoverIndicator: true,
+	})
+	// sc.defender_tamper — @apexacc/audit (2026-09) ran Set-MpPreference to
+	// disable Defender before loading its stealer. Warn-capped, not a block:
+	// Add-MpPreference -ExclusionPath is also a legitimate (if poor) build
+	// speed-up some tooling scripts.
+	register(Signal{
+		ID:          SignalSCDefenderTamper,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      -20,
+		MaxImpact:   40,
+		Title:       "Code disables or excludes Windows Defender",
+		Description: "A shipping file runs Set-MpPreference -Disable* or Add-MpPreference -Exclusion*, turning off or carving holes in the host's antivirus.",
+		Fires: func(in Input) (bool, string, map[string]any) {
+			if in.DefenderTamper == "" {
+				return false, "", nil
+			}
+			return true, "Defender tampering: " + in.DefenderTamper, nil
 		},
 		TakeoverIndicator: true,
 	})

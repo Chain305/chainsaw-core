@@ -261,6 +261,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		MaliciousIOCAtEntry:        r.Scan.MaliciousIOCAtEntry,
 		DependencyCredential:       r.Scan.DependencyCredential,
 		AppCredentialSend:          r.Scan.AppCredentialSend,
+		DefenderTamper:             r.Scan.DefenderTamper,
 		ImportTimeKind:             r.Scan.ImportTimeKind,
 		TrivialPackage:             r.Scan.TrivialPackage,
 
@@ -781,6 +782,16 @@ func projectActionsSection(s *ActionsSection, in *risk.Input) {
 				seenMalicious[f.Ref] = struct{}{}
 				in.ActionRefMaliciousRefs = append(in.ActionRefMaliciousRefs, f.Ref)
 			}
+		// Workflow-lint findings: Ref is the finding's "file:line".
+		case "action.pwn_request":
+			in.ActionPwnRequest = true
+			in.ActionPwnRequestLocs = append(in.ActionPwnRequestLocs, f.Ref)
+		case "action.comment_trigger_unguarded":
+			in.ActionCommentTriggerUnguarded = true
+			in.ActionCommentTriggerUnguardedLocs = append(in.ActionCommentTriggerUnguardedLocs, f.Ref)
+		case "action.script_injection":
+			in.ActionScriptInjection = true
+			in.ActionScriptInjectionLocs = append(in.ActionScriptInjectionLocs, f.Ref)
 		}
 	}
 }

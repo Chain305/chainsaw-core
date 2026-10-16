@@ -304,3 +304,75 @@ req.end();`
 		t.Fatalf("telemetry postinstall = %q, want %q", got, KindPresent)
 	}
 }
+
+// xorLoader builds the @7nohe/openapi-react-query-codegen preinstall shape
+// (`node 3FWCvzduYZg.js`, 6.4 MB in the wild): one enormous encoded string, an
+// XOR decode loop over it, and the Function constructor on the result. No
+// fetch, no eval(Buffer.from), no _0x identifiers — nothing the other arms see.
+func xorLoader(payloadLen int) string {
+	var b strings.Builder
+	b.WriteString(`var k="s3cr3t";var d="`)
+	for i := 0; i < payloadLen; i++ {
+		b.WriteByte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[i%62])
+	}
+	b.WriteString(`";var o="";for(var i=0;i<d.length;i++){o+=String.fromCharCode(d.charCodeAt(i)^k.charCodeAt(i%k.length))}Function(o)();`)
+	return b.String()
+}
+
+func TestScanReferencedBody_LargeXorLoaderFlagged(t *testing.T) {
+	if got := ScanReferencedBody(xorLoader(1200 * 1024)); got != KindFetchesRemote {
+		t.Fatalf("1.2 MB XOR loader = %q, want %q", got, KindFetchesRemote)
+	}
+	// Under 1 MiB but carrying a >=64 KiB literal: still a loader.
+	if got := ScanReferencedBody(xorLoader(70 * 1024)); got != KindFetchesRemote {
+		t.Fatalf("70 KiB-literal XOR loader = %q, want %q", got, KindFetchesRemote)
+	}
+}
+
+func TestScanReferencedBody_XorLoaderNeedsAllThree(t *testing.T) {
+	// Small XOR + Function: no size, no huge literal.
+	if got := ScanReferencedBody(xorLoader(1024)); got != KindPresent {
+		t.Fatalf("small XOR loader = %q, want %q (size gate)", got, KindPresent)
+	}
+	big := xorLoader(1200 * 1024)
+	if got := ScanReferencedBody(strings.Replace(big, "Function(o)()", "console.log(o)", 1)); got != KindPresent {
+		t.Fatalf("no dynamic exec = %q, want %q", got, KindPresent)
+	}
+	if got := ScanReferencedBody(strings.Replace(big, "^k.charCodeAt", "+k.charCodeAt", 1)); got != KindPresent {
+		t.Fatalf("no XOR decode = %q, want %q", got, KindPresent)
+	}
+}
+
+// A normal >1 MiB webpack bundle: the global-object shim
+// `new Function("return this")()`, String.fromCharCode in a UTF-8 decoder, and
+// a CRC32 that XORs charCodeAt. All three ingredients appear, none of them is
+// a decode-then-run.
+//
+// It asserts the XOR rule, not ScanReferencedBody: the pre-existing coupling
+// arm already returns fetches_remote for ANY referenced body containing
+// `new Function("...")` or `eval(`, because fetchesRemoteRE (its "fetch"
+// half) itself matches `Function(` and `eval(`. That predates this rule.
+func TestLooksXorLoader_WebpackBundleNotFlagged(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`(function(){var g;try{g=this||new Function("return this")()}catch(e){g=window}`)
+	b.WriteString(`function crc32(s){var c=-1;for(var i=0;i<s.length;i++){c=(c>>>8)^T[(c^s.charCodeAt(i))&255]}return c^-1}`)
+	b.WriteString(`function utf8(a){var s="";for(var i=0;i<a.length;i++){s+=String.fromCharCode(a[i]&127)}return s}`)
+	for b.Len() < 1300*1024 {
+		b.WriteString(`__webpack_require__.d(exports,{a:function(){return n}});var n=function(t,e){return t.map(function(r){return r+e})};`)
+	}
+	b.WriteString(`})();`)
+	if looksXorLoader(b.String()) {
+		t.Fatal("webpack bundle matched the XOR-loader rule")
+	}
+	// The same bundle with the shim's argument computed is still not a
+	// loader: its fromCharCode carries no XOR.
+	if looksXorLoader(strings.Replace(b.String(), `new Function("return this")`, `new Function(src)`, 1)) {
+		t.Fatal("computed Function without an XOR decode matched the XOR-loader rule")
+	}
+	// A bundled string-keyed HMAC really does XOR into fromCharCode
+	// (ipad/opad). Beside only the literal shim it is still not a loader.
+	hmac := `function pad(key){var p="";for(var i=0;i<64;i++){p+=String.fromCharCode(key.charCodeAt(i)^54)}return p}`
+	if looksXorLoader(hmac + b.String()) {
+		t.Fatal("HMAC pad + literal Function shim matched the XOR-loader rule")
+	}
+}

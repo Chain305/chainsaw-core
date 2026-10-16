@@ -67,7 +67,7 @@ type CheckResult struct {
 	// HasHiddenUnicode is true when it meets or exceeds
 	// CHAINSAW_HIDDEN_UNICODE_THRESHOLD. HiddenUnicodeKinds is the
 	// deduplicated, sorted union of detected kinds (subset of
-	// {"zero_width","bidi_override","tag"}).
+	// {"zero_width","bidi_override","tag","variation_selector"}).
 	HasHiddenUnicode   bool
 	HiddenUnicodeHits  int
 	HiddenUnicodeKinds []string
@@ -118,8 +118,10 @@ const VersionAnomalyHistoryDepth = 5
 // populates this shape before handing it off to the install-script
 // scanner, and that walker is legacy code we don't want to churn.
 type InstallScriptFiles struct {
-	// npm
+	// npm. BindingGyp is the package-root binding.gyp only
+	// (installscripts.IsRootBindingGyp); npm runs node-gyp for it.
 	PackageJSON []byte
+	BindingGyp  []byte
 	// pip
 	SetupPy       []byte
 	PyprojectToml []byte

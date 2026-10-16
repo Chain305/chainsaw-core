@@ -962,7 +962,7 @@ func TestParsePipRequirements_PipCompileHashes(t *testing.T) {
 		t.Fatal(err)
 	}
 	data = append(data, []byte("idna2==3.6  # via requests\narb===1.0\nmarked >= 2.0 ; python_version < \"3.11\"\n")...)
-	got := parsePipRequirements(data)
+	got, _ := parsePipRequirements(data)
 	if len(got) != 30 {
 		t.Errorf("got %d packages, want 30: %v", len(got), got)
 	}

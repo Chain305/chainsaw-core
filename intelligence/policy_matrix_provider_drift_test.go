@@ -113,6 +113,9 @@ var advertisedElsewhere = map[matrixCell]string{
 	{policy.ConditionCooldown, policy.EcoYum}:     reasonReleaseDateFetcher("FormatYum", "fetchRPMReleaseDate (internal/server/package_metadata.go:1050)"),
 	{policy.ConditionPackageAge, policy.EcoDNF}:   reasonReleaseDateFetcher("FormatDNF", "fetchRPMReleaseDate (internal/server/package_metadata.go:1050)"),
 	{policy.ConditionCooldown, policy.EcoDNF}:     reasonReleaseDateFetcher("FormatDNF", "fetchRPMReleaseDate (internal/server/package_metadata.go:1050)"),
+	{policy.ConditionCooldown, policy.EcoAPT}: "apt has no registry release date; interceptPolicyViolation " +
+		"(internal/server/server_repo_pipeline.go) backfills VersionReleaseDate from the pool file's " +
+		"cached Last-Modified (meta.ReleasedAt), so the cell is partial, not full.",
 }
 
 func reasonReleaseDateFetcher(format, fn string) string {
@@ -124,10 +127,10 @@ func reasonReleaseDateFetcher(format, fn string) string {
 		"applyFetchedMetadataFields writes it to VersionReleaseDate. "+
 		"Since N1 it writes PackageReleaseDate ONLY from a genuine "+
 		"creation date (pip/npm/composer), so this cell justifies the "+
-		"Cooldown column, not the PackageAge column. APT is correctly "+
-		"SupportNone because it is the one OS-package format with no "+
-		"case in that switch — the matrix is not self-inconsistent, it "+
-		"mirrors the switch exactly.",
+		"Cooldown column, not the PackageAge column. APT's PackageAge is "+
+		"correctly SupportNone because it is the one OS-package format "+
+		"with no case in that switch; its Cooldown is partial on the "+
+		"pool file's Last-Modified backfill alone.",
 		format, fn)
 }
 

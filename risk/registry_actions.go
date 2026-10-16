@@ -16,7 +16,34 @@ const (
 	SignalActionUnknownPublisher = "action.unknown_publisher"
 	SignalActionTyposquat        = "action.typosquat"
 	SignalActionMalicious        = "action.malicious"
+
+	// Workflow-structure lint: what a workflow does with its triggers, not
+	// which actions it uses. Weight 0 — they report and gate scan-actions
+	// (high severity) but move no score until a replay justifies a weight.
+	SignalActionPwnRequest              = "action.pwn_request"
+	SignalActionCommentTriggerUnguarded = "action.comment_trigger_unguarded"
+	SignalActionScriptInjection         = "action.script_injection"
 )
+
+// registerActionLint registers one weight-0 workflow-lint signal that fires
+// on flag and cites locs.
+func registerActionLint(id, title, desc, msg string, field func(Input) (bool, []string)) {
+	register(Signal{
+		ID:          id,
+		Category:    CategorySupplyChain,
+		Severity:    SevHigh,
+		Weight:      0,
+		Title:       title,
+		Description: desc,
+		Fires: func(in Input) (bool, string, map[string]any) {
+			fired, locs := field(in)
+			if !fired {
+				return false, "", nil
+			}
+			return true, msg, map[string]any{"locations": locs}
+		},
+	})
+}
 
 func init() {
 	// Unpinned ref — Action `uses:` line points at a branch or tag instead
@@ -110,4 +137,22 @@ func init() {
 				map[string]any{"refs": in.ActionRefMaliciousRefs}
 		},
 	})
+
+	registerActionLint(SignalActionPwnRequest,
+		"Privileged workflow runs pull request code",
+		"A pull_request_target or workflow_run workflow checks out the pull request head and then runs a step, so a fork's code runs with the base repository's secrets and write token.",
+		"Workflow checks out the pull request head under a privileged trigger and runs it.",
+		func(in Input) (bool, []string) { return in.ActionPwnRequest, in.ActionPwnRequestLocs })
+	registerActionLint(SignalActionCommentTriggerUnguarded,
+		"Comment-triggered workflow is not restricted to members",
+		"An issue_comment or pull_request_review_comment job holds secrets, id-token: write or a publish step, and no if: checks the commenter's author_association.",
+		"Any GitHub user's comment can trigger a privileged job.",
+		func(in Input) (bool, []string) {
+			return in.ActionCommentTriggerUnguarded, in.ActionCommentTriggerUnguardedLocs
+		})
+	registerActionLint(SignalActionScriptInjection,
+		"Attacker-written text interpolated into a shell step",
+		"A ${{ }} expression carrying a comment body, issue or pull request title/body, review body or branch name is interpolated directly into a run: step.",
+		"Untrusted event text is interpolated into a shell run: step.",
+		func(in Input) (bool, []string) { return in.ActionScriptInjection, in.ActionScriptInjectionLocs })
 }

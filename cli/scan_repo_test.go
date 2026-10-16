@@ -87,6 +87,7 @@ func TestScanRepoCandidatePredicate_CoversEveryInspectFileArm(t *testing.T) {
 		"pip.conf", "pip.ini",
 		"requirements.txt", "requirements-dev.txt",
 		"pyproject.toml",
+		"package.json",
 		"pom.xml",
 		"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
 		"nuget.config", "NuGet.Config",

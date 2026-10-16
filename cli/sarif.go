@@ -326,7 +326,16 @@ func sarifActionsRule(f scanActionsFinding) sarifRule {
 		fmt.Fprintf(&md, "%s\n\n", f.Detail)
 	}
 	md.WriteString("### Remediation\n\n")
-	md.WriteString("Pin the action to a full-length commit SHA and confirm the publisher is trusted before re-enabling the workflow.\n")
+	switch f.Signal {
+	case "action.pwn_request":
+		md.WriteString("Do not check out or run pull request code under pull_request_target or workflow_run. Use pull_request for untrusted code, or split the privileged step into a separate workflow that never executes the head.\n")
+	case "action.comment_trigger_unguarded":
+		md.WriteString("Gate the job with `if:` on github.event.comment.author_association (OWNER, MEMBER or COLLABORATOR) before it can reach secrets, OIDC or a publish step.\n")
+	case "action.script_injection":
+		md.WriteString("Pass the event field through `env:` and reference it as a quoted shell variable instead of interpolating `${{ }}` into the script.\n")
+	default:
+		md.WriteString("Pin the action to a full-length commit SHA and confirm the publisher is trusted before re-enabling the workflow.\n")
+	}
 	return sarifRule{
 		ID:               f.Signal,
 		Name:             f.Signal,

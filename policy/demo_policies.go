@@ -104,10 +104,11 @@ func DemoPolicies() []Policy {
 		// flags. The Mode column is the single source of truth for mode. Seeded visible so operators discover
 		// the controls that catch the 2025-26 attack class (account-takeover /
 		// zero-hour novel versions of real popular packages) that the malware +
-		// typosquat block rules above MISS. Switch Mode to 'quarantine' once tuned.
+		// typosquat block rules above MISS. Switch Mode to 'block' once tuned
+		// ('quarantine' records the match but still serves the download).
 		{
 			Name:        demoPolicyPrefix + "Cooldown: flag brand-new versions",
-			Description: "Demo policy, seeded in monitor mode. Matches any package VERSION published in the last 7 days. Account-takeover and zero-hour attacks (Axios, Chalk/Debug, Mastra) poison a fresh version of a real, popular package — and malicious versions are usually unpublished within hours, so a short cooldown catches them before they reach you. The malware/typosquat rules above can't: a hijacked real package is clean-named and not yet in any feed. Tune the window, then switch Mode to 'quarantine'. Edit or delete anytime.",
+			Description: "Demo policy, seeded in monitor mode. Matches any package VERSION published in the last 7 days. Account-takeover and zero-hour attacks (Axios, Chalk/Debug, Mastra) poison a fresh version of a real, popular package — and malicious versions are usually unpublished within hours, so a short cooldown catches them before they reach you. The malware/typosquat rules above can't: a hijacked real package is clean-named and not yet in any feed. Tune the window, then switch Mode to 'block' ('quarantine' records the match but still serves the download). Edit or delete anytime.",
 			Mode:        ModeMonitor,
 			Status:      StatusEnabled,
 			Conditions: Conditions{
@@ -122,7 +123,7 @@ func DemoPolicies() []Policy {
 		},
 		{
 			Name:        demoPolicyPrefix + "Flag publisher change (account-takeover)",
-			Description: "Demo policy, seeded in monitor mode. Matches a version whose publisher set changed vs the prior version — the signature of a maintainer-account takeover, the #1 supply-chain vector (Chalk/Debug, Axios). Pairs with the cooldown rule: a hijacked publish is both a brand-new version AND a publisher change. Also fires on legitimate ownership handoffs, so review before switching Mode to 'quarantine'. Edit or delete anytime.",
+			Description: "Demo policy, seeded in monitor mode. Matches a version whose publisher set changed vs the prior version — the signature of a maintainer-account takeover, the #1 supply-chain vector (Chalk/Debug, Axios). Pairs with the cooldown rule: a hijacked publish is both a brand-new version AND a publisher change. Also fires on legitimate ownership handoffs, so review before switching Mode to 'block'. Edit or delete anytime.",
 			Mode:        ModeMonitor,
 			Status:      StatusEnabled,
 			Conditions: Conditions{

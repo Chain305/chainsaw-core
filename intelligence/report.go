@@ -353,6 +353,12 @@ type ProvenanceSection struct {
 const (
 	InstallScriptDetectorAST   = "ast"
 	InstallScriptDetectorRegex = "regex"
+	// InstallScriptDetectorGypSuffix marks an npm stamp whose facts include a
+	// root binding.gyp (an implicit node-gyp install hook, 2026-10-15). Rows
+	// stamped before it never looked at binding.gyp, so a gyp-only package
+	// would otherwise raise install_script_appeared on its first rescan
+	// though its bytes never changed; the stamp mismatch skips that compare.
+	InstallScriptDetectorGypSuffix = "+gyp"
 )
 
 // ArtifactScanSection captures everything computed by scanning the bytes
@@ -421,6 +427,9 @@ type ArtifactScanSection struct {
 	// is already redacted to the token's prefix and length.
 	DependencyCredential string `json:"dependencyCredential,omitempty"`
 	AppCredentialSend    string `json:"appCredentialSend,omitempty"`
+	// DefenderTamper is a shipping file that disables Windows Defender or
+	// adds an exclusion to it (Set-/Add-MpPreference), e.g. @apexacc/audit.
+	DefenderTamper string `json:"defenderTamper,omitempty"`
 
 	// BuildRsExecutes is set by the installscripts provider when a cargo
 	// crate ships a build.rs that performs shell or network execution at

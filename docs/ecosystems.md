@@ -50,7 +50,7 @@ cannot produce a maintainer signal.
 | Swift | 20 | 9 | 24 |
 | Pub (Dart) | 18 | 12 | 23 |
 | Docker / OCI | 15 | 2 | 36 |
-| APT | 12 | 1 | 40 |
+| APT | 12 | 2 | 39 |
 | Yum | 13 | 2 | 38 |
 | DNF | 13 | 2 | 38 |
 

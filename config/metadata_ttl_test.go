@@ -7,9 +7,10 @@ import (
 
 // TestMetadataTTLPerFormatDefaults pins the builtin positive TTLs. npm
 // and pip are the two formats whose documents were measured drifting in
-// production (an npm packument 21 days stale, others 45 and 55); every
-// other format keeps the previous never-expire behaviour because
-// core/proxy has no mutable-document classifier for it.
+// production (an npm packument 21 days stale, others 45 and 55); the
+// composer/docker/maven/gradle/apt/yum/dnf index documents followed on
+// 2026-10-14. Formats without a mutable-document classifier in core/proxy
+// (cargo, nuget, ...) keep the previous never-expire behaviour.
 func TestMetadataTTLPerFormatDefaults(t *testing.T) {
 	for _, tc := range []struct {
 		format string
@@ -20,9 +21,15 @@ func TestMetadataTTLPerFormatDefaults(t *testing.T) {
 		{"bun", 600 * time.Second},
 		{"pip", 600 * time.Second},
 		{"NPM", 600 * time.Second}, // case-insensitive
-		{"maven", 0},
-		{"docker", 0},
+		{"composer", 600 * time.Second},
+		{"docker", 600 * time.Second},
+		{"maven", 600 * time.Second},
+		{"gradle", 600 * time.Second},
+		{"apt", 600 * time.Second},
+		{"yum", 600 * time.Second},
+		{"dnf", 600 * time.Second},
 		{"cargo", 0},
+		{"nuget", 0},
 		{"", 0},
 	} {
 		got := RepositoryConfig{Format: tc.format}.MetadataTTL()
