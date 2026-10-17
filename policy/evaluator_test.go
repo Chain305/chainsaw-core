@@ -337,15 +337,18 @@ func TestEvaluatePoliciesMonitorMatch(t *testing.T) {
 	}
 }
 
-func TestEvaluatePoliciesFirstMatchWinsAcrossModes(t *testing.T) {
+func TestEvaluatePoliciesMonitorYieldsToLaterBlock(t *testing.T) {
 	t.Parallel()
 
 	evaluator := NewEvaluator(nil)
 
-	// Monitor at precedence 10 should win over Block at precedence 100
-	// because policies are evaluated first-match-wins by ascending
-	// precedence. This encodes the contract that Monitor does NOT
-	// automatically yield to Block — precedence is the only tiebreaker.
+	// Monitor at precedence 10 and Block at precedence 100 both match: the
+	// Block wins. This test used to pin the opposite contract (first match
+	// terminal, so the monitor won), which let the seeded cooldown monitor
+	// switch off the hidden-unicode and typosquat blocks for every version
+	// under 10 days old (docs/attack-coverage-2026 F1). A monitor observes;
+	// precedence still orders enforcing rules, and an allow still never
+	// overrides an earlier monitor.
 	policies := []Policy{
 		{
 			ID:         "monitor-all-vulnerable",
@@ -370,16 +373,16 @@ func TestEvaluatePoliciesFirstMatchWinsAcrossModes(t *testing.T) {
 	}
 
 	result := evaluator.EvaluateWithPolicies(ctx, policies, 0)
-	if result.Action != ModeMonitor {
-		t.Fatalf("expected monitor to win (lower precedence), got %s", result.Action)
+	if result.Action != ModeBlock {
+		t.Fatalf("expected the later block to apply over the monitor, got %s", result.Action)
 	}
-	if result.MatchedPolicy == nil || result.MatchedPolicy.ID != "monitor-all-vulnerable" {
-		t.Fatalf("expected monitor-all-vulnerable to win, got %#v", result.MatchedPolicy)
+	if result.MatchedPolicy == nil || result.MatchedPolicy.ID != "block-all-vulnerable" {
+		t.Fatalf("expected block-all-vulnerable to apply, got %#v", result.MatchedPolicy)
 	}
 
 	// Reorder: Block first (precedence 10), Monitor last (precedence 100).
 	// The evaluator requires a pre-sorted precedence-ascending slice, mirroring
-	// Store.List ordering. Now Block should win under first-match-wins.
+	// Store.List ordering. Block first is terminal as before.
 	swapped := []Policy{
 		{
 			ID:         "block-all-vulnerable",

@@ -973,6 +973,7 @@ func IsExpiredException(p Policy, ageDays int, now time.Time) bool {
 
 func (e *Evaluator) evaluatePolicies(ctx EvaluationContext, policies []Policy, exceptionAgeDays int) EvaluationResult {
 	now := time.Now()
+	var firstMonitor *EvaluationResult
 	for _, policy := range policies {
 		if policy.Status != StatusEnabled {
 			continue
@@ -1028,14 +1029,36 @@ func (e *Evaluator) evaluatePolicies(ctx EvaluationContext, policies []Policy, e
 
 		if matches := e.matchesPolicy(ctx, policy); matches {
 			action, reason := e.resolveAction(ctx, policy, now)
-			return EvaluationResult{
+			res := EvaluationResult{
 				Action:        action,
 				MatchedPolicy: &policy,
 				Reason:        reason,
 			}
+			// A monitor match observes; it never switches off an enforcing
+			// rule ranked after it. First-match-terminal let the seeded
+			// "Block brand-new versions" monitor (140, every version under
+			// 10 days old) return before the hidden-unicode and typosquat
+			// blocks, in 41 of 46 prod orgs (docs/attack-coverage-2026 F1).
+			// Keep the first monitor and look on: a later block, quarantine
+			// or block_after_grace wins; a later allow (or nothing) leaves
+			// the monitor as the result, exactly as before. An allow ranked
+			// first — an exception — is still terminal.
+			if action == ModeMonitor {
+				if firstMonitor == nil {
+					firstMonitor = &res
+				}
+				continue
+			}
+			if action == ModeAllow && firstMonitor != nil {
+				return *firstMonitor
+			}
+			return res
 		}
 	}
 
+	if firstMonitor != nil {
+		return *firstMonitor
+	}
 	return EvaluationResult{Action: ModeAllow, Reason: "no matching policy"}
 }
 
