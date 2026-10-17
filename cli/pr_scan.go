@@ -139,8 +139,8 @@ signals (action.*), and a known-compromised action blocks. Known-compromised
 actions come from the same sources as scan-actions: the built-in seed plus the
 local GitHub Actions OSV snapshot when present. The scan-actions workflow lint
 also runs; a dangerous shape the PR introduces (pwn request, unguarded comment
-trigger, script injection, a decoded payload piped to a shell) is a warning row
-named after the workflow file.
+trigger, script injection) is a warning row named after the workflow file, and
+a run: step that decodes a payload into a shell or interpreter blocks.
 
 A changed .vscode/tasks.json or .vscode/settings.json that newly runs a task
 when the folder is opened (runOn: folderOpen, task.allowAutomaticTasks: on)
@@ -1849,10 +1849,22 @@ func diffWorkflowLint(rel string, baseContent, headContent []byte) ([]prScanSign
 	var out []prScanSignal
 	for _, f := range head {
 		if !had[f.Signal+"\x00"+f.Message] {
-			out = append(out, prScanSignal{ID: f.Signal, Severity: "warn", Reason: fmt.Sprintf("line %d: %s", f.Ref.SourceLine, f.Message)})
+			out = append(out, prScanSignal{ID: f.Signal, Severity: workflowLintSeverity(f.Signal), Reason: fmt.Sprintf("line %d: %s", f.Ref.SourceLine, f.Message)})
 		}
 	}
 	return out, nil
+}
+
+// workflowLintSeverity is the pr-scan severity of a workflow-lint finding the
+// PR introduces. A run: step that decodes a payload into an interpreter
+// (action.decode_exec, the Megalodon shape) blocks: it is execution of code
+// nobody reviewed, and it measured 0 hits in 842 benign workflows. The other
+// lint findings are review prompts and warn.
+func workflowLintSeverity(signal string) string {
+	if signal == githubactions.SignalActionDecodeExec {
+		return "block"
+	}
+	return "warn"
 }
 
 // diffVSCodeConfig returns one added row for a .vscode/tasks.json or

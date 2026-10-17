@@ -10,7 +10,7 @@ package cli
 // Covered since v0.22.106 (F16): LintWorkflow's action.decode_exec flags a
 // run: step that decodes a payload and executes it, so scan-actions reports
 // it high (default exit 1) and pr-scan's diffWorkflow gives the workflow a
-// warn row. The commits were direct pushes, so a PR gate would not have run;
+// warn row (a block row since v0.22.108). The commits were direct pushes, so a PR gate would not have run;
 // scan-actions as a required check on the default branch, or an
 // evaluate-actions sweep, is what sees them. Negative twin: a step that
 // decodes a secret to a file. The payload IP below is TEST-NET
@@ -55,7 +55,7 @@ jobs:
 			t.Fatalf("%s: want high action.decode_exec and exit 1, got exit %d %+v", name, code, r.Findings)
 		}
 		if !atk26PRScanLints(t, name, body, "action.decode_exec") {
-			t.Fatalf("%s: pr-scan: want a warn row with action.decode_exec", name)
+			t.Fatalf("%s: pr-scan: want a block row with action.decode_exec", name)
 		}
 	}
 

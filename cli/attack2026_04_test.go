@@ -120,10 +120,15 @@ func atk26PRScanLints(t *testing.T, name, body, signal string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Since v0.22.108 a decode-and-execute step blocks; other lint rows warn.
+	want := "warn"
+	if signal == "action.decode_exec" {
+		want = "block"
+	}
 	for _, e := range append(added, upgraded...) {
 		if hasPRSignal(e.Signals, signal) {
-			if e.Name != rel || e.Verdict != "warn" {
-				t.Fatalf("pr-scan lint row: want warn row named %s, got %+v", rel, e)
+			if e.Name != rel || e.Verdict != want {
+				t.Fatalf("pr-scan lint row: want %s row named %s, got %+v", want, rel, e)
 			}
 			return true
 		}
