@@ -12,7 +12,7 @@ package cli
 // cannot stop a fork PR against a workflow already merged and not scanned.
 //
 // pr-scan: since v0.22.106 (F12) diffWorkflow also runs the lint, so a PR
-// that adds this workflow gets a warn row carrying action.pwn_request; the
+// that adds this workflow gets a block row (a warn row before v0.22.110) carrying action.pwn_request; the
 // pull_request twin gets none.
 
 import (
@@ -102,9 +102,9 @@ func TestAttack2026_04_TrivyPwnRequest(t *testing.T) {
 	}
 
 	// pr-scan, since v0.22.106 (F12): the PR that introduces this workflow
-	// gets a warn row for the workflow file carrying action.pwn_request.
+	// gets a block row for the workflow file carrying action.pwn_request.
 	if !atk26PRScanLints(t, "apidiff.yaml", atk26TrivyAPIDiff("pull_request_target"), "action.pwn_request") {
-		t.Fatal("pr-scan: want a warn row with action.pwn_request for the pull_request_target workflow")
+		t.Fatal("pr-scan: want a block row with action.pwn_request for the pull_request_target workflow")
 	}
 	if atk26PRScanLints(t, "apidiff.yaml", atk26TrivyAPIDiff("pull_request"), "action.pwn_request") {
 		t.Fatal("pr-scan: the pull_request twin must not carry action.pwn_request")
@@ -112,7 +112,7 @@ func TestAttack2026_04_TrivyPwnRequest(t *testing.T) {
 }
 
 // atk26PRScanLints reports whether pr-scan's diffWorkflow, for a PR adding
-// the workflow, returns a warn row for the file carrying signal.
+// the workflow, returns a block row for the file carrying signal.
 func atk26PRScanLints(t *testing.T, name, body, signal string) bool {
 	t.Helper()
 	rel := ".github/workflows/" + name
@@ -120,11 +120,8 @@ func atk26PRScanLints(t *testing.T, name, body, signal string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Since v0.22.108 a decode-and-execute step blocks; other lint rows warn.
-	want := "warn"
-	if signal == "action.decode_exec" {
-		want = "block"
-	}
+	// Since v0.22.110 every introduced workflow-lint finding blocks.
+	want := "block"
 	for _, e := range append(added, upgraded...) {
 		if hasPRSignal(e.Signals, signal) {
 			if e.Name != rel || e.Verdict != want {

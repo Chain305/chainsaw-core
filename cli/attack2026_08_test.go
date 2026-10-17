@@ -34,7 +34,7 @@ jobs:
 		t.Fatalf("fork repository+head ref checkout under pull_request_target: want high pwn_request, exit 1; got exit %d %+v", code, r.Findings)
 	}
 	if !atk26PRScanLints(t, "ci.yml", pwn, "action.pwn_request") {
-		t.Fatal("pr-scan: want a warn row with action.pwn_request")
+		t.Fatal("pr-scan: want a block row with action.pwn_request")
 	}
 
 	const safe = `name: CI
