@@ -1413,6 +1413,7 @@ func MergeScan(dst *ArtifactScanSection, src ArtifactScanSection) {
 		dst.ImportTimeExecution = true
 		dst.ImportTimeKind = src.ImportTimeKind
 		dst.ImportTimeDetail = src.ImportTimeDetail
+		dst.ImportTimeDispositive = src.ImportTimeDispositive
 	}
 	if src.MaliciousIOC {
 		dst.MaliciousIOC = true

@@ -45,16 +45,29 @@ func seedPolicies(execer policyExecutor, orgID string, policies []Policy) (int, 
 		return 0, nil
 	}
 	orgID = tenancy.NormalizeOrgID(orgID)
-	rows, err := execer.Query(`SELECT name FROM policies WHERE org_id=?`, orgID)
+	rows, err := execer.Query(`SELECT name, precedence FROM policies WHERE org_id=?`, orgID)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 	existingNames := make(map[string]struct{})
+	// takenPrecedence: a rule added to the seed lands on orgs seeded long
+	// before it, where an operator's own rule may already hold its slot.
+	// idx_policies_org_precedence_unique would reject the INSERT and, at
+	// boot, stop the proxy (2026-09-18), so the seed rule moves to a free
+	// slot instead. Read up front: inside a Postgres transaction a failed
+	// INSERT cannot be retried.
+	takenPrecedence := make(map[int]struct{})
+	maxPrecedence := 0
 	for rows.Next() {
 		var name sql.NullString
-		if err := rows.Scan(&name); err != nil {
+		var prec sql.NullInt64
+		if err := rows.Scan(&name, &prec); err != nil {
 			return 0, err
+		}
+		if prec.Valid {
+			takenPrecedence[int(prec.Int64)] = struct{}{}
+			maxPrecedence = max(maxPrecedence, int(prec.Int64))
 		}
 		if !name.Valid {
 			continue
@@ -91,6 +104,11 @@ func seedPolicies(execer policyExecutor, orgID string, policies []Policy) (int, 
 		if violations := policyRangeViolations(pol); len(violations) > 0 {
 			return created, violations[0]
 		}
+		if _, taken := takenPrecedence[pol.Precedence]; taken {
+			pol.Precedence = maxPrecedence + 10
+		}
+		takenPrecedence[pol.Precedence] = struct{}{}
+		maxPrecedence = max(maxPrecedence, pol.Precedence)
 		id, err := newID()
 		if err != nil {
 			return created, err

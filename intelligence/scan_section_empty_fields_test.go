@@ -27,6 +27,7 @@ var scanEmptyDetail = map[string]string{
 	"ImportTimeDetail":        "ImportTimeExecution",
 	"MaliciousIOCKind":        "MaliciousIOC",
 	"MaliciousIOCDetail":      "MaliciousIOC",
+	"ImportTimeDispositive":   "ImportTimeExecution", // set only together with it (provider_pysource)
 	"MaliciousIOCCoupled":     "MaliciousIOC",
 	"MaliciousIOCAtEntry":     "MaliciousIOC",
 	"BuildRsPrimitives":       "BuildRsExecutes",

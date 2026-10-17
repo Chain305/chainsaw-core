@@ -61,30 +61,35 @@ func (p *pysourceProvider) Run(ctx context.Context, req Request, prior *Report) 
 	if len(src) == 0 {
 		return PartialReport{}, nil
 	}
-	var detected bool
+	var detected, dispositive bool
 	var kind, detail string
 	switch strings.ToLower(strings.TrimSpace(req.Key.Ecosystem)) {
 	case "npm":
 		r := jssource.Scan(src)
 		detected, kind, detail = r.Detected, r.Kind, r.Detail
+		dispositive = detected
 	case "composer":
 		r := scriptsource.ScanPHP(src)
 		detected, kind, detail = r.Detected && !r.Weak, r.Kind, r.Detail
+		dispositive = detected
 	case "rubygems":
 		r := scriptsource.ScanRuby(src)
 		detected, kind, detail = r.Detected && !r.Weak, r.Kind, r.Detail
+		dispositive = detected
 	default:
 		r := pysource.Scan(src)
 		detected, kind, detail = r.Detected, r.Kind, r.Detail
+		dispositive = r.Dispositive
 	}
 	if !detected {
 		return PartialReport{}, nil
 	}
 	return PartialReport{Scan: &ArtifactScanSection{
-		Performed:           true,
-		ImportTimeExecution: true,
-		ImportTimeKind:      kind,
-		ImportTimeDetail:    detail,
+		Performed:             true,
+		ImportTimeExecution:   true,
+		ImportTimeKind:        kind,
+		ImportTimeDetail:      detail,
+		ImportTimeDispositive: dispositive,
 	}}, nil
 }
 

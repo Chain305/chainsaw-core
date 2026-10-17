@@ -172,6 +172,7 @@ func (r *Report) ToLegacyCheckResult() *supplychain.CheckResult {
 		HasInstallScript:           r.Scan.HasInstallScript,
 		InstallScriptFetchesRemote: r.Scan.InstallScriptFetches,
 		ImportTimeExecution:        r.Scan.ImportTimeExecution,
+		ImportTimeDispositive:      r.Scan.ImportTimeRefusable(),
 		MaliciousIOC:               r.Scan.MaliciousIOC,
 		BuildRsExecutes:            r.Scan.BuildRsExecutes,
 		InstallScriptKind:          r.Scan.InstallScriptKind,

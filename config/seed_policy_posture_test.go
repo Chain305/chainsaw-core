@@ -37,6 +37,9 @@ var seededPolicyPosture = map[string]policy.Mode{
 	"Block packages released within 1 day":         policy.ModeBlock,
 	"Block install scripts that fetch remote URLs": policy.ModeBlock,
 	"Block bidi-override hidden Unicode payloads":  policy.ModeBlock,
+	// Dispositive import-time shapes only (ArtifactScanSection.
+	// ImportTimeRefusable): 0/860 benign; the advisory kinds hit 25/260 PyPI.
+	"Block import-time execution of fetched or decoded code": policy.ModeBlock,
 
 	// MONITOR — real signals that also fire on ordinary legitimate
 	// activity. Flagged for review and promoted deliberately per org via

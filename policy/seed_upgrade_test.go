@@ -143,11 +143,14 @@ func TestSeedIsIdempotentAcrossAReleaseThatChangesMode(t *testing.T) {
 	}
 }
 
-// TestSeedRefusesToRenameAnExistingRule is the red half: it reproduces the
-// 2026-09-18 crash. A renamed rule at an occupied precedence must be treated as
-// a defect, and this test documents it as one rather than leaving the next
-// author to discover it in a CrashLoopBackOff.
-func TestSeedRefusesToRenameAnExistingRule(t *testing.T) {
+// TestSeedRenamedRuleDuplicatesInsteadOfCrashing reproduces the 2026-09-18
+// case. A renamed rule at an occupied precedence used to violate
+// idx_policies_org_precedence_unique and stop the proxy at boot. Since
+// v0.22.107 the seeder moves a new rule off a taken precedence, so the boot
+// survives, but a rename is still not a rename: the old row stays and the
+// renamed one lands beside it as a second rule. That is why configs/seed.yaml
+// keeps its DO-NOT-RENAME banner.
+func TestSeedRenamedRuleDuplicatesInsteadOfCrashing(t *testing.T) {
 	db, orgID := seedUpgradeTestOrg(t)
 
 	if _, err := seedInto(t, db, orgID, releaseNMinus1()); err != nil {
@@ -159,22 +162,26 @@ func TestSeedRefusesToRenameAnExistingRule(t *testing.T) {
 		{Name: "Flag brand-new versions (account-takeover / zero-hour)", Precedence: 140,
 			Mode: ModeMonitor, Status: StatusEnabled, Conditions: Conditions{CooldownDays: &ten}},
 	}
-	_, err := seedInto(t, db, orgID, renamed)
-	if err == nil {
-		t.Fatal("renaming a seeded rule did NOT collide.\n" +
-			"Either the seeder gained precedence reallocation — in which case the " +
-			"DO-NOT-RENAME banner in configs/seed.yaml can be relaxed and this test " +
-			"rewritten — or the constraint is missing and this suite is not testing " +
-			"what it claims. Check seed.go and ensurePolicyIntegrity before assuming " +
-			"the former.")
+	n, err := seedInto(t, db, orgID, renamed)
+	if err != nil || n != 1 {
+		t.Fatalf("renamed seed rule: created=%d err=%v; want 1 row at a free precedence, no error", n, err)
 	}
-	if !strings.Contains(err.Error(), "idx_policies_org_precedence_unique") &&
-		!strings.Contains(err.Error(), "23505") {
-		t.Fatalf("rename failed for an unexpected reason: %v\n"+
-			"Expected the (org_id, precedence) unique violation.", err)
+	pols, err := (&Store{sql: db, orgID: orgID}).List()
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("confirmed: renaming a seeded rule violates the precedence constraint (%v) — "+
-		"this is why configs/seed.yaml carries a DO-NOT-RENAME banner", err)
+	var oldPrec, newPrec int
+	for _, p := range pols {
+		switch p.Name {
+		case "Block brand-new versions (account-takeover / zero-hour)":
+			oldPrec = p.Precedence
+		case renamed[0].Name:
+			newPrec = p.Precedence
+		}
+	}
+	if oldPrec != 140 || newPrec == 0 || newPrec == 140 {
+		t.Fatalf("old rule at %d, renamed rule at %d; want the old row kept at 140 and the renamed one beside it", oldPrec, newPrec)
+	}
 }
 
 // A brand-new org on a deployment whose config seeds cooldown and

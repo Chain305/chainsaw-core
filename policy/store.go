@@ -247,7 +247,7 @@ type Conditions struct {
 	ReservedNamespaces         []string `json:"reservedNamespaces,omitempty" yaml:"reservedNamespaces,omitempty"`                 // namespace patterns for dep confusion
 	HasInstallScript           *bool    `json:"hasInstallScript,omitempty" yaml:"hasInstallScript,omitempty"`                     // nil=any, true=any lifecycle script declared in the manifest
 	InstallScriptFetchesRemote *bool    `json:"installScriptFetchesRemote,omitempty" yaml:"installScriptFetchesRemote,omitempty"` // nil=any, true=install script body references curl/wget/fetch/subprocess/etc.
-	ImportTimeExecution        *bool    `json:"importTimeExecution,omitempty" yaml:"importTimeExecution,omitempty"`               // nil=any, true=PyPI, npm, Composer or RubyGems package runs malicious behavior at import/install (top-level obfuscated exec / exfil / shell)
+	ImportTimeExecution        *bool    `json:"importTimeExecution,omitempty" yaml:"importTimeExecution,omitempty"`               // nil=any, true=PyPI, npm, Composer or RubyGems package executes a downloaded or decoded payload at import/install/load (high-confidence shapes only; advisory import-time findings are scored, not matched)
 	MaliciousIOC               *bool    `json:"maliciousIOC,omitempty" yaml:"maliciousIOC,omitempty"`                             // nil=any, true=source embeds an exfil sink host or a coupled stealer string
 	BuildRsExecutes            *bool    `json:"buildRsExecutes,omitempty" yaml:"buildRsExecutes,omitempty"`                       // nil=any, true=cargo crate's build.rs performs shell/network execution at build time (cargo-only)
 

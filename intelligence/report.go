@@ -416,6 +416,14 @@ type ArtifactScanSection struct {
 	ImportTimeExecution bool   `json:"importTimeExecution,omitempty"`
 	ImportTimeKind      string `json:"importTimeExecutionKind,omitempty"`   // obfuscated_exec|import_time_exfil|top_level_shell|download_exec|…
 	ImportTimeDetail    string `json:"importTimeExecutionDetail,omitempty"` // file the signal fired on
+	// ImportTimeDispositive marks a result from the shapes that measured zero
+	// benign hits: a fetched or decoded payload actually executed at load
+	// (pysource Result.Dispositive, every non-weak jssource / scriptsource
+	// hit). The advisory pysource kinds fire on ~10% of top PyPI packages
+	// (pip, setuptools, numpy, pillow: tests, vendored ELF parsers, telemetry
+	// clients), so only this subset drives the importTimeExecution policy
+	// condition; the rest is scored. See ImportTimeRefusable.
+	ImportTimeDispositive bool `json:"importTimeDispositive,omitempty"`
 
 	// MaliciousIOC is set by the iocscan provider when the source embeds a
 	// high-confidence indicator of compromise: an exfil sink host (Discord/
@@ -1999,4 +2007,15 @@ type ProviderTiming struct {
 	Provider string        `json:"provider"`
 	Duration time.Duration `json:"durationNanos"`
 	Error    string        `json:"error,omitempty"`
+}
+
+// ImportTimeRefusable reports an import-time finding a policy may refuse on:
+// a Dispositive result, or a top_level_shell / download_exec kind, which is
+// Dispositive by construction (and is all a row stored before the flag
+// existed carries).
+func (s ArtifactScanSection) ImportTimeRefusable() bool {
+	if !s.ImportTimeExecution {
+		return false
+	}
+	return s.ImportTimeDispositive || s.ImportTimeKind == "top_level_shell" || s.ImportTimeKind == "download_exec"
 }

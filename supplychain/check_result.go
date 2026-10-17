@@ -34,6 +34,10 @@ type CheckResult struct {
 	// import/install/load time (pysource provider: PyPI, npm, Composer,
 	// RubyGems).
 	ImportTimeExecution bool
+	// ImportTimeDispositive: the high-confidence subset of
+	// ImportTimeExecution that the importTimeExecution policy condition
+	// reads (intelligence.ArtifactScanSection.ImportTimeRefusable).
+	ImportTimeDispositive bool
 	// MaliciousIOC: source embeds an exfil sink host or a coupled stealer
 	// string (iocscan provider). Cross-ecosystem.
 	MaliciousIOC bool
