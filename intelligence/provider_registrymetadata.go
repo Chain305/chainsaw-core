@@ -1047,10 +1047,18 @@ func npmPublisherBaseline(versions map[string]npmVersionMeta, stamps map[string]
 			prev, prevAt = v, t
 		}
 	}
-	b := &PublisherBaseline{Version: prev}
+	b := &PublisherBaseline{Version: prev, PreviousAt: prevAt, At: at}
 	if prev == "" {
 		return b
 	}
+	for v, m := range versions {
+		if t, ok := parseTime(stamps[v]); ok && t.Before(at) && m.NpmUser != nil {
+			if s := m.NpmUser.String(); s != "" {
+				b.PriorPublishers = append(b.PriorPublishers, s)
+			}
+		}
+	}
+	slices.Sort(b.PriorPublishers)
 	meta := versions[prev]
 	b.SourceRepoURL = npmRepoURL(meta.Repository)
 	b.HomepageURL = string(meta.Homepage)

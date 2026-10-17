@@ -3,6 +3,7 @@ package intelligence
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestNPMPublisherBaseline(t *testing.T) {
@@ -34,6 +35,11 @@ func TestNPMPublisherBaseline(t *testing.T) {
 		Maintainers:   []string{"jdalton <john.david.dalton@gmail.com>"},
 		SourceRepoURL: "https://github.com/lodash/lodash",
 		HomepageURL:   "https://lodash.com/",
+		// Publish history for the F4 takeover rules: every earlier
+		// publisher (sorted), and the two publish times.
+		PriorPublishers: []string{"bnjmnt4n <benjamin@dev.ofcr.se>", "jdalton <john.david.dalton@gmail.com>"},
+		PreviousAt:      time.Date(2026, 3, 31, 18, 18, 42, 717000000, time.UTC),
+		At:              time.Date(2026, 4, 1, 21, 1, 20, 458000000, time.UTC),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("baseline for 4.18.1 = %+v, want %+v", got, want)

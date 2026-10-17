@@ -288,6 +288,15 @@ type PublisherBaseline struct {
 	// publisher's version already named.
 	SourceRepoURL string
 	HomepageURL   string
+	// Publish history from the same packument (npm only; empty elsewhere,
+	// which leaves the rules that read it switched off): every identity that
+	// published a version before the scanned one, and the previous and
+	// scanned versions' publish times. They let the diff tell a takeover
+	// that reuses a known name (axios 1.14.1) or a dormant co-maintainer
+	// (node-ipc 12.0.1) from ordinary team rotation.
+	PriorPublishers []string
+	PreviousAt      time.Time
+	At              time.Time
 }
 
 // ScanLocation is one place in a package's files where a scanner matched.
