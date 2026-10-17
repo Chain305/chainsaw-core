@@ -8,7 +8,9 @@ package cli
 // What Chainsaw does: scan-actions reports action.unpinned_ref (medium) on
 // `@v5`. The default gate is --fail-on high, so this exits 0 by default;
 // `--fail-on medium` exits 1 and so enforces SHA pinning, which removes the
-// tag-repoint class entirely. Nothing knows the commit is malicious: the
+// tag-repoint class entirely. Since v0.22.111 pr-scan blocks a PR that adds a
+// third-party action by tag, so the repoint never reaches a workflow merged
+// through a gated PR. Nothing knows the commit is malicious: the
 // static Actions feed has no xygeni entry and no GHSA was published.
 
 import (
@@ -58,9 +60,23 @@ jobs:
 		t.Fatalf("SHA-pinned twin: want no unpinned_ref and exit 0 at --fail-on medium, got exit %d %+v", code, r.Findings)
 	}
 
-	// pr-scan: a PR adding the @v5 ref gets a warn row with unpinned_ref.
+	// pr-scan: a PR adding the third-party @v5 ref gets a block row with
+	// unpinned_ref (a warn row before v0.22.111): the tag is what attack 5
+	// re-pointed.
 	added, _, err := diffWorkflow(".github/workflows/xygeni.yml", nil, []byte(fmt.Sprintf(wf, "v5")))
+	if err != nil || len(added) != 1 || !hasPRSignal(added[0].Signals, "action.unpinned_ref") || added[0].Verdict != "block" {
+		t.Fatalf("pr-scan row for @v5: want block with action.unpinned_ref, got %+v %v", added, err)
+	}
+	// GitHub's own actions stay warn when tag-pinned, and so does the
+	// documented Chainsaw Guard Action ref.
+	guard := "name: guard\non: pull_request\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: Chain305/chainsaw-core/enforcement/github-actions@action-v1\n"
+	gAdded, _, gErr := diffWorkflow(".github/workflows/guard.yml", nil, []byte(guard))
+	if gErr != nil || len(gAdded) != 1 || gAdded[0].Verdict == "block" {
+		t.Fatalf("pr-scan row for the Chainsaw Guard Action @action-v1: want not blocked, got %+v %v", gAdded, gErr)
+	}
+	first := "name: ci\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
+	added, _, err = diffWorkflow(".github/workflows/ci.yml", nil, []byte(first))
 	if err != nil || len(added) != 1 || !hasPRSignal(added[0].Signals, "action.unpinned_ref") || added[0].Verdict != "warn" {
-		t.Fatalf("pr-scan row for @v5: want warn with action.unpinned_ref, got %+v %v", added, err)
+		t.Fatalf("pr-scan row for actions/checkout@v4: want warn with action.unpinned_ref, got %+v %v", added, err)
 	}
 }

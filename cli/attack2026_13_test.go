@@ -15,8 +15,9 @@ package cli
 //     (github-actions-osv/ beside the guard cache) scan-actions reports
 //     action.malicious (high) and exits 1 at the default gate; the clean
 //     0.35.0 / 0.2.6 releases do not match.
-//   - Gap: without a snapshot the CLI has only the three-entry static seed,
-//     which has no Trivy entry. Since v0.22.106 (F12) pr-scan reads the same
+//   - Without a snapshot the CLI has only the three-entry static seed,
+//     which has no Trivy entry; since v0.22.111 pr-scan still blocks a PR
+//     adding either action by tag (third-party unpinned_ref). Since v0.22.106 (F12) pr-scan reads the same
 //     snapshot as scan-actions, so with it present pr-scan blocks the tags.
 
 import (
@@ -65,14 +66,21 @@ func TestAttack2026_13_TrivyActionTagHijack(t *testing.T) {
 		t.Fatalf("--fail-on medium must refuse the tag refs before any advisory, exit %d", code)
 	}
 
-	// pr-scan: static seed only, so the tag gets warn (unpinned), never block.
+	// pr-scan, feed-blind: since v0.22.111 a third-party action added by tag
+	// blocks on action.unpinned_ref alone, before any advisory exists.
 	added, _, err := diffWorkflow(".github/workflows/scan.yml", nil, []byte(atk13WF("0.34.2", "v0.2.5")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(added) == 0 {
+		t.Fatal("pr-scan: no rows for the trivy workflow")
+	}
 	for _, e := range added {
-		if hasPRSignal(e.Signals, "action.malicious") || e.Verdict == "block" {
-			t.Fatalf("pr-scan blocked %s without a feed entry: update attack-13 gap note: %+v", e.Name, e)
+		if hasPRSignal(e.Signals, "action.malicious") {
+			t.Fatalf("pr-scan: %s malicious without a feed entry: update attack-13 classification: %+v", e.Name, e)
+		}
+		if e.Verdict != "block" || !hasPRSignal(e.Signals, "action.unpinned_ref") {
+			t.Fatalf("pr-scan: want %s blocked feed-blind on unpinned_ref, got %+v", e.Name, e)
 		}
 	}
 
@@ -117,8 +125,21 @@ func TestAttack2026_13_TrivyActionTagHijack(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range added {
+		// Still referenced by tag, so still blocked on unpinned_ref, but
+		// never as malicious.
+		if hasPRSignal(e.Signals, "action.malicious") {
+			t.Fatalf("pr-scan: clean release flagged malicious: %+v", e)
+		}
+	}
+	// The same clean releases pinned by commit SHA are not blocked.
+	pinned := atk13WF("0123456789abcdef0123456789abcdef01234567", "89abcdef0123456789abcdef0123456789abcdef")
+	added, _, err = diffWorkflow(".github/workflows/scan.yml", nil, []byte(pinned))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range added {
 		if e.Verdict == "block" {
-			t.Fatalf("pr-scan blocked a clean release: %+v", e)
+			t.Fatalf("pr-scan blocked a SHA-pinned clean release: %+v", e)
 		}
 	}
 
