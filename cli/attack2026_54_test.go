@@ -10,7 +10,7 @@ package cli
 // Covered since v0.22.106 (F16): scan-repo flags a .vscode/tasks.json task
 // with runOn: folderOpen (vscode-folder-open-task) and a .vscode/settings.json
 // turning on task.allowAutomaticTasks (vscode-automatic-tasks-on), and pr-scan
-// gives a PR that introduces either a warn row. A force-push is not a PR, so
+// gives a PR that introduces either a warn row (a block row since v0.22.109). A force-push is not a PR, so
 // scan-repo as a required check is the gate that sees the forged commit.
 // Negative twin: an ordinary build task with no runOn.
 
@@ -38,8 +38,8 @@ func TestAttack2026_54_BindsNETVSCodeTask(t *testing.T) {
 			t.Fatalf("scan-repo %s: want one %s finding, got %+v", rel, rule, got)
 		}
 		e, ok := diffVSCodeConfig(rel, nil, []byte(body))
-		if !ok || e.Verdict != "warn" || !hasPRSignal(e.Signals, rule) {
-			t.Fatalf("pr-scan %s: want a warn row with %s, got %+v", rel, rule, e)
+		if !ok || e.Verdict != "block" || !hasPRSignal(e.Signals, rule) {
+			t.Fatalf("pr-scan %s: want a block row with %s, got %+v", rel, rule, e)
 		}
 		// Already in base: not this PR's change, no row.
 		if _, ok := diffVSCodeConfig(rel, []byte(body), []byte(body)); ok {

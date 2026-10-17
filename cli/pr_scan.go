@@ -144,7 +144,8 @@ a run: step that decodes a payload into a shell or interpreter blocks.
 
 A changed .vscode/tasks.json or .vscode/settings.json that newly runs a task
 when the folder is opened (runOn: folderOpen, task.allowAutomaticTasks: on)
-is a warning row too.
+blocks: that code runs on a reviewer's machine as soon as they open the
+checkout.
 
 Intended as a required-status-check companion to chainsaw scan-repo: scan-repo
 catches committed bypass config; pr-scan catches newly introduced packages.
@@ -1871,6 +1872,9 @@ func workflowLintSeverity(signal string) string {
 // settings.json whose head carries a scan-repo editor-autorun finding
 // (inspectFile's vscode-* rules) that base did not: a task that runs when
 // the folder is opened executes on every machine that opens the checkout.
+// Since v0.22.109 the row blocks (BindsNET, attack 54): the PR adds code that
+// runs on a reviewer's machine before anyone reads it. Only an introduced
+// finding counts, so an existing folder-open task never fails a PR.
 func diffVSCodeConfig(rel string, baseContent, headContent []byte) (prScanEntry, bool) {
 	base := path.Base(filepath.ToSlash(rel))
 	had := map[string]bool{}
@@ -1880,7 +1884,7 @@ func diffVSCodeConfig(rel string, baseContent, headContent []byte) (prScanEntry,
 	var sigs []prScanSignal
 	for _, f := range inspectFile(rel, base, string(headContent)) {
 		if !had[f.Rule] {
-			sigs = append(sigs, prScanSignal{ID: f.Rule, Severity: "warn", Reason: f.Detail})
+			sigs = append(sigs, prScanSignal{ID: f.Rule, Severity: "block", Reason: f.Detail})
 		}
 	}
 	if len(sigs) == 0 {
