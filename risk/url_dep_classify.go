@@ -20,6 +20,7 @@ package risk
 
 import (
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -110,4 +111,27 @@ func ClassifyDepURL(version string) DepURLKind {
 
 	// Everything else is a registry reference (semver range, tag, dist-tag).
 	return DepURLRegistry
+}
+
+// npmGitHubShorthand is npm's bare "user/repo[#ref]" GitHub dependency. A
+// semver range, tag or dist-tag never contains a slash, but a Composer branch
+// can, so ClassifyDepURL (shared by every ecosystem) leaves it alone.
+var npmGitHubShorthand = regexp.MustCompile(`^[A-Za-z0-9][\w.-]*/[\w.-]+(#\S*)?$`)
+
+// ClassifyNPMDepURL is ClassifyDepURL with npm's bare user/repo GitHub form
+// read as git, which is how npm installs it. Use it only for npm specs.
+func ClassifyNPMDepURL(version string) DepURLKind {
+	k := ClassifyDepURL(version)
+	v := strings.TrimSpace(version)
+	if k == DepURLRegistry && npmGitHubShorthand.MatchString(v) && !npmTarballPath(v) {
+		return DepURLGit
+	}
+	return k
+}
+
+// npmTarballPath reports a relative path to a local tarball ("dist/x.tgz"),
+// which npm installs as a file, not from GitHub.
+func npmTarballPath(v string) bool {
+	repo, _, _ := strings.Cut(strings.ToLower(v), "#")
+	return strings.HasSuffix(repo, ".tgz") || strings.HasSuffix(repo, ".tar.gz") || strings.HasSuffix(repo, ".tar")
 }

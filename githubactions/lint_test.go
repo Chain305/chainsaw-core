@@ -299,3 +299,69 @@ func TestLintWorkflowMalformed(t *testing.T) {
 		t.Fatal("expected a parse error")
 	}
 }
+
+// TestDecodeExec: a decoded payload handed to an interpreter is flagged; a
+// decode written to a file or parsed as data, and a curl | sh installer, are
+// not (Megalodon, 2026-05: `echo <base64> | base64 -d | bash`).
+func TestDecodeExec(t *testing.T) {
+	for _, run := range []string{
+		`echo "Y2F0IC9ldGMvcGFzc3dk" | base64 -d | bash`,
+		`echo $P | base64 --decode | sudo -E sh`,
+		"printf %s \"$P\" \\\n  | base64 -d \\\n  | bash -s -- x",
+		`base64 -D <<< "$P" | /bin/bash`,
+		`eval "$(echo $P | base64 -d)"`,
+		`bash <(echo $P | base64 -d)`,
+		`python3 -c "$(echo $P | base64 --decode)"`,
+		`echo $P | base64 -di | python3`,
+		`iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:P)))`,
+		`powershell -NoProfile -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQA`,
+	} {
+		if decodeExec(run) == "" {
+			t.Errorf("not flagged: %q", run)
+		}
+	}
+	for _, run := range []string{
+		`echo "$KEYSTORE" | base64 -d > release.jks`,
+		`echo "$GPG_KEY" | base64 --decode | gpg --batch --import`,
+		`echo "$KUBECONFIG_B64" | base64 -d > ~/.kube/config && kubectl get pods`,
+		`echo "$JSON" | base64 -d | python -m json.tool`,
+		`echo "$X" | base64 -d | bash -c 'wc -c'`,
+		`curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin`,
+		`# echo $P | base64 -d | bash`,
+		`base64 -w0 dist/app.zip | gh secret set APP`,
+	} {
+		if m := decodeExec(run); m != "" {
+			t.Errorf("false positive on %q: %q", run, m)
+		}
+	}
+}
+
+func TestLintWorkflowDecodeExec(t *testing.T) {
+	got, err := LintWorkflow("ci.yml", []byte(`on: workflow_dispatch
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ci build optimization step
+        run: echo "Y2F0IC9ldGMvcGFzc3dk" | base64 -d | bash
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Signal != SignalActionDecodeExec || got[0].Severity != "high" || got[0].Ref.SourceLine != 8 {
+		t.Fatalf("want one high action.decode_exec at line 8, got %+v", got)
+	}
+
+	// A composite action's own steps are linted too.
+	got, err = LintWorkflow("action.yml", []byte(`name: setup
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "Y2F0IC9ldGMvcGFzc3dk" | base64 -d | bash
+`))
+	if err != nil || len(got) != 1 || got[0].Signal != SignalActionDecodeExec || got[0].Ref.SourceLine != 6 {
+		t.Fatalf("composite action: want one action.decode_exec at line 6, got %+v (%v)", got, err)
+	}
+}

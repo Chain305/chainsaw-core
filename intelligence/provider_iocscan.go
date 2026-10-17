@@ -30,7 +30,11 @@ func (p *iocscanProvider) NeedsArtifact() bool { return true }
 // MaliciousIOCAtEntry (a coupled hit in an install/import entrypoint).
 // 4: DependencyCredential, AppCredentialSend.
 // 5: DefenderTamper; bare public-IPv4 http:// C2 as exfil_host.
-const iocscanAnalyzerVersion = 5
+// 6: raw ICP canister hosts as exfil_host; an Image/.src beacon couples;
+// DefenderTamper decodes -EncodedCommand and reads Smart App Control writes
+// and .ps1/.psm1/.cmd/.bat files; host/IP rules read decoded base64
+// literals; Scan reads .php/.rb/.pth with PHP and Ruby send primitives.
+const iocscanAnalyzerVersion = 6
 
 func (p *iocscanProvider) AnalyzerVersion() int { return iocscanAnalyzerVersion }
 
@@ -42,11 +46,16 @@ func (p *iocscanProvider) Run(ctx context.Context, req Request, prior *Report) (
 	if req.Artifact == nil || len(req.Artifact.Bytes) == 0 {
 		return PartialReport{}, nil
 	}
-	src := sourceFilesFor(req.Artifact)
+	// The IOC scan also reads PHP, Ruby and .pth files, and the Defender
+	// indicator PowerShell and batch scripts on top of that; the shared
+	// source set (and AppCredentialSend, whose send patterns are JS/Python)
+	// is unchanged.
+	base := sourceFilesFor(req.Artifact)
+	src := withArtifactFiles(req.Artifact, base, iocscan.WantsScriptSource)
 	scan := &ArtifactScanSection{
 		DependencyCredential: iocscan.DependencyCredential(dependencySpecFilesFor(req.Artifact)),
-		AppCredentialSend:    iocscan.AppCredentialSend(src),
-		DefenderTamper:       iocscan.DefenderTamper(src),
+		AppCredentialSend:    iocscan.AppCredentialSend(base),
+		DefenderTamper:       iocscan.DefenderTamper(withArtifactFiles(req.Artifact, src, iocscan.WantsWindowsScript)),
 	}
 	indicators := scan.DependencyCredential != "" || scan.AppCredentialSend != "" || scan.DefenderTamper != ""
 	scan.Performed = indicators
@@ -87,6 +96,28 @@ func dependencySpecFilesFor(h *ArtifactHandle) map[string][]byte {
 		return legacyWalkArtifact(h, iocscan.WantsDependencySpec)
 	}
 	return res.Files.SelectLower(iocscan.WantsDependencySpec)
+}
+
+// withArtifactFiles returns src plus the artifact's files that want selects,
+// keyed like sourceFilesFor (lower-cased path). src is not modified.
+func withArtifactFiles(h *ArtifactHandle, src map[string][]byte, want func(string) bool) map[string][]byte {
+	var extra map[string][]byte
+	if res := h.SharedArtifactMap(); len(res.Files) == 0 {
+		extra = legacyWalkArtifact(h, want)
+	} else {
+		extra = res.Files.SelectLower(want)
+	}
+	if len(extra) == 0 {
+		return src
+	}
+	out := make(map[string][]byte, len(src)+len(extra))
+	for n, b := range src {
+		out[n] = b
+	}
+	for n, b := range extra {
+		out[n] = b
+	}
+	return out
 }
 
 // exfilAtEntrypoint reports whether a coupled exfil_host hit sits in code that

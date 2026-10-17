@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **98 risk signals**. Each is scored, not merely
+Chainsaw registers **99 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,19 +23,20 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 68 |
+| Supply chain | 69 |
 | Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 8 |
 | Quality | 6 |
-| **Total** | **98** |
+| **Total** | **99** |
 
 
-## Supply chain (68)
+## Supply chain (69)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
 | `action.comment_trigger_unguarded` | high | 0.00 | Comment-triggered workflow is not restricted to members |
+| `action.decode_exec` | high | 0.00 | Workflow step decodes a payload and executes it |
 | `action.malicious` | high | -50.00 | GitHub Action ref flagged as malicious |
 | `action.pwn_request` | high | 0.00 | Privileged workflow runs pull request code |
 | `action.script_injection` | high | 0.00 | Attacker-written text interpolated into a shell step |
@@ -70,7 +71,7 @@ a configured server.
 | `sc.exfil_sink_used` | high | -30.00 | Code sends data to an exfiltration endpoint |
 | `sc.hidden_unicode` | medium | -20.00 | Hidden Unicode in source |
 | `sc.http_url_dependency` | low | -8.00 | HTTP(S) tarball URL dependency |
-| `sc.import_time_shell` | high | -25.00 | Python module runs a shell command on import |
+| `sc.import_time_shell` | high | -25.00 | Package runs a shell command or downloaded code on import |
 | `sc.install_script_fetches_remote` | high | -25.00 | Install script makes network calls |
 | `sc.install_script_eval_encoded` | high | -25.00 | Install script evaluates encoded content |
 | `sc.install_script_only` | info | 0.00 | Install lifecycle script present |

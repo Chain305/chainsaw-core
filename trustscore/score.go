@@ -81,7 +81,7 @@ type Breakdown struct {
 	// double-counted; the total is clamped at -20 on the install-script
 	// axis).
 	InstallScript          int `json:"installScript"`          // 0 to -25
-	ImportTimeExecution    int `json:"importTimeExecution"`    // 0 or -30 (PyPI/npm import-time malicious exec)
+	ImportTimeExecution    int `json:"importTimeExecution"`    // 0, -10 or -30 (import-time malicious exec: PyPI, npm, Composer, RubyGems)
 	MaliciousIOC           int `json:"maliciousIoc"`           // 0 or -30 (embedded exfil host / coupled stealer string)
 	PublisherChanged       int `json:"publisherChanged"`       // 0 or -25 (account-takeover signal)
 	VersionAnomaly         int `json:"versionAnomaly"`         // 0 to -30 (−15 per flag, capped)
@@ -146,7 +146,7 @@ type Signals struct {
 	HasInstallScript           bool
 	InstallScriptFetchesRemote bool
 
-	// ImportTimeExecution flags a Python package that runs malicious behavior
+	// ImportTimeExecution flags a package (PyPI, npm, Composer, RubyGems) that runs malicious behavior
 	// at import/install time (top-level obfuscated decode-and-exec, import-time
 	// credential exfil, or a download-and-execute top-level shell). High-
 	// confidence-malicious; carries a heavy own-bytes penalty.
@@ -396,7 +396,7 @@ func Compute(signals Signals) Score {
 		b.InstallScript = -5
 	}
 
-	// Import-time execution (PyPI): obfuscated decode-and-exec / import-time
+	// Import-time execution (PyPI, npm, Composer, RubyGems): obfuscated decode-and-exec / import-time
 	// exfil / download-and-execute shell that runs the instant the package is
 	// imported or built. High-confidence-malicious — heaviest own-bytes hit.
 	//

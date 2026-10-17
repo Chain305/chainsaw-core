@@ -119,11 +119,13 @@ type Input struct {
 
 	// ImportTimeKind is core/pysource's verdict on what a Python package does
 	// at module top level, i.e. on import or install: top_level_shell,
-	// obfuscated_exec(_bare), import_time_exfil, import_time_beacon or
-	// embedded_executable; empty when nothing fired. Same history as
-	// MaliciousIOCKind. top_level_shell is scored by sc.import_time_shell;
-	// import_time_beacon and obfuscated_exec_bare only through warn-ceiling
-	// compounds (compound.go); the rest not at all.
+	// obfuscated_exec(_bare), import_time_exfil, import_time_beacon,
+	// embedded_executable or download_exec (core/jssource and, for composer
+	// and rubygems, core/scriptsource report the same kinds); empty when
+	// nothing fired. Same history as MaliciousIOCKind. top_level_shell and
+	// download_exec are scored by sc.import_time_shell; import_time_beacon and
+	// obfuscated_exec_bare only through warn-ceiling compounds (compound.go);
+	// the rest not at all.
 	ImportTimeKind string
 
 	// TrivialPackage: the package ships only a few lines of code
@@ -463,6 +465,8 @@ type Input struct {
 	ActionCommentTriggerUnguardedLocs []string
 	ActionScriptInjection             bool // attacker-written ${{ }} text interpolated into a run: step
 	ActionScriptInjectionLocs         []string
+	ActionDecodeExec                  bool // a run: step decodes a payload and executes it
+	ActionDecodeExecLocs              []string
 
 	// --- Runtime capability grading (Gap 2 / Socket-parity) ---
 	// These fields are populated by the capability scanner

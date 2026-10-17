@@ -40,8 +40,10 @@ var scanActionsCmd = &cobra.Command{
 issues — unpinned refs, typosquats, unknown publishers, known-malicious
 actions, and dangerous trigger shapes: a pull_request_target/workflow_run job
 that checks out and runs the pull request head, a comment-triggered job with
-secrets or a publish step and no author_association guard, and untrusted event
-text interpolated into a run: step.
+secrets or a publish step and no author_association guard, untrusted event
+text interpolated into a run: step, and a run: step that decodes a payload and
+executes it (echo <base64> | base64 -d | bash). A plain curl | sh installer is
+not flagged.
 
 <path> may be either a directory (the command walks <path>/.github/workflows/)
 or a single workflow YAML file.

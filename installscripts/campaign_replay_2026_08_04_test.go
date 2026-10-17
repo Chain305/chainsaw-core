@@ -18,13 +18,13 @@ import (
 //  1. ReferencedScripts resolves "node setup.mjs" — the follower added
 //     2026-06-27, five weeks before the campaign, does its job.
 //  2. fetch-to-disk + run-binary does NOT escalate. That is deliberate
-//     (see ScanReferencedBody's header) and it is this campaign's shape:
-//     download a legitimate signed Bun runtime, exec a local file with it.
-//  3. Escalation therefore rests entirely on the obfuscation arm, which
-//     needs >24 javascript-obfuscator identifiers in the body.
-//
-// So the answer to "would the install-script signal have fired" reduces
-// to one unknowable byte-level property of a file that no longer exists.
+//     (see ScanReferencedBody's header).
+//  3. This campaign's shape — download a legitimate signed Bun runtime,
+//     exec a LOCAL FILE with it — escalates since v0.22.106 (F11): the
+//     runtime is not the node running the hook and its argument is a
+//     bundled script. Before that, escalation rested entirely on the
+//     obfuscation arm (>24 javascript-obfuscator identifiers), an
+//     unknowable byte-level property of a file that no longer exists.
 func TestCacheableCampaignReferencedScript(t *testing.T) {
 	manifest := []byte(`{"name":"keyv","version":"6.0.0","license":"MIT",` +
 		`"scripts":{"preinstall":"node setup.mjs","test":"vitest run"}}`)
@@ -48,10 +48,15 @@ const r = await fetch(u); fs.writeFileSync("bun.zip", Buffer.from(await r.arrayB
 execSync("unzip -o bun.zip"); execSync("chmod +x ./bun");
 execFileSync("./bun", ["Math_Symbol.js"]);
 `
-	if got := ScanReferencedBody(fetchExec); got != KindPresent {
-		t.Errorf("fetch+exec body = %q, want %q — if this now escalates, the "+
-			"FP trade-off in ScanReferencedBody changed and §3 of the design "+
-			"doc is stale", got, KindPresent)
+	if got := ScanReferencedBody(fetchExec); got != KindFetchesRemote {
+		t.Errorf("fetch runtime + run bundled script = %q, want %q (F11)", got, KindFetchesRemote)
+	}
+	// The benign half of the trade-off is unchanged: fetch a binary and run
+	// IT (a version check), not a bundled script, stays present.
+	fetchBinary := strings.Replace(fetchExec, `["Math_Symbol.js"]`, `["--version"]`, 1)
+	if got := ScanReferencedBody(fetchBinary); got != KindPresent {
+		t.Errorf("fetch+run-binary body = %q, want %q — the FP trade-off in "+
+			"ScanReferencedBody changed", got, KindPresent)
 	}
 
 	// The obfuscation arm is the only route to escalation for this shape.

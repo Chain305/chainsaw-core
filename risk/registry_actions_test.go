@@ -168,7 +168,7 @@ func TestActionMaliciousFires(t *testing.T) {
 	}
 }
 
-// TestActionWorkflowLintSignals: the three workflow-lint signals are
+// TestActionWorkflowLintSignals: the four workflow-lint signals are
 // registered at weight 0 with no ceiling (they report; they do not move a
 // verdict until a replay sets a weight) and fire only on their own field.
 func TestActionWorkflowLintSignals(t *testing.T) {
@@ -179,6 +179,7 @@ func TestActionWorkflowLintSignals(t *testing.T) {
 		{SignalActionPwnRequest, Input{ActionPwnRequest: true, ActionPwnRequestLocs: []string{"ci.yml:9"}}},
 		{SignalActionCommentTriggerUnguarded, Input{ActionCommentTriggerUnguarded: true, ActionCommentTriggerUnguardedLocs: []string{"ci.yml:9"}}},
 		{SignalActionScriptInjection, Input{ActionScriptInjection: true, ActionScriptInjectionLocs: []string{"ci.yml:9"}}},
+		{SignalActionDecodeExec, Input{ActionDecodeExec: true, ActionDecodeExecLocs: []string{"ci.yml:9"}}},
 	} {
 		sig, ok := Registry[c.id]
 		if !ok {

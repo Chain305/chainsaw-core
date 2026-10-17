@@ -3,7 +3,7 @@
 **Supply-chain enforcement for package installs — on the developer's machine, in
 CI, at the registry proxy, at publish time, and at Kubernetes admission.** It
 refuses known-malicious and typosquatted packages, known-vulnerable versions,
-bad licences, and anything else your policy declines: **98 risk signals, 16
+bad licences, and anything else your policy declines: **99 risk signals, 16
 package ecosystems**, one policy language, five enforcement surfaces.
 
 **The install-time guard runs entirely offline with no account, no server and no
@@ -104,7 +104,7 @@ wherever its inputs exist.
 | Typosquat detection (4 methods, embedded corpus) | ✅ | ✅ |
 | Known-malicious floor (11 curated incidents, embedded) | ✅ | ✅ |
 | Full OpenSSF malicious-package set (~231k entries) | after `guard update` | ✅ |
-| Byte-level behavioural scan (IOC + hidden-Unicode) | ✅ opt-in | ✅ |
+| Byte-level behavioural scan (install scripts, IOC, hidden-Unicode, import-time execution) | ✅ opt-in | ✅ |
 | Blocking installs of npm/pip/go/cargo/gem | ✅ | ✅ |
 | Lockfile and manifest diffing in CI (`pr-scan`) | ✅ | ✅ |
 | Bypass-config detection (`scan-repo`) | ✅ | ✅ |
@@ -154,12 +154,12 @@ binary ([`policy/proxy_matrix.go`](policy/proxy_matrix.go)), queryable at
 
 ## Risk signals
 
-**98 signals are registered** ([`risk/registry.go`](risk/registry.go)), each
+**99 signals are registered** ([`risk/registry.go`](risk/registry.go)), each
 scored with a severity and a weight rather than a bare boolean.
 
 | Category | Count | Examples |
 |---|---:|---|
-| Supply chain | 68 | known-malicious, typosquat (3 confidence tiers), install script fetches remote, manifest confusion, publisher changed, provenance downgrade, hidden Unicode, transitive malware, release after long dormancy, capability flags (network / shell / filesystem / eval / URL strings / debug modules / telemetry), unsafe pickle opcodes, unpinned GitHub Action refs, pwn-request / unguarded comment-trigger / script-injection workflow shapes |
+| Supply chain | 69 | known-malicious, typosquat (3 confidence tiers), install script fetches remote, manifest confusion, publisher changed, provenance downgrade, hidden Unicode, transitive malware, release after long dormancy, capability flags (network / shell / filesystem / eval / URL strings / debug modules / telemetry), unsafe pickle opcodes, unpinned GitHub Action refs, pwn-request / unguarded comment-trigger / script-injection / decode-and-execute workflow shapes |
 | Licence | 8 | copyleft, non-permissive, missing, unidentified, ambiguous classifier, changed from previous version |
 | Vulnerability | 8 | critical / high / medium / low CVSS, known-vulnerable with no published severity, EPSS high exploit probability, KEV known-exploited, fix available |
 | Quality | 6 | checksum mismatch, minified code, version anomaly, declared MCP server / agent tool |
@@ -169,7 +169,7 @@ The full set is evaluated server-side. **The offline guard runs the subset
 needing no external data**: typosquat, known-malicious, and — opt-in — the
 byte-level checks.
 
-**All 98 with severities and weights: [docs/signals.md](docs/signals.md).**
+**All 99 with severities and weights: [docs/signals.md](docs/signals.md).**
 
 ---
 

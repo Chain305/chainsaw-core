@@ -89,9 +89,12 @@ func (p *installScriptsProvider) NeedsArtifact() bool { return true }
 // 9/10 (2026-10-15): npm reads the root binding.gyp (implicit node-gyp hook
 // and its `<!(...)` commands), and referenced bodies gained the XOR-loader
 // rule plus the tail of files past the 2 MiB cap.
+// 11/12 (2026-10-17): referenced bodies escalate a fetched bun/deno running a
+// bundled script (F11), binding.gyp actions and condition sandbox escapes are
+// read (F13), and composer plugins are install hooks (F17).
 const (
-	installScriptsAnalyzerRegex = 9
-	installScriptsAnalyzerAST   = 10
+	installScriptsAnalyzerRegex = 11
+	installScriptsAnalyzerAST   = 12
 )
 
 // AnalyzerVersion follows the detector actually in force.
@@ -522,18 +525,18 @@ func sourceFilesFor(h *ArtifactHandle) map[string][]byte {
 	return res.Files.SelectLower(wantsBundledScript)
 }
 
-// bundledScriptBodies is sourceFilesFor with each truncated file's tail joined
-// on (artifactmap.ArtifactFile.WithTail): a large loader's decoder and exec
+// bundledScriptBodies is sourceFilesFor over WantsReferencedScript, with each
+// truncated file's tail joined on (artifactmap.ArtifactFile.WithTail): a large loader's decoder and exec
 // call sit past the 2 MiB head. Kept apart from sourceFilesFor so the other
 // source scanners keep their measured head-only input.
 func bundledScriptBodies(h *ArtifactHandle) map[string][]byte {
 	res := h.SharedArtifactMap()
 	if len(res.Files) == 0 {
-		return legacyWalkArtifact(h, wantsBundledScript)
+		return legacyWalkArtifact(h, WantsReferencedScript)
 	}
 	out := make(map[string][]byte, len(res.Files)/4+1)
 	for key, f := range res.Files {
-		if wantsBundledScript(f.Path) {
+		if WantsReferencedScript(f.Path) {
 			out[key] = f.WithTail()
 		}
 	}
@@ -551,6 +554,14 @@ func rootBindingGyp(files map[string][]byte) []byte {
 		}
 	}
 	return out
+}
+
+// WantsReferencedScript is the file set the referenced-script resolver reads,
+// here and in the CLI guard: wantsBundledScript plus .php, the class a Composer
+// plugin runs on install (installscripts.Composer). PHP is kept out of
+// wantsBundledScript because that set also feeds iocscan and pysource.
+func WantsReferencedScript(name string) bool {
+	return wantsBundledScript(name) || strings.EqualFold(path.Ext(strings.TrimSpace(name)), ".php")
 }
 
 // wantsBundledScript matches the extensions an install hook can invoke as a

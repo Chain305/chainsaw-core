@@ -11,9 +11,9 @@ package cli
 // the victim's own workflows: it refuses the vulnerable workflow in CI, it
 // cannot stop a fork PR against a workflow already merged and not scanned.
 //
-// pr-scan's workflow inspection (diffWorkflow) runs only the uses: scanner,
-// not the lint, so a PR adding this workflow is NOT flagged there — asserted
-// below as current behaviour.
+// pr-scan: since v0.22.106 (F12) diffWorkflow also runs the lint, so a PR
+// that adds this workflow gets a warn row carrying action.pwn_request; the
+// pull_request twin gets none.
 
 import (
 	"os"
@@ -101,16 +101,32 @@ func TestAttack2026_04_TrivyPwnRequest(t *testing.T) {
 		t.Fatalf("pull_request twin: want no pwn_request and exit 0, got exit %d %+v", code, r.Findings)
 	}
 
-	// Current behaviour, a gap: pr-scan inspects only the uses: refs of a
-	// changed workflow, so the PR that introduces this workflow gets no
-	// pwn_request row (the refs are SHA-pinned well-known actions).
-	added, upgraded, err := diffWorkflow(".github/workflows/apidiff.yaml", nil, []byte(atk26TrivyAPIDiff("pull_request_target")))
+	// pr-scan, since v0.22.106 (F12): the PR that introduces this workflow
+	// gets a warn row for the workflow file carrying action.pwn_request.
+	if !atk26PRScanLints(t, "apidiff.yaml", atk26TrivyAPIDiff("pull_request_target"), "action.pwn_request") {
+		t.Fatal("pr-scan: want a warn row with action.pwn_request for the pull_request_target workflow")
+	}
+	if atk26PRScanLints(t, "apidiff.yaml", atk26TrivyAPIDiff("pull_request"), "action.pwn_request") {
+		t.Fatal("pr-scan: the pull_request twin must not carry action.pwn_request")
+	}
+}
+
+// atk26PRScanLints reports whether pr-scan's diffWorkflow, for a PR adding
+// the workflow, returns a warn row for the file carrying signal.
+func atk26PRScanLints(t *testing.T, name, body, signal string) bool {
+	t.Helper()
+	rel := ".github/workflows/" + name
+	added, upgraded, err := diffWorkflow(rel, nil, []byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range append(added, upgraded...) {
-		if hasPRSignal(e.Signals, "action.pwn_request") || e.Verdict == "block" {
-			t.Fatalf("pr-scan now lints workflow structure (%+v): update the attack-04 classification", e)
+		if hasPRSignal(e.Signals, signal) {
+			if e.Name != rel || e.Verdict != "warn" {
+				t.Fatalf("pr-scan lint row: want warn row named %s, got %+v", rel, e)
+			}
+			return true
 		}
 	}
+	return false
 }

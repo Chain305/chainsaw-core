@@ -1,12 +1,15 @@
 package iocscan
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"path"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 // Two narrow indicators found by reading the bytes of malicious packages
@@ -116,15 +119,85 @@ func AppCredentialSend(files map[string][]byte) string {
 // Set-MpPreference that does not disable something are not matched.
 var defenderTamperRE = regexp.MustCompile(`(?i)\bSet-MpPreference\s+-Disable\w+|\bAdd-MpPreference\s+-Exclusion\w+`)
 
-// DefenderTamper returns "cmdlet -Parameter (file)" when a shipping file
-// disables Defender or adds an exclusion to it.
+// smartAppControlWriteRE is a registry WRITE of Smart App Control's state
+// value (HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy), which turns SAC
+// off: @apexacc/cli (2026-09) set it to 0 before running a downloaded binary.
+// The value name is specific to SAC; reading it (Get-ItemProperty) is not
+// matched.
+var smartAppControlWriteRE = regexp.MustCompile(`(?i)\b(?:Set-ItemProperty|New-ItemProperty|reg(?:\.exe)?\s+add)\b[^\n;|]{0,300}?\bVerifiedAndReputablePolicyState\b`)
+
+// encodedCommandRE is PowerShell's -EncodedCommand (any prefix PowerShell
+// accepts: -e, -ec, -enc, ...) and its base64 argument. @apexacc/cli 1.5.122
+// shipped the same Defender and SAC commands as 1.5.121, base64-encoded and
+// launched elevated, so the plaintext regexes saw nothing.
+var encodedCommandRE = regexp.MustCompile(`(?i)(?:^|[^\w-])-e(?:c|n[a-z]*)?['"\x60]?[\s,]+['"\x60]?([A-Za-z0-9+/]{16,}={0,2})`)
+
+// maxEncodedCommand bounds the base64 decoded per match. A real command is a
+// few hundred bytes; this keeps a large base64 blob (an inlined wasm or font)
+// that happens to follow "-e" from being decoded.
+const maxEncodedCommand = 64 << 10
+
+// decodeEncodedCommand decodes an -EncodedCommand argument: base64 of
+// UTF-16LE. Returns "" when it is not that.
+func decodeEncodedCommand(b64 string) string {
+	if len(b64) > maxEncodedCommand {
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		if raw, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(b64, "=")); err != nil {
+			return ""
+		}
+	}
+	if len(raw) < 2 || len(raw)%2 != 0 {
+		return ""
+	}
+	u := make([]uint16, len(raw)/2)
+	for i := range u {
+		u[i] = binary.LittleEndian.Uint16(raw[2*i:])
+	}
+	return string(utf16.Decode(u))
+}
+
+// tamperIn returns the normalised tamper command found in s, or "".
+func tamperIn(s string) string {
+	if m := defenderTamperRE.FindString(s); m != "" {
+		return strings.Join(strings.Fields(m), " ")
+	}
+	if smartAppControlWriteRE.MatchString(s) {
+		return "Smart App Control policy write (VerifiedAndReputablePolicyState)"
+	}
+	return ""
+}
+
+// WantsWindowsScript selects the PowerShell and batch files DefenderTamper
+// reads on top of the caller's source set: NuGet runs tools/install.ps1 on
+// install, and a .cmd/.bat wrapper calls powershell or reg add the same way.
+// Only this indicator reads them; the other detectors keep their file set.
+func WantsWindowsScript(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".ps1", ".psm1", ".cmd", ".bat":
+		return true
+	}
+	return false
+}
+
+// DefenderTamper returns "command (file)" when a shipping file disables
+// Defender, adds an exclusion to it, or turns Smart App Control off — in
+// plain text or inside a PowerShell -EncodedCommand.
 func DefenderTamper(files map[string][]byte) string {
 	for _, name := range sortedNames(files) {
 		if isNonShippingPath(name) {
 			continue
 		}
-		if m := defenderTamperRE.FindString(capped(files[name])); m != "" {
-			return strings.Join(strings.Fields(m), " ") + " (" + name + ")"
+		body := capped(files[name])
+		if m := tamperIn(body); m != "" {
+			return m + " (" + name + ")"
+		}
+		for _, sm := range encodedCommandRE.FindAllStringSubmatch(body, 32) {
+			if m := tamperIn(decodeEncodedCommand(sm[1])); m != "" {
+				return m + " (" + name + ", -EncodedCommand)"
+			}
 		}
 	}
 	return ""

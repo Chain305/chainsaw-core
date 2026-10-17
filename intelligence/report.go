@@ -408,13 +408,13 @@ type ArtifactScanSection struct {
 	// whole Scan section, never field by field.
 	InstallScriptDetector string `json:"installScriptDetector,omitempty"`
 
-	// ImportTimeExecution is set by the pysource provider when a Python
-	// package runs malicious behavior at IMPORT/INSTALL time (top-level
+	// ImportTimeExecution is set by the pysource provider when a Python, npm,
+	// PHP or Ruby package runs malicious behavior at IMPORT/INSTALL time (top-level
 	// obfuscated decode-and-exec, import-time env/credential exfil, or a
 	// top-level shell call) — the PyPI malware class the install-script and
 	// manifest signals miss. Kind/Detail name the shape and the file.
 	ImportTimeExecution bool   `json:"importTimeExecution,omitempty"`
-	ImportTimeKind      string `json:"importTimeExecutionKind,omitempty"`   // obfuscated_exec|import_time_exfil|top_level_shell
+	ImportTimeKind      string `json:"importTimeExecutionKind,omitempty"`   // obfuscated_exec|import_time_exfil|top_level_shell|download_exec|…
 	ImportTimeDetail    string `json:"importTimeExecutionDetail,omitempty"` // file the signal fired on
 
 	// MaliciousIOC is set by the iocscan provider when the source embeds a

@@ -42,11 +42,20 @@ import (
 //     blob land here, so the scoring layer applies a lighter penalty and does
 //     not let this signal alone drive a block (detection-roadmap item 3).
 //   - "import_time_exfil" | "top_level_shell" | "import_time_beacon" |
-//     "embedded_executable" — the structural import-time signals.
+//     "embedded_executable" | "download_exec" — the structural import-time
+//     signals.
+//
+// Dispositive marks the shapes that measured zero benign hits (the v0.22.106
+// site-packages corpus, CHAINSAW_PYSOURCE_CORPUS): top_level_shell,
+// download_exec, a decode-and-exec in a .pth file, and a child interpreter fed
+// decoded code. The other kinds fire on popular packages (PIL, numpy, pip's
+// vendored packaging) and are unscored server-side for that reason; the
+// install guard refuses only on a Dispositive result.
 type Result struct {
-	Detected bool
-	Kind     string
-	Detail   string
+	Detected    bool
+	Kind        string
+	Detail      string
+	Dispositive bool
 }
 
 // obfExecCoMarkerRE matches the co-occurring intent markers that promote a
@@ -68,7 +77,9 @@ func obfExecHasCoMarker(body string) bool {
 
 const (
 	maxFiles    = 800
+	maxPthFiles = 64      // scanned before, and apart from, the .py cap
 	maxFileSize = 2 << 20 // 2 MiB per file
+	maxDests    = 64      // urlretrieve destinations tracked per file
 )
 
 // obfuscatedExecRE: exec/eval/compile whose argument is a decode primitive —
@@ -89,9 +100,19 @@ var execImportChainRE = regexp.MustCompile(`\bexec\s*\(\s*(?:getattr\s*\(\s*)?__
 // evades the inline obfuscatedExecRE window.
 var execCallRE = regexp.MustCompile(`(?:^|[^.\w])(?:exec|eval)\s*\(`)
 
-// decodePrimRE: a decode/unpack primitive whose output is the kind of thing a
+// decodePrims: a decode/unpack primitive whose output is the kind of thing a
 // loader feeds to exec.
-var decodePrimRE = regexp.MustCompile(`b64decode|b85decode|b16decode|b32decode|a85decode|marshal\.loads|zlib\.decompress|lzma\.decompress|bz2\.decompress|codecs\.decode|\.fromhex\b|\bfromhex\s*\(`)
+const decodePrims = `b64decode|b85decode|b16decode|b32decode|a85decode|marshal\.loads|zlib\.decompress|lzma\.decompress|bz2\.decompress|codecs\.decode|\.fromhex\b|\bfromhex\s*\(`
+
+var decodePrimRE = regexp.MustCompile(decodePrims)
+
+// childExecRE: a child Python interpreter whose `-c` code is a decode result —
+// `Popen([sys.executable, "-c", base64.b64decode(blob).decode()])`. That is
+// decode-and-exec in another process, so it is nesting-agnostic like
+// obfuscatedExecRE (litellm 1.82.7, xinference 2.6.2). A literal `-c` string
+// (`[sys.executable, "-c", "import numpy; print(numpy.get_include())"]`, a
+// common setup.py probe) has no decode in the window and stays clean.
+var childExecRE = regexp.MustCompile(`(?:sys\.executable|['"](?:[\w./-]*/)?python[0-9.]*['"])\s*,\s*['"]-c['"]\s*,.{0,160}?(?:` + decodePrims + `)`)
 
 // getattrExecRE: getattr(__builtins__/__import__/builtins, 'exec'…) — indirect
 // exec hidden behind a dynamic attribute fetch.
@@ -170,7 +191,8 @@ func reconCount(body string) int {
 }
 
 // Scan reports the strongest import-time malicious signal across a package's
-// .py files, or an empty Result if none.
+// .py files and the executed lines of its .pth files, or an empty Result if
+// none.
 func Scan(files map[string][]byte) Result {
 	// Deterministic, payload-relevant cap: scan .py files SHALLOWEST-first
 	// (fewest path segments, then lexical). Without this, the maxFiles cap
@@ -179,12 +201,53 @@ func Scan(files map[string][]byte) Result {
 	// 800+ junk modules to push the payload out of window). Shallow files
 	// (__init__.py / setup.py / top-level modules) are where import-time
 	// payloads live, so they are always in window.
-	names := make([]string, 0, len(files))
+	//
+	// .pth files run on every interpreter start, so they are scanned first and
+	// under their own cap: 800 padding modules cannot push one out of window.
+	var pths, pys []string
 	for name := range files {
-		if strings.HasSuffix(strings.ToLower(name), ".py") {
-			names = append(names, name)
+		switch lower := strings.ToLower(name); {
+		case strings.HasSuffix(lower, ".pth"):
+			pths = append(pths, name)
+		case strings.HasSuffix(lower, ".py"):
+			pys = append(pys, name)
 		}
 	}
+	sortShallowFirst(pths)
+	sortShallowFirst(pys)
+	if len(pths) > maxPthFiles {
+		pths = pths[:maxPthFiles]
+	}
+	if len(pys) > maxFiles {
+		pys = pys[:maxFiles]
+	}
+
+	// Every file is scanned and the strongest result wins: a Dispositive one
+	// returns at once, otherwise the first advisory hit is kept. Returning the
+	// first hit of any kind let a decoy (an advisory decode-and-exec appended
+	// to the dropper, or a shallower module) mask a Dispositive shape.
+	var first Result
+	for _, name := range append(pths, pys...) {
+		body := string(files[name])
+		if len(body) > maxFileSize {
+			body = body[:maxFileSize]
+		}
+		isPth := strings.HasSuffix(strings.ToLower(name), ".pth")
+		if isPth {
+			body = pthCode(body)
+		}
+		r := scanFile(name, body, isPth)
+		if r.Dispositive {
+			return r
+		}
+		if r.Detected && !first.Detected {
+			first = r
+		}
+	}
+	return first
+}
+
+func sortShallowFirst(names []string) {
 	sort.Slice(names, func(i, j int) bool {
 		si, sj := strings.Count(names[i], "/"), strings.Count(names[j], "/")
 		if si != sj {
@@ -192,61 +255,61 @@ func Scan(files map[string][]byte) Result {
 		}
 		return names[i] < names[j]
 	})
+}
 
-	scanned := 0
-	for _, name := range names {
-		b := files[name]
-		if scanned >= maxFiles {
-			break
-		}
-		scanned++
-		body := string(b)
-		if len(body) > maxFileSize {
-			body = body[:maxFileSize]
-		}
-		// Obfuscated decode-and-exec fires at any nesting (obfuscation in a
-		// published package is never legitimate, so context does not gate the
-		// signal). It is split by intent co-marker: COUPLED with a send/recon/
-		// harvest/exfil-host marker it is a dropper ("obfuscated_exec", strong);
-		// ALONE it is the bare loader shape ("obfuscated_exec_bare", advisory) —
-		// still reported for visibility but scored lighter so a legit plugin/
-		// bytecode loader is not blocked on this signal alone (item 3).
-		if obfuscatedExecRE.MatchString(body) || execImportChainRE.MatchString(body) {
-			return Result{Detected: true, Kind: obfExecKind(body), Detail: name}
-		}
-		// Separated / indirect decode-and-exec: a file carrying BOTH a decode
-		// primitive AND a bare exec/eval (or a getattr-builtins-exec) is a
-		// loader even when the decode result is exec'd in a later statement —
-		// the inline window above misses that, this closes it. A plain
-		// `exec('CONST=1')` with no decode in the file stays clean.
-		if decodePrimRE.MatchString(body) && (execCallRE.MatchString(body) || getattrExecRE.MatchString(body)) {
-			return Result{Detected: true, Kind: obfExecKind(body), Detail: name}
-		}
-		shell, send, harvest, bareCall := topLevelSignals(body)
-		if shell {
-			return Result{Detected: true, Kind: "top_level_shell", Detail: name}
-		}
-		// Exfil coupling: a network send AND credential/env harvesting, both at
-		// import time. Legit libraries do neither at module top level.
-		if send && harvest {
-			return Result{Detected: true, Kind: "import_time_exfil", Detail: name}
-		}
-		// Beacon: a module-scope invocation (bareCall) reaches a file that does
-		// a network send AND >=2 system-RECON reads (hostname/platform/cwd/user/
-		// CI-env). This is the dependency-confusion / install-beacon pattern,
-		// where the send+recon live inside a function CALLED at import — so the
-		// top-level send/harvest above don't see them. Two distinct recon
-		// markers + a send + an import-time trigger is a fingerprint legit
-		// packages don't have (they don't phone home host+platform+cwd on import).
-		if bareCall && netSendRE.MatchString(body) && reconCount(body) >= 2 {
-			return Result{Detected: true, Kind: "import_time_beacon", Detail: name}
-		}
-		// Embedded executable: a PE (MZ) or ELF magic in a bytes literal — a
-		// dropper that writes a bundled binary to disk at install. No legit
-		// package ships an executable inside its .py source.
-		if embeddedExecRE.MatchString(body) {
-			return Result{Detected: true, Kind: "embedded_executable", Detail: name}
-		}
+// scanFile returns the strongest signal in one file: a Dispositive shape over
+// any advisory one, and among the advisory ones the old precedence.
+func scanFile(name, body string, isPth bool) Result {
+	shell, send, harvest, bareCall, dlExec := topLevelSignals(body)
+	if shell {
+		return Result{Detected: true, Kind: "top_level_shell", Detail: name, Dispositive: true}
+	}
+	// Download-then-run: a top-level urlretrieve whose destination a
+	// top-level process launch then executes, as the program or as an
+	// interpreter's script (durabletask 1.4.x: urlretrieve to
+	// /tmp/managed.pyz, then Popen(["python3", "/tmp/managed.pyz"])).
+	if dlExec {
+		return Result{Detected: true, Kind: "download_exec", Detail: name, Dispositive: true}
+	}
+	// Obfuscated decode-and-exec fires at any nesting (obfuscation in a
+	// published package is never legitimate, so context does not gate the
+	// signal). It is split by intent co-marker: COUPLED with a send/recon/
+	// harvest/exfil-host marker it is a dropper ("obfuscated_exec", strong);
+	// ALONE it is the bare loader shape ("obfuscated_exec_bare", advisory) —
+	// still reported for visibility but scored lighter so a legit plugin/
+	// bytecode loader is not blocked on this signal alone (item 3).
+	child := childExecRE.MatchString(body)
+	if child || obfuscatedExecRE.MatchString(body) || execImportChainRE.MatchString(body) {
+		return Result{Detected: true, Kind: obfExecKind(body), Detail: name, Dispositive: child || isPth}
+	}
+	// Separated / indirect decode-and-exec: a file carrying BOTH a decode
+	// primitive AND a bare exec/eval (or a getattr-builtins-exec) is a
+	// loader even when the decode result is exec'd in a later statement —
+	// the inline window above misses that, this closes it. A plain
+	// `exec('CONST=1')` with no decode in the file stays clean.
+	if decodePrimRE.MatchString(body) && (execCallRE.MatchString(body) || getattrExecRE.MatchString(body)) {
+		return Result{Detected: true, Kind: obfExecKind(body), Detail: name, Dispositive: isPth}
+	}
+	// Exfil coupling: a network send AND credential/env harvesting, both at
+	// import time. Legit libraries do neither at module top level.
+	if send && harvest {
+		return Result{Detected: true, Kind: "import_time_exfil", Detail: name}
+	}
+	// Beacon: a module-scope invocation (bareCall) reaches a file that does
+	// a network send AND >=2 system-RECON reads (hostname/platform/cwd/user/
+	// CI-env). This is the dependency-confusion / install-beacon pattern,
+	// where the send+recon live inside a function CALLED at import — so the
+	// top-level send/harvest above don't see them. Two distinct recon
+	// markers + a send + an import-time trigger is a fingerprint legit
+	// packages don't have (they don't phone home host+platform+cwd on import).
+	if bareCall && netSendRE.MatchString(body) && reconCount(body) >= 2 {
+		return Result{Detected: true, Kind: "import_time_beacon", Detail: name}
+	}
+	// Embedded executable: a PE (MZ) or ELF magic in a bytes literal — a
+	// dropper that writes a bundled binary to disk at install. No legit
+	// package ships an executable inside its .py source.
+	if embeddedExecRE.MatchString(body) {
+		return Result{Detected: true, Kind: "embedded_executable", Detail: name}
 	}
 	return Result{}
 }
@@ -255,8 +318,9 @@ func Scan(files map[string][]byte) Result {
 // nested inside any def/class/__main__ guard) for dangerous primitives. It
 // tracks block nesting by indentation: a def/class/script-guard header pushes a
 // frame, and a statement is import-time only when no frame encloses it.
-func topLevelSignals(body string) (shell, send, harvest, bareCall bool) {
-	var stack []int // indentation of each open def/class/guard frame
+func topLevelSignals(body string) (shell, send, harvest, bareCall, dlExec bool) {
+	var stack []int            // indentation of each open def/class/guard frame
+	var dests, spawns []string // top-level urlretrieve destinations, process-launch lines
 	inTriple := false
 	var tripleDelim string
 	// shell fires when a top-level shell-EXEC call and a suspicious shell token
@@ -324,6 +388,64 @@ func topLevelSignals(body string) (shell, send, harvest, bareCall bool) {
 		if !bareCall && bareCallRE.MatchString(trimmed) && !bareCallExcludeRE.MatchString(trimmed) {
 			bareCall = true
 		}
+		for _, m := range urlretrieveRE.FindAllStringSubmatch(line, -1) {
+			if len(dests) < maxDests {
+				dests = append(dests, m[1]+m[2])
+			}
+		}
+		if spawnRE.MatchString(line) {
+			spawns = append(spawns, line)
+		}
 	}
-	return shellCall && shellSuspicious, send, harvest, bareCall
+	// One alternation over every destination, each launch line matched once:
+	// a regex per destination against every line was quadratic (18 s on a
+	// 145 KB file of 4k fetches and 4k launches).
+	if len(dests) > 0 && len(spawns) > 0 {
+		re := runsDestRE(dests)
+		for _, l := range spawns {
+			if re.MatchString(l) {
+				dlExec = true
+				break
+			}
+		}
+	}
+	return shellCall && shellSuspicious, send, harvest, bareCall, dlExec
+}
+
+var (
+	// urlretrieveRE captures the destination of urlretrieve(url, dest): a
+	// string literal (group 1) or a bare name (group 2).
+	urlretrieveRE = regexp.MustCompile(`\burlretrieve\s*\(\s*[^,()]+(?:\([^()]*\))?\s*,\s*(?:['"]([^'"]+)['"]|([A-Za-z_]\w*))`)
+	// spawnRE: any process launch, including os.spawn*/os.exec* and a bare
+	// Popen( after `from subprocess import Popen`.
+	spawnRE = regexp.MustCompile(`\bos\.(?:system|popen|spawn\w*|exec\w*|startfile)\s*\(|\bsubprocess\.(?:Popen|call|run|check_output|check_call)\s*\(|(?:^|[^.\w])Popen\s*\(|\bpty\.spawn\s*\(`)
+)
+
+// runsDestRE matches a launch line that EXECUTES one of dests: it is the program
+// (first argv element / start of the command string) or the script handed to
+// an interpreter. Passing the file as data (`["tar", "xzf", dest]`, the
+// setup.py that fetches a build dependency) does not match.
+func runsDestRE(dests []string) *regexp.Regexp {
+	quoted := make([]string, len(dests))
+	for i, d := range dests {
+		quoted[i] = regexp.QuoteMeta(d)
+	}
+	d := `(?:` + strings.Join(quoted, `|`) + `)`
+	return regexp.MustCompile(`(?:\(\s*\[?\s*|(?:sys\.executable|python[0-9.]*|\b(?:ba|z)?sh|\bnode|\bperl|\bruby)['"]?\s*[,\s]\s*)['"]?` + d + `(?:['"\s,)\]]|$)`)
+}
+
+// pthCode returns the lines of a .pth file that site.py EXECUTES at every
+// interpreter start: those beginning with `import` followed by a space or tab.
+// Every other line is a path entry (or a comment) and never runs. A .pth is
+// installed straight into site-packages, so its code runs without the package
+// ever being imported (litellm 1.82.8, elementary-data 0.23.3).
+func pthCode(body string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "import ") || strings.HasPrefix(line, "import\t") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }

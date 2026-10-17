@@ -97,7 +97,7 @@ type EvaluationContext struct {
 	// Install-script signals (static scan of the unpacked artifact).
 	HasInstallScript           bool // true if a lifecycle script is declared in the package manifest
 	InstallScriptFetchesRemote bool // true if the install-script body references curl/wget/fetch/subprocess/etc.
-	ImportTimeExecution        bool // true if a PyPI or npm package runs malicious behavior at import/install time (pysource, jssource)
+	ImportTimeExecution        bool // true if a PyPI, npm, Composer or RubyGems package runs malicious behavior at import/install/load time (pysource, jssource, scriptsource)
 	MaliciousIOC               bool // true if source embeds an exfil sink host / coupled stealer string (iocscan)
 	BuildRsExecutes            bool // true if a cargo crate's build.rs performs shell/network execution at build time (cargo-only)
 

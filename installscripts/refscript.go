@@ -42,6 +42,7 @@ var scriptInterpreters = map[string]struct{}{
 	"tsx":     {},
 	"deno":    {},
 	"bun":     {},
+	"php":     {},
 }
 
 // scriptExtensions are the bundled-file extensions we treat as resolvable
@@ -58,6 +59,7 @@ var scriptExtensions = map[string]struct{}{
 	".py":   {},
 	".sh":   {},
 	".bash": {},
+	".php":  {},
 }
 
 // commandSepRE splits a hook into the individual commands a shell would run.
@@ -244,6 +246,13 @@ var execOfDecodeRE = regexp.MustCompile(
 // pulls a remote resource. Used together with a remote-fetch check.
 var pyExecRE = regexp.MustCompile(`os\.system|subprocess|\bexec\s*\(|\beval\s*\(|check_call|check_output|Popen`)
 
+// pyNetRE is a Python network primitive. fetchesRemoteRE counts a bare
+// `subprocess` as a fetch, so without it every setup.py or gyp codegen helper
+// that runs the toolchain (pg_config, git rev-parse, clang --version) read as
+// a download-and-execute loader: psycopg2-binary, sympy and lxml were refused
+// by the guard (benign corpus, 2026-10-17). Since v0.22.106.
+var pyNetRE = regexp.MustCompile(`\burllib|\burlopen\b|\burlretrieve\b|\brequests\.|\bhttp\.client\b|\bhttpx\b|\baiohttp\b|\bsocket\.|\bftplib\b|\bcurl\b|\bwget\b`)
+
 // hostReconRE matches a read of the MACHINE's identity — hostname or network
 // interfaces — or a dump of the whole environment.
 // reconSendRE is any outbound primitive. Together, inside a script an install
@@ -320,10 +329,13 @@ func MutatesDependency(body string) bool {
 //     decode certs/checksums/config — so it is excluded.
 //   - DOWNLOAD-AND-EXECUTE COUPLING: a remote-fetch primitive co-occurring with
 //     a true DYNAMIC code-eval primitive (eval / new Function for JS;
-//     os.system/subprocess/exec/eval for Python). A benign installer fetches
-//     bytes and writes them to disk then runs a *binary*, or decodes an
-//     embedded cert/checksum — it does not eval the fetched bytes — so it does
-//     not match.
+//     os.system/subprocess/exec/eval plus a network call for Python). A
+//     benign installer fetches bytes and writes them to disk then runs a
+//     *binary*, or decodes an embedded cert/checksum — it does not eval the
+//     fetched bytes — so it does not match.
+//   - FETCH THEN RUN A BUNDLED SCRIPT UNDER BUN/DENO: a fetch co-occurring
+//     with a bun/deno invocation whose argument is a package-local script
+//     (runsBundledScriptUnderForeignRuntime). Since v0.22.106 (F11).
 //
 // Everything else (fetch-to-disk + run-binary, pure local compile, node-gyp /
 // prebuild wrappers) stays KindPresent — present but not a strong signal.
@@ -357,10 +369,15 @@ func ScanReferencedBody(body string) Kind {
 			return KindFetchesRemote
 		}
 		// Python: a referenced helper running an exec primitive alongside a
-		// remote pull is the pip equivalent. The pip ecosystem rarely ships
-		// "download my own binary" installers, so the exec+fetch coupling is a
-		// reliable signal there.
-		if looksPython(body) && pyExecRE.MatchString(body) {
+		// real network pull (pyNetRE) is the pip equivalent. The pip
+		// ecosystem rarely ships "download my own binary" installers, so the
+		// exec+fetch coupling is a reliable signal there.
+		if looksPython(body) && pyExecRE.MatchString(body) && pyNetRE.MatchString(body) {
+			return KindFetchesRemote
+		}
+		// JS/shell: fetch, then run a bundled script under a foreign runtime
+		// (the Bun loader wave). See runsBundledScriptUnderForeignRuntime.
+		if runsBundledScriptUnderForeignRuntime(body) {
 			return KindFetchesRemote
 		}
 		// Remote fetch present but no eval/decode coupling — benign binary
@@ -477,6 +494,54 @@ func hasLongStringLiteral(body string, min int) bool {
 	return false
 }
 
+// A Bun-loader install script (keyv@6.0.0, @bitwarden/cli 2026.4.0,
+// intercom-client@7.0.4) fetches a signed Bun runtime and runs a script the
+// package ships with it. The fetch-then-run-a-BINARY installer stays present;
+// what is new is the second half: the runtime is not the node running the
+// hook, and its argument is a bundled script, not `--version`. Two forms:
+//
+//	execFileSync(dir+'/bun', [path.join(__dirname, x)])   // call
+//	/tmp/b/bun "$(dirname "$0")/router_runtime.js"         // command line
+//
+// The command line counts only where something runs it: after a shell
+// separator, as the first thing in an exec*/spawn*/system string, or on its
+// own line of a #!sh script — never in a message or a comment ("If you use
+// Bun, run: bun run setup.ts").
+//
+// ponytail: bun and deno only. A downloaded node binary, or a runtime held in
+// a variable not named for it (spawn(exe, [script])), is not matched; the
+// second-hop scan of a literal script name still covers the latter.
+var (
+	runtimeCallRE = regexp.MustCompile(
+		"\\b(?:execFile|spawn|execa)(?:Sync)?\\s*\\(\\s*((?:[^,()\\[\\];]|\\([^()]*\\))+?)\\s*,\\s*\\[([^\\]]{0,240})\\]",
+	)
+	runtimeCmdRE   = regexp.MustCompile("(?:^|[^A-Za-z0-9_])(?:bun|deno)(?:\\.exe)?[\"'`)\\s]*$")
+	localArgRE     = regexp.MustCompile("__dirname|import\\.meta|[\"'`][^\"'`]*\\.(?:[cm]?[jt]s|py)[\"'`]")
+	runtimeLineRE  = regexp.MustCompile(runtimeExecCtx + runtimeLine)
+	runtimeShellRE = regexp.MustCompile("(?m)(?:" + runtimeExecCtx + "|^[ \\t]*)" + runtimeLine)
+	shellShebangRE = regexp.MustCompile(`^#!\S*(?:/|env[ \t]+)(?:ba|z|da|k)?sh\b`)
+)
+
+const (
+	runtimeExecCtx = "(?:&&|\\|\\||[;|]|\\b(?:exec\\w*|spawn\\w*|system|popen|shell_exec|passthru)\\s*\\(\\s*[\"'`])[ \\t]*"
+	runtimeLine    = "(?:[^\\s\"'`;|&()]*/)?(?:bun|deno)(?:\\.exe)?[\"'`]?[ \\t]+(?:run[ \\t]+)?(?:-{1,2}[A-Za-z][\\w=-]*[ \\t]+)*" +
+		"(?:[\"'`]?\\$\\(dirname|[\"'`]?\\$\\{?__dirname|[\"'`]?[^\\s\"'`;|&]+\\.(?:[cm]?[jt]s|py)\\b)"
+)
+
+// runsBundledScriptUnderForeignRuntime reports a bun/deno invocation whose
+// argument is a package-local script. The caller has already seen a fetch.
+func runsBundledScriptUnderForeignRuntime(body string) bool {
+	for _, m := range runtimeCallRE.FindAllStringSubmatch(body, 64) {
+		if runtimeCmdRE.MatchString(m[1]) && localArgRE.MatchString(m[2]) {
+			return true
+		}
+	}
+	if shellShebangRE.MatchString(body) {
+		return runtimeShellRE.MatchString(body)
+	}
+	return runtimeLineRE.MatchString(body)
+}
+
 // looksPython is a cheap heuristic to gate the python exec+fetch coupling so we
 // don't apply pyExecRE to a JS body that happens to contain "exec(".
 func looksPython(body string) bool {
@@ -516,7 +581,9 @@ func NextHopScripts(body string) []string {
 		if len(m) < 2 {
 			continue
 		}
-		ref := normalizeRef(m[1])
+		// `__dirname+'/x.js'`, `dirname(__DIR__).'/x.sh'`: the literal is
+		// package-relative after the dir join, so drop the leading slash.
+		ref := normalizeRef(strings.TrimLeft(m[1], "/"))
 		if ref == "" {
 			continue
 		}

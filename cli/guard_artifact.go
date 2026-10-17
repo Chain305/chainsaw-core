@@ -48,6 +48,9 @@ import (
 	"github.com/chain305/chainsaw-core/intelligence"
 	"github.com/chain305/chainsaw-core/intelligence/artifactmap"
 	"github.com/chain305/chainsaw-core/iocscan"
+	"github.com/chain305/chainsaw-core/jssource"
+	"github.com/chain305/chainsaw-core/pysource"
+	"github.com/chain305/chainsaw-core/scriptsource"
 )
 
 // guardArtifactDirEnv points at a directory of pre-staged package tarballs the
@@ -121,7 +124,14 @@ func analyzeArtifact(ecosystem string, archive []byte) behavioralVerdict {
 		}
 	case "composer", "php":
 		if cj := rootFileBytes(files, "composer.json"); cj != nil {
-			if v := installVerdict(installscripts.Composer(cj)); v.Block {
+			scan := installscripts.Composer(cj)
+			if v := installVerdict(scan); v.Block {
+				return v
+			} else if v.Severity != "" {
+				warning = v
+			}
+			// A plugin's class file, and what it runs (F17).
+			if v := referencedScriptVerdict(files, scan.ScriptBody); v.Block {
 				return v
 			} else if v.Severity != "" {
 				warning = v
@@ -148,13 +158,26 @@ func analyzeArtifact(ecosystem string, archive []byte) behavioralVerdict {
 		}
 	}
 
+	// Import-time execution: code that runs on import / require / autoload with
+	// no install hook (the server's pysource provider, same detectors).
+	if v := importTimeVerdict(ecosystem, files); v.Block {
+		return v
+	} else if v.Severity != "" && warning.Severity == "" {
+		warning = v
+	}
+
 	// Embedded-IOC scan over the artifact's source bodies, any ecosystem (an
 	// exfil webhook or coupled stealer string is malicious in any package, so
 	// this lives OUTSIDE the ecosystem switch). Same detector the server-side
 	// intelligence provider runs (core/intelligence/provider_iocscan.go), so
 	// guard and server never drift on what counts as an indicator. A hit is
 	// high-confidence and dispositive — block outright rather than warn.
-	if src := sourceFileMap(files); len(src) > 0 {
+	// .pth (and .php/.rb, already source) as the server's IOC scan reads them.
+	src := sourceFileMap(files)
+	for n, b := range files.Select(iocscan.WantsScriptSource) {
+		src[n] = b
+	}
+	if len(src) > 0 {
 		if r := iocscan.Scan(src); r.Detected {
 			// A Weak hit is an indicator found ONLY in the package's own tests,
 			// docs examples, or vendored third-party code. Warn — do not refuse
@@ -169,8 +192,65 @@ func analyzeArtifact(ecosystem string, archive []byte) behavioralVerdict {
 				Reason: "embedded malicious indicator (" + r.Kind + ": " + r.Detail + ")"}
 		}
 	}
+	// Defender / Smart App Control tampering, plaintext or inside a
+	// PowerShell -EncodedCommand, in source and in .ps1/.cmd/.bat scripts
+	// (NuGet's tools/install.ps1). The server scores this sc.defender_tamper,
+	// warn-capped, so the guard warns rather than refuses.
+	for n, b := range files.Select(iocscan.WantsWindowsScript) {
+		src[n] = b
+	}
+	if d := iocscan.DefenderTamper(src); d != "" && warning.Severity == "" {
+		warning = behavioralVerdict{Severity: "behavioral-medium",
+			Reason: "Windows Defender or Smart App Control tampering (" + d + ")"}
+	}
 
 	return warning
+}
+
+// importTimeVerdict runs the import-time detectors the server's pysource
+// provider runs (core/intelligence/provider_pysource.go) for the artifact's
+// ecosystem, and refuses on the shapes that execute fetched or decoded
+// content, like installVerdict's fetches-remote / eval-encoded: pysource's
+// Dispositive kinds (top_level_shell, download_exec, decode-and-exec in a .pth
+// or a child interpreter), jssource's top_level_shell, and both scriptsource
+// kinds. pysource's other kinds fire on popular packages (PIL, numpy, pip's
+// vendored packaging) and yield no verdict here, as they score nothing
+// server-side. A scriptsource hit only in a non-shipping path warns.
+func importTimeVerdict(ecosystem string, files artifactmap.ArtifactFileMap) behavioralVerdict {
+	src := map[string][]byte{}
+	for name, f := range files {
+		if f.Kind == artifactmap.KindSource || strings.EqualFold(filepath.Ext(name), ".pth") {
+			src[name] = f.Bytes
+		}
+	}
+	if len(src) == 0 {
+		return behavioralVerdict{}
+	}
+	var block, weak bool
+	var kind, detail string
+	switch strings.ToLower(ecosystem) {
+	case "npm":
+		r := jssource.Scan(src)
+		block, kind, detail = r.Detected, r.Kind, r.Detail
+	case "pip", "pypi":
+		r := pysource.Scan(src)
+		block, kind, detail = r.Dispositive, r.Kind, r.Detail
+	case "composer", "php":
+		r := scriptsource.ScanPHP(src)
+		block, weak, kind, detail = r.Detected && !r.Weak, r.Weak, r.Kind, r.Detail
+	case "rubygems", "gem":
+		r := scriptsource.ScanRuby(src)
+		block, weak, kind, detail = r.Detected && !r.Weak, r.Weak, r.Kind, r.Detail
+	}
+	reason := "code runs fetched or decoded content on import (" + kind + ": " + detail + ")"
+	switch {
+	case block:
+		return behavioralVerdict{Block: true, Severity: "behavioral-high", Reason: reason}
+	case weak:
+		// Only in tests / spec / docs / examples: warn, as iocscan's Weak does.
+		return behavioralVerdict{Severity: "behavioral-medium", Reason: reason}
+	}
+	return behavioralVerdict{}
 }
 
 // hiddenUnicodeVerdict tiers post-suppression hidden-unicode hits by kind and
@@ -290,18 +370,25 @@ func referencedScriptVerdict(files artifactmap.ArtifactFileMap, scriptBody strin
 	if len(refs) == 0 {
 		return behavioralVerdict{}
 	}
-	src := sourceFileMap(files)
+	// The server resolver's file set (shell scripts and PHP are not KindSource).
+	src := map[string][]byte{}
+	for name, f := range files {
+		if intelligence.WantsReferencedScript(f.Path) {
+			src[name] = f.Bytes
+		}
+	}
 	if len(src) == 0 {
 		return behavioralVerdict{}
 	}
+	block := behavioralVerdict{Block: true, Severity: "behavioral-high", Reason: "referenced install script fetches or hides executable payload"}
 	var warning behavioralVerdict
 	seen := map[string]struct{}{}
 	const maxResolve = 16
 	resolved := 0
-	for _, ref := range refs {
-		if resolved >= maxResolve {
-			break
-		}
+	// scan classifies every candidate for ref and returns the shallowest
+	// body, whose next hop the caller follows.
+	scan := func(ref string) (bool, string) {
+		first := ""
 		for _, name := range resolveLocalScriptNames(src, ref) {
 			if resolved >= maxResolve {
 				break
@@ -312,11 +399,30 @@ func referencedScriptVerdict(files artifactmap.ArtifactFileMap, scriptBody strin
 			seen[name] = struct{}{}
 			resolved++
 			// WithTail: a loader past the 2 MiB cap keeps its decoder at the end.
-			switch installscripts.ScanReferencedBody(string(files[name].WithTail())) {
+			body := string(files[name].WithTail())
+			switch installscripts.ScanReferencedBody(body) {
 			case installscripts.KindFetchesRemote, installscripts.KindEvalEncoded:
-				return behavioralVerdict{Block: true, Severity: "behavioral-high", Reason: "referenced install script fetches or hides executable payload"}
+				return true, ""
 			case installscripts.KindMutatesDependency:
 				warning = behavioralVerdict{Block: false, Severity: "behavioral-medium", Reason: "referenced install script mutates files under node_modules"}
+			}
+			if first == "" {
+				first = body
+			}
+		}
+		return false, first
+	}
+	for _, ref := range refs {
+		bad, body := scan(ref)
+		if bad {
+			return block
+		}
+		// Second hop, as the server's scanReferencedScripts: a clean loader
+		// running a sibling bundled script it names as a literal (keyv@6.0.0
+		// setup.mjs -> Math_Symbol.js). Since v0.22.106 (F11).
+		for _, hop := range installscripts.NextHopScripts(body) {
+			if bad, _ := scan(hop); bad {
+				return block
 			}
 		}
 	}

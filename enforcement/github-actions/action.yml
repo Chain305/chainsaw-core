@@ -533,7 +533,7 @@ runs:
                     elif .verdict == "warn" then ":warning:"
                     else ":white_check_mark:"
                     end
-                  ) + " **[" + .ecosystem + "]** `" + .name + "@" + .version + "`"
+                  ) + " **[" + .ecosystem + "]** `" + .name + (if (.version // "") != "" then "@" + .version else "" end) + "`"
                   + if .previous_version then " *(was " + .previous_version + ")*" else "" end
                   + if (.signals | length) > 0 then
                       " — " + (.signals | map(.id + ": " + .reason) | join("; "))

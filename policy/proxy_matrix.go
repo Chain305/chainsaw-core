@@ -791,7 +791,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionReservedNamespaces:         SupportFull,
 		ConditionHasInstallScript:           SupportFull,
 		ConditionInstallScriptFetchesRemote: SupportFull,
-		ConditionImportTimeExecution:        SupportNone,
+		ConditionImportTimeExecution:        SupportFull, // since v0.22.106 (F7): core/scriptsource over .php
 		ConditionMaliciousIOC:               SupportFull,
 		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportNone, // not extracted in PR 2
@@ -863,7 +863,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionReservedNamespaces:         SupportFull,
 		ConditionHasInstallScript:           SupportFull,
 		ConditionInstallScriptFetchesRemote: SupportFull,
-		ConditionImportTimeExecution:        SupportNone,
+		ConditionImportTimeExecution:        SupportFull, // since v0.22.106 (F7): core/scriptsource over .rb
 		ConditionMaliciousIOC:               SupportFull,
 		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportFull, // authors (comma-split)

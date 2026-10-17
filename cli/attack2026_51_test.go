@@ -4,11 +4,11 @@ import "testing"
 
 // ChainDrop / keyv@6.0.0 (row 51), guard side.
 //
-// FINDING: the guard's referencedScriptVerdict (core/cli/guard_artifact.go)
-// scans only the FIRST hop. The server provider follows one more hop
-// (installscripts.NextHopScripts, core/intelligence/provider_installscripts.go
-// scanReferencedScripts), so a readable Bun loader that execs an obfuscated
-// Math_Symbol.js is refused by the proxy and allowed by the guard.
+// Since v0.22.106 (F11) the guard's referencedScriptVerdict follows the same
+// second hop as the server (installscripts.NextHopScripts, see
+// scanReferencedScripts in core/intelligence/provider_installscripts.go); it
+// used to scan the first hop only. The readable Bun loader is also refused on
+// the first hop now (fetch Bun, run a bundled script with it).
 func TestAttack2026_51_ChainDrop_Guard(t *testing.T) {
 	manifest := `{"name":"keyv","version":"6.0.0","scripts":{"preinstall":"node setup.mjs"}}`
 	loader := "import https from 'node:https';import fs from 'node:fs';import path from 'node:path';\n" +
@@ -21,8 +21,27 @@ func TestAttack2026_51_ChainDrop_Guard(t *testing.T) {
 	staged := analyzeArtifact("npm", atkBTgz(t, map[string]string{
 		"package.json": manifest, "setup.mjs": loader, "Math_Symbol.js": payload,
 	}))
-	if staged.Block {
-		t.Fatalf("guard now follows the second hop — update the finding: %+v", staged)
+	if !staged.Block {
+		t.Fatalf("readable Bun loader + obfuscated Math_Symbol.js not refused: %+v", staged)
+	}
+
+	// The second hop on its own: a loader with nothing to escalate (node
+	// runs the sibling, no fetch) is refused for the obfuscated sibling.
+	hop2 := analyzeArtifact("npm", atkBTgz(t, map[string]string{
+		"package.json":   manifest,
+		"setup.mjs":      "import path from 'node:path';import {spawnSync} from 'node:child_process';\nspawnSync(process.execPath,[path.join(__dirname,'Math_Symbol.js')]);\n",
+		"Math_Symbol.js": payload,
+	}))
+	if !hop2.Block {
+		t.Fatalf("second hop not followed: %+v", hop2)
+	}
+	benignHop := analyzeArtifact("npm", atkBTgz(t, map[string]string{
+		"package.json":   manifest,
+		"setup.mjs":      "import path from 'node:path';import {spawnSync} from 'node:child_process';\nspawnSync(process.execPath,[path.join(__dirname,'Math_Symbol.js')]);\n",
+		"Math_Symbol.js": "module.exports = Math.max;\n",
+	}))
+	if benignHop.Block {
+		t.Fatalf("benign second hop refused: %+v", benignHop)
 	}
 
 	// An obfuscated loader (the jaredwray wave) IS refused on the first hop.

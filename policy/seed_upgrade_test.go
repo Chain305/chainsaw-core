@@ -239,3 +239,156 @@ func TestSeedDemoSkipsSignalsTheConfigAlreadyCovers(t *testing.T) {
 		}
 	}
 }
+
+// hiddenUnicodeSeed returns the hidden-unicode block rule as a given release
+// seeded it: kinds is the only thing v0.22.99 changed.
+func hiddenUnicodeSeed(precedence int, kinds ...string) Policy {
+	yes := true
+	return Policy{Name: "Block bidi-override hidden Unicode payloads", Precedence: precedence,
+		Mode: ModeBlock, Status: StatusEnabled,
+		Conditions: Conditions{HasHiddenUnicode: &yes, HiddenUnicodeKinds: kinds}}
+}
+
+// TestSupersededSeedUpgradeDecision is the non-DB half of F19: which stored
+// rows the startup upgrade rewrites. Only an exact earlier seeded definition
+// qualifies; any edit leaves the row alone.
+func TestSupersededSeedUpgradeDecision(t *testing.T) {
+	disabled := hiddenUnicodeSeed(150, "bidi_override")
+	disabled.Status = StatusDisabled
+	described := hiddenUnicodeSeed(150, "bidi_override")
+	described.Description = "ours now"
+	monitor := hiddenUnicodeSeed(150, "bidi_override")
+	monitor.Mode = ModeMonitor
+	scoped := hiddenUnicodeSeed(150, "bidi_override")
+	scoped.Identifier.TargetPackageRepo = "npmjs"
+	renamed := hiddenUnicodeSeed(150, "bidi_override")
+	renamed.Name = "Block bidi only"
+	cased := hiddenUnicodeSeed(150, "bidi_override")
+	cased.Name = "  block BIDI-override hidden unicode payloads "
+
+	cases := []struct {
+		name string
+		row  Policy
+		want bool
+	}{
+		{"pre-v0.22.99 seed at 150", hiddenUnicodeSeed(150, "bidi_override"), true},
+		{"earliest seed at 120", hiddenUnicodeSeed(120, "bidi_override"), true},
+		{"disabled seed: conditions upgraded, status kept", disabled, true},
+		{"name folded as seeding folds it", cased, true},
+		{"current seed is not upgraded again", hiddenUnicodeSeed(150, "bidi_override", "variation_selector"), false},
+		{"user moved precedence", hiddenUnicodeSeed(155, "bidi_override"), false},
+		{"user widened kinds", hiddenUnicodeSeed(150, "bidi_override", "zero_width"), false},
+		{"user added a description", described, false},
+		{"user switched to monitor", monitor, false},
+		{"user scoped it to one repo", scoped, false},
+		{"different name", renamed, false},
+	}
+	for _, c := range cases {
+		got, ok := SupersededSeedUpgrade(c.row)
+		if ok != c.want {
+			t.Errorf("%s: upgrade=%v, want %v", c.name, ok, c.want)
+			continue
+		}
+		if ok && !slicesEqual(got.HiddenUnicodeKinds, []string{"bidi_override", "variation_selector"}) {
+			t.Errorf("%s: upgraded kinds = %v", c.name, got.HiddenUnicodeKinds)
+		}
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestSupersededSeedUpgradeOnStartup is the DB half of F19. Three orgs: one
+// seeded by a pre-v0.22.99 release, one whose operator edited that rule, and
+// one seeded fresh. Opening the store (what every startup does) upgrades the
+// first only, and a second open changes nothing.
+func TestSupersededSeedUpgradeOnStartup(t *testing.T) {
+	db, oldOrg := seedUpgradeTestOrg(t)
+	editedOrg, freshOrg := oldOrg+"-edited", oldOrg+"-fresh"
+	t.Cleanup(func() {
+		_, _ = db.DB().Exec(`DELETE FROM policies WHERE org_id IN (?, ?)`, editedOrg, freshOrg)
+	})
+
+	if n, err := seedInto(t, db, oldOrg, []Policy{hiddenUnicodeSeed(150, "bidi_override")}); err != nil || n != 1 {
+		t.Fatalf("seed old org: created=%d err=%v", n, err)
+	}
+	edited := hiddenUnicodeSeed(150, "bidi_override")
+	edited.Description = "kept bidi-only on purpose"
+	if n, err := seedInto(t, db, editedOrg, []Policy{edited}); err != nil || n != 1 {
+		t.Fatalf("seed edited org: created=%d err=%v", n, err)
+	}
+	if n, err := seedInto(t, db, freshOrg, []Policy{hiddenUnicodeSeed(150, "bidi_override", "variation_selector")}); err != nil || n != 1 {
+		t.Fatalf("seed fresh org: created=%d err=%v", n, err)
+	}
+
+	read := func(orgID string) (Policy, string) {
+		t.Helper()
+		pols, err := (&Store{sql: db, orgID: orgID}).List()
+		if err != nil || len(pols) != 1 {
+			t.Fatalf("list %s: %d rows, err=%v", orgID, len(pols), err)
+		}
+		var hash string
+		if err := db.DB().QueryRow(`SELECT parameter_hash FROM policies WHERE id=?`, pols[0].ID).Scan(&hash); err != nil {
+			t.Fatalf("read hash: %v", err)
+		}
+		return pols[0], hash
+	}
+	_, editedHashBefore := read(editedOrg)
+	freshBefore, freshHashBefore := read(freshOrg)
+
+	type recorded struct {
+		orgID, summary string
+		pol            Policy
+	}
+	var calls []recorded
+	recorder := WithSeedUpgradeRecorder(func(orgID string, pol Policy, summary string) {
+		if orgID == oldOrg || orgID == editedOrg || orgID == freshOrg {
+			calls = append(calls, recorded{orgID, summary, pol})
+		}
+	})
+	if _, err := NewStore(db, recorder); err != nil {
+		t.Fatalf("startup: %v", err)
+	}
+	first, _ := read(oldOrg)
+	if _, err := NewStore(db, recorder); err != nil {
+		t.Fatalf("second startup: %v", err)
+	}
+	// The recorder (wired to the policy version history by the proxy) hears
+	// about the one rewrite, once, with the full upgraded row.
+	if len(calls) != 1 || calls[0].orgID != oldOrg || calls[0].pol.ID != first.ID ||
+		!strings.Contains(calls[0].summary, "F19") ||
+		!slicesEqual(normalizeHashStrings(calls[0].pol.Conditions.HiddenUnicodeKinds), []string{"bidi_override", "variation_selector"}) {
+		t.Fatalf("seed-upgrade recorder calls = %+v, want one for %s/%s naming F19", calls, oldOrg, first.ID)
+	}
+
+	up, upHash := read(oldOrg)
+	if !up.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Fatalf("second startup rewrote the upgraded row again (updated_at %v -> %v): not idempotent", first.UpdatedAt, up.UpdatedAt)
+	}
+	if !slicesEqual(normalizeHashStrings(up.Conditions.HiddenUnicodeKinds), []string{"bidi_override", "variation_selector"}) {
+		t.Fatalf("old org rule not upgraded: kinds=%v", up.Conditions.HiddenUnicodeKinds)
+	}
+	if want, _ := PolicyParameterHash(up); upHash != want {
+		t.Fatalf("upgraded row parameter_hash %q != recomputed %q", upHash, want)
+	}
+	if up.Mode != ModeBlock || up.Precedence != 150 || up.Status != StatusEnabled {
+		t.Fatalf("upgrade changed more than the conditions: %+v", up)
+	}
+	ed, edHash := read(editedOrg)
+	if !slicesEqual(ed.Conditions.HiddenUnicodeKinds, []string{"bidi_override"}) || edHash != editedHashBefore {
+		t.Fatalf("user-edited rule was rewritten: kinds=%v", ed.Conditions.HiddenUnicodeKinds)
+	}
+	fr, frHash := read(freshOrg)
+	if frHash != freshHashBefore || !fr.UpdatedAt.Equal(freshBefore.UpdatedAt) {
+		t.Fatalf("fresh org's current rule was touched (updated_at %v -> %v)", freshBefore.UpdatedAt, fr.UpdatedAt)
+	}
+}

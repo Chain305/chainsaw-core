@@ -180,6 +180,9 @@ func actionInputFields(in risk.Input) map[string]any {
 	if in.ActionScriptInjection {
 		out["ActionScriptInjectionLocs"] = in.ActionScriptInjectionLocs
 	}
+	if in.ActionDecodeExec {
+		out["ActionDecodeExecLocs"] = in.ActionDecodeExecLocs
+	}
 	if len(out) == 0 {
 		return nil
 	}

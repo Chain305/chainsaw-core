@@ -78,6 +78,7 @@ func matrixProducers() []conditionProducer {
 		{policy.ConditionCooldown, "supportedRegistryEcosystems (provider_registrymetadata.go)", registryMetadata},
 		{policy.ConditionShrinkwrapPresent, "ecosystemLockfiles (provider_shrinkwrap.go)", inSet(shrinkwrapLockfileEcosystems())},
 		{policy.ConditionTyposquat, "typosquat.EcosystemsWithTyposquatRisk (provider_typosquat.go)", inSet(supportedTyposquatEcosystems)},
+		{policy.ConditionImportTimeExecution, "pysourceEcosystems (provider_pysource.go)", inSet(pysourceEcosystems)},
 	}
 }
 

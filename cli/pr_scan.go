@@ -63,7 +63,6 @@ import (
 	"github.com/chain305/chainsaw-core/depparser/parser/ruby/bundler"
 	ftypes "github.com/chain305/chainsaw-core/fanal"
 	"github.com/chain305/chainsaw-core/githubactions"
-	"github.com/chain305/chainsaw-core/malware"
 	"github.com/chain305/chainsaw-core/policy"
 	"github.com/chain305/chainsaw-core/policy/dsl"
 	"github.com/chain305/chainsaw-core/policyengine"
@@ -136,7 +135,16 @@ verdict is "allow", "warn", or "block".
 
 Changed GitHub Actions workflows (.github/workflows/*.yml, action.yml) are
 inspected too: every added or changed uses: ref gets the scan-actions
-signals (action.*), and a known-compromised action blocks.
+signals (action.*), and a known-compromised action blocks. Known-compromised
+actions come from the same sources as scan-actions: the built-in seed plus the
+local GitHub Actions OSV snapshot when present. The scan-actions workflow lint
+also runs; a dangerous shape the PR introduces (pwn request, unguarded comment
+trigger, script injection, a decoded payload piped to a shell) is a warning row
+named after the workflow file.
+
+A changed .vscode/tasks.json or .vscode/settings.json that newly runs a task
+when the folder is opened (runOn: folderOpen, task.allowAutomaticTasks: on)
+is a warning row too.
 
 Intended as a required-status-check companion to chainsaw scan-repo: scan-repo
 catches committed bypass config; pr-scan catches newly introduced packages.
@@ -288,7 +296,9 @@ func buildPRScanReport(baseSHA, headSHA, absRepo string) (prScanReport, int, err
 	for _, rel := range changedFiles {
 		eco, ok := classifyManifest(rel)
 		workflow := !ok && isWorkflowFile(rel)
-		if !ok && !workflow {
+		vscodeBase := path.Base(filepath.ToSlash(rel))
+		vscode := !ok && !workflow && isVSCodeConfig(rel) && (vscodeBase == "tasks.json" || vscodeBase == "settings.json")
+		if !ok && !workflow && !vscode {
 			continue
 		}
 
@@ -308,6 +318,13 @@ func buildPRScanReport(baseSHA, headSHA, absRepo string) (prScanReport, int, err
 		if headContent == nil {
 			// File genuinely absent at head — removed by this PR. Removals are
 			// risk-reduction, so there is nothing to evaluate.
+			continue
+		}
+
+		if vscode {
+			if e, found := diffVSCodeConfig(rel, baseContent, headContent); found {
+				report.Added = append(report.Added, e)
+			}
 			continue
 		}
 
@@ -1749,10 +1766,22 @@ func isWorkflowFile(rel string) bool {
 // blocks; every other action signal warns, like pr-scan's own heuristics. An
 // unparseable head is an error (counted); an unparseable or absent base
 // makes every head ref new.
+//
+// It also runs the workflow-structure lint (githubactions.LintWorkflow, the
+// same as scan-actions): findings the head has and base did not become one
+// added row named after the workflow file, every signal a warn.
+//
+// The malware feed is scan-actions' (scanActionsFeed): the static seed plus
+// the local GitHub Actions OSV snapshot when one is present. Offline.
 func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded []prScanEntry, err error) {
 	headRefs, err := githubactions.ParseWorkflowFile(rel, headContent)
 	if err != nil {
 		return nil, nil, err
+	}
+	if lint, err := diffWorkflowLint(rel, baseContent, headContent); err != nil {
+		return nil, nil, err
+	} else if len(lint) > 0 {
+		added = append(added, prScanEntry{Ecosystem: "github_actions", Name: rel, Signals: lint, Verdict: prScanVerdict(lint)})
 	}
 	baseRefs, _ := githubactions.ParseWorkflowFile(rel, baseContent)
 	seen, prev := map[string]bool{}, map[string]string{}
@@ -1770,12 +1799,12 @@ func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded 
 		}
 	}
 	if len(changed) == 0 {
-		return nil, nil, nil
+		return added, nil, nil
 	}
 	findings, err := githubactions.Scan(context.Background(), changed, githubactions.ScanDeps{
 		// The same wiring as scan-actions (scan_actions.go); both offline.
 		Typosquat: githubactions.NewTyposquatAdapter(typosquat.NewGitHubActionsDetector(nil)),
-		Malware:   githubactions.NewMalwareAdapter(malware.NewGitHubActionsFeed()),
+		Malware:   githubactions.NewMalwareAdapter(scanActionsFeed(os.Stderr)),
 	})
 	if err != nil {
 		return nil, nil, err
@@ -1803,6 +1832,49 @@ func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded 
 		}
 	}
 	return added, upgraded, nil
+}
+
+// diffWorkflowLint returns the head's LintWorkflow findings that base does
+// not have, keyed on signal and message (line numbers move with any edit).
+func diffWorkflowLint(rel string, baseContent, headContent []byte) ([]prScanSignal, error) {
+	head, err := githubactions.LintWorkflow(rel, headContent)
+	if err != nil {
+		return nil, err
+	}
+	base, _ := githubactions.LintWorkflow(rel, baseContent)
+	had := map[string]bool{}
+	for _, f := range base {
+		had[f.Signal+"\x00"+f.Message] = true
+	}
+	var out []prScanSignal
+	for _, f := range head {
+		if !had[f.Signal+"\x00"+f.Message] {
+			out = append(out, prScanSignal{ID: f.Signal, Severity: "warn", Reason: fmt.Sprintf("line %d: %s", f.Ref.SourceLine, f.Message)})
+		}
+	}
+	return out, nil
+}
+
+// diffVSCodeConfig returns one added row for a .vscode/tasks.json or
+// settings.json whose head carries a scan-repo editor-autorun finding
+// (inspectFile's vscode-* rules) that base did not: a task that runs when
+// the folder is opened executes on every machine that opens the checkout.
+func diffVSCodeConfig(rel string, baseContent, headContent []byte) (prScanEntry, bool) {
+	base := path.Base(filepath.ToSlash(rel))
+	had := map[string]bool{}
+	for _, f := range inspectFile(rel, base, string(baseContent)) {
+		had[f.Rule] = true
+	}
+	var sigs []prScanSignal
+	for _, f := range inspectFile(rel, base, string(headContent)) {
+		if !had[f.Rule] {
+			sigs = append(sigs, prScanSignal{ID: f.Rule, Severity: "warn", Reason: f.Detail})
+		}
+	}
+	if len(sigs) == 0 {
+		return prScanEntry{}, false
+	}
+	return prScanEntry{Ecosystem: "vscode", Name: rel, Signals: sigs, Verdict: prScanVerdict(sigs)}, true
 }
 
 // prScanNotAssessedSignalID marks a row for a package from outside the
@@ -2340,7 +2412,11 @@ func printEntryGroup(cmd *cobra.Command, title string, entries []prScanEntry) {
 		if e.PreviousVersion != nil {
 			prev = fmt.Sprintf(" (was %s)", *e.PreviousVersion)
 		}
-		fmt.Fprintf(out, "  %s [%s] %s@%s%s\n", icon, e.Ecosystem, e.Name, e.Version, prev)
+		coord := e.Name
+		if e.Version != "" {
+			coord += "@" + e.Version
+		}
+		fmt.Fprintf(out, "  %s [%s] %s%s\n", icon, e.Ecosystem, coord, prev)
 		for _, s := range e.Signals {
 			fmt.Fprintf(out, "       %s: %s\n", s.ID, s.Reason)
 		}

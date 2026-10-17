@@ -6,8 +6,9 @@ package cli
 //
 // Same mechanism as attack 04, different shape: the checkout names the fork
 // repository and head ref instead of the head SHA. scan-actions reports
-// action.pwn_request (high, default exit 1). Negative twin: a workflow_run
-// job that checks out the default branch only.
+// action.pwn_request (high, default exit 1), and since v0.22.106 (F12)
+// pr-scan reports it on the PR that adds the workflow. Negative twin: a
+// workflow_run job that checks out the default branch only.
 
 import "testing"
 
@@ -32,6 +33,9 @@ jobs:
 	if atk26Sigs(r)["action.pwn_request"] != "high" || code != 1 {
 		t.Fatalf("fork repository+head ref checkout under pull_request_target: want high pwn_request, exit 1; got exit %d %+v", code, r.Findings)
 	}
+	if !atk26PRScanLints(t, "ci.yml", pwn, "action.pwn_request") {
+		t.Fatal("pr-scan: want a warn row with action.pwn_request")
+	}
 
 	const safe = `name: CI
 on:
@@ -51,5 +55,8 @@ jobs:
 	}
 	if _, ok := atk26Sigs(r)["action.pwn_request"]; ok || code != 0 {
 		t.Fatalf("workflow_run job on the base checkout: want no pwn_request, exit 0; got exit %d %+v", code, r.Findings)
+	}
+	if atk26PRScanLints(t, "ci.yml", safe, "action.pwn_request") {
+		t.Fatal("pr-scan: the base-checkout workflow_run twin must not carry action.pwn_request")
 	}
 }

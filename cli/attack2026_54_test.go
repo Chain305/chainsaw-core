@@ -7,10 +7,12 @@ package cli
 // .vscode/settings.json enabling task.allowAutomaticTasks. A Dependabot merge
 // carried it into master. No package release was affected (GHSA-6f2q-w3r8-xxhj).
 //
-// NOT COVERED, asserted as current behaviour: scan-repo reads only the files
-// a bypass rule can match (isScanRepoCandidate) and has no rule for editor
-// tasks; pr-scan diffs manifests, lockfiles and workflows only. Control: the
-// same scan-repo inspector does flag a requirements.txt git dependency.
+// Covered since v0.22.106 (F16): scan-repo flags a .vscode/tasks.json task
+// with runOn: folderOpen (vscode-folder-open-task) and a .vscode/settings.json
+// turning on task.allowAutomaticTasks (vscode-automatic-tasks-on), and pr-scan
+// gives a PR that introduces either a warn row. A force-push is not a PR, so
+// scan-repo as a required check is the gate that sees the forged commit.
+// Negative twin: an ordinary build task with no runOn.
 
 import "testing"
 
@@ -28,14 +30,36 @@ func TestAttack2026_54_BindsNETVSCodeTask(t *testing.T) {
   }]
 }`
 	const settings = `{"task.allowAutomaticTasks": "on", "terminal.integrated.hideOnStartup": "always"}`
-	for rel, body := range map[string]string{".vscode/tasks.json": tasks, ".vscode/settings.json": settings} {
+	for rel, rule := range map[string]string{".vscode/tasks.json": "vscode-folder-open-task", ".vscode/settings.json": "vscode-automatic-tasks-on"} {
+		body := map[string]string{".vscode/tasks.json": tasks, ".vscode/settings.json": settings}[rel]
 		base := rel[len(".vscode/"):]
-		if isScanRepoCandidate(base) || len(inspectFile(rel, base, body)) != 0 {
-			t.Fatalf("scan-repo now inspects %s: update the attack-54 classification", rel)
+		got := inspectFile(rel, base, body)
+		if !isScanRepoCandidate(base) || len(got) != 1 || got[0].Rule != rule {
+			t.Fatalf("scan-repo %s: want one %s finding, got %+v", rel, rule, got)
+		}
+		e, ok := diffVSCodeConfig(rel, nil, []byte(body))
+		if !ok || e.Verdict != "warn" || !hasPRSignal(e.Signals, rule) {
+			t.Fatalf("pr-scan %s: want a warn row with %s, got %+v", rel, rule, e)
+		}
+		// Already in base: not this PR's change, no row.
+		if _, ok := diffVSCodeConfig(rel, []byte(body), []byte(body)); ok {
+			t.Fatalf("pr-scan %s: a finding already in base must not be re-reported", rel)
 		}
 	}
-	if _, ok := classifyManifest(".vscode/tasks.json"); ok || isWorkflowFile(".vscode/tasks.json") {
-		t.Fatal("pr-scan now monitors .vscode/tasks.json: update the attack-54 classification")
+
+	// An escaped key is the same key to VS Code's JSONC reader.
+	if got := inspectFile(".vscode/tasks.json", "tasks.json", `{"tasks":[{"command":"x","runOptions":{"run\u004fn":"folder\u004Fpen"}}]}`); len(got) != 1 {
+		t.Fatalf("escaped runOn/folderOpen not flagged: %+v", got)
+	}
+
+	// Negative twin: a build task that runs only when asked.
+	const build = `{"version":"2.0.0","tasks":[{"label":"build","type":"shell","command":"make","group":"build"}]}`
+	if got := inspectFile(".vscode/tasks.json", "tasks.json", build); len(got) != 0 {
+		t.Fatalf("ordinary build task flagged: %+v", got)
+	}
+	// And a tasks.json outside .vscode/ is not editor config.
+	if got := inspectFile("ci/tasks.json", "tasks.json", tasks); len(got) != 0 {
+		t.Fatalf("ci/tasks.json flagged: %+v", got)
 	}
 
 	// Control: the inspector is live — a git requirement is a proxy bypass.

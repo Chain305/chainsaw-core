@@ -41,8 +41,8 @@ cannot produce a maintainer signal.
 | PyPI | 45 | 4 | 5 |
 | Maven | 19 | 16 | 19 |
 | Cargo | 35 | 3 | 16 |
-| Composer | 34 | 4 | 16 |
-| RubyGems | 36 | 5 | 13 |
+| Composer | 35 | 4 | 15 |
+| RubyGems | 37 | 5 | 12 |
 | NuGet | 24 | 12 | 18 |
 | Go | 29 | 2 | 23 |
 | Hugging Face | 20 | 3 | 31 |

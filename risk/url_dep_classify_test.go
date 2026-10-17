@@ -53,3 +53,30 @@ func TestClassifyDepURL(t *testing.T) {
 		}
 	}
 }
+
+// npm reads a bare user/repo[#ref] as a GitHub dependency (attack 31's
+// owner/repo#sha form); every other ecosystem keeps ClassifyDepURL's answer.
+func TestClassifyNPMDepURL(t *testing.T) {
+	for spec, want := range map[string]DepURLKind{
+		"tanstack/router#79ac49ee":      DepURLGit,
+		"user/repo":                     DepURLGit,
+		" user/repo.js#v1.2.0 ":         DepURLGit,
+		"github:user/repo":              DepURLGit,
+		"^1.2.3":                        DepURLRegistry,
+		"latest":                        DepURLRegistry,
+		"@scope/pkg":                    DepURLRegistry,
+		"./local/dir":                   DepURLRegistry,
+		"file:../x":                     DepURLOther,
+		"dist/foo.tgz":                  DepURLRegistry,
+		"vendor/pkg-1.0.0.tar.gz":       DepURLRegistry,
+		"https://example.invalid/x.tgz": DepURLHTTP,
+	} {
+		if got := ClassifyNPMDepURL(spec); got != want {
+			t.Errorf("ClassifyNPMDepURL(%q) = %v, want %v", spec, got, want)
+		}
+	}
+	// The shared classifier must not read a Composer-style branch as git.
+	if got := ClassifyDepURL("dev-feature/x"); got != DepURLRegistry {
+		t.Errorf("ClassifyDepURL(dev-feature/x) = %v, want registry", got)
+	}
+}

@@ -16,6 +16,7 @@ package config
 // inherits (core/policy/seed.go).
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -99,30 +100,48 @@ func TestAttack2026_06_GlassWormVariationSelectors(t *testing.T) {
 	})
 
 	// Seeding dedups by NAME (core/policy/seed.go seedPolicies), so an org
-	// seeded before v0.22.99 keeps the old row whose kinds are
-	// ["bidi_override"] only. Pin that this row does NOT refuse GlassWorm:
-	// it is the limitation, and it proves the test above depends on the
-	// rule's kinds rather than on any hidden-unicode hit.
-	t.Run("limitation: pre-v0.22.99 seeded row (bidi_override only) does not refuse", func(t *testing.T) {
+	// seeded before v0.22.99 still carries the old row whose kinds are
+	// ["bidi_override"] only, and that row does NOT refuse GlassWorm. Since
+	// v0.22.106 (F19) every startup rewrites that exact row to the current
+	// definition (policy.SupersededSeedUpgrade, run by ensurePolicyIntegrity
+	// for every org). Pin all three: the old row misses, the upgrade
+	// recognises it, and the upgraded row is the seed's current rule and
+	// refuses.
+	t.Run("upgrade: pre-v0.22.99 seeded row (bidi_override only) is rewritten and then refuses", func(t *testing.T) {
 		old := make([]policy.Policy, len(seeded))
 		copy(old, seeded)
-		found := false
+		idx := -1
 		for i := range old {
 			if old[i].Name == "Block bidi-override hidden Unicode payloads" {
+				current := seeded[i].Conditions
 				old[i].Conditions.HiddenUnicodeKinds = []string{"bidi_override"}
-				found = true
+				idx = i
+				up, ok := policy.SupersededSeedUpgrade(old[i])
+				if !ok {
+					t.Fatal("SupersededSeedUpgrade does not recognise the pre-v0.22.99 seeded row")
+				}
+				if !reflect.DeepEqual(up, current) {
+					t.Fatalf("upgrade writes %+v, seed.yaml now seeds %+v — update core/policy/seed.go supersededSeeds", up, current)
+				}
+				if _, again := policy.SupersededSeedUpgrade(seeded[i]); again {
+					t.Fatal("the current seeded row is itself treated as superseded; the upgrade would not be idempotent")
+				}
 			}
 		}
-		if !found {
+		if idx < 0 {
 			t.Fatal("seeded hidden-unicode block rule missing")
 		}
 		res := hiddenunicode.Scan(map[string][]byte{"package/index.js": []byte(glassWormIndexJS())})
-		out := eval.EvaluateWithPolicies(policy.EvaluationContext{
+		ctx := policy.EvaluationContext{
 			Repository: "npmjs", PackageName: "@aifabrix/miso-client", PackageVersion: "4.7.2",
 			HasHiddenUnicode: res.Hits > 0, HiddenUnicodeKinds: res.Kinds,
-		}, old, 0)
-		if out.Action == policy.ModeBlock {
-			t.Fatalf("old bidi-only row blocked (%s) — limitation no longer holds; update the attack-evidence record", out.Reason)
+		}
+		if out := eval.EvaluateWithPolicies(ctx, old, 0); out.Action == policy.ModeBlock {
+			t.Fatalf("old bidi-only row blocked (%s) — the upgrade would be unnecessary; update the attack-evidence record", out.Reason)
+		}
+		old[idx].Conditions, _ = policy.SupersededSeedUpgrade(old[idx])
+		if out := eval.EvaluateWithPolicies(ctx, old, 0); out.Action != policy.ModeBlock {
+			t.Fatalf("upgraded row did not refuse GlassWorm: action=%s (%s)", out.Action, out.Reason)
 		}
 	})
 

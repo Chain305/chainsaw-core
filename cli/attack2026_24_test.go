@@ -9,12 +9,12 @@ package cli
 // seed 0x3039), a worm that scrapes Runner.Worker memory and exfiltrates to
 // audit.checkmarx[.]cx.
 //
-// Install-guard bytes (asserted as current behaviour): bw_setup.js is the
-// fetch-to-disk + run-a-local-file shape that ScanReferencedBody deliberately
-// does NOT escalate (see TestCacheableCampaignReferencedScript), and bw1.js
-// carries no plaintext IOC, so the bytes alone are not refused. What refuses
-// it is the malware feed once MAL-2026-3020 is listed (core/malware test),
-// or a release-age hold (live 93 minutes; any hold >= 1 day).
+// Install-guard bytes: refused since v0.22.106 (F11). bw_setup.js fetches Bun
+// and runs the bundled bw1.js with it, which ScanReferencedBody now escalates
+// (runsBundledScriptUnderForeignRuntime; before, fetch-to-disk + run-a-local-
+// file stayed present, see TestCacheableCampaignReferencedScript). bw1.js
+// carries no plaintext IOC. The malware feed (MAL-2026-3020, core/malware
+// test) and a release-age hold (live 93 minutes) still refuse it too.
 
 import (
 	"strings"
@@ -47,11 +47,18 @@ func TestAttack2026_24_BitwardenCLIBytes(t *testing.T) {
 		"package/bw1.js":       atk24Worm(),
 		"package/build/bw.js":  "module.exports=function(){};\n",
 	})
-	v := analyzeArtifact("npm", bad)
-	if v.Block {
-		t.Fatalf("2026.4.0 bytes are now refused (%+v): update the attack-24 timing to feed_blind", v)
+	if v := analyzeArtifact("npm", bad); !v.Block {
+		t.Fatalf("2026.4.0 bytes must be refused since v0.22.106 (F11), got %+v", v)
 	}
-	t.Logf("2026.4.0 guard byte verdict (not refused): %+v", v)
+
+	// Negative control: the earlier releases had no install script.
+	clean := makeTGZ(t, map[string]string{
+		"package/package.json": `{"name":"@bitwarden/cli","version":"2026.3.0","bin":{"bw":"build/bw.js"}}`,
+		"package/build/bw.js":  "module.exports=function(){};\n",
+	})
+	if v := analyzeArtifact("npm", clean); v.Block || v.Severity != "" {
+		t.Fatalf("2026.3.0 flagged: %+v", v)
+	}
 
 	// Control: the detector is live — the same hook running a loader that
 	// fetches and evals is refused.

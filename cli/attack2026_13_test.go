@@ -16,7 +16,8 @@ package cli
 //     action.malicious (high) and exits 1 at the default gate; the clean
 //     0.35.0 / 0.2.6 releases do not match.
 //   - Gap: without a snapshot the CLI has only the three-entry static seed,
-//     which has no Trivy entry; pr-scan always uses only the static seed.
+//     which has no Trivy entry. Since v0.22.106 (F12) pr-scan reads the same
+//     snapshot as scan-actions, so with it present pr-scan blocks the tags.
 
 import (
 	"os"
@@ -95,6 +96,30 @@ func TestAttack2026_13_TrivyActionTagHijack(t *testing.T) {
 	}
 	if !malicious["aquasecurity/trivy-action"] || !malicious["aquasecurity/setup-trivy"] || code != 1 {
 		t.Fatalf("with GHSA snapshot: want both actions malicious and exit 1, got exit %d %+v", code, r.Findings)
+	}
+
+	// pr-scan, since v0.22.106 (F12): the same snapshot, so both refs block.
+	added, _, err = diffWorkflow(".github/workflows/scan.yml", nil, []byte(atk13WF("0.34.2", "v0.2.5")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := map[string]bool{}
+	for _, e := range added {
+		if hasPRSignal(e.Signals, "action.malicious") && e.Verdict == "block" {
+			blocked[e.Name] = true
+		}
+	}
+	if !blocked["aquasecurity/trivy-action"] || !blocked["aquasecurity/setup-trivy"] {
+		t.Fatalf("pr-scan with GHSA snapshot: want both refs blocked, got %+v", added)
+	}
+	added, _, err = diffWorkflow(".github/workflows/scan.yml", nil, []byte(atk13WF("0.35.0", "v0.2.6")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range added {
+		if e.Verdict == "block" {
+			t.Fatalf("pr-scan blocked a clean release: %+v", e)
+		}
 	}
 
 	// Negative twin: the clean releases cut after the incident.

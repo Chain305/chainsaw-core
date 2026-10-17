@@ -430,3 +430,22 @@ func TestTyposquatHighCannotPromoteToUpgradeAvailable(t *testing.T) {
 			"a newer release of a typosquatted package is still typosquatted")
 	}
 }
+
+// TestImportTimeShellKinds: since v0.22.106 download_exec (executing a fetched
+// file on import) scores like top_level_shell; the advisory kinds do not.
+func TestImportTimeShellKinds(t *testing.T) {
+	var sig Signal
+	for _, s := range AllSignals() {
+		if s.ID == SignalSCImportTimeShell {
+			sig = s
+		}
+	}
+	for kind, want := range map[string]bool{
+		"top_level_shell": true, "download_exec": true,
+		"obfuscated_exec_bare": false, "import_time_exfil": false, "": false,
+	} {
+		if got, _, _ := sig.Fires(Input{ImportTimeKind: kind}); got != want {
+			t.Errorf("%s: fires=%v want %v", kind, got, want)
+		}
+	}
+}

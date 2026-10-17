@@ -3,7 +3,7 @@ package githubactions
 // lint.go — dangerous-trigger lint over a workflow's own structure.
 //
 // Scan judges the actions a workflow USES; this judges what the workflow
-// DOES with its triggers. Three shapes, each from a real compromise:
+// DOES with its triggers and steps. Four shapes, each from a real compromise:
 //
 //   - action.pwn_request: pull_request_target / workflow_run checks out the
 //     pull request's head and then runs a step. The fork's code runs with
@@ -16,6 +16,12 @@ package githubactions
 //   - action.script_injection: attacker-written text (a comment body, an
 //     issue or PR title, a branch name) is interpolated with ${{ }} straight
 //     into a shell `run:` (elementary-data, 2026-04).
+//   - action.decode_exec: a `run:` step decodes a payload (base64 -d,
+//     FromBase64String) and executes it, so the script that runs cannot be
+//     read in the workflow (Megalodon mass CI backdoor, 2026-05:
+//     `echo <base64> | base64 -d | bash`). A plain `curl … | sh` installer is
+//     deliberately NOT matched: it is ordinary in CI and its source is a URL
+//     a reviewer can read.
 //
 // Like the parser, this is pure: no I/O, no network.
 
@@ -32,6 +38,7 @@ const (
 	SignalActionPwnRequest              = "action.pwn_request"
 	SignalActionCommentTriggerUnguarded = "action.comment_trigger_unguarded"
 	SignalActionScriptInjection         = "action.script_injection"
+	SignalActionDecodeExec              = "action.decode_exec"
 )
 
 var (
@@ -48,6 +55,23 @@ var (
 	publishRe = regexp.MustCompile(`\b(npm|yarn|pnpm) publish\b|\btwine upload\b|\bcargo publish\b|\bgem push\b|\bpoetry publish\b|\bdocker push\b|\bgh release create\b|\bgoreleaser\b`)
 
 	secretsRe = regexp.MustCompile(`\bsecrets\.`)
+
+	// decodeRe matches a decode of an encoded payload.
+	decodeRe = regexp.MustCompile(`(?i)\bbase64\s+(?:-[a-ce-z]*d[a-z]*|--decode)\b|\bFromBase64String\b`)
+
+	// pipeExecRe matches a pipe into an interpreter that executes its stdin:
+	// no argument, `-`, or `-s`. `| python -m json.tool` and `| bash -c '…'`
+	// read stdin as data and do not match.
+	pipeExecRe = regexp.MustCompile(`\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:/usr/bin/env\s+)?(?:/\S*/)?(?:sh|bash|zsh|dash|ksh|ash|python[0-9.]*|perl|node|ruby|php|pwsh)(?:\s+-s\b|\s+-(?:\s|$)|\s*(?:$|[;&|)]))`)
+
+	// execWrapRe matches an executor whose argument is a substitution still
+	// open at the decode: eval "$(… base64 -d)", bash <(… base64 -d),
+	// python -c "$(… base64 -d)", iex / Invoke-Expression around a decode.
+	execWrapRe = regexp.MustCompile("(?i)(?:\\beval\\s+|\\bsource\\s+|\\b(?:sh|bash|zsh|dash)\\s+(?:-c\\s+)?|\\b(?:python[0-9.]*|perl|node|ruby)\\s+-[ce]\\s+)[\"']?(?:\\$\\(|<\\(|`)[^)`]*$|\\b(?:iex|invoke-expression)\\b")
+
+	// encodedCommandRe matches PowerShell's own decode-and-run flag with a
+	// base64 argument.
+	encodedCommandRe = regexp.MustCompile(`(?i)\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]*\s-(?:e|ec|en|enc|encodedcommand)\s+["']?[A-Za-z0-9+/]{16,}={0,2}`)
 )
 
 // LintWorkflow parses one workflow and returns its dangerous-trigger
@@ -77,9 +101,21 @@ func LintWorkflow(path string, data []byte) ([]Finding, error) {
 	}
 
 	var out []Finding
+	decodeExecs := func(where string, steps []*yaml.Node) {
+		for _, s := range steps {
+			if m := decodeExec(scalar(mapGet(s, "run"))); m != "" {
+				out = append(out, finding(SignalActionDecodeExec, mapGetKey(s, "run").Line,
+					fmt.Sprintf("%s: a run: step decodes a payload and executes it (%s); the code that runs cannot be read in the workflow", where, m)))
+			}
+		}
+	}
+	// A composite action's own steps (action.yml `runs.steps`): the
+	// reviewdog/action-setup compromise (2025-03) hid its payload there.
+	decodeExecs("composite action", stepsOf(mapGet(wf, "runs")))
+
 	jobs := mapGet(wf, "jobs")
 	if jobs == nil || jobs.Kind != yaml.MappingNode {
-		return nil, nil
+		return out, nil
 	}
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
 		jobName, job := jobs.Content[i], deref(jobs.Content[i+1])
@@ -116,8 +152,40 @@ func LintWorkflow(path string, data []byte) ([]Finding, error) {
 					fmt.Sprintf("job %q: %s is interpolated into a shell run: step; attacker-written text becomes shell code (pass it through env: instead)", jobName.Value, m)))
 			}
 		}
+
+		// d) decode and execute.
+		decodeExecs(fmt.Sprintf("job %q", jobName.Value), steps)
 	}
 	return out, nil
+}
+
+// decodeExec returns the first line of a run: script that decodes a payload
+// and executes it, or "". Backslash continuations are joined first so a
+// pipeline split across lines is still one command.
+func decodeExec(run string) string {
+	for _, ln := range strings.Split(strings.ReplaceAll(run, "\\\n", " "), "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if encodedCommandRe.MatchString(t) {
+			return truncate(t)
+		}
+		d := decodeRe.FindStringIndex(t)
+		if d != nil && (pipeExecRe.MatchString(t[d[1]:]) || execWrapRe.MatchString(t[:d[0]])) {
+			return truncate(t)
+		}
+	}
+	return ""
+}
+
+// truncate keeps a finding message readable when the line carries a long
+// encoded payload.
+func truncate(s string) string {
+	if len(s) > 120 {
+		return s[:57] + "…" + s[len(s)-60:]
+	}
+	return s
 }
 
 type pwnHit struct {

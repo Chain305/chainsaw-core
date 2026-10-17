@@ -88,3 +88,36 @@ func TestDefenderTamperIgnoresBenignMpPreference(t *testing.T) {
 		t.Fatalf("benign Set-MpPreference flagged: %q", part.Scan.DefenderTamper)
 	}
 }
+
+// NuGet runs tools/install.ps1 on install. The Defender-tamper indicator
+// reads .ps1 files (and only that indicator does); a benign install.ps1 that
+// edits the project is not tampering.
+func TestDefenderTamperReadsNuGetInstallPS1(t *testing.T) {
+	run := func(ps1 string) *ArtifactScanSection {
+		nupkg := buildZip(t, map[string]string{
+			"Contoso.Build.nuspec":   `<?xml version="1.0"?><package><metadata><id>Contoso.Build</id><version>2.1.0</version></metadata></package>`,
+			"tools/install.ps1":      ps1,
+			"lib/net8.0/Contoso.dll": "MZ\x00\x00",
+		})
+		part, err := newIOCScanProvider().Run(context.Background(), Request{
+			Key:      Key{Ecosystem: "nuget", Package: "Contoso.Build", Version: "2.1.0"},
+			Artifact: &ArtifactHandle{Bytes: nupkg},
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return part.Scan
+	}
+	bad := run("param($installPath, $toolsPath, $package, $project)\n" +
+		"Add-MpPreference -ExclusionPath \"$env:LOCALAPPDATA\\Contoso\"\n" +
+		"Start-Process \"$toolsPath\\helper.exe\" -WindowStyle Hidden\n")
+	if bad == nil || bad.DefenderTamper != "Add-MpPreference -ExclusionPath (tools/install.ps1)" {
+		t.Fatalf("tools/install.ps1 Defender exclusion not reported: %+v", bad)
+	}
+	good := run("param($installPath, $toolsPath, $package, $project)\n" +
+		"$project.ProjectItems.Item(\"App.config\").Properties.Item(\"CopyToOutputDirectory\").Value = 1\n" +
+		"Write-Host (Get-MpPreference).ExclusionPath\n")
+	if good != nil && good.DefenderTamper != "" {
+		t.Fatalf("benign install.ps1 flagged: %q", good.DefenderTamper)
+	}
+}

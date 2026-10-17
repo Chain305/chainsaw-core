@@ -30,8 +30,9 @@ type CheckResult struct {
 	// store, or when ScanArtifact is invoked inline).
 	HasInstallScript           bool
 	InstallScriptFetchesRemote bool
-	// ImportTimeExecution: Python package runs malicious behavior at
-	// import/install time (pysource provider). PyPI-only.
+	// ImportTimeExecution: the package runs malicious behavior at
+	// import/install/load time (pysource provider: PyPI, npm, Composer,
+	// RubyGems).
 	ImportTimeExecution bool
 	// MaliciousIOC: source embeds an exfil sink host or a coupled stealer
 	// string (iocscan provider). Cross-ecosystem.

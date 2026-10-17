@@ -149,9 +149,78 @@ func NPM(packageJSON []byte) Result {
 // while it LOADS binding.gyp, before anything is compiled.
 var gypCommandRE = regexp.MustCompile(`[<>]!@?(pymod_do_main)?\(`)
 
+// gypActionRE finds an `action` list — the command make runs for a gyp
+// target's actions during `node-gyp rebuild`, at any depth (inside
+// `conditions` too). gypStringRE picks its string elements.
+var (
+	gypActionRE = regexp.MustCompile(`["']action["']\s*:\s*\[([^\]]{0,1000})\]`)
+	gypStringRE = regexp.MustCompile(`"([^"]*)"|'([^']*)'`)
+)
+
+// gypConditionEscapeRE is a Python sandbox escape. gyp evaluates every
+// `conditions` / `target_conditions` expression with eval() and empty
+// builtins, so a condition reaches os.system only through dunder walks like
+// `'o'.__class__.__mro__[1].__subclasses__()` — the @7nohe wave-1 binding.gyp.
+// No real condition (`OS=="win"`, `target_arch=="x64"`) names a dunder.
+var (
+	gypConditionEscapeRE = regexp.MustCompile(`__(?:class|mro|base|bases|subclasses|globals|builtins|import|getattribute|loader)__`)
+	gypConditionsKeyRE   = regexp.MustCompile(`["'](?:target_)?conditions["']\s*:\s*\[`)
+)
+
+// gypConditionEscapes reports a sandbox escape in a condition EXPRESSION —
+// the first string of each `[expr, {...}, {...}]` entry under a conditions
+// key — not anywhere in the file: a `<!(python -c ...)` command or a comment
+// may name a dunder legitimately, and only the expression is eval()d.
+func gypConditionEscapes(s string) bool {
+	const maxKeys, maxSpan = 64, 64 << 10
+	for _, m := range gypConditionsKeyRE.FindAllStringIndex(s, maxKeys) {
+		depth := 1
+		for i := m[1]; i < len(s) && i < m[1]+maxSpan && depth > 0; i++ {
+			switch s[i] {
+			case '[', '{':
+				depth++
+				if s[i] == '[' && depth == 2 {
+					if expr, ok := gypLeadingString(s[i+1:]); ok && gypConditionEscapeRE.MatchString(expr) {
+						return true
+					}
+				}
+			case ']', '}':
+				depth--
+			case '"', '\'':
+				i += len(gypQuoted(s[i:])) + 1
+			}
+		}
+	}
+	return false
+}
+
+// gypLeadingString returns the string literal s starts with, after spaces.
+func gypLeadingString(s string) (string, bool) {
+	s = strings.TrimLeft(s, " \t\r\n")
+	if s == "" || (s[0] != '"' && s[0] != '\'') {
+		return "", false
+	}
+	return gypQuoted(s), true
+}
+
+// gypQuoted returns the body of the quoted literal s starts with (s[0] is the
+// quote), honouring backslash escapes; unterminated runs to the end.
+func gypQuoted(s string) string {
+	for j := 1; j < len(s); j++ {
+		switch s[j] {
+		case '\\':
+			j++
+		case s[0]:
+			return s[1:j]
+		}
+	}
+	return s[1:]
+}
+
 // GypCommands returns the shell commands a binding.gyp runs, innermost
-// parentheses kept. A pymod_do_main call is rendered as `python module.py
-// args` so ReferencedScripts resolves the bundled module.
+// parentheses kept: its command expansions, then its actions. A
+// pymod_do_main call is rendered as `python module.py args` so
+// ReferencedScripts resolves the bundled module.
 func GypCommands(bindingGyp []byte) []string {
 	const maxCommands, maxLen = 64, 4096
 	s := string(bindingGyp)
@@ -173,6 +242,15 @@ func GypCommands(bindingGyp []byte) []string {
 				out = append(out, cmd)
 				break
 			}
+		}
+	}
+	for _, m := range gypActionRE.FindAllStringSubmatch(s, maxCommands) {
+		var argv []string
+		for _, e := range gypStringRE.FindAllStringSubmatch(m[1], -1) {
+			argv = append(argv, e[1]+e[2])
+		}
+		if cmd := strings.TrimSpace(strings.Join(argv, " ")); cmd != "" {
+			out = append(out, cmd)
 		}
 	}
 	return out
@@ -200,7 +278,9 @@ func IsRootBindingGyp(name string) bool {
 // The commands are appended to ScriptBody so callers' ReferencedScripts scan
 // resolves `node index.js`, and are classified inline like any hook string.
 // They are read only when node-gyp runs: the implicit hook, or a declared
-// hook naming node-gyp.
+// hook naming node-gyp. Since v0.22.106 (F13) target actions join the
+// commands, and a sandbox escape in a condition expression (which gyp
+// eval()s) is eval_encoded.
 func BindingGyp(r Result, packageJSON, bindingGyp []byte) Result {
 	if len(bindingGyp) == 0 {
 		return r
@@ -228,6 +308,9 @@ func BindingGyp(r Result, packageJSON, bindingGyp []byte) Result {
 	}
 	if k := classifyBody(cmds); kindRank(k) > kindRank(out.Kind) {
 		out.Kind = k
+	}
+	if gypConditionEscapes(string(bindingGyp)) && kindRank(KindEvalEncoded) > kindRank(out.Kind) {
+		out.Kind = KindEvalEncoded
 	}
 	if kindRank(out.Kind) < kindRank(KindPresent) {
 		out.Kind = KindPresent
@@ -708,13 +791,23 @@ func CargoBuildScript(cargoToml []byte) (disabled bool, declared string) {
 //
 //	pre-install-cmd, post-install-cmd, pre-update-cmd, post-update-cmd,
 //	post-package-install, post-package-update.
+//
+// A `"type": "composer-plugin"` package is an install hook too: Composer
+// loads its `extra.class` and runs it on install and update, before any
+// script (Mini Shai-Hulud's intercom/intercom-php 5.0.2). Each class is
+// appended to ScriptBody as `php <ShortName>.php`, after classification, so
+// the referenced-script scan resolves and reads the class file. Since
+// v0.22.106 (F17).
 func Composer(composerJSON []byte) Result {
 	var manifest struct {
-		Scripts map[string]any `json:"scripts"`
+		Type    string          `json:"type"`
+		Scripts map[string]any  `json:"scripts"`
+		Extra   json.RawMessage `json:"extra"`
 	}
 	if err := json.Unmarshal(composerJSON, &manifest); err != nil {
 		return Result{}
 	}
+	plugin := strings.EqualFold(strings.TrimSpace(manifest.Type), "composer-plugin")
 	lifecycle := []string{
 		"pre-install-cmd", "post-install-cmd",
 		"pre-update-cmd", "post-update-cmd",
@@ -732,7 +825,40 @@ func Composer(composerJSON []byte) Result {
 		appendAny(&body, v)
 		body.WriteString("\n")
 	}
-	return finish("composer", hasScript, body.String())
+	r := finish("composer", hasScript || plugin, body.String())
+	if plugin {
+		r.ScriptBody += composerPluginRefs(manifest.Extra)
+	}
+	return r
+}
+
+// composerPluginRefs renders a plugin's extra.class (a string or a list) as
+// `php <ShortName>.php` lines. ponytail: resolved by file basename, not the
+// psr-4 map; a class file not named for its class is not read.
+func composerPluginRefs(extra json.RawMessage) string {
+	var e struct {
+		Class any `json:"class"`
+	}
+	_ = json.Unmarshal(extra, &e)
+	var classes []string
+	switch c := e.Class.(type) {
+	case string:
+		classes = []string{c}
+	case []any:
+		for _, x := range c {
+			if s, ok := x.(string); ok {
+				classes = append(classes, s)
+			}
+		}
+	}
+	var b strings.Builder
+	for _, c := range classes {
+		short := c[strings.LastIndex(c, "\\")+1:]
+		if short != "" && strings.Trim(short, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") == "" {
+			b.WriteString("php " + short + ".php\n")
+		}
+	}
+	return b.String()
 }
 
 // finish applies the shared remote-fetch / eval-encoded classification

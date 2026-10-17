@@ -368,6 +368,7 @@ var socketConceptMap = map[string]conceptMapping{
 	"action.pwn_request":               {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
 	"action.comment_trigger_unguarded": {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
 	"action.script_injection":          {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
+	"action.decode_exec":               {Socket: nil, Grade: gradeNoneSt, Cadence: cadWorkflow},
 }
 
 // ─── declined surfaces: G-3 and the 2026-10-03 decisions ────────────────────

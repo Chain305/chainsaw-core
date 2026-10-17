@@ -12,11 +12,11 @@ package cli
 // Workflow half: scan-actions reports action.comment_trigger_unguarded
 // (high), default exit 1; the author_association-guarded twin does not fire.
 // Package half (install guard, analyzeArtifact): wave 2 is refused on the
-// bytes (looksXorLoader behind the preinstall hook). Wave 1 is NOT refused:
-// binding.gyp makes it an install script, but its payload hides in a gyp
-// `conditions` Python expression GypCommands does not read, and nothing
-// references 3FWCvzduYZg.js — asserted below as current behaviour. Both
-// waves are refused once MAL-2026-15494 is in the feed (core/malware).
+// bytes (looksXorLoader behind the preinstall hook). Wave 1 is refused on the
+// bytes since v0.22.106 (F13): binding.gyp makes it an install script, and
+// its payload — a gyp `conditions` Python expression escaping eval()'s empty
+// builtins — is read as eval_encoded. Nothing references 3FWCvzduYZg.js.
+// Both waves are refused once MAL-2026-15494 is in the feed (core/malware).
 
 import (
 	"strings"
@@ -89,11 +89,9 @@ func TestAttack2026_53_7noheNpmPayload(t *testing.T) {
 		"package/binding.gyp":    atk53Gyp,
 		"package/3FWCvzduYZg.js": atk53Loader(),
 	})
-	v := analyzeArtifact("npm", wave1)
-	if v.Block {
-		t.Fatalf("wave 1 is now refused on the bytes (%+v): update the attack-53 gap note", v)
+	if v := analyzeArtifact("npm", wave1); !v.Block {
+		t.Fatalf("wave 1 (binding.gyp condition escape) must be refused since v0.22.106 (F13), got %+v", v)
 	}
-	t.Logf("wave 1 guard verdict (not refused): %+v", v)
 
 	// Negative control: the last good release, no gyp file, no hook.
 	clean := makeTGZ(t, map[string]string{

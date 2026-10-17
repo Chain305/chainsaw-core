@@ -1,9 +1,22 @@
 package iocscan
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
+
+// encPS is PowerShell's -EncodedCommand encoding: base64 of UTF-16LE.
+func encPS(cmd string) string {
+	u := utf16.Encode([]rune(cmd))
+	b := make([]byte, 2*len(u))
+	for i, c := range u {
+		binary.LittleEndian.PutUint16(b[2*i:], c)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
 
 func TestDependencyCredential(t *testing.T) {
 	tok := "ghp_" + strings.Repeat("a1B2", 9) // 40 chars, fake
@@ -81,6 +94,24 @@ func TestDefenderTamper(t *testing.T) {
 		{"reading preferences is not tampering", "package/a.js", "exec('Get-MpPreference')", ""},
 		{"enabling is not tampering", "package/a.js", "exec('Set-MpPreference -SignatureUpdateInterval 4')", ""},
 		{"docs", "package/docs/windows.md", "Set-MpPreference -DisableRealtimeMonitoring $true", ""},
+		{"smart app control off", "package/apex.cjs",
+			"execSync(`powershell -Command \"Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy' -Name VerifiedAndReputablePolicyState -Value 0\"`)",
+			"Smart App Control policy write (VerifiedAndReputablePolicyState) (package/apex.cjs)"},
+		{"smart app control via reg add", "package/a.js",
+			"exec('reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy /v VerifiedAndReputablePolicyState /t REG_DWORD /d 0 /f')",
+			"Smart App Control policy write (VerifiedAndReputablePolicyState) (package/a.js)"},
+		{"reading smart app control state", "package/a.js",
+			"exec('Get-ItemProperty HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy -Name VerifiedAndReputablePolicyState')", ""},
+		{"encoded exclusion", "package/apex.cjs",
+			"spawn('powershell',['-WindowStyle','Hidden','-Command',\"Start-Process powershell -Verb RunAs -ArgumentList '-EncodedCommand " + encPS("Add-MpPreference -ExclusionPath C:\\x") + "'\"])",
+			"Add-MpPreference -ExclusionPath (package/apex.cjs, -EncodedCommand)"},
+		{"encoded, -enc and array arg", "package/a.js",
+			"spawn('powershell',['-enc','" + encPS("Set-MpPreference -DisableRealtimeMonitoring $true") + "'])",
+			"Set-MpPreference -DisableRealtimeMonitoring (package/a.js, -EncodedCommand)"},
+		{"encoded benign command", "package/a.js",
+			"exec('powershell -e " + encPS("Get-ChildItem Env:") + "')", ""},
+		{"not utf-16 base64", "package/a.js",
+			"exec('node -e " + base64.StdEncoding.EncodeToString([]byte("Add-MpPreference -ExclusionPath C:\\x")) + "')", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

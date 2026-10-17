@@ -19,9 +19,9 @@ import (
 //	         elevated PowerShell (-EncodedCommand, Start-Process -Verb RunAs).
 //
 // 1.5.121 -> iocscan.DefenderTamper -> sc.defender_tamper (warn-capped, 40)
-// -> verdict warn. 1.5.122 -> nothing: the regex reads plaintext cmdlets
-// only. FINDING: core/iocscan/indicators.go defenderTamperRE does not decode
-// -EncodedCommand, so the weaponised release scores clean on this lane.
+// -> verdict warn. Since v0.22.106 (F10) DefenderTamper decodes
+// -EncodedCommand (base64 UTF-16LE), so 1.5.122 scores the same; it also
+// reads the Smart App Control registry write on its own.
 func TestAttack2026_57_ApexaccCLI_DefenderTamper(t *testing.T) {
 	cmd := `Add-MpPreference -ExclusionPath "$env:USERPROFILE\.apex"; ` +
 		`Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -Name VerifiedAndReputablePolicyState -Value 0`
@@ -61,8 +61,17 @@ func TestAttack2026_57_ApexaccCLI_DefenderTamper(t *testing.T) {
 	}
 
 	r122 := score("1.5.122", elevated)
-	if r122.Scan.DefenderTamper != "" || atkBFired(r122, risk.SignalSCDefenderTamper) {
-		t.Fatalf("1.5.122 -EncodedCommand now detected — update the finding: %q", r122.Scan.DefenderTamper)
+	if r122.Scan.DefenderTamper == "" || !atkBFired(r122, risk.SignalSCDefenderTamper) {
+		t.Fatalf("1.5.122 -EncodedCommand: want sc.defender_tamper, got scan=%q", r122.Scan.DefenderTamper)
+	}
+	if r122.Risk.Verdict == risk.VerdictAllow || r122.SupplyChain.TrustScore > 40 {
+		t.Fatalf("1.5.122: want a verdict off allow with score <= 40, got %s / %d", r122.Risk.Verdict, r122.SupplyChain.TrustScore)
+	}
+
+	// The Smart App Control write alone (no Defender cmdlet) is tampering too.
+	sac := score("1.5.122", "require('child_process').execSync(\"powershell -Command \\\"Set-ItemProperty -Path 'HKLM:\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\CI\\\\Policy' -Name VerifiedAndReputablePolicyState -Value 0\\\"\");\n")
+	if sac.Scan.DefenderTamper == "" || !atkBFired(sac, risk.SignalSCDefenderTamper) {
+		t.Fatalf("Smart App Control write: want sc.defender_tamper, got scan=%q", sac.Scan.DefenderTamper)
 	}
 
 	// Negative control: reading Defender state is not tampering.

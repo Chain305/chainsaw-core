@@ -7,13 +7,14 @@ package cli
 // SysDiag (push + pull_request_target) and Optimize-Build (workflow_dispatch,
 // a dormant backdoor).
 //
-// NOT COVERED, asserted as current behaviour: LintWorkflow looks for three
-// trigger shapes (pwn request, unguarded comment trigger, ${{ }} injection)
-// and none is present — the payload is a literal in the run: step. With no
-// uses: refs there is nothing for the Actions scanner either, so scan-actions
-// exits 0 even at --fail-on low, and pr-scan's diffWorkflow produces no row.
-// The commits were direct pushes, so a PR gate would not have run anyway.
-// The payload IP below is TEST-NET (192.0.2.10), defanged.
+// Covered since v0.22.106 (F16): LintWorkflow's action.decode_exec flags a
+// run: step that decodes a payload and executes it, so scan-actions reports
+// it high (default exit 1) and pr-scan's diffWorkflow gives the workflow a
+// warn row. The commits were direct pushes, so a PR gate would not have run;
+// scan-actions as a required check on the default branch, or an
+// evaluate-actions sweep, is what sees them. Negative twin: a step that
+// decodes a secret to a file. The payload IP below is TEST-NET
+// (192.0.2.10), defanged.
 
 import "testing"
 
@@ -50,13 +51,24 @@ jobs:
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code != 0 || len(r.Findings) != 0 {
-			t.Fatalf("%s: scan-actions now flags a base64|bash run: step (exit %d, %+v); update the attack-33 classification", name, code, r.Findings)
+		if code != 1 || atk26Sigs(r)["action.decode_exec"] != "high" {
+			t.Fatalf("%s: want high action.decode_exec and exit 1, got exit %d %+v", name, code, r.Findings)
 		}
-		added, upgraded, err := diffWorkflow(".github/workflows/"+name, nil, []byte(body))
-		if err != nil || len(added)+len(upgraded) != 0 {
-			t.Fatalf("%s: pr-scan produced rows %+v %+v (%v); update the attack-33 classification", name, added, upgraded, err)
+		if !atk26PRScanLints(t, name, body, "action.decode_exec") {
+			t.Fatalf("%s: pr-scan: want a warn row with action.decode_exec", name)
 		}
+	}
+
+	// Negative twin: decoding a secret to a file executes nothing.
+	const benign = `on: [push]
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "$KEYSTORE_B64" | base64 -d > release.jks
+`
+	if code, r, err := runScanActionsJSON(t, atk26WriteWF(t, "sign.yml", benign), "low"); err != nil || code != 0 || len(r.Findings) != 0 {
+		t.Fatalf("decode to a file: want no findings, exit 0; got exit %d %+v (%v)", code, r.Findings, err)
 	}
 
 	// Harness control: the same scan does report a structural lint finding,

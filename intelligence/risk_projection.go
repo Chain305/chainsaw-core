@@ -792,6 +792,9 @@ func projectActionsSection(s *ActionsSection, in *risk.Input) {
 		case "action.script_injection":
 			in.ActionScriptInjection = true
 			in.ActionScriptInjectionLocs = append(in.ActionScriptInjectionLocs, f.Ref)
+		case "action.decode_exec":
+			in.ActionDecodeExec = true
+			in.ActionDecodeExecLocs = append(in.ActionDecodeExecLocs, f.Ref)
 		}
 	}
 }
@@ -1359,9 +1362,13 @@ func projectURLDeps(r *Report, in *risk.Input) {
 		r.Dependencies.Peer,
 		r.Dependencies.Optional,
 	}
+	classify := risk.ClassifyDepURL
+	if strings.EqualFold(r.Identity.Ecosystem, "npm") {
+		classify = risk.ClassifyNPMDepURL // bare user/repo is a GitHub dep
+	}
 	for _, bucket := range buckets {
 		for _, dep := range bucket {
-			switch risk.ClassifyDepURL(dep.Constraint) {
+			switch classify(dep.Constraint) {
 			case risk.DepURLGit:
 				in.HasGitURLDep = true
 				in.GitURLDeps = append(in.GitURLDeps, dep.Name)

@@ -3,7 +3,9 @@ package policy
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -129,4 +131,128 @@ func seedPolicies(execer policyExecutor, orgID string, policies []Policy) (int, 
 		created++
 	}
 	return created, nil
+}
+
+// supersededSeed is a seeded rule whose definition a later release changed.
+type supersededSeed struct {
+	name        string
+	precedences []int // every precedence an earlier seed used for the rule
+	old         Policy
+	current     Conditions
+	summary     string // the policy-history change summary for the rewrite
+}
+
+// SeedUpgradeActor is the actor id the startup seed upgrade records in the
+// policy version history.
+const SeedUpgradeActor = "system:seed-upgrade"
+
+// supersededSeeds closes the hole seedPolicies' skip-by-name leaves: an org
+// seeded before a seed change keeps the old definition forever (F19). Since
+// v0.22.99 the hidden-unicode block rule also refuses variation_selector, the
+// GlassWorm encoding; every org seeded earlier kept bidi_override only.
+//
+// Entries are added only where the old definition is strictly weaker. A mode
+// change the other way (block -> monitor) is deliberately NOT upgraded: an
+// existing org keeps the stricter rule it already enforces. A function, not a
+// var, so a caller mutating the returned conditions cannot poison the next.
+func supersededSeeds() []supersededSeed {
+	yes := true
+	return []supersededSeed{{
+		name:        "Block bidi-override hidden Unicode payloads",
+		precedences: []int{120, 150},
+		old: Policy{Mode: ModeBlock, Conditions: Conditions{
+			HasHiddenUnicode: &yes, HiddenUnicodeKinds: []string{"bidi_override"}}},
+		current: Conditions{
+			HasHiddenUnicode: &yes, HiddenUnicodeKinds: []string{"bidi_override", "variation_selector"}},
+		summary: "Seed upgrade (v0.22.106, F19): hiddenUnicodeKinds bidi_override -> bidi_override, variation_selector",
+	}}
+}
+
+// SupersededSeedUpgrade returns the conditions to write over row when row
+// still carries an earlier seeded definition EXACTLY: same name, same
+// behaviour hash (mode, identifier, conditions, scope), no description, and a
+// precedence an earlier seed used. Anything else means someone edited the
+// rule, and it is never touched. Status is not compared and never changed: a
+// disabled seeded rule stays disabled and is stronger when re-enabled.
+func SupersededSeedUpgrade(row Policy) (Conditions, bool) {
+	s, ok := matchSupersededSeed(row)
+	return s.current, ok
+}
+
+func matchSupersededSeed(row Policy) (supersededSeed, bool) {
+	name := strings.ToLower(strings.TrimSpace(row.Name))
+	for _, s := range supersededSeeds() {
+		if name != strings.ToLower(s.name) || strings.TrimSpace(row.Description) != "" {
+			continue
+		}
+		if !slices.Contains(s.precedences, row.Precedence) {
+			continue
+		}
+		got, err := PolicyParameterHash(row)
+		if err != nil {
+			continue
+		}
+		want, err := PolicyParameterHash(s.old)
+		if err != nil || got != want {
+			continue
+		}
+		return s, true
+	}
+	return supersededSeed{}, false
+}
+
+// upgradeSupersededSeeds rewrites, in every org, the seeded rows that still
+// carry a superseded definition. It runs from ensurePolicyIntegrity on every
+// startup and is idempotent: an upgraded row no longer matches the old hash.
+// A row whose upgraded hash would collide with another rule in the same org
+// (an operator already wrote the stronger rule by hand) is left alone rather
+// than failing startup on the parameter-hash unique index. Each rewrite is
+// handed to the store's seedUpgraded recorder (WithSeedUpgradeRecorder), which
+// the proxy wires to the policy version history so the change shows in the
+// changelog like any other update.
+func (s *Store) upgradeSupersededSeeds() error {
+	policiesByOrg, err := s.listPoliciesForIntegrity()
+	if err != nil {
+		return err
+	}
+	for orgID, policies := range policiesByOrg {
+		for _, pol := range policies {
+			seed, ok := matchSupersededSeed(pol)
+			if !ok {
+				continue
+			}
+			conditions := seed.current
+			pol.Conditions = conditions
+			hash, err := PolicyParameterHash(pol)
+			if err != nil {
+				return err
+			}
+			var taken int
+			if err := s.sql.DB().QueryRow(`SELECT count(*) FROM policies WHERE org_id=? AND parameter_hash=? AND id<>?`,
+				orgID, hash, pol.ID).Scan(&taken); err != nil {
+				return err
+			}
+			if taken > 0 {
+				continue
+			}
+			conditionsJSON, err := json.Marshal(conditions)
+			if err != nil {
+				return err
+			}
+			if _, err := s.sql.DB().Exec(`UPDATE policies SET conditions=?, parameter_hash=?, updated_at=? WHERE org_id=? AND id=?`,
+				string(conditionsJSON), hash, time.Now().UTC(), orgID, pol.ID); err != nil {
+				return fmt.Errorf("upgrade seeded policy %s: %w", pol.ID, err)
+			}
+			slog.Info("Upgraded seeded policy to the current definition", "org_id", orgID, "policy_id", pol.ID, "name", pol.Name)
+			if s.seedUpgraded != nil {
+				upgraded, err := s.ForOrg(orgID).Get(pol.ID)
+				if err != nil {
+					slog.Warn("seed upgrade: re-read for history failed", "org_id", orgID, "policy_id", pol.ID, "error", err)
+					continue
+				}
+				s.seedUpgraded(orgID, upgraded, seed.summary)
+			}
+		}
+	}
+	return nil
 }

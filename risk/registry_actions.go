@@ -23,6 +23,7 @@ const (
 	SignalActionPwnRequest              = "action.pwn_request"
 	SignalActionCommentTriggerUnguarded = "action.comment_trigger_unguarded"
 	SignalActionScriptInjection         = "action.script_injection"
+	SignalActionDecodeExec              = "action.decode_exec"
 )
 
 // registerActionLint registers one weight-0 workflow-lint signal that fires
@@ -155,4 +156,9 @@ func init() {
 		"A ${{ }} expression carrying a comment body, issue or pull request title/body, review body or branch name is interpolated directly into a run: step.",
 		"Untrusted event text is interpolated into a shell run: step.",
 		func(in Input) (bool, []string) { return in.ActionScriptInjection, in.ActionScriptInjectionLocs })
+	registerActionLint(SignalActionDecodeExec,
+		"Workflow step decodes a payload and executes it",
+		"A run: step decodes an encoded payload (base64 -d, FromBase64String, PowerShell -EncodedCommand) and pipes or passes it to an interpreter, so the code that runs cannot be read in the workflow.",
+		"A run: step executes a decoded payload.",
+		func(in Input) (bool, []string) { return in.ActionDecodeExec, in.ActionDecodeExecLocs })
 }

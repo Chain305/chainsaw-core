@@ -205,3 +205,28 @@ func TestFinishPrefersFetchesRemoteOverEvalEncoded(t *testing.T) {
 		t.Errorf("want fetches_remote (stronger), got %q", got.Kind)
 	}
 }
+
+// Since v0.22.106 (F17): a Composer plugin runs its extra.class on install.
+func TestComposer_PluginIsAnInstallHook(t *testing.T) {
+	r := Composer([]byte(`{"name":"intercom/intercom-php","type":"composer-plugin","extra":{"class":"Intercom\\ComposerPlugin"}}`))
+	if !r.HasInstallScript || r.Kind != KindPresent {
+		t.Fatalf("composer-plugin: got %+v, want present install script", r)
+	}
+	if refs := ReferencedScripts(r.ScriptBody); len(refs) != 1 || refs[0] != "ComposerPlugin.php" {
+		t.Fatalf("ReferencedScripts(%q) = %v, want [ComposerPlugin.php]", r.ScriptBody, refs)
+	}
+	// A list of classes, a class named like a fetch tool, and a non-object extra.
+	r = Composer([]byte(`{"type":"composer-plugin","extra":{"class":["A\\Curl","B\\Two"]}}`))
+	if r.Kind != KindPresent || r.ScriptBody != "php Curl.php\nphp Two.php\n" {
+		t.Fatalf("class list: got %+v", r)
+	}
+	if r := Composer([]byte(`{"type":"composer-plugin","extra":[]}`)); !r.HasInstallScript {
+		t.Fatalf("extra:[] plugin: got %+v", r)
+	}
+	// Libraries and metapackages are not plugins.
+	for _, cj := range []string{`{"type":"library"}`, `{"name":"x/y","extra":{"class":"X\\Y"}}`} {
+		if r := Composer([]byte(cj)); r.HasInstallScript {
+			t.Fatalf("%s: got %+v, want no install script", cj, r)
+		}
+	}
+}

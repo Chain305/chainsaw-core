@@ -4,10 +4,10 @@ import "testing"
 
 // helpersutils-dev-tools (2026-09-02, row 56): index.js beacons the host
 // page's domain to http://5.189.173.113:8899/csp-edu on require. When
-// iocscan reports it (only for a send primitive it recognises — see
-// core/iocscan/attack2026_56_test.go: the documented `new Image()` beacon
-// is NOT recognised), MaliciousIOC is set; no default seed rule blocks on
-// it. PREVENTED_CONFIG via a maliciousIOC block rule.
+// iocscan reports it (the documented `new Image()` beacon is a recognised
+// send since v0.22.106, F9 — see core/intelligence/attack2026_56_test.go),
+// MaliciousIOC is set; no default seed rule blocks on it. PREVENTED_CONFIG
+// via a maliciousIOC block rule.
 func TestAttack2026_56_HelpersutilsDevTools_PolicyKnob(t *testing.T) {
 	if SupportMatrix[EcoNPM][ConditionMaliciousIOC] != SupportFull {
 		t.Fatal("maliciousIOC is not SupportFull on npm")

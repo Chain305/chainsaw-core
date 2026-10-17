@@ -333,6 +333,8 @@ func sarifActionsRule(f scanActionsFinding) sarifRule {
 		md.WriteString("Gate the job with `if:` on github.event.comment.author_association (OWNER, MEMBER or COLLABORATOR) before it can reach secrets, OIDC or a publish step.\n")
 	case "action.script_injection":
 		md.WriteString("Pass the event field through `env:` and reference it as a quoted shell variable instead of interpolating `${{ }}` into the script.\n")
+	case "action.decode_exec":
+		md.WriteString("Decode the payload and read it before anything runs it. A legitimate step commits the script in clear text; an encoded script piped to a shell is how the Megalodon CI backdoor hid its credential theft. Remove the step and rotate any secret the workflow could read.\n")
 	default:
 		md.WriteString("Pin the action to a full-length commit SHA and confirm the publisher is trusted before re-enabling the workflow.\n")
 	}
@@ -369,6 +371,12 @@ func prScanToSARIF(report prScanReport) sarifLog {
 	var results []sarifResult
 	emit := func(e prScanEntry) {
 		coord := e.Ecosystem + ":" + e.Name + "@" + e.Version
+		uri := coord
+		if e.Version == "" {
+			// A file row (workflow lint, editor config): Name is the
+			// repository path, so the result is located at the file.
+			coord, uri = e.Ecosystem+":"+e.Name, e.Name
+		}
 		for _, sig := range e.Signals {
 			if _, ok := ruleMeta[sig.ID]; !ok {
 				ruleMeta[sig.ID] = sarifPRScanRule(sig)
@@ -379,7 +387,7 @@ func prScanToSARIF(report prScanReport) sarifLog {
 				Message: sarifMessage{Text: fmt.Sprintf("%s: %s", coord, sig.Reason)},
 				Locations: []sarifLocation{{
 					PhysicalLocation: sarifPhysicalLocation{
-						ArtifactLocation: sarifArtifactLocation{URI: coord},
+						ArtifactLocation: sarifArtifactLocation{URI: uri},
 					},
 				}},
 			})

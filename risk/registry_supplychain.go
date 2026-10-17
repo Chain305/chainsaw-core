@@ -406,19 +406,31 @@ func init() {
 	// default. Decided 2026-10-10 for two of them, as warn-ceiling compounds
 	// (compound.go): sc.import_time_beacon, exempt past a download line, and
 	// sc.obfuscated_exec_eval (the bare kind with dynamic eval).
+	//
+	// Since v0.22.106 download_exec fires it too: a module-level download that
+	// is then run (pysource, durabletask 1.4.x), or fetched content reaching an
+	// eval / shell / include sink in PHP or Ruby (core/scriptsource,
+	// laravel-lang, SleeperGem). Same class as top_level_shell, executing a
+	// fetched file on import, so same weight and cap. MEASURED, bytes only:
+	// 0 of 3,534 local site-packages entries (download_exec), 0 of 111
+	// Composer packages and 0 of 380 gems (scriptsource); recall on malware
+	// samples is unmeasured (the Datadog set has no PHP or Ruby).
 	register(Signal{
 		ID:          SignalSCImportTimeShell,
 		Category:    CategorySupplyChain,
 		Severity:    SevHigh,
 		Weight:      -25,
 		MaxImpact:   40,
-		Title:       "Python module runs a shell command on import",
-		Description: "A module-level statement in the package's Python source spawns a shell, so it runs the moment the package is imported or, in setup.py, installed.",
+		Title:       "Package runs a shell command or downloaded code on import",
+		Description: "Code in the package spawns a shell or runs content it downloads when the package is imported, required or autoloaded, or (setup.py) installed.",
 		Fires: func(in Input) (bool, string, map[string]any) {
-			if in.ImportTimeKind != "top_level_shell" {
-				return false, "", nil
+			switch in.ImportTimeKind {
+			case "top_level_shell":
+				return true, "Module-level code spawns a shell at import time.", nil
+			case "download_exec":
+				return true, "Code runs content it downloads when the package is imported or loaded.", nil
 			}
-			return true, "Module-level code spawns a shell at import time.", nil
+			return false, "", nil
 		},
 		TakeoverIndicator: true,
 	})
@@ -475,7 +487,8 @@ func init() {
 	// sc.defender_tamper — @apexacc/audit (2026-09) ran Set-MpPreference to
 	// disable Defender before loading its stealer. Warn-capped, not a block:
 	// Add-MpPreference -ExclusionPath is also a legitimate (if poor) build
-	// speed-up some tooling scripts.
+	// speed-up some tooling scripts. @apexacc/cli (2026-09) also wrote the
+	// Smart App Control state and hid both inside -EncodedCommand (F10).
 	register(Signal{
 		ID:          SignalSCDefenderTamper,
 		Category:    CategorySupplyChain,
@@ -483,7 +496,7 @@ func init() {
 		Weight:      -20,
 		MaxImpact:   40,
 		Title:       "Code disables or excludes Windows Defender",
-		Description: "A shipping file runs Set-MpPreference -Disable* or Add-MpPreference -Exclusion*, turning off or carving holes in the host's antivirus.",
+		Description: "A shipping file runs Set-MpPreference -Disable* or Add-MpPreference -Exclusion*, or writes the Smart App Control policy state, turning off or carving holes in the host's protection. PowerShell -EncodedCommand payloads are decoded first.",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			if in.DefenderTamper == "" {
 				return false, "", nil

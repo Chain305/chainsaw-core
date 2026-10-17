@@ -93,9 +93,10 @@ const (
 
 	// SignalImportTimeExecution activates the pysource provider — import-time
 	// malicious behavior (PyPI: top-level obfuscated decode-and-exec,
-	// import-time env/credential exfil, top-level shell; npm: top-level
-	// decode/download-and-execute shell via core/jssource). Tier 2, rides the
-	// shared artifact map.
+	// import-time env/credential exfil, top-level shell or download-then-run,
+	// .pth lines; npm: top-level decode/download-and-execute shell via
+	// core/jssource; composer/rubygems: execution of fetched or decoded
+	// content via core/scriptsource). Tier 2, rides the shared artifact map.
 	SignalImportTimeExecution
 
 	// SignalIOCScan activates the iocscan provider — high-confidence embedded

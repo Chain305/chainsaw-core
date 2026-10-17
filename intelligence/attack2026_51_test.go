@@ -22,7 +22,8 @@ import (
 //	B. loader itself _0x-obfuscated (jaredwray wave)
 //	   -> escalated on the first hop.
 //	C. loader hides the filename in a non-_0x string table (second wave)
-//	   -> NOT escalated: present only. Documented gap.
+//	   -> escalated since v0.22.106 (F11): it runs a bundled script under
+//	   the Bun it fetched (was present only).
 func TestAttack2026_51_ChainDrop_ByteScan(t *testing.T) {
 	manifest := `{"name":"keyv","version":"6.0.0","main":"dist/index.cjs","files":["dist","setup.mjs","Math_Symbol.js"],` +
 		`"scripts":{"preinstall":"node setup.mjs","test":"vitest run"}}`
@@ -61,8 +62,8 @@ func TestAttack2026_51_ChainDrop_ByteScan(t *testing.T) {
 	c := atkBRun(t, p, "keyv", "6.0.0", atkBTarball(t, map[string]string{
 		"package.json": manifest, "setup.mjs": hidden, "Math_Symbol.js": payload,
 	}))
-	if c.InstallScriptFetches || !c.HasInstallScript {
-		t.Fatalf("C (filename hidden in a non-_0x string table): current behaviour is present-only, got %+v", c)
+	if !c.InstallScriptFetches || c.InstallScriptKind != string(installscripts.KindFetchesRemote) {
+		t.Fatalf("C (filename hidden in a non-_0x string table): want fetches_remote since v0.22.106 (F11), got %+v", c)
 	}
 
 	// Negative control: keyv@5.6.0 has no install hook at all.

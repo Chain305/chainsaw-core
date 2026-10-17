@@ -30,9 +30,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -99,6 +101,8 @@ var scanRepoCandidateBasenames = map[string]bool{
 	"Podfile":             true,
 	"Package.swift":       true,
 	"Dockerfile":          true,
+	"tasks.json":          true, // inspectFile additionally requires a .vscode/ path
+	"settings.json":       true, // likewise
 }
 
 // isScanRepoCandidate reports whether a basename can possibly match a rule in
@@ -127,7 +131,10 @@ route package traffic around Chainsaw: committed .npmrc / .yarnrc.yml /
 packageSources, Cargo [source.*] replace-with entries, GOPROXY overrides,
 Dockerfile images without the Chainsaw prefix, CocoaPods non-Chainsaw
 sources, SPM .package(url:) direct dependencies, and git dependencies in
-requirements*.txt, pyproject.toml and package.json.
+requirements*.txt, pyproject.toml and package.json. It also flags editor
+config that runs repository code when the folder is opened: a .vscode/tasks.json
+task with runOn: folderOpen, and .vscode/settings.json turning on
+task.allowAutomaticTasks.
 
 Exit codes:
   0  the tree is clean
@@ -252,8 +259,9 @@ func runScanRepo(cmd *cobra.Command, args []string) error {
 
 		// Skip files that contain the chainsaw sentinel — those are
 		// managed by install-hook and are expected to have the keys
-		// we'd otherwise flag.
-		if strings.Contains(text, "chainsaw-managed") {
+		// we'd otherwise flag. Chainsaw never writes editor config, so the
+		// sentinel is not honoured there: a comment must not hide a task.
+		if strings.Contains(text, "chainsaw-managed") && !isVSCodeConfig(rel) {
 			return nil
 		}
 
@@ -416,6 +424,15 @@ func inspectFile(rel, base, text string) []scanFinding {
 		if strings.Contains(text, ".package(url:") {
 			add("swift", "package-swift-scm", "Package.swift has git-URL dependencies — run swift package --replace-scm-with-registry")
 		}
+	case base == "tasks.json" && isVSCodeConfig(rel):
+		if vscodeFolderOpenRE.MatchString(jsonUnescape(text)) {
+			add("vscode", "vscode-folder-open-task", ".vscode/tasks.json runs a task automatically when the folder is opened (runOptions.runOn: folderOpen) — "+
+				"opening the repository executes its command; review what it runs (BindsNET, 2026-08: a forged commit ran disguised JavaScript this way)")
+		}
+	case base == "settings.json" && isVSCodeConfig(rel):
+		if vscodeAutoTasksRE.MatchString(jsonUnescape(text)) {
+			add("vscode", "vscode-automatic-tasks-on", `.vscode/settings.json sets "task.allowAutomaticTasks": "on" — folder-open tasks run without asking`)
+		}
 	case base == "Dockerfile" || strings.HasPrefix(base, "Dockerfile."):
 		for _, ln := range strings.Split(text, "\n") {
 			t := strings.TrimSpace(ln)
@@ -443,6 +460,28 @@ func inspectFile(rel, base, text string) []scanFinding {
 	}
 
 	return out
+}
+
+var (
+	vscodeFolderOpenRE = regexp.MustCompile(`"runOn"\s*:\s*"folderOpen"`)
+	vscodeAutoTasksRE  = regexp.MustCompile(`"task\.allowAutomaticTasks"\s*:\s*"on"`)
+	jsonUnicodeEscRE   = regexp.MustCompile(`\\u[0-9a-fA-F]{4}`)
+)
+
+// isVSCodeConfig reports a file directly under a .vscode/ directory.
+func isVSCodeConfig(rel string) bool {
+	return path.Base(path.Dir("/"+filepath.ToSlash(rel))) == ".vscode"
+}
+
+// jsonUnescape decodes \uXXXX escapes, which VS Code's JSONC reader honours,
+// so "run\u004fn" cannot hide a key from the regexes above. A grep, like the
+// rest of inspectFile: tasks.json is JSONC (comments, trailing commas), and a
+// task commented out still reports, which is the safe direction.
+func jsonUnescape(s string) string {
+	return jsonUnicodeEscRE.ReplaceAllStringFunc(s, func(m string) string {
+		r, _ := strconv.ParseUint(m[2:], 16, 32)
+		return string(rune(r))
+	})
 }
 
 // pyprojectGitKey matches a Poetry / uv dependency table's git key.

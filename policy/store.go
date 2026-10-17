@@ -247,7 +247,7 @@ type Conditions struct {
 	ReservedNamespaces         []string `json:"reservedNamespaces,omitempty" yaml:"reservedNamespaces,omitempty"`                 // namespace patterns for dep confusion
 	HasInstallScript           *bool    `json:"hasInstallScript,omitempty" yaml:"hasInstallScript,omitempty"`                     // nil=any, true=any lifecycle script declared in the manifest
 	InstallScriptFetchesRemote *bool    `json:"installScriptFetchesRemote,omitempty" yaml:"installScriptFetchesRemote,omitempty"` // nil=any, true=install script body references curl/wget/fetch/subprocess/etc.
-	ImportTimeExecution        *bool    `json:"importTimeExecution,omitempty" yaml:"importTimeExecution,omitempty"`               // nil=any, true=PyPI or npm package runs malicious behavior at import/install (top-level obfuscated exec / exfil / shell)
+	ImportTimeExecution        *bool    `json:"importTimeExecution,omitempty" yaml:"importTimeExecution,omitempty"`               // nil=any, true=PyPI, npm, Composer or RubyGems package runs malicious behavior at import/install (top-level obfuscated exec / exfil / shell)
 	MaliciousIOC               *bool    `json:"maliciousIOC,omitempty" yaml:"maliciousIOC,omitempty"`                             // nil=any, true=source embeds an exfil sink host or a coupled stealer string
 	BuildRsExecutes            *bool    `json:"buildRsExecutes,omitempty" yaml:"buildRsExecutes,omitempty"`                       // nil=any, true=cargo crate's build.rs performs shell/network execution at build time (cargo-only)
 
@@ -603,14 +603,32 @@ func nullableInt(n *int) any {
 type Store struct {
 	sql   *pgstore.Store
 	orgID string
+	// seedUpgraded, when set, is told about every row the startup seed
+	// upgrade rewrites (upgradeSupersededSeeds), with the full row as
+	// re-read and a change summary.
+	seedUpgraded func(orgID string, pol Policy, summary string)
+}
+
+// StoreOption configures NewStore.
+type StoreOption func(*Store)
+
+// WithSeedUpgradeRecorder registers fn to record each seeded rule the
+// startup integrity pass rewrites. The version history lives in
+// internal/policy/history, which core cannot import, so the proxy passes the
+// writer in here; it must be set before NewStore runs the pass.
+func WithSeedUpgradeRecorder(fn func(orgID string, pol Policy, summary string)) StoreOption {
+	return func(s *Store) { s.seedUpgraded = fn }
 }
 
 // NewStore wires a policy store backed by Postgres.
-func NewStore(db *pgstore.Store) (*Store, error) {
+func NewStore(db *pgstore.Store, opts ...StoreOption) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("postgres store is required")
 	}
 	store := &Store{sql: db}
+	for _, opt := range opts {
+		opt(store)
+	}
 	if err := store.ensurePolicyIntegrity(); err != nil {
 		return nil, err
 	}
@@ -1568,6 +1586,9 @@ func (s *Store) ensurePolicyIntegrity() error {
 		return err
 	}
 	if err := s.repairDuplicateNames(); err != nil {
+		return err
+	}
+	if err := s.upgradeSupersededSeeds(); err != nil {
 		return err
 	}
 	if _, err := s.sql.DB().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_policies_org_precedence_unique ON policies(org_id, precedence)`); err != nil {
