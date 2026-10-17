@@ -125,6 +125,8 @@ const (
 	settingProvenanceSwiftFullVerify    = "provenance.swift_full_verify"
 	settingProvenanceSwiftRegistryURL   = "provenance.swift_registry_url"
 	settingMalwareEnableGHSA            = "malware.enable_ghsa"
+	settingMalwareDockerFeedURL         = "malware.docker_feed_url"
+	settingMalwareHuggingFaceFeedURL    = "malware.huggingface_feed_url"
 	settingSBOMAttributionEnabled       = "sbom.attribution_enabled"
 	settingSBOMAttributionWindowDays    = "sbom.attribution_window_days"
 	settingCorrelationEnabled           = "correlation.enabled"
@@ -290,6 +292,8 @@ func applySettingsOverlay(cfg *Config, settings settingMap) {
 
 	// optional feature blocks
 	settings.overlayBoolPtr(settingMalwareEnableGHSA, &cfg.Malware.EnableGHSA)
+	settings.overlayString(settingMalwareDockerFeedURL, &cfg.Malware.DockerFeedURL)
+	settings.overlayString(settingMalwareHuggingFaceFeedURL, &cfg.Malware.HuggingFaceFeedURL)
 	settings.overlayBool(settingSBOMAttributionEnabled, &cfg.SBOM.AttributionEnabled)
 	settings.overlayInt(settingSBOMAttributionWindowDays, &cfg.SBOM.AttributionWindowDays)
 	settings.overlayBool(settingCorrelationEnabled, &cfg.Correlation.Enabled)
@@ -574,6 +578,12 @@ func saveFeatureSettings(set settingSetter, cfg *Config) error {
 		if err := set(settingMalwareEnableGHSA, boolString(*cfg.Malware.EnableGHSA)); err != nil {
 			return err
 		}
+	}
+	if err := set(settingMalwareDockerFeedURL, cfg.Malware.DockerFeedURL); err != nil {
+		return err
+	}
+	if err := set(settingMalwareHuggingFaceFeedURL, cfg.Malware.HuggingFaceFeedURL); err != nil {
+		return err
 	}
 	if err := set(settingSBOMAttributionEnabled, boolString(cfg.SBOM.AttributionEnabled)); err != nil {
 		return err

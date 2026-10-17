@@ -141,7 +141,7 @@ The sixteen: npm, PyPI, Maven, Cargo, Composer, RubyGems, NuGet, Go, Hugging
 Face, CocoaPods, Swift, Pub (Dart), Docker/OCI, APT, Yum, DNF.
 
 Coverage across them is **not uniform** — of 54 policy conditions, npm supports
-43 fully and APT supports 12, because an upstream that publishes no maintainer
+44 fully and APT supports 12, because an upstream that publishes no maintainer
 metadata cannot produce a maintainer signal. The matrix is compiled into the
 binary ([`policy/proxy_matrix.go`](policy/proxy_matrix.go)), queryable at
 `GET /api/policies/support-matrix`, and a rule skipped for this reason emits a

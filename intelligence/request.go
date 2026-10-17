@@ -91,10 +91,11 @@ const (
 	// CHAINSAW_OFFLINE=1; on fetch error sets sentinel -1 → SevUnknown.
 	SignalWeeklyDownloads
 
-	// SignalImportTimeExecution activates the pysource provider — Python
-	// import-time malicious behavior (top-level obfuscated decode-and-exec,
-	// import-time env/credential exfil, top-level shell). Tier 2, PyPI-only,
-	// rides the shared artifact map.
+	// SignalImportTimeExecution activates the pysource provider — import-time
+	// malicious behavior (PyPI: top-level obfuscated decode-and-exec,
+	// import-time env/credential exfil, top-level shell; npm: top-level
+	// decode/download-and-execute shell via core/jssource). Tier 2, rides the
+	// shared artifact map.
 	SignalImportTimeExecution
 
 	// SignalIOCScan activates the iocscan provider — high-confidence embedded

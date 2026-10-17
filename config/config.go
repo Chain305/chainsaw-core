@@ -239,6 +239,32 @@ type MalwareConfig struct {
 	// Pointer-to-bool so an absent YAML key keeps the default-on
 	// behavior; explicit `enable_ghsa: false` opts out.
 	EnableGHSA *bool `yaml:"enable_ghsa"`
+	// DockerFeedURL and HuggingFaceFeedURL point the Docker and HuggingFace
+	// malware syncers at an operator feed (HTTPS, the embedded seed's JSON
+	// schema), merged over the embedded seed on every 6h sync. Empty means
+	// seed only; offline mode drops them. CHAINSAW_DOCKER_MALWARE_FEED_URL /
+	// CHAINSAW_HUGGINGFACE_MALWARE_FEED_URL win over the YAML. Until v0.22.105
+	// the syncers accepted a URL but nothing passed one in, so an operator
+	// could not add an image the seed lacked (checkmarx/kics, 2026-04).
+	DockerFeedURL      string `yaml:"docker_feed_url"`
+	HuggingFaceFeedURL string `yaml:"huggingface_feed_url"`
+}
+
+// DockerFeed returns the effective Docker malware feed URL.
+func (m MalwareConfig) DockerFeed() string {
+	return envOr("CHAINSAW_DOCKER_MALWARE_FEED_URL", m.DockerFeedURL)
+}
+
+// HuggingFaceFeed returns the effective HuggingFace malware feed URL.
+func (m MalwareConfig) HuggingFaceFeed() string {
+	return envOr("CHAINSAW_HUGGINGFACE_MALWARE_FEED_URL", m.HuggingFaceFeedURL)
+}
+
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(fallback)
 }
 
 // GHSAEnabled returns the effective EnableGHSA setting, defaulting to

@@ -81,7 +81,7 @@ type Breakdown struct {
 	// double-counted; the total is clamped at -20 on the install-script
 	// axis).
 	InstallScript          int `json:"installScript"`          // 0 to -25
-	ImportTimeExecution    int `json:"importTimeExecution"`    // 0 or -30 (PyPI import-time malicious exec)
+	ImportTimeExecution    int `json:"importTimeExecution"`    // 0 or -30 (PyPI/npm import-time malicious exec)
 	MaliciousIOC           int `json:"maliciousIoc"`           // 0 or -30 (embedded exfil host / coupled stealer string)
 	PublisherChanged       int `json:"publisherChanged"`       // 0 or -25 (account-takeover signal)
 	VersionAnomaly         int `json:"versionAnomaly"`         // 0 to -30 (−15 per flag, capped)

@@ -385,7 +385,7 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionReservedNamespaces:         SupportFull,
 		ConditionHasInstallScript:           SupportFull,
 		ConditionInstallScriptFetchesRemote: SupportFull,
-		ConditionImportTimeExecution:        SupportNone,
+		ConditionImportTimeExecution:        SupportFull,
 		ConditionMaliciousIOC:               SupportFull,
 		ConditionBuildRsExecutes:            SupportNone, // build.rs is cargo-only
 		ConditionPublisherChanged:           SupportFull, // maintainers[].name

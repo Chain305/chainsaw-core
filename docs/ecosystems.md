@@ -37,7 +37,7 @@ cannot produce a maintainer signal.
 
 | Ecosystem | Full | Partial | Not supported |
 |---|---:|---:|---:|
-| npm | 43 | 4 | 7 |
+| npm | 44 | 4 | 6 |
 | PyPI | 45 | 4 | 5 |
 | Maven | 19 | 16 | 19 |
 | Cargo | 35 | 3 | 16 |

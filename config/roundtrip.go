@@ -101,6 +101,8 @@ var settingsBackedFields = map[string]string{
 
 	// optional feature blocks
 	"Malware.EnableGHSA":         settingMalwareEnableGHSA,
+	"Malware.DockerFeedURL":      settingMalwareDockerFeedURL,
+	"Malware.HuggingFaceFeedURL": settingMalwareHuggingFaceFeedURL,
 	"SBOM.AttributionEnabled":    settingSBOMAttributionEnabled,
 	"SBOM.AttributionWindowDays": settingSBOMAttributionWindowDays,
 	"Correlation.Enabled":        settingCorrelationEnabled,
