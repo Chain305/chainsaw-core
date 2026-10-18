@@ -5,9 +5,10 @@
 > Consume it pinned to a commit SHA:
 > `uses: Chain305/chainsaw-core/enforcement/github-actions@4b6142b568b8b8aa34364b20fbcb46c7be3b9532 # v0.22.115`.
 > Since v0.22.116 pr-scan blocks every action referenced by tag or branch, this
-> one included, so `@action-v1` fails the check it installs. The `action-v1` tag
-> also does not follow releases (it still pins CLI v0.22.100); the SHA above is
-> the open-core commit carrying the v0.22.115 action.
+> one included, so `@action-v1` fails the check it installs. The SHA above is
+> the open-core commit carrying the v0.22.115 action. `action-v1` itself was
+> moved on 2026-10-18 to `action-v1.0.2` (open-core `3930bf0`, CLI v0.22.116);
+> before that it had stayed on `action-v1.0.1`, which runs CLI v0.22.100.
 > It is **not** on the GitHub Marketplace yet — a Marketplace listing requires
 > `action.yml` at a repository root, and this action ships from a subdirectory
 > of the open-core repo.
