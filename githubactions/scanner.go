@@ -228,12 +228,15 @@ func stripSubPath(name string) string {
 // typosquat.PopularGitHubActions(), deduped and lowercased. Trimming to
 // owners (rather than the full owner/name corpus) keeps this list short
 // and human-auditable while still tracking the popular-Actions corpus
-// as it grows. The list is sorted alphabetically.
+// as it grows. The list is sorted alphabetically. chain305 is not in that
+// corpus: it is the publisher of the Chainsaw Guard Action, which a
+// pr-scan user already runs, so its own uses: line is not flagged.
 func DefaultKnownPublishers() []string {
 	return []string{
 		"actions",
 		"aws-actions",
 		"azure",
+		"chain305",
 		"docker",
 		"github",
 		"golang",

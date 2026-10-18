@@ -74,6 +74,10 @@ jobs:
 	if gErr != nil || len(gAdded) != 1 || gAdded[0].Verdict == "block" {
 		t.Fatalf("pr-scan row for the Chainsaw Guard Action @action-v1: want not blocked, got %+v %v", gAdded, gErr)
 	}
+	// Since v0.22.112 chain305 is a known publisher: no unknown_publisher row.
+	if hasPRSignal(gAdded[0].Signals, "action.unknown_publisher") {
+		t.Fatalf("pr-scan flags the Chainsaw Guard Action as an unknown publisher: %+v", gAdded[0])
+	}
 	first := "name: ci\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
 	added, _, err = diffWorkflow(".github/workflows/ci.yml", nil, []byte(first))
 	if err != nil || len(added) != 1 || !hasPRSignal(added[0].Signals, "action.unpinned_ref") || added[0].Verdict != "warn" {
