@@ -67,8 +67,8 @@ jobs:
 	if err != nil || len(added) != 1 || !hasPRSignal(added[0].Signals, "action.unpinned_ref") || added[0].Verdict != "block" {
 		t.Fatalf("pr-scan row for @v5: want block with action.unpinned_ref, got %+v %v", added, err)
 	}
-	// GitHub's own actions stay warn when tag-pinned, and so does the
-	// documented Chainsaw Guard Action ref.
+	// The documented Chainsaw Guard Action ref is the one tag that does not
+	// block.
 	guard := "name: guard\non: pull_request\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: Chain305/chainsaw-core/enforcement/github-actions@action-v1\n"
 	gAdded, _, gErr := diffWorkflow(".github/workflows/guard.yml", nil, []byte(guard))
 	if gErr != nil || len(gAdded) != 1 || gAdded[0].Verdict == "block" {
@@ -80,7 +80,14 @@ jobs:
 	}
 	first := "name: ci\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
 	added, _, err = diffWorkflow(".github/workflows/ci.yml", nil, []byte(first))
-	if err != nil || len(added) != 1 || !hasPRSignal(added[0].Signals, "action.unpinned_ref") || added[0].Verdict != "warn" {
-		t.Fatalf("pr-scan row for actions/checkout@v4: want warn with action.unpinned_ref, got %+v %v", added, err)
+	// Since v0.22.114 GitHub's own actions block too when tag-pinned...
+	if err != nil || len(added) != 1 || !hasPRSignal(added[0].Signals, "action.unpinned_ref") || added[0].Verdict != "block" {
+		t.Fatalf("pr-scan row for actions/checkout@v4: want block with action.unpinned_ref, got %+v %v", added, err)
+	}
+	// ...and not when pinned by commit SHA.
+	pinnedCO := "name: ci\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n"
+	added, _, err = diffWorkflow(".github/workflows/ci.yml", nil, []byte(pinnedCO))
+	if err != nil || len(added) != 1 || added[0].Verdict == "block" {
+		t.Fatalf("pr-scan row for SHA-pinned actions/checkout: want not blocked, got %+v %v", added, err)
 	}
 }

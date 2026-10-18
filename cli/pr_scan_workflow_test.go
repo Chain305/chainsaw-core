@@ -35,8 +35,8 @@ func TestIsWorkflowFile(t *testing.T) {
 }
 
 // TestDiffWorkflowRowsCarryActionSignals: only refs the PR added or changed
-// become rows; a SHA pin moved to a tag is an upgrade flagged unpinned, and a
-// known-compromised action blocks.
+// become rows; a SHA pin moved to a tag is an upgrade that blocks on
+// unpinned_ref, and a known-compromised action blocks.
 func TestDiffWorkflowRowsCarryActionSignals(t *testing.T) {
 	base := prWorkflow("actions/checkout@"+prWorkflowSHA, "actions/setup-node@"+prWorkflowSHA)
 	head := prWorkflow("actions/checkout@v5", "actions/setup-node@"+prWorkflowSHA, "tj-actions/changed-files@v35", "tj-actions/changed-files@v35")
@@ -48,8 +48,9 @@ func TestDiffWorkflowRowsCarryActionSignals(t *testing.T) {
 		upgraded[0].PreviousVersion == nil || *upgraded[0].PreviousVersion != prWorkflowSHA {
 		t.Fatalf("want one upgrade actions/checkout %s -> v5, got %+v", prWorkflowSHA, upgraded)
 	}
-	if !hasPRSignal(upgraded[0].Signals, "action.unpinned_ref") || upgraded[0].Verdict != "warn" {
-		t.Errorf("SHA -> tag must warn action.unpinned_ref, got %+v", upgraded[0])
+	// Since v0.22.114 an unpinned GitHub-owned action blocks too.
+	if !hasPRSignal(upgraded[0].Signals, "action.unpinned_ref") || upgraded[0].Verdict != "block" {
+		t.Errorf("SHA -> tag must block on action.unpinned_ref, got %+v", upgraded[0])
 	}
 	if len(added) != 1 || added[0].Name != "tj-actions/changed-files" {
 		t.Fatalf("want one added row (a ref used twice is one row; setup-node is unchanged), got %+v", added)

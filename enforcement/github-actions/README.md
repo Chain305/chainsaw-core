@@ -37,7 +37,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Required: pr-scan diffs against the PR's merge base, which a
           # shallow clone does not contain. Without this the pr-scan leg
@@ -81,7 +81,7 @@ Example — fail only when blocking policies hit, but always upload the report:
   with:
     mode: warn
 
-- uses: actions/upload-artifact@v4
+- uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
   if: always()
   with:
     name: chainsaw-report

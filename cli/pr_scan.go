@@ -136,10 +136,9 @@ verdict is "allow", "warn", or "block".
 Changed GitHub Actions workflows (.github/workflows/*.yml, action.yml) are
 inspected too: every added or changed uses: ref gets the scan-actions
 signals (action.*); a known-compromised action blocks, so does a name that
-imitates a known-good action under another owner, and so does a
-third-party action referenced by tag or branch instead of a commit SHA
-(GitHub's own actions/* and github/*, and the Chainsaw Guard Action, only
-warn). Known-compromised
+imitates a known-good action under another owner, and so does any action
+referenced by tag or branch instead of a commit SHA, GitHub's own included
+(only the Chainsaw Guard Action's own tag warns). Known-compromised
 actions come from the same sources as scan-actions: the built-in seed plus the
 local GitHub Actions OSV snapshot when present. The scan-actions workflow lint
 also runs; a dangerous shape the PR introduces (pwn request, unguarded comment
@@ -1817,7 +1816,7 @@ func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded 
 	signals := map[string][]prScanSignal{}
 	for _, f := range findings {
 		sev := "warn"
-		if f.Signal == githubactions.SignalActionMalicious || f.Signal == githubactions.SignalActionTyposquat || unpinnedThirdParty(f) {
+		if f.Signal == githubactions.SignalActionMalicious || f.Signal == githubactions.SignalActionTyposquat || unpinnedBlocks(f) {
 			sev = "block"
 		}
 		raw := strings.TrimSpace(f.Ref.Raw)
@@ -1839,25 +1838,17 @@ func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded 
 	return added, upgraded, nil
 }
 
-// unpinnedThirdParty reports an action.unpinned_ref finding on an action
-// GitHub does not publish. Since v0.22.111 it blocks: a tag or branch on a
-// third-party action can be re-pointed by whoever controls that repository
+// unpinnedBlocks reports an action.unpinned_ref finding pr-scan blocks. A tag
+// or branch can be re-pointed by whoever controls the action's repository
 // (tj-actions/changed-files, attack 13's trivy-action), so only a commit SHA
-// pins the code that runs. GitHub's own actions/* and github/* stay warn, and
-// so does Chain305's Guard Action (documented as @action-v1): whoever runs
-// pr-scan already trusts Chain305's binaries, so its tag adds no trust, and
-// blocking it would fail the PR that installs the guard.
-// Measured on 940 real workflows: 251 (26.7%) add a third-party ref by tag,
-// 541 (57.6%) counting GitHub's own.
-func unpinnedThirdParty(f githubactions.Finding) bool {
-	if f.Signal != githubactions.SignalActionUnpinnedRef {
-		return false
-	}
-	switch strings.ToLower(f.Ref.Owner) {
-	case "actions", "github", "chain305":
-		return false
-	}
-	return true
+// pins the code that runs. Since v0.22.111 third-party refs blocked; since
+// v0.22.114 GitHub's own actions/* and github/* do too (owner decision).
+// Measured on 940 real workflows: 541 (57.6%) add some action by tag.
+// The one exemption is Chain305's Guard Action (documented as @action-v1):
+// whoever runs pr-scan already trusts Chain305's binaries, so its tag adds no
+// trust, and blocking it would fail the PR that installs the guard.
+func unpinnedBlocks(f githubactions.Finding) bool {
+	return f.Signal == githubactions.SignalActionUnpinnedRef && !strings.EqualFold(f.Ref.Owner, "chain305")
 }
 
 // diffWorkflowLint returns the head's LintWorkflow findings that base does
