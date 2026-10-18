@@ -163,7 +163,9 @@ func TestScan_TyposquatStripsSubPath(t *testing.T) {
 		SourceLine: 1,
 	}
 	// The fake answers only for the stripped form.
-	fake := &fakeTyposquat{hits: map[string]string{"actions/cache": "actions/cache"}}
+	// (A suggestion under a different owner, so the same-owner rule does
+	// not suppress it.)
+	fake := &fakeTyposquat{hits: map[string]string{"actions/cache": "github/cache"}}
 	// Since the lookup returns a non-empty suggestion equal to the
 	// queried name, this would fire — but our purpose here is to
 	// confirm the stripped lookup string is what we feed to the
@@ -184,6 +186,29 @@ func TestScan_TyposquatStripsSubPath(t *testing.T) {
 	}
 	if typo == nil {
 		t.Fatalf("expected typosquat finding for sub-path lookup, got %+v", got)
+	}
+}
+
+// A sibling repository of the same publisher is not a typosquat: on 940 real
+// workflows every typosquat hit was anchore/sbom-action "resembling"
+// anchore/scan-action.
+func TestScan_TyposquatSameOwnerIsNotASquat(t *testing.T) {
+	refs := []ActionRef{remoteRef("anchore", "sbom-action", "v0", "", "wf.yml", 1)}
+	got, err := Scan(context.Background(), refs, ScanDeps{
+		Typosquat:       &fakeTyposquat{hits: map[string]string{"anchore/sbom-action": "anchore/scan-action"}},
+		KnownPublishers: []string{"anchore"},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	for _, f := range got {
+		if f.Signal == SignalActionTyposquat {
+			t.Fatalf("same-owner sibling flagged as typosquat: %+v", f)
+		}
+	}
+	// Owner case does not matter.
+	if !sameOwner("Anchore", "anchore/scan-action") || sameOwner("anchor", "anchore/scan-action") {
+		t.Fatal("sameOwner: want case-insensitive exact owner match")
 	}
 }
 

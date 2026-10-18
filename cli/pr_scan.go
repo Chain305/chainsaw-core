@@ -135,7 +135,8 @@ verdict is "allow", "warn", or "block".
 
 Changed GitHub Actions workflows (.github/workflows/*.yml, action.yml) are
 inspected too: every added or changed uses: ref gets the scan-actions
-signals (action.*); a known-compromised action blocks, and so does a
+signals (action.*); a known-compromised action blocks, so does a name that
+imitates a known-good action under another owner, and so does a
 third-party action referenced by tag or branch instead of a commit SHA
 (GitHub's own actions/* and github/*, and the Chainsaw Guard Action, only
 warn). Known-compromised
@@ -1816,7 +1817,7 @@ func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded 
 	signals := map[string][]prScanSignal{}
 	for _, f := range findings {
 		sev := "warn"
-		if f.Signal == githubactions.SignalActionMalicious || unpinnedThirdParty(f) {
+		if f.Signal == githubactions.SignalActionMalicious || f.Signal == githubactions.SignalActionTyposquat || unpinnedThirdParty(f) {
 			sev = "block"
 		}
 		raw := strings.TrimSpace(f.Ref.Raw)

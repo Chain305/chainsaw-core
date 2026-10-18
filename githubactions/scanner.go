@@ -146,7 +146,10 @@ func Scan(ctx context.Context, refs []ActionRef, deps ScanDeps) ([]Finding, erro
 			if err != nil {
 				return findings, err
 			}
-			if suggestion != "" {
+			// A squat needs a different owner: the same publisher's sibling
+			// repository (anchore/sbom-action vs anchore/scan-action) is not
+			// impersonating anyone. On 940 real workflows every hit was this.
+			if suggestion != "" && !sameOwner(ref.Owner, suggestion) {
 				perRef = append(perRef, Finding{
 					Ref:      ref,
 					Signal:   SignalActionTyposquat,
@@ -218,6 +221,12 @@ func stripSubPath(name string) string {
 		return name[:i]
 	}
 	return name
+}
+
+// sameOwner reports whether suggestion ("owner/name") belongs to owner.
+func sameOwner(owner, suggestion string) bool {
+	o, _, _ := strings.Cut(suggestion, "/")
+	return strings.EqualFold(strings.TrimSpace(o), strings.TrimSpace(owner))
 }
 
 // DefaultKnownPublishers returns the curated owner-allowlist for the
