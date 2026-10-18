@@ -136,9 +136,10 @@ verdict is "allow", "warn", or "block".
 Changed GitHub Actions workflows (.github/workflows/*.yml, action.yml) are
 inspected too: every added or changed uses: ref gets the scan-actions
 signals (action.*); a known-compromised action blocks, so does a name that
-imitates a known-good action under another owner, and so does any action
+imitates a known-good action under another owner, so does any action
 referenced by tag or branch instead of a commit SHA, GitHub's own included
-(only the Chainsaw Guard Action's own tag warns). Known-compromised
+(only the Chainsaw Guard Action's own tag warns), and so does an action from
+a publisher outside the known-publisher list, even when SHA-pinned. Known-compromised
 actions come from the same sources as scan-actions: the built-in seed plus the
 local GitHub Actions OSV snapshot when present. The scan-actions workflow lint
 also runs; a dangerous shape the PR introduces (pwn request, unguarded comment
@@ -1816,7 +1817,8 @@ func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded 
 	signals := map[string][]prScanSignal{}
 	for _, f := range findings {
 		sev := "warn"
-		if f.Signal == githubactions.SignalActionMalicious || f.Signal == githubactions.SignalActionTyposquat || unpinnedBlocks(f) {
+		if f.Signal == githubactions.SignalActionMalicious || f.Signal == githubactions.SignalActionTyposquat ||
+			f.Signal == githubactions.SignalActionUnknownPublisher || unpinnedBlocks(f) {
 			sev = "block"
 		}
 		raw := strings.TrimSpace(f.Ref.Raw)

@@ -16,7 +16,9 @@ func TestPRScanActionTyposquatBlocks(t *testing.T) {
 	// A sibling repository of the same publisher is not a squat (every
 	// typosquat hit on 940 real workflows was anchore/sbom-action).
 	added, _, err = diffWorkflow(".github/workflows/sbom.yml", nil, wf("anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610"))
-	if err != nil || len(added) != 1 || hasPRSignal(added[0].Signals, "action.typosquat") || added[0].Verdict == "block" {
-		t.Fatalf("anchore/sbom-action: want no typosquat and no block, got %+v %v", added, err)
+	// (It still blocks since v0.22.115, on unknown_publisher: anchore is
+	// not on the known-publisher list.)
+	if err != nil || len(added) != 1 || hasPRSignal(added[0].Signals, "action.typosquat") {
+		t.Fatalf("anchore/sbom-action: want no typosquat, got %+v %v", added, err)
 	}
 }

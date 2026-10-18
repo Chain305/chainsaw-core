@@ -90,4 +90,12 @@ jobs:
 	if err != nil || len(added) != 1 || added[0].Verdict == "block" {
 		t.Fatalf("pr-scan row for SHA-pinned actions/checkout: want not blocked, got %+v %v", added, err)
 	}
+	// Since v0.22.115 a SHA-pinned action from a publisher outside the
+	// known-publisher list blocks on action.unknown_publisher alone.
+	unk := "name: ci\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: codecov/codecov-action@0123456789abcdef0123456789abcdef01234567\n"
+	added, _, err = diffWorkflow(".github/workflows/cov.yml", nil, []byte(unk))
+	if err != nil || len(added) != 1 || added[0].Verdict != "block" || !hasPRSignal(added[0].Signals, "action.unknown_publisher") ||
+		hasPRSignal(added[0].Signals, "action.unpinned_ref") {
+		t.Fatalf("pr-scan row for SHA-pinned codecov: want block on unknown_publisher only, got %+v %v", added, err)
+	}
 }

@@ -131,15 +131,21 @@ func TestAttack2026_13_TrivyActionTagHijack(t *testing.T) {
 			t.Fatalf("pr-scan: clean release flagged malicious: %+v", e)
 		}
 	}
-	// The same clean releases pinned by commit SHA are not blocked.
+	// The same clean releases pinned by commit SHA carry no unpinned or
+	// malicious signal. Since v0.22.115 they still block, on
+	// action.unknown_publisher alone: aquasecurity is not on the
+	// known-publisher list.
 	pinned := atk13WF("0123456789abcdef0123456789abcdef01234567", "89abcdef0123456789abcdef0123456789abcdef")
 	added, _, err = diffWorkflow(".github/workflows/scan.yml", nil, []byte(pinned))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range added {
-		if e.Verdict == "block" {
-			t.Fatalf("pr-scan blocked a SHA-pinned clean release: %+v", e)
+		if hasPRSignal(e.Signals, "action.unpinned_ref") || hasPRSignal(e.Signals, "action.malicious") {
+			t.Fatalf("pr-scan: SHA-pinned clean release carries unpinned/malicious: %+v", e)
+		}
+		if e.Verdict != "block" || !hasPRSignal(e.Signals, "action.unknown_publisher") {
+			t.Fatalf("pr-scan: want SHA-pinned aquasecurity blocked on unknown_publisher, got %+v", e)
 		}
 	}
 
