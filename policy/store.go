@@ -2248,6 +2248,15 @@ type CachedStore struct {
 	// take an RLock, writes take a Lock.
 	busMu     sync.RWMutex
 	publisher *Publisher
+
+	// downstream are per-org invalidators for caches layered on top of
+	// this one (the evaluator's eval cache). They are fixed at
+	// construction because the bus is attached from the
+	// [OnCachedStoreInit] hook, which cannot see the evaluator, and run
+	// for every inbound bus message alongside the AttachInvalidationBus
+	// extras. Without them a peer replica kept serving memoised
+	// verdicts for up to the eval-cache TTL after a policy edit.
+	downstream []func(orgID string)
 }
 
 type cachedEntry struct {
@@ -2264,14 +2273,19 @@ const defaultPolicyCacheTTL = 15 * time.Second
 // invalidation bus. The hook is a seam, not policy: NewCachedStore
 // remains callable (and returns a usable store) even with no hook
 // registered.
-func NewCachedStore(inner *Store, ttl time.Duration) *CachedStore {
+//
+// downstream are per-org invalidators run whenever ANOTHER replica
+// invalidates an org over the bus (see [CachedStore.AttachInvalidationBus]);
+// pass the evaluator's InvalidateCacheForOrg here. Nil entries are skipped.
+func NewCachedStore(inner *Store, ttl time.Duration, downstream ...func(orgID string)) *CachedStore {
 	if ttl <= 0 {
 		ttl = defaultPolicyCacheTTL
 	}
 	cs := &CachedStore{
-		inner: inner,
-		cache: make(map[string]cachedEntry),
-		ttl:   ttl,
+		inner:      inner,
+		cache:      make(map[string]cachedEntry),
+		ttl:        ttl,
+		downstream: downstream,
 	}
 	cachedStoreInitHookMu.RLock()
 	hook := cachedStoreInitHook
@@ -2334,6 +2348,11 @@ func (c *CachedStore) AttachInvalidationBus(ctx context.Context, publisher *Publ
 	// first; downstream caches see a consistent state on re-read.
 	subscriber.callback = func(orgID string) {
 		c.localInvalidate(orgID)
+		for _, down := range c.downstream {
+			if down != nil {
+				down(orgID)
+			}
+		}
 		for _, extra := range extras {
 			if extra != nil {
 				extra(orgID)

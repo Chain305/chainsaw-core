@@ -2499,6 +2499,23 @@ func (s *Store) migrateSchema() error {
 			PRIMARY KEY (org_id, install_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_guard_installs_org_last_seen ON guard_installs(org_id, last_seen_at DESC)`,
+		// pending_2fa holds a password/SSO login waiting for its second
+		// factor (H-10), so the verify can land on any replica. Before this
+		// it was an in-process map and a verify routed to another replica
+		// failed as expired. Keyed by sha256(pending token), never the token;
+		// the row carries only what the map did. 5-minute TTL, deleted on
+		// success, expired rows swept by authcore.SweepPending2FA. attempts
+		// is incremented atomically so the retry cap holds across replicas.
+		`CREATE TABLE IF NOT EXISTS pending_2fa (
+			token_hash TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			org_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_2fa_expires_at ON pending_2fa(expires_at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

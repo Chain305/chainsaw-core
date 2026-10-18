@@ -430,6 +430,12 @@ func (s *Store) ensureSIEMAndSCIMColumns() error {
 	if err := s.addColumnIfMissing("siem_integrations", "created_by_user_id", "TEXT"); err != nil {
 		return err
 	}
+	// delivery_claimed_until is the SIEM dispatcher's per-integration
+	// delivery lease (internal/siem ClaimDelivery): the one replica whose
+	// lease is live ships the next batch. NULL = unclaimed.
+	if err := s.addColumnIfMissing("siem_integrations", "delivery_claimed_until", "TIMESTAMPTZ"); err != nil {
+		return err
+	}
 	// hash_algo identifies how the row's token_hash was computed so the
 	// verifier can pick the right algorithm. Legacy rows with NULL /
 	// empty value are treated as raw SHA-256 (pre-HMAC); new rows use

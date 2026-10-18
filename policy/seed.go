@@ -22,7 +22,7 @@ func SeedPoliciesIfNeeded(store *Store, policies []Policy, logger *slog.Logger) 
 	if store == nil || len(policies) == 0 {
 		return nil
 	}
-	created, err := seedPolicies(store.sql.DB(), tenancy.NormalizeOrgID(store.orgID), policies)
+	created, err := seedPoliciesLocked(store.sql.DB(), tenancy.NormalizeOrgID(store.orgID), policies)
 	if err != nil {
 		return err
 	}
@@ -30,6 +30,44 @@ func SeedPoliciesIfNeeded(store *Store, policies []Policy, logger *slog.Logger) 
 		logger.Info("Seeded policies into database", "count", created)
 	}
 	return nil
+}
+
+// seedAdvisoryLockID serialises boot-time policy seeding across every
+// process pointed at the same database: the ASCII bytes of "CSAWSEED" read
+// as a big-endian int64. Distinct from pgstore's migration lock
+// ("CHAINSAW") so a seed never waits on another replica's migration and
+// the two are told apart in pg_locks.
+const seedAdvisoryLockID int64 = 0x4353415753454544
+
+// seedPoliciesLocked runs seedPolicies in one transaction that first takes
+// seedAdvisoryLockID. seedPolicies reads the org's names and precedences,
+// then INSERTs what is missing; two replicas cold-booting together both
+// read an empty org and the loser's INSERT hit
+// idx_policies_org_precedence_unique, which exits the process at boot. Under
+// the lock the second seeder reads the first one's committed rows and
+// inserts nothing. A transaction-scoped lock needs no pinned connection and
+// is released by COMMIT or ROLLBACK. The wait is bounded by the pool's
+// statement_timeout; a peer's seed holds the lock for milliseconds.
+func seedPoliciesLocked(db *sql.DB, orgID string, policies []Policy) (int, error) {
+	if db == nil || len(policies) == 0 {
+		return 0, nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin policy seed: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(?)`, seedAdvisoryLockID); err != nil {
+		return 0, fmt.Errorf("acquire policy seed advisory lock: %w", err)
+	}
+	created, err := seedPolicies(tx, orgID, policies)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit policy seed: %w", err)
+	}
+	return created, nil
 }
 
 // SeedPoliciesIfNeededTx persists policies for an org inside the provided transaction.

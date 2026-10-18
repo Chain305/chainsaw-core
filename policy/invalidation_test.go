@@ -397,3 +397,48 @@ func TestCachedStoreTTLFallbackWithoutBus(t *testing.T) {
 		t.Fatal("Invalidate without bus must still evict locally")
 	}
 }
+
+// TestBusInvalidationEvictsPeerEvalCache is the B8 regression: a policy
+// edit on replica A must drop replica B's memoised verdicts, not only
+// B's policy list. B is built the way server.New builds it —
+// NewCachedStore with the evaluator's InvalidateCacheForOrg as a
+// downstream invalidator — and the bus is attached WITHOUT extras, as
+// the cmd/chainsaw-proxy hook does.
+func TestBusInvalidationEvictsPeerEvalCache(t *testing.T) {
+	bus := newFakeBus()
+	evB := NewEvaluator(nil).WithEvalCache(time.Hour)
+	a := NewCachedStore(nil, 30*time.Second)
+	b := NewCachedStore(nil, 30*time.Second, evB.InvalidateCacheForOrg)
+
+	subA := NewSubscriber(bus, nil, nil)
+	subB := NewSubscriber(bus, nil, nil)
+	if err := a.AttachInvalidationBus(context.Background(), NewPublisher(bus, nil), subA); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AttachInvalidationBus(context.Background(), NewPublisher(bus, nil), subB); err != nil {
+		t.Fatal(err)
+	}
+	defer subA.Stop()
+	defer subB.Stop()
+
+	edited := cacheKey{OrgID: "org-edited", PackageName: "lodash", Version: "4.17.21"}
+	other := cacheKey{OrgID: "org-other", PackageName: "lodash", Version: "4.17.21"}
+	evB.cache.Put(edited, EvaluationResult{Action: ModeAllow})
+	evB.cache.Put(other, EvaluationResult{Action: ModeAllow})
+
+	a.Invalidate("org-edited")
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, ok := evB.cache.Get(edited); !ok {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if _, ok := evB.cache.Get(edited); ok {
+		t.Fatal("peer eval cache still holds a verdict for the org edited on another replica")
+	}
+	if _, ok := evB.cache.Get(other); !ok {
+		t.Fatal("bus invalidation for one org evicted another org's verdicts")
+	}
+}
