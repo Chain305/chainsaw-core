@@ -2,18 +2,15 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 
-> Consume it as
-> `uses: Chain305/chainsaw-core/enforcement/github-actions@action-v1`.
+> Consume it pinned to a commit SHA:
+> `uses: Chain305/chainsaw-core/enforcement/github-actions@4b6142b568b8b8aa34364b20fbcb46c7be3b9532 # v0.22.115`.
+> Since v0.22.116 pr-scan blocks every action referenced by tag or branch, this
+> one included, so `@action-v1` fails the check it installs. The `action-v1` tag
+> also does not follow releases (it still pins CLI v0.22.100); the SHA above is
+> the open-core commit carrying the v0.22.115 action.
 > It is **not** on the GitHub Marketplace yet — a Marketplace listing requires
 > `action.yml` at a repository root, and this action ships from a subdirectory
 > of the open-core repo.
->
-> The tag is `action-v1`, not `v1`, on purpose: this repository is also the
-> `github.com/chain305/chainsaw-core` Go module, and a `v1.0.0` tag would mint a
-> permanent v1.0.0 module release in Go's immutable proxy cache — an API-stability
-> promise the library has not made. `action-v1` is not valid semver, so the Go
-> proxy ignores it while GitHub Actions resolves it normally. `action-v1` floats
-> to the newest `action-v1.x.y`; pin `action-v1.0.0` for an immutable ref.
 
 **Block vulnerable, typosquatted, malicious, or unlicensed packages in your pull requests before they reach `main`.** Chainsaw Guard runs on every PR, inspects your lockfiles and package-manager configuration, and fails the build — or just comments — when something unsafe slips in.
 
@@ -43,7 +40,7 @@ jobs:
           # shallow clone does not contain. Without this the pr-scan leg
           # silently scans nothing.
           fetch-depth: 0
-      - uses: Chain305/chainsaw-core/enforcement/github-actions@action-v1
+      - uses: Chain305/chainsaw-core/enforcement/github-actions@4b6142b568b8b8aa34364b20fbcb46c7be3b9532 # v0.22.115
         with:
           mode: warn   # warn | block
 ```
@@ -77,7 +74,7 @@ Example — fail only when blocking policies hit, but always upload the report:
 
 ```yaml
 - id: guard
-  uses: Chain305/chainsaw-core/enforcement/github-actions@action-v1
+  uses: Chain305/chainsaw-core/enforcement/github-actions@4b6142b568b8b8aa34364b20fbcb46c7be3b9532 # v0.22.115
   with:
     mode: warn
 

@@ -137,8 +137,8 @@ Changed GitHub Actions workflows (.github/workflows/*.yml, action.yml) are
 inspected too: every added or changed uses: ref gets the scan-actions
 signals (action.*); a known-compromised action blocks, so does a name that
 imitates a known-good action under another owner, so does any action
-referenced by tag or branch instead of a commit SHA, GitHub's own included
-(only the Chainsaw Guard Action's own tag warns), and so does an action from
+referenced by tag or branch instead of a commit SHA, GitHub's and Chain305's
+own included, and so does an action from
 a publisher outside the known-publisher list, even when SHA-pinned. Known-compromised
 actions come from the same sources as scan-actions: the built-in seed plus the
 local GitHub Actions OSV snapshot when present. The scan-actions workflow lint
@@ -1843,14 +1843,12 @@ func diffWorkflow(rel string, baseContent, headContent []byte) (added, upgraded 
 // unpinnedBlocks reports an action.unpinned_ref finding pr-scan blocks. A tag
 // or branch can be re-pointed by whoever controls the action's repository
 // (tj-actions/changed-files, attack 13's trivy-action), so only a commit SHA
-// pins the code that runs. Since v0.22.111 third-party refs blocked; since
-// v0.22.114 GitHub's own actions/* and github/* do too (owner decision).
-// Measured on 940 real workflows: 541 (57.6%) add some action by tag.
-// The one exemption is Chain305's Guard Action (documented as @action-v1):
-// whoever runs pr-scan already trusts Chain305's binaries, so its tag adds no
-// trust, and blocking it would fail the PR that installs the guard.
+// pins the code that runs. Third-party refs blocked since v0.22.111, GitHub's
+// own since v0.22.114, and Chain305's Guard Action since v0.22.116 (owner
+// decision; its action-v1 tag had silently stayed on CLI v0.22.100). Every
+// action is now pinned by SHA, ours included; the published snippets are.
 func unpinnedBlocks(f githubactions.Finding) bool {
-	return f.Signal == githubactions.SignalActionUnpinnedRef && !strings.EqualFold(f.Ref.Owner, "chain305")
+	return f.Signal == githubactions.SignalActionUnpinnedRef
 }
 
 // diffWorkflowLint returns the head's LintWorkflow findings that base does

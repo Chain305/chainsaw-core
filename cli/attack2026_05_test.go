@@ -67,12 +67,16 @@ jobs:
 	if err != nil || len(added) != 1 || !hasPRSignal(added[0].Signals, "action.unpinned_ref") || added[0].Verdict != "block" {
 		t.Fatalf("pr-scan row for @v5: want block with action.unpinned_ref, got %+v %v", added, err)
 	}
-	// The documented Chainsaw Guard Action ref is the one tag that does not
-	// block.
+	// Since v0.22.116 the Chainsaw Guard Action's own tag blocks too...
 	guard := "name: guard\non: pull_request\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: Chain305/chainsaw-core/enforcement/github-actions@action-v1\n"
 	gAdded, _, gErr := diffWorkflow(".github/workflows/guard.yml", nil, []byte(guard))
-	if gErr != nil || len(gAdded) != 1 || gAdded[0].Verdict == "block" {
-		t.Fatalf("pr-scan row for the Chainsaw Guard Action @action-v1: want not blocked, got %+v %v", gAdded, gErr)
+	if gErr != nil || len(gAdded) != 1 || gAdded[0].Verdict != "block" || !hasPRSignal(gAdded[0].Signals, "action.unpinned_ref") {
+		t.Fatalf("pr-scan row for the Chainsaw Guard Action @action-v1: want block on unpinned_ref, got %+v %v", gAdded, gErr)
+	}
+	// ...and the SHA-pinned form the docs publish does not.
+	guardPinned := "name: guard\non: pull_request\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: Chain305/chainsaw-core/enforcement/github-actions@4b6142b568b8b8aa34364b20fbcb46c7be3b9532 # v0.22.115\n"
+	if gp, _, err := diffWorkflow(".github/workflows/guard.yml", nil, []byte(guardPinned)); err != nil || len(gp) != 1 || gp[0].Verdict == "block" {
+		t.Fatalf("pr-scan row for the SHA-pinned Guard Action: want not blocked, got %+v %v", gp, err)
 	}
 	// Since v0.22.112 chain305 is a known publisher: no unknown_publisher row.
 	if hasPRSignal(gAdded[0].Signals, "action.unknown_publisher") {

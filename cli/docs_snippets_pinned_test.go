@@ -11,7 +11,7 @@ import (
 )
 
 // Since v0.22.114 pr-scan blocks every action referenced by tag or branch
-// except Chain305's own Guard Action, and since v0.22.115 every action whose
+// (Chain305's own Guard Action included since v0.22.116), and since v0.22.115 every action whose
 // publisher is not on the known-publisher list. The workflows our docs and
 // templates tell customers to copy must therefore pin by commit SHA and use
 // known publishers, or the PR that adds them fails the guard they install.
@@ -47,7 +47,7 @@ func TestCustomerWorkflowSnippetsArePinned(t *testing.T) {
 			for i, line := range strings.Split(string(b), "\n") {
 				for _, m := range usesRE.FindAllStringSubmatch(line, -1) {
 					owner := strings.ToLower(m[1])
-					pinned := owner == "chain305" || shaRE.MatchString(m[2])
+					pinned := shaRE.MatchString(m[2])
 					if pinned && known[owner] {
 						continue
 					}
