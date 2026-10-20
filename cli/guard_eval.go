@@ -419,6 +419,30 @@ type guardVerdict struct {
 	PolicySeverity string
 	PolicyReason   string
 
+	// ClearedReason records that the ESTABLISHED TABLE (guard_established.go)
+	// cleared this candidate's typosquat lane: the detector suspected the
+	// name, the candidate is an established package, and the claim was wrong
+	// rather than weak. It rides the verdict that was actually returned —
+	// exactly like WaivedSeverity — because a clear is orthogonal to the
+	// outcome: the user needs to be told both "the typosquat claim was
+	// cleared by establishment data" and whatever the rest of the ladder
+	// (byte scan, policy) went on to say. Empty when nothing was cleared.
+	//
+	// Informational, not a verdict: printed by printGuardVerdicts as a
+	// "~ established" line (suppressed under --quiet — on a lockfile install
+	// of ten thousand packages, dozens of clears are context, and the lanes
+	// that still ran are the signal). Counted into guard_state.json so
+	// `guard status` can report it (see processGuardOutcome).
+	ClearedReason string
+
+	// MonitorDemoted records that guard MONITOR mode (guard_monitor.go)
+	// converted this BLOCK into a warn before it left evaluateAll. Set only
+	// on verdicts where guardAllowlistableVerdict was true — the same
+	// boundary the local allowlist respects — so malware, known-vulnerable,
+	// homoglyph, behavioral and coverage refusals are structurally outside
+	// monitor mode's reach and can never be silenced by it.
+	MonitorDemoted bool
+
 	// DigestMismatch records that byte acquisition returned
 	// acquireDigestMismatch for this coordinate: the guard DID get bytes and
 	// they are not the bytes that will be installed.
@@ -512,6 +536,14 @@ func newLocalGuard() *localGuard {
 	if deepFetchEnabled() {
 		g.notices = append(g.notices,
 			"deep mode: fetching pinned package archives over the NETWORK for pre-install analysis (offline guarantee waived)")
+	}
+	// Monitor mode loosens enforcement — say so every run too, for the same
+	// reason: an operator (or a stale CI export) must not be able to leave
+	// the guard refusing less than it appears to. The per-verdict "! monitor"
+	// lines carry the detail; this one line says the machine is in monitor.
+	if guardMonitorActive() {
+		g.notices = append(g.notices,
+			"monitor mode: typosquat blocks will WARN, not refuse (unset "+guardModeEnv+" or set =enforce to restore refusals)")
 	}
 	// NOTE: there is deliberately NO byte-scan coverage notice here. Whether
 	// the byte scan ran is not knowable at construction time — see the
@@ -741,6 +773,11 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	// event. A waiver that produces no output at all is what this closure exists
 	// to stop: it made one line of local JSON an invisible, permanent hole.
 	var waived guardVerdict
+	// clearedReason carries the established-table clear (guard_established.go)
+	// for the same reason waived exists: the clear must be reported beside
+	// whatever the REST of the ladder went on to say, not dropped the moment
+	// the byte scan claims the verdict. Empty on the common path.
+	clearedReason := ""
 	// policyWarn holds a non-blocking POLICY verdict that lost the pendingWarn
 	// slot to another lane. It rides the returned verdict rather than replacing
 	// it — see guardVerdict.PolicySeverity for why losing it was a defect.
@@ -750,6 +787,7 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 	digestMismatch := false
 	withNotices := func(v guardVerdict) guardVerdict {
 		v.WaivedSeverity, v.WaivedReason = waived.Severity, waived.Reason
+		v.ClearedReason = clearedReason
 		v.DigestMismatch = digestMismatch
 		if v.Severity != guardSeverityPolicy {
 			v.PolicySeverity, v.PolicyReason = policyWarn.Severity, policyWarn.Reason
@@ -776,84 +814,126 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 		}
 
 		if res.IsSuspected {
-			// Verdict ladder, split by METHOD rather than the detector's flat
-			// confidence: the certainty gradient homoglyph > edit-d1-vs-top >
-			// edit-d1-vs-tail > d≥2/reorder is real, and only the first two
-			// earn a block. Corpus members never reach here (exact-match skip
-			// in the detector), so an edit-distance hit is by construction a
-			// name ABSENT from the popular corpus.
+			// ── THE ESTABLISHED TABLE CLEAR ─────────────────────────────────
 			//
-			// DELIBERATE SILENCE at the bottom of the ladder. checkCombosquat
-			// returns IsSuspected with Confidence "low", which matches no arm
-			// below — no block, no warn, no telemetry — and that is CORRECT, not
-			// an oversight. Measured on this repo's own corpora (held-out real,
-			// popular packages: npm ranks 2501–5000, PyPI 1501–3000), a
-			// low-confidence combosquat fires on 274/2500 = 11.0% of npm and
-			// 184/1500 = 12.3% of PyPI names — @types/cacheable-request,
-			// @npmcli/node-gyp, lodash.mergewith, django-environ,
-			// tree-sitter-python. Warning on ~1 in 9 real packages would recreate
-			// the 2026-07 742-false-positive incident in warn form, and warn form
-			// is WORSE: warnings don't break builds, so they get tuned out —
-			// taking every real warning with them. Combosquat coverage is a
-			// priced-in gap in the bypass matrix, not a bug to "fix".
-			// TestGuardNeverWarnsOnLowConfidenceCombosquat pins this absence.
+			// Sits EXACTLY here: after the homoglyph arm above (byte-level
+			// confusable evidence outranks data clears — an established row
+			// for a confusable NAME must never clear a homoglyph block) and
+			// before the d1InCutoff/lane computation below. A candidate whose
+			// qualification row clears risk.EstablishedClear — the SAME
+			// single definition the server path calls (v0.22.73–78) — is not
+			// a squat wearing a popular face; it IS the popular face, and the
+			// typosquat claim about it is wrong rather than weak.
 			//
-			// The reason string is built INSIDE the arms that can emit it: at the
-			// low-confidence bottom of the ladder no verdict exists to carry it,
-			// and a string built for a verdict that can never be emitted reads to
-			// the next person as a dropped result.
-			reason := func() string { return guardTyposquatReason(res) }
-			// d1InCutoff is the population the block-lane gate speaks for: a
-			// single edit against a target inside the rank cutoff. Splitting it
-			// out is what lets a hit the GATE demoted be labelled differently
-			// from a hit that was never block-eligible in the first place.
-			// (The homoglyph arm returned above, before the allowlist consult.)
-			d1InCutoff := res.Method == "edit-distance" && res.Distance == 1 &&
-				res.TargetRank > 0 && res.TargetRank <= guardTyposquatBlockRankCutoff
-			// lane is the verdict the EVIDENCE earns, computed before the
-			// allowlist is consulted. That order is what makes a waiver
-			// reportable rather than silent: "your allowlist suppressed this"
-			// needs the this, and the consult used to run first and throw the
-			// answer away.
-			var lane guardVerdict
-			switch {
-			case d1InCutoff && guardTyposquatBlockGate.allowsD1Block(spec.Ecosystem, spec.Name, res):
-				lane = guardVerdict{Spec: spec, Block: true, Severity: guardSeverityTyposquatHigh, Reason: reason()}
-			case d1InCutoff:
-				// DEMOTED by the gate, not by the evidence. Its own severity so
-				// the printer can keep it out of the --quiet suppression that
-				// covers ordinary medium-confidence chatter: this is the class
-				// where the gate is trading recall for false blocks, and an
-				// operator who never sees it cannot audit that trade.
-				lane = guardVerdict{Spec: spec, Block: false, Severity: guardSeverityTyposquatDemoted, Reason: reason()}
-			case res.Confidence == "high" || res.Confidence == "medium":
-				lane = guardVerdict{Spec: spec, Block: false, Severity: guardSeverityTyposquatMedium, Reason: reason()}
+			// Skips the WHOLE lane: no pendingWarn, no policyWarn, no
+			// allowlist consult (there is nothing to waive — a waived typosquat
+			// notice beside a cleared one would tell the user two opposite
+			// things). The clear itself is recorded on ClearedReason and
+			// counted, so it is never silent.
+			//
+			// NEVER an early return: evaluate() falls through to the origin
+			// stop, the byte scan and policy below. An established package
+			// with malicious staged bytes must still block behaviorally —
+			// establishment data speaks about the NAME's history, not the
+			// artifact's contents.
+			//
+			// The `res.Confidence != "low"` gate preserves the DELIBERATE
+			// SILENCE documented in the ladder below: a low-confidence
+			// combosquat produces no verdict at all, so there is nothing to
+			// clear, and announcing an established row for one would leak
+			// exactly the ~1-in-9 real-package population the silence exists
+			// to protect.
+			clearedLane := false
+			if res.Confidence != "low" {
+				if why, _, ok := establishedClears(spec.Ecosystem, spec.Name, time.Now()); ok {
+					guardEstablishedClears.Add(1)
+					clearedReason = establishedClearsNotice(spec, guardTyposquatReason(res), why)
+					clearedLane = true
+				}
 			}
+			if !clearedLane {
+				// Verdict ladder, split by METHOD rather than the detector's flat
+				// confidence: the certainty gradient homoglyph > edit-d1-vs-top >
+				// edit-d1-vs-tail > d≥2/reorder is real, and only the first two
+				// earn a block. Corpus members never reach here (exact-match skip
+				// in the detector), so an edit-distance hit is by construction a
+				// name ABSENT from the popular corpus.
+				//
+				// DELIBERATE SILENCE at the bottom of the ladder. checkCombosquat
+				// returns IsSuspected with Confidence "low", which matches no arm
+				// below — no block, no warn, no telemetry — and that is CORRECT, not
+				// an oversight. Measured on this repo's own corpora (held-out real,
+				// popular packages: npm ranks 2501–5000, PyPI 1501–3000), a
+				// low-confidence combosquat fires on 274/2500 = 11.0% of npm and
+				// 184/1500 = 12.3% of PyPI names — @types/cacheable-request,
+				// @npmcli/node-gyp, lodash.mergewith, django-environ,
+				// tree-sitter-python. Warning on ~1 in 9 real packages would recreate
+				// the 2026-07 742-false-positive incident in warn form, and warn form
+				// is WORSE: warnings don't break builds, so they get tuned out —
+				// taking every real warning with them. Combosquat coverage is a
+				// priced-in gap in the bypass matrix, not a bug to "fix".
+				// TestGuardNeverWarnsOnLowConfidenceCombosquat pins this absence.
+				//
+				// The reason string is built INSIDE the arms that can emit it: at the
+				// low-confidence bottom of the ladder no verdict exists to carry it,
+				// and a string built for a verdict that can never be emitted reads to
+				// the next person as a dropped result.
+				reason := func() string { return guardTyposquatReason(res) }
+				// d1InCutoff is the population the block-lane gate speaks for: a
+				// single edit against a target inside the rank cutoff. Splitting it
+				// out is what lets a hit the GATE demoted be labelled differently
+				// from a hit that was never block-eligible in the first place.
+				// (The homoglyph arm returned above, before the allowlist consult.)
+				d1InCutoff := res.Method == "edit-distance" && res.Distance == 1 &&
+					res.TargetRank > 0 && res.TargetRank <= guardTyposquatBlockRankCutoff
+				// lane is the verdict the EVIDENCE earns, computed before the
+				// allowlist is consulted. That order is what makes a waiver
+				// reportable rather than silent: "your allowlist suppressed this"
+				// needs the this, and the consult used to run first and throw the
+				// answer away.
+				var lane guardVerdict
+				switch {
+				case d1InCutoff && guardTyposquatBlockGate.allowsD1Block(spec.Ecosystem, spec.Name, res):
+					lane = guardVerdict{Spec: spec, Block: true, Severity: guardSeverityTyposquatHigh, Reason: reason()}
+				case d1InCutoff:
+					// DEMOTED by the gate, not by the evidence. Its own severity so
+					// the printer can keep it out of the --quiet suppression that
+					// covers ordinary medium-confidence chatter: this is the class
+					// where the gate is trading recall for false blocks, and an
+					// operator who never sees it cannot audit that trade.
+					lane = guardVerdict{Spec: spec, Block: false, Severity: guardSeverityTyposquatDemoted, Reason: reason()}
+				case res.Confidence == "high" || res.Confidence == "medium":
+					lane = guardVerdict{Spec: spec, Block: false, Severity: guardSeverityTyposquatMedium, Reason: reason()}
+				}
 
-			// The ONE allowlist consult (guard_allow.go). It gates the whole
-			// typosquat lane and nothing else, which is what makes the security
-			// boundary structural rather than a rule someone must remember:
-			//   - known-malicious and known-vulnerable already returned ABOVE, so
-			//     a waiver is physically incapable of clearing either;
-			//   - the homoglyph arm returned above it too;
-			//   - the byte-level scan below is downstream and unconditioned, so a
-			//     cleared name falls through to it exactly as a clean name does — a
-			//     waiver can never mask a behavioral block, which is the failure the
-			//     pendingWarn comment further down exists to prevent in the other
-			//     direction.
-			switch {
-			case lane.Severity == "":
-				// The deliberate silence documented above. Nothing was
-				// suppressed, so a waiver notice here would announce a
-				// suppression that never happened — and would leak the
-				// low-confidence combosquat population we specifically decided
-				// not to speak about.
-			case guardAllowlistClearsTyposquat(spec):
-				waived = lane
-			case lane.Block:
-				return lane
-			default:
-				pendingWarn = lane
+				// The ONE allowlist consult (guard_allow.go). It gates the whole
+				// typosquat lane and nothing else, which is what makes the security
+				// boundary structural rather than a rule someone must remember:
+				//   - known-malicious and known-vulnerable already returned ABOVE, so
+				//     a waiver is physically incapable of clearing either;
+				//   - the homoglyph arm returned above it too;
+				//   - the established-table clear returned above it as well — a
+				//     cleared candidate never reaches a consult, so the two
+				//     suppressions can never both fire on one verdict;
+				//   - the byte-level scan below is downstream and unconditioned, so a
+				//     cleared name falls through to it exactly as a clean name does — a
+				//     waiver can never mask a behavioral block, which is the failure the
+				//     pendingWarn comment further down exists to prevent in the other
+				//     direction.
+				switch {
+				case lane.Severity == "":
+					// The deliberate silence documented above. Nothing was
+					// suppressed, so a waiver notice here would announce a
+					// suppression that never happened — and would leak the
+					// low-confidence combosquat population we specifically decided
+					// not to speak about.
+				case guardAllowlistClearsTyposquat(spec):
+					waived = lane
+				case lane.Block:
+					return lane
+				default:
+					pendingWarn = lane
+				}
 			}
 		}
 	}
@@ -980,7 +1060,11 @@ func supplementalInstallAdvisory(spec packageSpec) (string, bool) {
 	return reason, true
 }
 
-// evaluateAll runs every spec and returns the verdicts plus whether any blocks.
+// evaluateAll runs every spec and returns the verdicts plus whether any
+// block. The blocked flag is derived from the finished verdicts (anyBlocking)
+// so it always agrees with what the printer prints — including after
+// monitor-mode demotion (guard_monitor.go), which can un-block a verdict
+// between evaluation and return.
 //
 // The optional coverage gate runs first and independently of the per-package
 // signals: if a data source the operator declared mandatory could not be
@@ -1014,7 +1098,6 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 	for _, s := range specs {
 		if s.Local {
 			if res := g.malware.Lookup(ctx, s.Ecosystem, s.Name, s.Version); res.IsKnownMalicious {
-				blocked = true
 				what := "a local/workspace crate with no source, which does not stop cargo fetching it from the registry"
 				if s.Ecosystem != "cargo" {
 					what = "a local/workspace package, which one lockfile edit turns back into a registry install"
@@ -1028,12 +1111,13 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 			registry = append(registry, s)
 			continue
 		}
-		v := g.evaluateNonRegistry(ctx, s)
-		blocked = blocked || v.Block
-		verdicts = append(verdicts, v)
+		verdicts = append(verdicts, g.evaluateNonRegistry(ctx, s))
 	}
 	if len(registry) == 0 {
-		return verdicts, blocked
+		// Monitor mode (guard_monitor.go) still applies: the verdicts above
+		// can include a typosquat block surfaced for a non-registry spec.
+		guardMonitorDemote(verdicts)
+		return verdicts, anyBlocking(verdicts)
 	}
 	// One clock read, shared by the ledger and the gate: two calls could
 	// straddle the grace or staleness boundary and disagree.
@@ -1050,11 +1134,7 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 	}
 
 	for _, s := range registry {
-		v := g.evaluate(ctx, s)
-		if v.Block {
-			blocked = true
-		}
-		verdicts = append(verdicts, v)
+		verdicts = append(verdicts, g.evaluate(ctx, s))
 		if s.ExtraIndex != "" {
 			// Beside the verdict, never instead of it: a refusal stays one.
 			verdicts = append(verdicts, guardVerdict{Spec: s, Severity: guardSeverityDependencyConfusion,
@@ -1062,7 +1142,27 @@ func (g *localGuard) evaluateAll(ctx context.Context, specs []packageSpec) (verd
 					s.Name, guardOriginLabel(s.ExtraIndex))})
 		}
 	}
-	return verdicts, blocked
+	// Monitor mode (guard_monitor.go) is applied HERE, on the finished
+	// verdicts, after every lane has spoken: the demotion boundary is the
+	// allowlist's own predicate (guardAllowlistableVerdict), and running it
+	// once at the end means every block path passes through one point. The
+	// coverage-gate refusal above is deliberately NOT demoted — it is not an
+	// allowlistable severity, and a monitor-mode machine that promised a
+	// coverage source still keeps that promise's refusal.
+	guardMonitorDemote(verdicts)
+	return verdicts, anyBlocking(verdicts)
+}
+
+// anyBlocking reports whether any verdict still blocks after monitor-mode
+// demotion — the boolean evaluateAll's blocked flag must reflect, derived
+// from the verdicts rather than from a stale accumulation.
+func anyBlocking(verdicts []guardVerdict) bool {
+	for _, v := range verdicts {
+		if v.Block {
+			return true
+		}
+	}
+	return false
 }
 
 // guardOriginLabel is how the guard prints an origin. A git source keeps

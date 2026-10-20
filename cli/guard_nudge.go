@@ -97,6 +97,23 @@ type guardState struct {
 	// network trade can later see exactly what left the box and where to. Newest
 	// last; capped at guardDeepFetchEgressMax. Local-only audit, never emitted.
 	DeepFetchEgress []deepFetchEgressRecord `json:"deep_fetch_egress,omitempty"`
+	// EstablishedClears counts typosquat lanes the ESTABLISHED TABLE
+	// (guard_established.go) skipped because the candidate cleared
+	// risk.EstablishedClear — the offline guard's copy of the server-side
+	// established clear. Reported by `guard status` beside Blocks: the two
+	// numbers read together are the lane's false-positive story on this
+	// machine (a clear is a would-have-blocked package that no longer is).
+	// omitempty + absent-decodes-to-0, so a guard_state.json written by any
+	// earlier chainsaw decodes to exactly today's behaviour.
+	EstablishedClears int `json:"established_clears,omitempty"`
+	// Mode records the enforcement posture the last guarded install ran
+	// under: "monitor" (CHAINSAW_GUARD_MODE=monitor — allowlistable typosquat
+	// blocks warned instead of refusing, see guard_monitor.go) or "enforce"
+	// (the default). The env var is authoritative per-run; this field is the
+	// RECORD, so `guard status` can show what the guard on this machine has
+	// been doing without env archaeology. Empty on a state file written
+	// before the knob existed, and read as "enforce".
+	Mode string `json:"mode,omitempty"`
 }
 
 // guardRecentBlocksMax caps the locally-retained block ring.
@@ -274,6 +291,14 @@ func processGuardOutcome(bin string, verdicts []guardVerdict, blocked bool) {
 	st.PackagesScanned += len(verdicts)
 	blockCount := 0
 	for _, v := range verdicts {
+		if v.ClearedReason != "" {
+			// The established-table clear, counted into the persisted state
+			// `guard status` reports (guardEstablishedClears is the
+			// per-process twin). Counted off the VERDICTS for the same reason
+			// the block ring is: a counter the state file carries must be a
+			// function of the run's outcomes.
+			st.EstablishedClears++
+		}
 		if v.Block {
 			blockCount++
 			st.RecentBlocks = append(st.RecentBlocks, guardBlockRecord{
@@ -282,6 +307,9 @@ func processGuardOutcome(bin string, verdicts []guardVerdict, blocked bool) {
 			})
 		}
 	}
+	// Record the enforcement posture this run used (guard_monitor.go). The
+	// env var stays authoritative; this makes the mode durable and visible.
+	st.Mode = guardModeLabel()
 	if n := len(st.RecentBlocks); n > guardRecentBlocksMax {
 		st.RecentBlocks = st.RecentBlocks[n-guardRecentBlocksMax:]
 	}

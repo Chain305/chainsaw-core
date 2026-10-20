@@ -13,7 +13,9 @@ package cli
 //  4. The two recall classes the gate deliberately narrows are pinned by
 //     example in BOTH directions, so a later tightening cannot widen them
 //     silently: the popular-target rescue (lodashn, hdebug) and the
-//     short-target shape split (uudi/ajvv block, pix/ajx demote).
+//     short-target shape split (uudi and ritch block on 4-rune targets, pix
+//     and ajx demote, and the interior family demotes below 4 runes — the
+//     five adjudicated feed names inxi/miz/pmg/tiar/m5d below).
 //  5. The homoglyph arm never consults this gate, is hoisted above the
 //     allowlist, and prints no escape-hatch hint.
 
@@ -142,12 +144,31 @@ func TestTyposquatTargetLongEnough(t *testing.T) {
 		// blob/glob, tape/type, jsbi/jsbn are all real packages.
 		{"substitution on a 4-rune target", "blob", "glob", false},
 		{"substitution on a 3-rune target", "pix", "pip", false},
-		// Every other shape keeps the block lane at any target length: two
-		// independent legitimate names do not collide by transposition or by
-		// an interior insert.
+		// The interior family clears the LOWER floor
+		// (guardTyposquatInteriorMinTargetLen = 4): it keeps the block lane
+		// on a 4-rune target — uudi against uuid is pinned here and in the
+		// recall suite — and demotes below it, because at 2-3 runes the
+		// whole name is the edit (pug is not a squat of pg).
 		{"transposition on a 4-rune target", "uudi", "uuid", true},
-		{"doubled last rune on a 3-rune target", "ajvv", "ajv", true},
 		{"interior insert on a 4-rune target", "ritch", "rich", true},
+		{"doubled last rune on a 3-rune target", "ajvv", "ajv", false},
+		{"interior insert on a 3-rune target (pug of pg)", "pug", "pg", false},
+		{"interior delete of a delimiter on a 3-rune target (md-5 of md5)", "md-5", "md5", false},
+		// The ADJUDICATED feed demotions, priced on the OpenSSF recall
+		// harness (2026-10-19): exactly these five malicious names lose the
+		// block lane to the interior floor, no more (feed blocks 1,030 →
+		// 1,025). Pin them so a later widening of the floor cannot hide
+		// inside "still under review". m5d is the transposition half of the
+		// family: a 3-rune target is below the floor in ANY interior shape.
+		{"adjudicated feed demotion inxi (of ini)", "inxi", "ini", false},
+		{"adjudicated feed demotion miz (of mz)", "miz", "mz", false},
+		{"adjudicated feed demotion pmg (of pg)", "pmg", "pg", false},
+		{"adjudicated feed demotion tiar (of tar)", "tiar", "tar", false},
+		{"adjudicated feed demotion m5d (of md5)", "m5d", "md5", false},
+		// truncate-end keeps the block lane at ANY target length: an
+		// arbitrary last rune missing is a keystroke that did not land, not
+		// a sibling name, and the feed is full of the shape.
+		{"dropped arbitrary last rune on a 4-rune target", "deb", "debu", true},
 	}
 	for _, c := range shortCases {
 		t.Run(c.name, func(t *testing.T) {

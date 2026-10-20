@@ -50,9 +50,96 @@ const (
 	EstablishedMinAge          = 2 * 365 * 24 * time.Hour
 )
 
+// The long-lived lines, shared by the server's clear
+// (core/intelligence/typosquat_established.go) and the guard's table clear
+// (core/cli/guard_established.go). Registries delete a squat once it is
+// reported, and squats are reported in days to months; jeIlyfish (PyPI,
+// 2018-12 to 2019-12) is the famous outlier at about a year. Rev6 stratum E
+// (2026-10-10) quarantined 11 benign packages one edit from a popular name,
+// every one on its registry since 2010-2018, none popular enough for the
+// download lines, and only one with a long release history.
+//
+// Both halves are required. The package age is the survival evidence; the
+// release age stops a sleeper — a lookalike name registered years ago that
+// ships its payload in a fresh release — from inheriting that evidence.
+// Unknown dates (zero time.Time) prove nothing and fail the line.
+const (
+	EstablishedLongLivedPackageAge = 5 * 365 * 24 * time.Hour
+	EstablishedLongLivedVersionAge = 365 * 24 * time.Hour
+)
+
+// EstablishedRow is the registry-wide qualification data for one package:
+// what the typosquat clear decides on. It is NOT a popularity corpus — it is
+// the evidence that a name the typosquat lane suspects is itself a
+// long-standing registry resident, which makes the similarity claim wrong
+// rather than weak.
+//
+// The zero value of each field means UNKNOWN. Unknown data establishes
+// nothing; a negative count (a failed fetch) is below every line, same as in
+// EstablishedReason.
+type EstablishedRow struct {
+	Name string
+	// WeeklyDownloads is the registry's weekly download count. The crates.io
+	// 90-day count has no field here: the guard table stores a normalized
+	// weekly figure per ecosystem, and the 90-day reading stays a server-side
+	// shape (EstablishedReason's window plumbing below).
+	WeeklyDownloads int64
+	VersionCount    int
+	// FirstPublished / LastPublished are the first and most recent release
+	// dates. Zero = unknown; unknown dates fail every line that needs them —
+	// in particular an unknown LastPublished FAILS the long-lived line (a
+	// sleeper whose last release nobody recorded must not inherit survival
+	// evidence).
+	FirstPublished time.Time
+	LastPublished  time.Time
+}
+
+// EstablishedClear is THE definition of when a package's qualification data
+// clears a typosquat claim: one of
+//
+//   - the downloads line:  >= EstablishedWeeklyDownloads weekly downloads;
+//   - the release-history line: >= EstablishedMinVersions versions AND
+//     first published >= EstablishedMinAge ago;
+//   - the long-lived line: first published >= EstablishedLongLivedPackageAge
+//     ago AND last released >= EstablishedLongLivedVersionAge ago.
+//
+// The server path (core/intelligence, clearEstablishedTyposquat) and the
+// offline guard (core/cli, establishedClears) both route their line decisions
+// through this function so the two can never disagree about which packages
+// are established — the guard blocked 28 established packages (pug, jsdoc,
+// uglify-es, …) on a real 10,428-name inventory precisely because its copy of
+// these rules had never been written.
+//
+// Returns the line that cleared (human-readable, carried on verdicts and
+// warnings as the explanation), or "" when nothing cleared.
+func EstablishedClear(row EstablishedRow, now time.Time) (reason string, cleared bool) {
+	if row.WeeklyDownloads >= EstablishedWeeklyDownloads {
+		return fmt.Sprintf("%d downloads per week", row.WeeklyDownloads), true
+	}
+	if row.FirstPublished.IsZero() {
+		return "", false
+	}
+	if row.VersionCount >= EstablishedMinVersions && now.Sub(row.FirstPublished) >= EstablishedMinAge {
+		return fmt.Sprintf("%d versions since %s", row.VersionCount, row.FirstPublished.Format("2006-01-02")), true
+	}
+	if !row.LastPublished.IsZero() &&
+		now.Sub(row.FirstPublished) >= EstablishedLongLivedPackageAge &&
+		now.Sub(row.LastPublished) >= EstablishedLongLivedVersionAge {
+		return fmt.Sprintf("published since %s, last released %s",
+			row.FirstPublished.Format("2006-01-02"), row.LastPublished.Format("2006-01-02")), true
+	}
+	return "", false
+}
+
 // EstablishedReason reports why a package counts as established, or "" when
 // it does not. Missing data establishes nothing; a failed fetch (-1) is
 // below every line.
+//
+// The weekly and release-history lines are decided by EstablishedClear — the
+// same function the guard's table clear calls — by building a row that can
+// only clear through the line being asked about. What stays here is the
+// window plumbing the row shape has no field for: crates.io's 90-day count
+// (Established90DayDownloads) and the "week"-window downloads spelling.
 func EstablishedReason(downloads *int, window string, weekly *int, versions int, first *time.Time, now time.Time) string {
 	switch {
 	case window == "90d" && downloads != nil:
@@ -60,18 +147,20 @@ func EstablishedReason(downloads *int, window string, weekly *int, versions int,
 			return fmt.Sprintf("%d downloads per 90d", *downloads)
 		}
 	case weekly != nil:
-		if *weekly >= EstablishedWeeklyDownloads {
-			return fmt.Sprintf("%d downloads per week", *weekly)
+		if reason, ok := EstablishedClear(EstablishedRow{WeeklyDownloads: int64(*weekly)}, now); ok {
+			return reason
 		}
 	case window == "week" && downloads != nil:
 		if *downloads >= EstablishedWeeklyDownloads {
 			return fmt.Sprintf("%d downloads per week", *downloads)
 		}
 	}
-	if first != nil && versions >= EstablishedMinVersions && now.Sub(*first) >= EstablishedMinAge {
-		return fmt.Sprintf("%d versions since %s", versions, first.Format("2006-01-02"))
+	row := EstablishedRow{VersionCount: versions}
+	if first != nil {
+		row.FirstPublished = *first
 	}
-	return ""
+	reason, _ := EstablishedClear(row, now)
+	return reason
 }
 
 // establishedInputReason is EstablishedReason over a risk Input.

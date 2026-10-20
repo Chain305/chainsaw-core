@@ -79,6 +79,23 @@ func guardDashboardURL() string {
 	return hostedGuardDashboardURL
 }
 
+// guardStatusModeLabel renders the enforcement posture for `guard status`.
+// The env var is authoritative for THIS invocation; the persisted st.Mode
+// (written by processGuardOutcome) is the record of what the last guarded
+// install ran under. Both default to enforce — including a state file
+// written before the knob existed (st.Mode == "").
+func guardStatusModeLabel(st *guardState) string {
+	if guardMonitorActive() {
+		return guardModeMonitor + " (CHAINSAW_GUARD_MODE=monitor: typosquat blocks warn, they do not refuse)"
+	}
+	switch st.Mode {
+	case guardModeMonitor:
+		return guardModeMonitor + " (last install ran in monitor; unset " + guardModeEnv + " to enforce again)"
+	default:
+		return guardModeEnforce
+	}
+}
+
 var guardStatusCmd = &cobra.Command{
 	Use:          "status",
 	Short:        "Show local guard activity and privacy state",
@@ -115,16 +132,18 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	// string, not this UUID.
 	if useJSON(cmd) {
 		return PrintJSONTo(cmd, map[string]any{
-			"installs_checked":  st.InstallsChecked,
-			"packages_scanned":  st.PackagesScanned,
-			"blocks":            st.Blocks,
-			"activated":         st.Activated,
-			"first_block_unix":  st.FirstBlockAtUnix,
-			"first_run_unix":    st.FirstRunUnix,
-			"telemetry_consent": st.Consent,
-			"telemetry_label":   telemetryConsentLabel(st),
-			"install_id":        displayInstallID(),
-			"signed_in":         cfgToken() != "",
+			"installs_checked":   st.InstallsChecked,
+			"packages_scanned":   st.PackagesScanned,
+			"blocks":             st.Blocks,
+			"activated":          st.Activated,
+			"first_block_unix":   st.FirstBlockAtUnix,
+			"first_run_unix":     st.FirstRunUnix,
+			"established_clears": st.EstablishedClears,
+			"mode":               guardStatusModeLabel(st),
+			"telemetry_consent":  st.Consent,
+			"telemetry_label":    telemetryConsentLabel(st),
+			"install_id":         displayInstallID(),
+			"signed_in":          cfgToken() != "",
 		})
 	}
 
@@ -142,6 +161,13 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(tw, "  Installs checked\t%d\n", st.InstallsChecked)
 	fmt.Fprintf(tw, "  Packages scanned\t%d\n", st.PackagesScanned)
 	fmt.Fprintf(tw, "  Blocks\t%d\n", st.Blocks)
+	// Established clears ride beside Blocks because they are the other half
+	// of the typosquat lane's story: a clear is a would-have-blocked package
+	// (pug, jsdoc, …) that the established table now leaves alone.
+	if st.EstablishedClears > 0 {
+		fmt.Fprintf(tw, "  Established clears\t%d\n", st.EstablishedClears)
+	}
+	fmt.Fprintf(tw, "  Mode\t%s\n", guardStatusModeLabel(st))
 	fmt.Fprintf(tw, "  First block\t%s\n", firstBlock)
 	fmt.Fprintf(tw, "  First run\t%s\n", firstRun)
 	_ = tw.Flush()

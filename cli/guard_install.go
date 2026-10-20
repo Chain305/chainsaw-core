@@ -2152,6 +2152,33 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 				sanitizeForTerminal(v.WaivedReason),
 				c(ansiDim, "(a local allowlist entry cleared this — undo: chainsaw guard allow --remove "+guardHintCoordinate(v.Spec)+")"))
 		}
+		// THE ESTABLISHED-CLEAR LINE. Informational, unlike the waiver notice
+		// above: the guard had a typosquat OPINION and registry qualification
+		// data (not a decision on this machine) showed the opinion wrong —
+		// the same clear the server path has applied since v0.22.73. Printed
+		// beside whatever the rest of the ladder went on to say, because a
+		// clear is orthogonal to the outcome (the byte scan below it still
+		// ran). Suppressed under --quiet — INVARIANT D silences chatter and
+		// this is context, not a verdict: on a lockfile install of ten
+		// thousand packages dozens of names clear, and the lanes that still
+		// ran are the signal. Never a refusal, never an exit-code change.
+		if v.ClearedReason != "" && !isQuiet {
+			fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+				tag, c(ansiDim, "~ established"), sanitizeForTerminal(fmt.Sprint(v.Spec)),
+				sanitizeForTerminal(v.ClearedReason),
+				c(ansiDim, "(typosquat lane skipped — established package; malware and byte checks still ran)"))
+		}
+		// THE MONITOR LINE. A verdict monitor mode (guard_monitor.go) demoted
+		// from block to warn. NOT suppressed by --quiet, same reasoning as
+		// the waiver notice: "this machine refused less than it appeared to"
+		// is exactly the fact a CI log must not lose, and an operator who
+		// cannot see demotions cannot audit the monitor-mode roll-out.
+		if v.MonitorDemoted {
+			fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
+				tag, c(ansiYellow, "! monitor"), c(ansiBold, sanitizeForTerminal(fmt.Sprint(v.Spec))),
+				sanitizeForTerminal(v.Reason),
+				c(ansiDim, "(guard monitor mode — allowed, not a refusal)"))
+		}
 		// The ride-along half of the policy line: a monitor verdict that lost
 		// the verdict slot to another warn. The switch below renders the other
 		// half; the guard here keeps a verdict that IS the policy verdict from
@@ -2231,6 +2258,12 @@ func printGuardVerdicts(out io.Writer, tag string, verdicts []guardVerdict, isQu
 			fmt.Fprintf(out, "%s  %s  %s — %s %s\n",
 				tag, c(ansiYellow, "? not assessed"), sanitizeForTerminal(fmt.Sprint(v.Spec)), sanitizeForTerminal(v.Reason),
 				c(ansiDim, "(allowed, not checked)"))
+		case v.MonitorDemoted:
+			// Already spoken: the "! monitor" line above the switch
+			// rendered this verdict in full (spec, reason, the demotion
+			// itself). Falling through to the catch-all arm below would
+			// print a SECOND generic warning for the same package and
+			// double-count one demotion in a CI log.
 		case v.Severity == "":
 			// A clean allow. The only verdict this printer should say nothing
 			// about, and it is now the only one that CAN be silent.

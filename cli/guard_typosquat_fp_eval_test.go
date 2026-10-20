@@ -286,24 +286,40 @@ func tsfpLadder(gate typosquatBlockGate, ecosystem, name string, res typosquat.D
 // as a disagreement instead of being silently absorbed.
 const tsfpMinTargetLen = 5
 
+// tsfpInteriorMinTargetLen is this file's own reading of the interior
+// family's floor (guardTyposquatInteriorMinTargetLen), as a literal for the
+// same reason: transposition / interior insert / interior delete / doubled
+// end need ≥ 4 runes, a LOWER bar than edge edits and substitutions because
+// independent legitimate names essentially never collide in those shapes at
+// 4+ runes — but do at 2-3 (pug is not a squat of pg).
+const tsfpInteriorMinTargetLen = 4
+
 // tsfpModelAllowsD1Block is the independent re-derivation of the block lane.
 // Any disagreement with typosquatBlockGate.allowsD1Block is reported by name.
 //
-// It models the SAME three rules the gate implements, from the proposal rather
+// It models the SAME rules the gate implements, from the proposal rather
 // than from the code:
 //
 //	P2 — an EDGE edit (append/prepend/truncate) or a SUBSTITUTION needs a
-//	     target of ≥ tsfpMinTargetLen runes. Other shapes do not.
+//	     target of ≥ tsfpMinTargetLen runes; an INTERIOR-family shape
+//	     (transposition, interior insert/delete, doubled end) needs ≥
+//	     tsfpInteriorMinTargetLen.
 //	P1 — an EDGE edit demotes …
 //	P3 — … unless it ADDS a rune (append/prepend) and the target is inside
 //	     gate.PopularTargetRescueRank and long enough.
 func tsfpModelAllowsD1Block(gate typosquatBlockGate, ecosystem, candidate string, res typosquat.DetectionResult) bool {
 	norm := typosquat.NormalizerForFormat(ecosystem)
 	shape := tsfpEditShape([]rune(norm(candidate)), []rune(norm(res.SimilarTo)))
-	short := len([]rune(res.SimilarTo)) < tsfpMinTargetLen
+	targetLen := len([]rune(res.SimilarTo))
+	short := targetLen < tsfpMinTargetLen
 
-	if gate.RequireMinTargetLen && short && tsfpShapeNeedsLongTarget(shape) {
-		return false
+	if gate.RequireMinTargetLen && short {
+		if tsfpShapeNeedsLongTarget(shape) {
+			return false
+		}
+		if tsfpShapeInterior(shape) && targetLen < tsfpInteriorMinTargetLen {
+			return false
+		}
 	}
 	if gate.RequireTypoShape && tsfpEdgeShape(shape) {
 		rescuable := shape == "append" || shape == "prepend"
@@ -327,9 +343,23 @@ func tsfpEdgeShape(shape string) bool {
 }
 
 // tsfpShapeNeedsLongTarget models P2's shape scoping: only the shapes in which
-// two INDEPENDENT legitimate short names collide are length-gated.
+// two INDEPENDENT legitimate short names collide are length-gated at the 5-rune
+// floor.
 func tsfpShapeNeedsLongTarget(shape string) bool {
 	return tsfpEdgeShape(shape) || shape == "substitution"
+}
+
+// tsfpShapeInterior models the interior family that carries the LOWER length
+// floor: transposition, interior insert/delete, and the doubled-end/start
+// fat-fingers. truncate-end is NOT interior (an arbitrary last rune missing
+// blocks at any length) and unknown is not (it fails SAFE).
+func tsfpShapeInterior(shape string) bool {
+	switch shape {
+	case "transposition", "insert-interior", "delete-interior", "double-end", "double-start":
+		return true
+	default:
+		return false
+	}
 }
 
 // tsfpEditShape names the shape of the single edit between two normalized

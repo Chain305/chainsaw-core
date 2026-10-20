@@ -30,10 +30,11 @@ const (
 // Both halves are required. The package age is the survival evidence; the
 // version age stops a sleeper, a lookalike name registered years ago that
 // ships its payload in a fresh release, from inheriting that evidence.
-const (
-	typosquatLongLivedPackageAge = 5 * 365 * 24 * time.Hour
-	typosquatLongLivedVersionAge = 365 * 24 * time.Hour
-)
+//
+// The ages themselves are risk.EstablishedLongLived* so that the offline
+// guard's table clear (core/cli/guard_established.go) decides the SAME line
+// with the SAME numbers — the guard had no copy of any clear rule at all and
+// blocked 28 established packages before this shared definition existed.
 
 // WarnTyposquatClearedEstablished records a typosquat hit that was cleared
 // because the candidate is itself established. The message keeps the
@@ -92,9 +93,14 @@ func clearEstablishedTyposquat(r *Report, now time.Time) {
 // what npm leaves behind when it removes a squat, so its age is the removal
 // date, not survival.
 //
-// This is deliberately not in risk.EstablishedReason: the damper there
-// softens every hygiene signal, and age alone does not make a package
-// well-kept, only not a squat.
+// The AGE LINE ITSELF is risk.EstablishedClear — the one definition the
+// offline guard's table clear also calls — so the server and the guard
+// cannot diverge on the numbers again. What stays here is the half the guard
+// table cannot express: the report-specific exclusions (the sentinel year,
+// the holding-package version suffix) and the mapping of Report fields onto
+// an EstablishedRow. Deliberately still NOT in the damper
+// (risk.EstablishedReason): the damper softens every hygiene signal, and age
+// alone does not make a package well-kept, only not a squat.
 func longLivedReason(r *Report, now time.Time) string {
 	first, pub := r.Maintenance.FirstPublishedAt, r.Release.PublishedAt
 	if first == nil || pub == nil || first.Year() <= 1901 || pub.Year() <= 1901 {
@@ -103,9 +109,14 @@ func longLivedReason(r *Report, now time.Time) string {
 	if strings.HasSuffix(strings.ToLower(r.Identity.Version), "-security") {
 		return ""
 	}
-	if now.Sub(*first) < typosquatLongLivedPackageAge || now.Sub(*pub) < typosquatLongLivedVersionAge {
+	// WeeklyDownloads 0 and VersionCount 0 mean this row can only clear
+	// through the long-lived line — exactly the question being asked.
+	reason, cleared := risk.EstablishedClear(risk.EstablishedRow{
+		FirstPublished: *first,
+		LastPublished:  *pub,
+	}, now)
+	if !cleared {
 		return ""
 	}
-	return fmt.Sprintf("published since %s, this version since %s",
-		first.Format("2006-01-02"), pub.Format("2006-01-02"))
+	return reason
 }

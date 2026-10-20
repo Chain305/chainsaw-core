@@ -77,19 +77,32 @@ package cli
 //	BASELINE, rank cutoff only  453 blocks  1.87%
 //	production gate             247 blocks  1.02%   → 206 false blocks recovered
 //
+// The 247 was measured at the revision where the interior family had NO
+// length floor; the interior floor added since (see
+// guardTyposquatInteriorMinTargetLen) only demotes, so 247 is an upper bound
+// on the current gate. Re-run the harness before quoting a newer figure.
+//
 // Block recall on real attacker names, 227,525 npm/PyPI coordinates from the
 // OpenSSF malicious-packages feed (TestTyposquatMalwareFeedBlockRecall). Only
 // the 1,122 that are d=1 against an in-cutoff target can reach this gate:
 //
 //	BASELINE                   1,122 blocks
-//	production gate            1,030 blocks          → 92 given up, 8.2%
+//	production gate            1,025 blocks          → 97 given up, 8.6%
 //
-// So the gate trades 92 typosquat-lane blocks on known-malicious names for 206
-// recovered false blocks. Both numbers are lower bounds on their own side, and
-// the 92 are all names the shipped known-malicious floor refuses by coordinate
-// anyway — what is actually given up is the block on the NEXT, unlisted squat
-// of the same shape, which now warns instead (loudly: see
-// guardSeverityTyposquatDemoted, printed even under --quiet).
+// The 97 are the 92 the edge/shape predicates cost PLUS exactly 5 the
+// interior length floor demotes — inxi (of ini), miz (of mz), pmg (of pg),
+// tiar (of tar), each an interior insert against a 2-3-rune target, and m5d
+// (transposition of md5, a 3-rune target). Measured 2026-10-19; the
+// pre-floor production gate stood at 1,030.
+//
+// So the gate trades 97 typosquat-lane blocks on known-malicious names for
+// 206 recovered false blocks (and counting the interior floor's held-out
+// win, which the 247 figure above does not yet include). Both numbers are
+// lower bounds on their own side, and the 97 are all names the shipped
+// known-malicious floor refuses by coordinate anyway — what is actually
+// given up is the block on the NEXT, unlisted squat of the same shape, which
+// now warns instead (loudly: see guardSeverityTyposquatDemoted, printed even
+// under --quiet).
 //
 // ─── SCOPE: what stays demoted on purpose ──────────────────────────────────
 //
@@ -99,11 +112,13 @@ package cli
 //  1. A SUBSTITUTION against a ≤4-rune target (P2). That band is where two
 //     legitimate short names collide by coincidence — blob/glob, jsbi/jsbn,
 //     tape/type, chat/chai, gsap/asap, mqtt/mitt, i18n/y18n, pix/pip. Cost:
-//     30 of the 92 demoted malicious names, including cffy/cffi, zipf/zipp,
-//     yamm/yaml. Transpositions, interior inserts/deletes and doubled-end
-//     fat-fingers on the SAME short targets do keep the block lane, because
-//     two independent legitimate names essentially never collide in those
-//     shapes (uudi, ajvv, ritch all still block).
+//     30 of the 92 shape-demoted malicious names, including cffy/cffi,
+//     zipf/zipp, yamm/yaml. Transpositions, interior inserts/deletes and
+//     doubled-end fat-fingers keep the block lane on a 4-rune target (uudi,
+//     ritch still block) but DEMOTE below it — the interior floor — which
+//     costs exactly five feed names (inxi, miz, pmg, tiar by interior
+//     insert; m5d by transposition of md5) and recovers the pug/of/pg and
+//     md-5/of/md5 false-block class.
 //
 //  2. A LEADING-RUNE truncate, at any rank. Required by `args`/`yargs` (#70).
 //     Cost: 24 of the 92, including odash/lodash, halk/chalk,
@@ -146,6 +161,30 @@ import (
 // The check is on RUNES, not bytes, so a non-ASCII target is measured the way
 // a human reads it.
 const guardTyposquatBlockMinTargetLen = 5
+
+// guardTyposquatInteriorMinTargetLen is the FLOOR for the interior family —
+// transposition, interior insert, interior delete, and the doubled-start/end
+// fat-fingers (see typosquatEditShape.interiorEdit): those shapes require a
+// target of at least 4 runes to keep the block lane. They previously had NO
+// length floor at all, which blocked real packages whose names sit one
+// INTERIOR edit from a very short popular name: pug (of pg), md-5 (of md5),
+// uglify-es-shapes — four of the 28 measured false blocks on the 10,428-name
+// inventory.
+//
+// 4, not 5, because the two families differ in how independent legitimate
+// names collide: two real packages DO end up one substitution or one edge
+// edit apart in the 3-4 rune band (blob/glob, chat/chai), but they essentially
+// never collide by an interior edit at 4+ runes — uudi is not a package that
+// happens to look like uuid. Below 4, though, the interior edit carries no
+// more signal than a substitution does: the whole name is the edit. Adversarially
+// priced on the OpenSSF feed (TestTyposquatMalwareFeedBlockRecall, re-measured
+// 2026-10-19): exactly FIVE malicious names demote — inxi (of ini), miz (of
+// mz), pmg (of pg) and tiar (of tar), all interior inserts against 2-3-rune
+// targets, plus m5d (transposition of md5, a 3-rune target) — taking feed
+// blocks 1,030 → 1,025. uudi (uuid), ajvv-class shapes against 4-rune targets
+// and every 5+-rune interior target keep the block lane; the uuid-class
+// transposition at exactly 4 runes is pinned by TestTyposquatTargetLongEnough.
+const guardTyposquatInteriorMinTargetLen = 4
 
 // guardTyposquatPopularRescueRank is the popularity rank at or above which an
 // edge INSERTION (append/prepend) keeps the block lane despite being a naming
@@ -231,23 +270,52 @@ func (s typosquatEditShape) edgeInsertion() bool {
 // Edge edits and substitutions do: those are the two shapes in which two
 // INDEPENDENT legitimate short names collide (blob/glob, tape/type, nano/nan,
 // attr/attrs). Transpositions, interior inserts/deletes and doubled-end
-// fat-fingers do not: `uudi` is not a package that happens to look like
-// `uuid`, and demoting those on a length rule alone stripped the block lane
-// from every popular name of 4 runes or fewer — 118 npm and 147 PyPI corpus
-// names inside the rank cutoff, including pip, six, idna, glob, ajv, uuid,
-// rich and tqdm.
+// fat-fingers do not — they carry their own, LOWER floor instead (see
+// interiorEdit and guardTyposquatInteriorMinTargetLen): the shapes are rare
+// enough between legitimate names that a 4-rune target suffices, but a 2-3
+// rune one does not (pug is not a squat of pg).
 func (s typosquatEditShape) needsLongTarget() bool {
 	return s.edgeEdit() || s == typosquatEditSubstitution
 }
 
-// typosquatTargetLongEnough is predicate P2: the matched target must be at
-// least guardTyposquatBlockMinTargetLen runes long WHEN the edit shape needs
-// that check.
+// interiorEdit reports whether this shape edits the INSIDE of the target (or
+// doubles a rune at an end — the two copies make that an interior edit in
+// alignment terms): transposition, interior insert, interior delete,
+// doubled-end and doubled-start. This family clears the LOWER length floor
+// (guardTyposquatInteriorMinTargetLen) rather than
+// guardTyposquatBlockMinTargetLen.
+//
+// truncate-end is deliberately NOT here: an arbitrary last rune missing is a
+// keystroke that did not land and keeps the block lane at any target length
+// (the feed is full of debu/nump/chal shapes), and unknown is not here
+// because an alignment we cannot read must never open a hole.
+func (s typosquatEditShape) interiorEdit() bool {
+	switch s {
+	case typosquatEditTransposition, typosquatEditDeleteInterior, typosquatEditInsertInterior,
+		typosquatEditDoubleEnd, typosquatEditDoubleStart:
+		return true
+	default:
+		return false
+	}
+}
+
+// typosquatTargetLongEnough is predicate P2: the matched target must be long
+// enough — 5 runes for the shapes where independent short names collide
+// (edge edits, substitutions), 4 for the interior family — when the edit
+// shape needs that check.
 func typosquatTargetLongEnough(ecosystem, candidate string, res typosquat.DetectionResult) bool {
-	if utf8.RuneCountInString(res.SimilarTo) >= guardTyposquatBlockMinTargetLen {
+	n := utf8.RuneCountInString(res.SimilarTo)
+	if n >= guardTyposquatBlockMinTargetLen {
 		return true
 	}
-	return !classifyTyposquatEdit(ecosystem, candidate, res).needsLongTarget()
+	shape := classifyTyposquatEdit(ecosystem, candidate, res)
+	if shape.needsLongTarget() {
+		return false
+	}
+	if shape.interiorEdit() && n < guardTyposquatInteriorMinTargetLen {
+		return false
+	}
+	return true
 }
 
 // typosquatEditIsTypoShaped is predicate P1: the single edit separating the

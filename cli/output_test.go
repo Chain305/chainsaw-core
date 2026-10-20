@@ -87,10 +87,28 @@ func TestIsColorEnabled_AllowsWhenTTYAndNoOptOut(t *testing.T) {
 	// the genuine no-opt-out path (the empty-string case is asserted separately
 	// in TestIsColorEnabled_NoColorEmptyStringDisables).
 	os.Unsetenv("NO_COLOR")
+	// "No opt-out" also requires a TERM that is not "dumb" (output.go treats
+	// TERM=dumb as an opt-out); pin it so the test is hermetic under shells
+	// and CI runners that export TERM=dumb.
+	t.Setenv("TERM", "xterm-256color")
 
 	cmd := newTestCmd()
 	if !IsColorEnabled(cmd) {
 		t.Fatalf("IsColorEnabled() = false on TTY with no opt-out, want true")
+	}
+}
+
+// TestIsColorEnabled_TermDumbDisables pins the TERM=dumb contract from
+// output.go: even on a TTY with NO_COLOR absent, a dumb terminal opts out.
+func TestIsColorEnabled_TermDumbDisables(t *testing.T) {
+	withStdoutTTY(t, true)
+	resetViperColor(t)
+	os.Unsetenv("NO_COLOR")
+	t.Setenv("TERM", "dumb")
+
+	cmd := newTestCmd()
+	if IsColorEnabled(cmd) {
+		t.Fatalf("IsColorEnabled() = true with TERM=dumb, want false")
 	}
 }
 

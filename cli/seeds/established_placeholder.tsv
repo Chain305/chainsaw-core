@@ -1,0 +1,14 @@
+# established_placeholder.tsv — BUILD SUPPORT ONLY, NOT SEED DATA.
+#
+# This file exists so the `//go:embed seeds/established_*.tsv` pattern in
+# core/cli/guard_established.go compiles before the generated per-ecosystem
+# tables (established_npm.tsv, established_pypi.tsv, established_cargo.tsv,
+# ...) land. go:embed fails the BUILD when a pattern matches no file, and the
+# loader must tolerate the tables' absence gracefully instead.
+#
+# It carries ZERO rows and always will: every line starts with '#'. The real
+# tables are generated registry-wide qualification data
+# (name<TAB>weekly_downloads<TAB>version_count<TAB>first_published<TAB>last_published)
+# and are produced by the seed pipeline, not hand-edited here. When they land,
+# this placeholder is still harmless — it parses to an empty table under an
+# ecosystem key no lookup ever uses.
