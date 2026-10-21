@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -197,6 +200,100 @@ func TestCircuitStateString(t *testing.T) {
 	for _, tt := range tests {
 		if got := tt.state.String(); got != tt.want {
 			t.Errorf("CircuitState(%d).String() = %q, want %q", tt.state, got, tt.want)
+		}
+	}
+}
+
+// TestCircuitBreakerHalfOpenRecoversFromStrandedProbes pins the liveness
+// fix. Half-open is left only through RecordSuccess or RecordFailure; a
+// probe that records neither (a DNS error, a 429) never frees its slot.
+// Once every slot was spent that way, Allow refused forever — the
+// open→half-open timer runs only from open — and the repository served
+// 503 "circuit breaker is open" until the process restarted.
+//
+// Verified by deletion: removing the re-arm branch in Allow makes the
+// final Allow return false.
+func TestCircuitBreakerHalfOpenRecoversFromStrandedProbes(t *testing.T) {
+	cb := NewCircuitBreaker(CircuitBreakerConfig{
+		FailureThreshold: 1,
+		ResetTimeout:     10 * time.Millisecond,
+		HalfOpenRequests: 1,
+	})
+	cb.RecordFailure()
+	time.Sleep(20 * time.Millisecond)
+
+	// Both probes go out and record nothing.
+	if !cb.Allow() || !cb.Allow() {
+		t.Fatal("expected half-open to hand out its probes")
+	}
+	if cb.Allow() {
+		t.Fatal("expected Allow to refuse while the probes are outstanding")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if !cb.Allow() {
+		t.Fatalf("stranded half-open never recovered: Allow=false, state=%s", cb.State())
+	}
+
+	// The fresh probe keeps the old semantics: a success closes...
+	cb.RecordSuccess()
+	if s := cb.State(); s != CircuitClosed {
+		t.Fatalf("expected closed after the re-armed probe succeeded, got %s", s)
+	}
+}
+
+// TestCircuitBreakerReArmedProbeFailureReopens is the other half: a
+// re-armed probe that fails re-opens the circuit, as any half-open
+// failure does.
+func TestCircuitBreakerReArmedProbeFailureReopens(t *testing.T) {
+	cb := NewCircuitBreaker(CircuitBreakerConfig{
+		FailureThreshold: 1,
+		ResetTimeout:     10 * time.Millisecond,
+		HalfOpenRequests: 1,
+	})
+	cb.RecordFailure()
+	time.Sleep(20 * time.Millisecond)
+	cb.Allow()
+	cb.Allow()
+	time.Sleep(20 * time.Millisecond)
+	if !cb.Allow() {
+		t.Fatal("expected a re-armed probe")
+	}
+	cb.RecordFailure()
+	if s := cb.State(); s != CircuitOpen {
+		t.Fatalf("expected open after the re-armed probe failed, got %s", s)
+	}
+}
+
+// TestCircuitBreakerLogsTransitionsOnce pins the operator signal: a
+// repository that 503s because its breaker opened must say so, once per
+// transition, with the repository name, and at WARN when it opens.
+func TestCircuitBreakerLogsTransitionsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cb := NewCircuitBreaker(CircuitBreakerConfig{
+		FailureThreshold: 1,
+		ResetTimeout:     10 * time.Millisecond,
+		HalfOpenRequests: 1,
+		Name:             "npm-proxy",
+	})
+	cb.RecordFailure()
+	cb.RecordFailure() // already open: no second line
+	time.Sleep(20 * time.Millisecond)
+	cb.Allow()
+	cb.RecordSuccess()
+
+	out := buf.String()
+	for _, want := range []string{
+		"level=WARN msg=\"circuit breaker state change\" repository=npm-proxy from=closed to=open",
+		"level=INFO msg=\"circuit breaker state change\" repository=npm-proxy from=open to=half-open",
+		"level=INFO msg=\"circuit breaker state change\" repository=npm-proxy from=half-open to=closed",
+	} {
+		if strings.Count(out, want) != 1 {
+			t.Errorf("want exactly one %q in:\n%s", want, out)
 		}
 	}
 }

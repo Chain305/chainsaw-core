@@ -1345,6 +1345,15 @@ func (e *Evaluator) matchesPolicy(ctx EvaluationContext, policy Policy) bool {
 	// on IsKnownMalicious, not IsVulnerable) to ignore active
 	// exceptions. See the smoke-evidence at qa/smoke-evidence/D51.
 	if policy.Kind == KindException {
+		// The one condition an exception honours, and only to NARROW it:
+		// an exception minted with isKnownMalicious:false (the backlog
+		// baseline import does this) accepts a known vulnerability on an
+		// installed version, and must never become a malware bypass if
+		// that coordinate is later flagged. Fail direction is closed: the
+		// only effect is fewer exception matches.
+		if ExceptionExcludesMalware(policy) && ctx.IsKnownMalicious {
+			return false
+		}
 		return true
 	}
 
@@ -1354,6 +1363,17 @@ func (e *Evaluator) matchesPolicy(ctx EvaluationContext, policy Policy) bool {
 	}
 
 	return true
+}
+
+// ExceptionExcludesMalware reports whether an exception was minted so that
+// it can never cover a known-malicious coordinate: Kind=KindException with
+// the narrowing condition isKnownMalicious:false. Every other exception
+// keeps the identifier-only semantics (a manual operator exception still
+// overrides a malware verdict, deliberately — qa/smoke-evidence/D51). The
+// server's malware fast path (exceptionBypassesMalwareBlock) reads the same
+// predicate, so the two paths cannot disagree.
+func ExceptionExcludesMalware(p Policy) bool {
+	return p.Kind == KindException && p.Conditions.IsKnownMalicious != nil && !*p.Conditions.IsKnownMalicious
 }
 
 // MatchesIdentifier is the exported form of the evaluator's identifier

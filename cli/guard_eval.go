@@ -752,6 +752,14 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 				reason += " — " + res.MalwareID
 			}
 		}
+		// Still a block; the clause says what actually matched when
+		// "known-malicious" alone would overstate it (npm's security
+		// placeholder, or a whole-name advisory on a version it does not
+		// list — usually the org's own package colliding with an
+		// attacker-held public name).
+		if detail := malware.RefusalDetail(spec.Ecosystem, spec.Name, spec.Version, res); detail != "" {
+			reason += " — " + detail
+		}
 		return guardVerdict{Spec: spec, Block: true, Severity: "malicious", Reason: reason}
 	}
 

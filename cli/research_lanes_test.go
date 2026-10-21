@@ -24,6 +24,11 @@ package cli
 // Output: analysis/guard_malware.csv, analysis/guard_names.csv, and a summary
 // with the feed size n (a zero hit is only meaningful with the feed size and
 // the coordinate count stated alongside).
+//
+// Monitor mode: with CHAINSAW_GUARD_MODE=monitor every verdict passes through
+// guardMonitorDemote — the function evaluateAll runs on its finished verdicts
+// — and the outputs go to *_monitor.csv so the enforce receipts are not
+// overwritten. Unset, the demotion is a no-op and the run is the enforce run.
 
 import (
 	"bufio"
@@ -78,22 +83,41 @@ func TestResearchGuardOverDataset(t *testing.T) {
 	g.malware.Load(entries)
 	t.Logf("malware index: %d entries (%d floor + %d MAL docs fetched)", len(entries), len(malware.Floor()), len(feed))
 
-	malFile := researchOut(t, filepath.Join(outDir, "guard_malware.csv"), "ecosystem", "name", "version", "blocked", "advisory")
-	blocked := 0
+	suffix := ""
+	if guardMonitorActive() {
+		suffix = "_monitor"
+	}
+	t.Logf("guard mode: %s", guardModeLabel())
+	// demote applies monitor mode exactly as evaluateAll does after every lane
+	// has spoken; it is a no-op in enforce mode.
+	demote := func(v guardVerdict) guardVerdict {
+		vs := []guardVerdict{v}
+		guardMonitorDemote(vs)
+		return vs[0]
+	}
+
+	malFile := researchOut(t, filepath.Join(outDir, "guard_malware"+suffix+".csv"), "ecosystem", "name", "version", "blocked", "advisory")
+	blocked, refusing := 0, 0
 	for _, c := range coords {
 		res := g.malware.Lookup(ctx, c.Eco, c.Name, c.Version)
 		if !res.IsKnownMalicious {
 			continue
 		}
 		blocked++
-		researchRow(malFile, c.Eco, c.Name, c.Version, "true", res.MalwareID)
+		// The full verdict for the exact coordinate, after demotion: proves
+		// the malware refusal survives monitor mode rather than assuming it.
+		v := demote(g.evaluate(ctx, packageSpec{Ecosystem: c.Eco, Name: c.Name, Version: c.Version}))
+		if v.Block {
+			refusing++
+		}
+		researchRow(malFile, c.Eco, c.Name, c.Version, strconv.FormatBool(v.Block), res.MalwareID)
 	}
-	t.Logf("malware lane: %d of %d coordinates known-malicious", blocked, len(coords))
+	t.Logf("malware lane: %d of %d coordinates known-malicious; %d still refuse after the full verdict", blocked, len(coords), refusing)
 
-	nameFile := researchOut(t, filepath.Join(outDir, "guard_names.csv"), "ecosystem", "name", "verdict", "severity", "reason")
+	nameFile := researchOut(t, filepath.Join(outDir, "guard_names"+suffix+".csv"), "ecosystem", "name", "verdict", "severity", "reason")
 	verdicts := map[string]int{}
 	for _, n := range names {
-		v := g.evaluate(ctx, packageSpec{Ecosystem: n.eco, Name: n.name})
+		v := demote(g.evaluate(ctx, packageSpec{Ecosystem: n.eco, Name: n.name}))
 		// The coordinate pass above already decided the malware lane per
 		// exact version; an empty-version range match here would be a
 		// different question (unpinned install) than the census asks.
@@ -104,6 +128,8 @@ func TestResearchGuardOverDataset(t *testing.T) {
 		switch {
 		case v.Block:
 			kind = "block"
+		case v.MonitorDemoted:
+			kind = "warn-monitor-demoted"
 		case v.Severity != "":
 			kind = "warn"
 		}

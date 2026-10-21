@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -45,6 +47,9 @@ type CircuitBreakerConfig struct {
 	// HalfOpenRequests is the number of probe requests allowed in half-open
 	// state before the circuit closes again. Default: 2.
 	HalfOpenRequests int
+	// Name labels the breaker's state-change logs; normally the
+	// repository name. Optional.
+	Name string
 }
 
 func (c CircuitBreakerConfig) withDefaults() CircuitBreakerConfig {
@@ -70,6 +75,8 @@ type CircuitBreaker struct {
 	consecutiveFail int
 	lastFailTime    time.Time
 	halfOpenPassed  int
+	// lastProbeTime is when Allow last handed out a half-open probe.
+	lastProbeTime time.Time
 }
 
 // NewCircuitBreaker creates a circuit breaker with the given configuration.
@@ -90,20 +97,53 @@ func (cb *CircuitBreaker) Allow() bool {
 
 	case CircuitOpen:
 		if time.Since(cb.lastFailTime) >= cb.cfg.ResetTimeout {
-			cb.state = CircuitHalfOpen
+			cb.setState(CircuitHalfOpen)
 			cb.halfOpenPassed = 0
+			cb.lastProbeTime = time.Now()
 			return true
 		}
 		return false
 
 	case CircuitHalfOpen:
-		if cb.halfOpenPassed < cb.cfg.HalfOpenRequests {
-			cb.halfOpenPassed++
-			return true
+		if cb.halfOpenPassed >= cb.cfg.HalfOpenRequests {
+			// Every probe slot is out. Half-open is left only through
+			// RecordSuccess or RecordFailure, and a probe can end with
+			// neither: a DNS error (RecordNetworkFailure ignores it), a
+			// 429, a fetch that never reaches the recorder. Without this
+			// the breaker refused every request until the process
+			// restarted. So once ResetTimeout has passed since the last
+			// probe went out, treat the outstanding probes as lost and
+			// hand out a fresh set.
+			if time.Since(cb.lastProbeTime) < cb.cfg.ResetTimeout {
+				return false
+			}
+			cb.halfOpenPassed = 0
+			slog.Default().Info("circuit breaker half-open probes recorded no outcome, re-arming",
+				"repository", cb.cfg.Name, "probes", cb.cfg.HalfOpenRequests)
 		}
-		return false
+		cb.halfOpenPassed++
+		cb.lastProbeTime = time.Now()
+		return true
 	}
 	return true
+}
+
+// setState moves the breaker to state `to` and logs the transition,
+// once, at WARN when the circuit opens and INFO otherwise. Callers hold
+// cb.mu.
+func (cb *CircuitBreaker) setState(to CircuitState) {
+	from := cb.state
+	if from == to {
+		return
+	}
+	cb.state = to
+	level := slog.LevelInfo
+	if to == CircuitOpen {
+		level = slog.LevelWarn
+	}
+	slog.Default().Log(context.Background(), level, "circuit breaker state change",
+		"repository", cb.cfg.Name, "from", from.String(), "to", to.String(),
+		"consecutive_failures", cb.consecutiveFail)
 }
 
 // RecordSuccess records a successful upstream request. In half-open state,
@@ -116,7 +156,7 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	if cb.state == CircuitHalfOpen {
 		cb.halfOpenPassed++
 		if cb.halfOpenPassed >= cb.cfg.HalfOpenRequests {
-			cb.state = CircuitClosed
+			cb.setState(CircuitClosed)
 		}
 	}
 }
@@ -132,11 +172,11 @@ func (cb *CircuitBreaker) RecordFailure() {
 
 	if cb.state == CircuitHalfOpen {
 		// Any failure in half-open immediately re-opens the circuit.
-		cb.state = CircuitOpen
+		cb.setState(CircuitOpen)
 		return
 	}
 	if cb.consecutiveFail >= cb.cfg.FailureThreshold {
-		cb.state = CircuitOpen
+		cb.setState(CircuitOpen)
 	}
 }
 
@@ -147,7 +187,7 @@ func (cb *CircuitBreaker) State() CircuitState {
 
 	// Check for automatic transition from open to half-open.
 	if cb.state == CircuitOpen && time.Since(cb.lastFailTime) >= cb.cfg.ResetTimeout {
-		cb.state = CircuitHalfOpen
+		cb.setState(CircuitHalfOpen)
 		cb.halfOpenPassed = 0
 	}
 	return cb.state

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -86,6 +87,16 @@ func recordUpstreamError(ecosystem string) {
 	}
 	rec(normalizeEcosystemLabel(ecosystem))
 }
+
+// UpstreamUserAgent is the User-Agent on every repository fetch.
+//
+// Without it, internal fetches (scanner artifact and POM reads) went out
+// as Go's default "Go-http-client/1.1" and client fetches forwarded the
+// client's UA. Maven Central throttles the Go default: measured
+// 2026-10-21, the same POM answered 200 to curl's UA and 429
+// (Retry-After 662) to Go's, which then held the Sonatype stand-off open.
+// The binary stamps its version over the default at startup.
+var UpstreamUserAgent = "chainsaw-proxy/dev (+https://chain305.com)"
 
 // Request mirrors the arguments expected by ProxyFacetSupport.get(...)
 type Request struct {
@@ -354,8 +365,30 @@ func (f *facet) awaitFetch(ctx context.Context, req *Request, remote RemoteDefin
 			recordUpstreamError(f.format)
 			return nil, result.Err
 		}
-		return result.Val.(*Response), nil
+		// Every coalesced waiter receives the SAME *Response, and the server
+		// writes per-request headers into it (applyCacheHeaders, release
+		// hold). Shared, that map took concurrent writes from two installs of
+		// the same package and the runtime killed the whole process ("fatal
+		// error: concurrent map writes", 2026-10-21, 8 parallel npm packs).
+		return ownCopy(result.Val.(*Response)), nil
 	}
+}
+
+// ownCopy gives one singleflight waiter its own Response: headers, the
+// content struct and its ExtraHeaders map. The blob itself is not copied;
+// CachedContent.Open hands each caller a fresh reader.
+func ownCopy(shared *Response) *Response {
+	if shared == nil {
+		return nil
+	}
+	resp := *shared
+	resp.Headers = shared.Headers.Clone()
+	if shared.Content != nil {
+		content := *shared.Content
+		content.Metadata.ExtraHeaders = maps.Clone(shared.Content.Metadata.ExtraHeaders)
+		resp.Content = &content
+	}
+	return &resp
 }
 
 // fetchAndStore is the singleflight-protected body: re-check cache,
@@ -427,16 +460,24 @@ func (f *facet) fetchAndStore(fetchCtx context.Context, req *Request, remote Rem
 }
 
 // recordCircuitOutcome feeds upstream status codes back into the
-// circuit breaker: 5xx bumps the failure counter, <400 bumps success.
-// 4xx status codes are intentionally ignored — they're client errors,
-// not upstream health signals.
+// circuit breaker: 5xx is a failure, anything else but 429 a success.
+//
+// A 4xx counts as success because the breaker asks one question — is
+// the upstream up — and an upstream that answers 404 or 403 is up. It
+// used to count as nothing, which is how half-open probes got stranded:
+// on a proxy whose traffic is mostly misses, the probe after a 5xx burst
+// is often a 404, and a probe with no outcome kept the breaker
+// half-open with no slots left (see CircuitBreaker.Allow). 429 alone is
+// left unrecorded: the upstream is alive but asking us to stop, and
+// closing the circuit on it would invite the traffic it refused.
 func (f *facet) recordCircuitOutcome(status int) {
 	if f.circuitBreaker == nil {
 		return
 	}
-	if status >= 500 {
+	switch {
+	case status >= 500:
 		f.circuitBreaker.RecordFailure()
-	} else if status < 400 {
+	case status != http.StatusTooManyRequests:
 		f.circuitBreaker.RecordSuccess()
 	}
 }
@@ -705,7 +746,8 @@ func (f *facet) fetchFromRemote(ctx context.Context, remote RemoteDefinition, lo
 		req.Header.Add(k, v)
 	}
 	for k, values := range header {
-		if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Authorization") {
+		if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Authorization") ||
+			strings.EqualFold(k, "User-Agent") {
 			continue
 		}
 		if forceHTML && strings.EqualFold(k, "Accept") {
@@ -723,6 +765,12 @@ func (f *facet) fetchFromRemote(ctx context.Context, remote RemoteDefinition, lo
 	}
 	if needsTransform {
 		req.Header.Set("Accept-Encoding", "gzip, zstd, identity")
+	}
+	// The proxy fetches as itself: a singleflight fetch serves every
+	// waiting client, so no one client's UA is the right one. A UA the
+	// operator configures in the remote headers still wins.
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", UpstreamUserAgent)
 	}
 	return remote.Client.Do(req)
 }
