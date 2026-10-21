@@ -7,8 +7,9 @@
 > Since v0.22.116 pr-scan blocks every action referenced by tag or branch, this
 > one included, so `@action-v1` fails the check it installs. The SHA above is
 > the open-core commit carrying the v0.22.115 action. `action-v1` itself was
-> moved on 2026-10-18 to `action-v1.0.2` (open-core `3930bf0`, CLI v0.22.116);
-> before that it had stayed on `action-v1.0.1`, which runs CLI v0.22.100.
+> moved on 2026-10-21 to `action-v1.0.3` (open-core `0b078db`, CLI v0.22.119);
+> before that it was on `action-v1.0.2` (open-core `3930bf0`, CLI v0.22.116)
+> from 2026-10-18, and on `action-v1.0.1` (CLI v0.22.100) before that.
 > It is **not** on the GitHub Marketplace yet — a Marketplace listing requires
 > `action.yml` at a repository root, and this action ships from a subdirectory
 > of the open-core repo.
