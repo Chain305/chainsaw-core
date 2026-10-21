@@ -591,12 +591,14 @@ func flattenRecord(rec osvRecord) []Advisory {
 		return nil
 	}
 	score, label := SeveritySummary(rec.Severity)
-	// FALL BACK TO THE PUBLISHER'S LABEL when no vector parsed. This is what
-	// recovers CVSS:4.0-only advisories (skipped by SeveritySummary) and
-	// label-only ones. Only ever a fallback: a parsed vector is strictly
-	// better evidence than a band, so it always wins.
-	if score == 0 {
-		score, label = SeverityFromLabel(rec.DatabaseSpecific.Severity)
+	// BAND BY THE PUBLISHER'S LABEL (BandScore, shared with the proxy). With
+	// no parsed vector this is the old fallback — the label floor — which
+	// recovers CVSS:4.0-only and label-only advisories. With a vector, the
+	// label raises a v3 score below its band, and lowers one above it only
+	// when the record carries a CVSS 4.0 vector with real impact (GitHub
+	// derives the label from it). Mirrored in dockerized/build.sh.
+	if banded := BandScore(score, rec.DatabaseSpecific.Severity, hasV4Impact(rec.Severity)); banded != score {
+		score, label = banded, cvssLabel(banded)
 	}
 	var out []Advisory
 	for _, aff := range rec.Affected {
@@ -774,4 +776,16 @@ func isTruthy(v string) bool {
 		return true
 	}
 	return false
+}
+
+// FlattenJSON decodes one OSV record and flattens it exactly as the refresher
+// does for each file in all.zip. Exported for the cross-path severity test in
+// internal/server and the benchmark replay, which must score an advisory
+// through this path rather than a model of it.
+func FlattenJSON(raw []byte) ([]Advisory, error) {
+	var rec osvRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, err
+	}
+	return flattenRecord(rec), nil
 }

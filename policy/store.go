@@ -150,6 +150,7 @@ type Conditions struct {
 	CVSSMax        *float64 `json:"cvssMax,omitempty" yaml:"cvssMax,omitempty"`               // maximum CVSS score (0-10)
 	EPSSMin        *float64 `json:"epssMin,omitempty" yaml:"epssMin,omitempty"`               // minimum EPSS score (0-1)
 	EPSSMax        *float64 `json:"epssMax,omitempty" yaml:"epssMax,omitempty"`               // maximum EPSS score (0-1)
+	InKEV          *bool    `json:"inKev,omitempty" yaml:"inKev,omitempty"`                   // nil=any, true=one of the package's CVEs is in the CISA KEV catalog, REGARDLESS of CVSS; fails CLOSED (matches a vulnerable package) when no KEV catalog is loaded
 	PackageLicense []string `json:"packageLicense,omitempty" yaml:"packageLicense,omitempty"` // allowed licenses, empty=all
 
 	// Ecosystems narrows the rule to a specific subset of repository
@@ -2054,6 +2055,9 @@ func hasPolicyCondition(conditions Conditions) bool {
 		return true
 	}
 	if conditions.EPSSMin != nil || conditions.EPSSMax != nil {
+		return true
+	}
+	if conditions.InKEV != nil {
 		return true
 	}
 	if hasMeaningfulValues(conditions.PackageLicense) {

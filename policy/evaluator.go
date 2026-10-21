@@ -42,6 +42,13 @@ type EvaluationContext struct {
 	CVSSScore    float64
 	EPSSScore    float64
 	CVEs         []string
+	// InKEV: at least one of CVEs is in the CISA Known Exploited
+	// Vulnerabilities catalog. KEVUnavailable: no KEV catalog was loaded
+	// when the facts were gathered, so InKEV=false means "unknown", not
+	// "not exploited" — an inKev rule then fails CLOSED on a vulnerable
+	// package (see matchesConditions).
+	InKEV          bool
+	KEVUnavailable bool
 
 	// Supply chain integrity metadata
 	HasProvenance        bool   // true if provenance attestation was verified
@@ -1561,6 +1568,17 @@ func matchesConditions(ctx EvaluationContext, cond Conditions) bool {
 	}
 	if cond.EPSSMax != nil && ctx.EPSSScore > *cond.EPSSMax {
 		return false
+	}
+
+	// CISA KEV, independent of CVSS: an exploited CVE is refused whatever
+	// band its publisher put it in (CVE-2023-44487, HTTP/2 Rapid Reset, is
+	// GitHub MODERATE). With no catalog loaded a vulnerable package is
+	// treated as KEV-listed: missing data must not read as "not exploited".
+	if cond.InKEV != nil {
+		inKEV := ctx.InKEV || (ctx.KEVUnavailable && ctx.IsVulnerable)
+		if *cond.InKEV != inKEV {
+			return false
+		}
 	}
 
 	// Check license condition

@@ -1554,7 +1554,9 @@ func EcosystemForFormat(format string) Ecosystem {
 // which cells to check for the silent-no-op audit event.
 func ConditionsUsedBy(c Conditions) []ConditionType {
 	used := make([]ConditionType, 0, 8)
-	if c.IsVulnerable != nil || c.CVSSMin != nil || c.CVSSMax != nil {
+	// inKev reads the same per-package CVE list, so it has exactly the CVE
+	// column's support.
+	if c.IsVulnerable != nil || c.CVSSMin != nil || c.CVSSMax != nil || c.InKEV != nil {
 		used = append(used, ConditionCVE)
 	}
 	if c.CVSSMin != nil || c.CVSSMax != nil {

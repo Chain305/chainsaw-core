@@ -235,3 +235,100 @@ func SeverityFromLabel(label string) (float64, string) {
 	}
 	return 0, ""
 }
+
+// labelBand returns the [floor, ceiling] of a publisher label's CVSS band and
+// the label in CVSS spelling; ok is false for an absent/unrecognised label.
+func labelBand(label string) (floor, ceiling float64, norm string, ok bool) {
+	floor, norm = SeverityFromLabel(label)
+	switch norm {
+	case "CRITICAL":
+		return floor, 10.0, norm, true
+	case "HIGH":
+		return floor, 8.9, norm, true
+	case "MEDIUM":
+		return floor, 6.9, norm, true
+	case "LOW":
+		return floor, 3.9, norm, true
+	}
+	return 0, 0, "", false
+}
+
+// BandScore is the ONE severity rule both install paths apply to a GitHub
+// advisory, so one advisory gets one band whichever path scores it: the OSV
+// refresher (flattenRecord, mirrored in dockerized/build.sh) and the proxy's
+// trivy.db payload (internal/server advisoryScore).
+//
+//   - The label RAISES a score below its band to the band floor (no score at
+//     all -> the floor, as SeverityFromLabel always did).
+//   - The label LOWERS a score above its band to the band ceiling ONLY when
+//     v4Backed: GitHub has its own non-zero CVSS 4.0 score in the label's band.
+//     GitHub derives its label from that vector (99.9% agreement on the
+//     2026-10-21 benchmark), so the label then speaks for the vector. Without
+//     it — label but no v4 vector, or turbo's all-None vector that scores 0.0
+//     — nothing entitles us to lower, and the score stands.
+//   - Absent/unrecognised label: score unchanged.
+//
+// A known label never yields less than 0.1, so banding cannot turn an
+// advisory into "no severity". Callers decide what `score` and `v4Backed` are;
+// see each call site — WHO the publisher is matters more than this arithmetic
+// (taking it from Trivy's SeveritySource failed open on 59 GitHub-HIGH pairs).
+func BandScore(score float64, label string, v4Backed bool) float64 {
+	floor, ceiling, _, ok := labelBand(label)
+	if !ok {
+		return score
+	}
+	if score < floor {
+		return floor
+	}
+	if v4Backed && score > ceiling {
+		return ceiling
+	}
+	return score
+}
+
+// V4BacksLabel reports whether a publisher's own CVSS 4.0 score is non-zero
+// and lands in its label's band — the condition under which BandScore may
+// lower. For callers that carry the v4 NUMBER (trivy.db's V40Score).
+func V4BacksLabel(v4Score float64, label string) bool {
+	_, _, norm, ok := labelBand(label)
+	return ok && v4Score > 0 && cvssLabel(v4Score) == norm
+}
+
+// v4VectorHasImpact reports whether a CVSS 4.0 vector can score above 0.0.
+// The spec scores a vector 0.0 exactly when all six impact metrics (VC, VI,
+// VA, SC, SI, SA) are None; any other vector scores at least 0.1. This is the
+// OSV path's stand-in for V4BacksLabel: OSV carries the v4 VECTOR, not the
+// number, and this package does not score 4.0 (see SeverityFromLabel). What it
+// cannot check is that the vector's band equals the label — it takes GitHub's
+// label as derived from the vector. Malformed or non-4.0 -> false.
+func v4VectorHasImpact(vec string) bool {
+	if !strings.HasPrefix(vec, "CVSS:4.0/") {
+		return false
+	}
+	seen, impact := 0, false
+	for _, tok := range strings.Split(vec[len("CVSS:4.0/"):], "/") {
+		k, v, found := strings.Cut(tok, ":")
+		if !found {
+			continue
+		}
+		switch k {
+		case "VC", "VI", "VA", "SC", "SI", "SA":
+			seen++
+			if v != "N" {
+				impact = true
+			}
+		}
+	}
+	return seen == 6 && impact
+}
+
+// hasV4Impact reports whether any CVSS 4.0 entry in severity[] can score
+// above 0.0. See v4VectorHasImpact.
+func hasV4Impact(entries []SeverityEntry) bool {
+	for _, e := range entries {
+		if v4VectorHasImpact(strings.TrimSpace(e.Score)) {
+			return true
+		}
+	}
+	return false
+}

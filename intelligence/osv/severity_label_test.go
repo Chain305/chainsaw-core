@@ -59,16 +59,19 @@ func TestSeverityFromLabelIsTheFloorNotTheMidpoint(t *testing.T) {
 	}
 }
 
-// TestLabelFallbackNeverBeatsAParsedVector — a parsed vector is strictly
-// better evidence than a band, so the fallback must only apply when nothing
-// parsed. A 4.0-only record has no parseable vector and IS recovered.
-func TestLabelFallbackNeverBeatsAParsedVector(t *testing.T) {
+// TestLabelNeverLowersAParsedVectorWithoutV4 — until 2026-10-21 a parsed
+// vector always beat the label. The owner-approved band rule (BandScore) now
+// lets the label RAISE a vector below its band (GitHub rates the advisory
+// higher than its own v3 says), but it still never LOWERS a parsed vector
+// unless the record carries a CVSS 4.0 vector with real impact. A 4.0-only
+// record has no parseable vector and IS recovered.
+func TestLabelNeverLowersAParsedVectorWithoutV4(t *testing.T) {
 	withVector := osvRecord{
 		ID: "GHSA-test-vector",
 		Severity: []SeverityEntry{
-			{Type: "CVSS_V3", Score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+			{Type: "CVSS_V3", Score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
 		},
-		DatabaseSpecific: osvDatabaseSpecific{Severity: "CRITICAL"},
+		DatabaseSpecific: osvDatabaseSpecific{Severity: "MODERATE"},
 		Affected: []osvAffected{{
 			Package:  osvPackage{Ecosystem: "npm", Name: "x"},
 			Versions: []string{"1.0.0"},
@@ -78,9 +81,16 @@ func TestLabelFallbackNeverBeatsAParsedVector(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("no rows")
 	}
-	if rows[0].Severity == "CRITICAL" {
-		t.Errorf("the CRITICAL label overrode a parsed vector (got cvss %v); "+
-			"a vector is better evidence than a band and must win", rows[0].CVSSScore)
+	if rows[0].CVSSScore != 9.8 || rows[0].Severity != "CRITICAL" {
+		t.Errorf("a MODERATE label with no v4 vector lowered a parsed 9.8 to %v %q; "+
+			"only a v4-backed label may lower", rows[0].CVSSScore, rows[0].Severity)
+	}
+
+	raised := withVector
+	raised.Severity = []SeverityEntry{{Type: "CVSS_V3", Score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"}}
+	raised.DatabaseSpecific = osvDatabaseSpecific{Severity: "CRITICAL"}
+	if rows = flattenRecord(raised); len(rows) == 0 || rows[0].CVSSScore != 9.0 {
+		t.Errorf("a CRITICAL label did not raise a 5.3 vector to the band floor 9.0: %+v", rows)
 	}
 
 	only40 := osvRecord{

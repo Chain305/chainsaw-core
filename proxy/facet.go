@@ -326,11 +326,13 @@ func (f *facet) respondFromCache(ctx context.Context, logicalPath string, conten
 	if stale {
 		headers.Set("Warning", staleWarning)
 	}
+	// An entry nobody has verified yet is not a cache hit to the caller:
+	// it must verify it (see ContentMetadata.Unverified).
 	return &Response{
 		StatusCode: http.StatusOK,
 		Headers:    headers,
 		Content:    content,
-		FromCache:  true,
+		FromCache:  !content.Metadata.Unverified,
 	}, nil
 }
 
@@ -554,6 +556,7 @@ func (f *facet) storeUpstream(fetchCtx context.Context, remote RemoteDefinition,
 		meta.PackageName = coord.Name
 		meta.PackageVersion = coord.Version
 		meta.PackageSubtype = coord.Subtype
+		meta.Unverified = true
 		if f.index != nil {
 			_ = f.index.Record(f.repoName, index.PackageCoordinate{
 				Package: coord.Name,
@@ -1050,7 +1053,7 @@ func (f *facet) tryStaleCache(ctx context.Context, logicalPath string) *Response
 		StatusCode: http.StatusOK,
 		Headers:    headers,
 		Content:    content,
-		FromCache:  true,
+		FromCache:  !content.Metadata.Unverified,
 	}
 }
 

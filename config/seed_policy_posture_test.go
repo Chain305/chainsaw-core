@@ -40,6 +40,9 @@ var seededPolicyPosture = map[string]policy.Mode{
 	// Dispositive import-time shapes only (ArtifactScanSection.
 	// ImportTimeRefusable): 0/860 benign; the advisory kinds hit 25/260 PyPI.
 	"Block import-time execution of fetched or decoded code": policy.ModeBlock,
+	// Exploitation observed by CISA, not a severity opinion; owner decision
+	// 2026-10-21. Fails closed when no KEV catalog is loaded.
+	"Block known-exploited vulnerabilities (CISA KEV)": policy.ModeBlock,
 
 	// MONITOR — real signals that also fire on ordinary legitimate
 	// activity. Flagged for review and promoted deliberately per org via

@@ -81,6 +81,14 @@ func (i *Index) LastRefresh() time.Time {
 	return i.lastRefresh
 }
 
+// Len is the number of catalog entries loaded. Zero means "no catalog",
+// which a KEV policy rule must treat as unknown, never as "not exploited".
+func (i *Index) Len() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return len(i.entries)
+}
+
 // Lookup returns the Entry for a CVE ID, if any.
 func (i *Index) Lookup(cve string) (Entry, bool) {
 	if cve == "" {

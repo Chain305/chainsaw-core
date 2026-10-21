@@ -42,6 +42,13 @@ type ContentMetadata struct {
 	ClamAVDBVersion string            `json:"clamav_db_version,omitempty"`
 	ClamAVSHA256    string            `json:"clamav_sha256,omitempty"`
 	ExtraHeaders    map[string]string `json:"extra_headers,omitempty"`
+	// Unverified marks an artifact the proxy facet stored from upstream
+	// that no request has verified yet (checksum). The facet answers a
+	// cache hit on it as not-from-cache, so the request verifies it
+	// rather than taking the cache-hit shortcut; the server clears the
+	// mark once verification passes. Without it a request arriving
+	// while the first one was still verifying was served the bytes.
+	Unverified bool `json:"unverified,omitempty"`
 }
 
 // CachedContent wraps a blob and its metadata.

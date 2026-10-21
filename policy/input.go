@@ -85,6 +85,7 @@ type Input struct {
 	CVSSScore    float64  `json:"cvss,omitempty"`
 	EPSSScore    float64  `json:"epss,omitempty"`
 	CVEs         []string `json:"cves,omitempty"`
+	InKEV        bool     `json:"inKEV,omitempty"`
 
 	// Supply-chain integrity metadata.
 	HasProvenance        bool   `json:"hasProvenance,omitempty"`
@@ -228,6 +229,7 @@ func ContextToInput(surface SurfaceTag, ctx EvaluationContext) Input {
 		CVSSScore:                    ctx.CVSSScore,
 		EPSSScore:                    ctx.EPSSScore,
 		CVEs:                         ctx.CVEs,
+		InKEV:                        ctx.InKEV,
 		HasProvenance:                ctx.HasProvenance,
 		ProvenanceStatus:             ctx.ProvenanceStatus,
 		IsSuspectedTyposquat:         ctx.IsSuspectedTyposquat,
