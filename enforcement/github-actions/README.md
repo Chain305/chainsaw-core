@@ -3,14 +3,15 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 
 > Consume it pinned to a commit SHA:
-> `uses: Chain305/chainsaw-core/enforcement/github-actions@1c4b6342b7bc94a7a200243d461970e32061d1e4 # v0.22.123`.
+> `uses: Chain305/chainsaw-core/enforcement/github-actions@704e12675383e7f337bfefcbbf3e525bff72918e # v0.22.124`.
 > Since v0.22.116 pr-scan blocks every action referenced by tag or branch, this
 > one included, so `@action-v1` fails the check it installs. The SHA above is
-> the open-core commit `action-v1.0.5` points at, whose action installs CLI
-> v0.22.123 (before 2026-10-22 the docs pinned `f3d549a`, the v0.22.122
-> action; earlier `0b078db` (v0.22.119) and `4b6142b` (v0.22.115)). `action-v1`
-> itself moved on 2026-10-22 to `action-v1.0.5` (open-core `1c4b634`, CLI
-> v0.22.123), after `action-v1.0.4` (open-core `f3d549a`, CLI v0.22.122) and
+> the open-core commit `action-v1.0.6` points at, whose action installs CLI
+> v0.22.124 (earlier the docs pinned `1c4b634` (v0.22.123), `f3d549a`
+> (v0.22.122), `0b078db` (v0.22.119) and `4b6142b` (v0.22.115)). `action-v1`
+> itself moved on 2026-10-22 to `action-v1.0.6` (open-core `704e126`, CLI
+> v0.22.124), after `action-v1.0.5` (open-core `1c4b634`, CLI v0.22.123) the
+> same day, `action-v1.0.4` (open-core `f3d549a`, CLI v0.22.122) and
 > `action-v1.0.3` (open-core `0b078db`, CLI v0.22.119) on 2026-10-21,
 > `action-v1.0.2` (open-core `3930bf0`, CLI v0.22.116) from 2026-10-18, and
 > `action-v1.0.1` (CLI v0.22.100) before that.
@@ -46,7 +47,7 @@ jobs:
           # shallow clone does not contain. Without this the pr-scan leg
           # silently scans nothing.
           fetch-depth: 0
-      - uses: Chain305/chainsaw-core/enforcement/github-actions@1c4b6342b7bc94a7a200243d461970e32061d1e4 # v0.22.123
+      - uses: Chain305/chainsaw-core/enforcement/github-actions@704e12675383e7f337bfefcbbf3e525bff72918e # v0.22.124
         with:
           mode: warn   # warn | block
 ```
@@ -80,7 +81,7 @@ Example — fail only when blocking policies hit, but always upload the report:
 
 ```yaml
 - id: guard
-  uses: Chain305/chainsaw-core/enforcement/github-actions@1c4b6342b7bc94a7a200243d461970e32061d1e4 # v0.22.123
+  uses: Chain305/chainsaw-core/enforcement/github-actions@704e12675383e7f337bfefcbbf3e525bff72918e # v0.22.124
   with:
     mode: warn
 
