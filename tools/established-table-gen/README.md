@@ -1,158 +1,125 @@
 # established-table-gen
 
-Generates the per-ecosystem **established tables** consumed by the install
-guard's typosquat clear:
+Generates the install guard's embedded **established tables** by census
+(since 2026-10-21):
 
 - `core/cli/seeds/established_npm.tsv`
 - `core/cli/seeds/established_pypi.tsv`
 - `core/cli/seeds/established_cargo.tsv`
+- `core/cli/seeds/established_pub.tsv`
 
-Row format (TSV, qualifying rows only):
+## What a row is
+
+The guard consults the table for any name its typosquat lane flags at medium
+or high confidence. So the census reads the registry's **full public name
+list** and runs the guard's own detector — same corpus, normalization,
+distance and thresholds — over every name. A candidate is any name it flags
+(homoglyph hits excluded; the guard decides those before any table). Two
+tiers, recorded per candidate: **block** (the d=1 lookalike of a target
+ranked within the block cutoff, 2,500 — `cli.guardTyposquatBlockRankCutoff`)
+and **warn** (every other medium/high hit: distance 2–3 within the
+detector's thresholds, reorder matches, d=1 past the cutoff). A candidate is
+admitted only when the registry shows it is long-standing and heavily used in
+its own right — **both**, the same lines for both tiers:
+
+| line | value |
+| --- | --- |
+| age | first published ≥ 2 years before the build |
+| downloads | ≥ 100,000 a week (npm last-week; PyPI pypistats `last_week`; crates.io 90-day × 7/90; pub.dev 30-day × 7/30) |
+
+Downloads alone is a pumped young package; a version count alone is cheap
+(create-jst shipped 28 versions in 30 days), so neither admits on its own.
+**Never admitted:** a name in the known-malicious feed, an npm security
+placeholder (highest version is npm's `-security` holding release:
+`npm:http`), a name with no registry data.
+
+Row format (TSV):
 
 ```
-name <TAB> weekly_downloads (0 if unknown) <TAB> version_count <TAB> first_published (YYYY-MM-DD or empty) <TAB> last_published (YYYY-MM-DD or empty)
+name <TAB> weekly_downloads <TAB> version_count <TAB> first_published <TAB> last_published <TAB> releases
 ```
 
-Names are keyed **exactly as the registry spells them**; the consumer
-normalizes. Row order is weekly downloads descending (the churn rail reads
-the top 100 rows as "the top 100").
+`releases` (comma-separated, sorted) is every version that existed at build
+time. The guard is **silent only for an exact pin inside it**; every other
+install of the name (no version, a range, a tag, a release newer than the
+build) keeps the typosquat lane: a block is lowered to a printed warning, and
+a warning stays a warning. A warn-tier row therefore only ever silences a
+medium-confidence warning on a pinned build-time release; it cannot touch a
+block the block-tier rules would not already lower.
+See `core/cli/guard_established.go`, THE VERSION GATE. Weekly downloads are
+stored scaled to a week so the guard's runtime clear (`risk.EstablishedClear`,
+downloads line) agrees with the census.
 
-## Why a table and not a popularity corpus
+## Why a census (and what it replaced)
 
-The previous design keyed the typosquat clear to corpus *rows* — a package
-was established only if it appeared in a top-N popularity ranking. The
-adversarial review rejected that: **establishment and popularity are
-different properties**. A package with 20k weekly downloads, 8 years of
-history and 60 versions is beyond any doubt not a typosquat — it has
-outlived every squat registry moderation has ever removed — yet it will
-never crack a top-10k ranking. Keying the clear to popularity made the
-false-block rate a function of rank, and rank is exactly what a patient
-attacker can buy.
+Until 2026-10-21 the candidate universe was the popular seeds plus a customer
+SBOM export, admission was "any clear line", and **rail 3** held out every
+name one edit from a popular seed with under 1% of its traffic. Two defects:
 
-This table instead keys **the clear lines themselves**, mirrored from
-`core/risk/established.go` and `core/intelligence/typosquat_established.go`
-(one definition, so the table, the runtime clear and the damper cannot
-disagree). A name is in the table iff real registry data shows it meets ANY
-line:
+- **In-sample.** Measuring the guard on that customer's inventory measured the
+  table on its own training data, and the export's pseudonymised
+  `internal-<hash>` names were sent to the registries as lookups.
+- **Rail 3 held out exactly the packages the table exists for** — `jsonp`
+  (json5), `pegjs` (pngjs), `is-blob` (is-glob), `js-logger` (bs-logger),
+  `has-own` (hasown). It was needed while a table row cleared SILENTLY for
+  any version; once a row can only warn on anything but an exact build-time
+  pin, the age-and-downloads admission is the safer line.
 
-| line | npm / pypi | cargo |
+## Sources (public only)
+
+| eco | name list | per-candidate |
 | --- | --- | --- |
-| downloads | >= 100,000 weekly | >= 75,000 **total** (see proxy note) |
-| versions | >= 50 versions AND first published >= 2y ago | same |
-| long-lived | first published >= 5y ago AND last published >= 1y ago | same |
+| npm | `replicate.npmjs.com/_all_docs` ids (~4.5M, 10k/page, 2/s), held in memory only | `api.npmjs.org` last-week (unscoped: 128 per bulk request, first; scoped: one point call each, after the doc shows ≥2y); registry doc only for names on the line and scoped names |
+| pypi | `pypi.org/simple/` (PEP 691 JSON) | `hugovk.dev/top-pypi-packages` (top 15,000 by 30-day downloads, one request) decides who is worth more: a candidate under half the line there (or absent — the list's cutoff is ~53k/month, an eighth of the line) gets no further call; the rest get `pypi.org/pypi/<name>/json` and, if ≥2y, `pypistats.org` recent (1/1.1s) |
+| cargo | `crates.io/api/v1/crates` seek pages (100/page, 1/s — the 2 GB db dump does not fit the release machine); the listing carries created date, 90-day downloads and version count, so no per-crate call | `index.crates.io` releases for admissible crates |
+| pub | `pub.dev/api/package-names` | `/api/packages/<name>`; `/api/packages/<name>/score` if ≥2y |
 
-If those constants move in `core/risk`, regenerate all three tables.
+The detector pass is CPU-bound (npm's 4.5M names: ~45 min on 8 cores);
+downloads are checked before anything that needs a registry doc, so most of
+the warn tier is refused without a per-name request.
 
-**Cargo proxy note:** crates.io publishes no weekly figure, only a 90-day
-and an all-time count. v1 applies the >=75k/90d spirit to **total**
-downloads, which is a strictly looser bar for an old crate than 75k per 90
-days; the file header says so on every generation.
+Every request carries the descriptive User-Agent
+(`chain305 established-table-gen (github.com/chain305/chainsaw)`), goes through
+a per-host limiter, and backs off on 429/5xx honouring `Retry-After`. Downloads
+are fetched only for candidates that already pass the age half. The run ends
+by printing upstream request counts per host.
 
-Rows with `weekly_downloads=0` (PyPI has no download data in v1) are fine:
-they qualify through the version/age lines, which need no traffic data.
+**Never a customer inventory.** As a second guard, any `internal-<8 hex>` name
+(the SBOM export's pseudonym shape) is dropped from every list before use;
+`internal-slot` is a real npm package and stays.
 
-## Sources
+## Rails
 
-**npm** — universe (candidates, ~8.4k distinct names):
-`core/cli/seeds/npm_popular.txt` (5,000) ∪ `packages.csv` rows with
-`ecosystem=npm` (~7.1k public SBOM names) ∪ the names in the cached
-abbreviated docs `npm_docs.jsonl` (6,858) ∪ the canary pins below. Per name:
-- full registry doc `https://registry.npmjs.org/<name>` — `time.created`,
-  per-version times (last published = max excluding `created`/`modified`),
-  `version_count = len(versions)`; npm's `0.0.x-security` holding
-  placeholders are excluded from the age lines (their timestamps are removal
-  artifacts);
-- weekly downloads from `https://api.npmjs.org/downloads/point/last-week/…`
-  — comma-joined batches of ~128 unscoped names per request, scoped names
-  individually.
+Any failure refuses the write and exits non-zero:
 
-**pypi** — universe: `core/cli/seeds/pypi_popular.txt` (3,000) ∪
-`packages.csv` pypi names (318). `https://pypi.org/pypi/<PEP503>/json`:
-`version_count` = releases with files; first/last from `upload_time`.
-Downloads are not fetched (pypistats skipped in v1) → `0`.
+1. **Self-test** of the admission lines on synthetic rows: a pumped young
+   package, an old quiet one, a version-count-only one, a feed name and a
+   placeholder are refused; a dormant old package with two versions and real
+   traffic is admitted.
+2. **Sentinels** — measured false blocks that must be admitted (npm: `pug`,
+   `jsonp`, `is-blob`; pub: `dartx`).
+3. **Churn** — a regeneration that loses more than 25% of the previous census's
+   rows is refused (first census run: baseline).
+4. **Feed** — `-malware-feed` (default: the `chainsaw guard update` cache)
+   plus the embedded floor; an unreadable or empty feed refuses the run.
 
-**cargo** — `https://crates.io/api/v1/crates?sort=downloads&per_page=100`
-× 30 pages = top 3,000 crates. The listing itself carries `created_at`,
-`updated_at`, total `downloads` and `num_versions` (no per-crate second
-call needed). A descriptive User-Agent
-(`chain305 established-table-gen (github.com/chain305/chainsaw)`) and a
-modest page rate keep crates.io happy.
-
-Every fetch is cached as JSONL under `-cache` (distilled records — a
-full-doc cache would be gigabytes) and every run resumes from it; reruns are
-cheap and idempotent until the caches are deleted. On the monthly refresh,
-delete `npm_downloads.jsonl` from the cache (weekly figures go stale; the
-doc-derived fields barely move). api.npmjs.org rate-limits hard: the tool
-spaces requests through a shared limiter, sends unscoped names in bulk
-batches of 128 first, and then walks scoped names one point call at a time
-(the bulk endpoint rejects them outright) — budget ~1h for a cold-cache npm
-run.
-
-## Refresh cadence
-
-**Monthly**, alongside the popular seeds (upstream download rankings refresh
-monthly). The registry docs are effectively stable for established packages,
-so the churn rail below makes monthly drift visible and bounded.
-
-## Anti-poisoning rails
-
-Following the refuse-don't-report-zero discipline of `popular-corpus-gen`
-(any hard rail failure refuses the write and exits non-zero):
-
-1. **Canary presence.** The npm canaries — `pug`, `jsdoc`, `uglify-es`,
-   `flatten`, `lodash.set`, `charset`, `parseuri`, `clui`, `as-number`,
-   `hable`, `crypto-es`, `crypto-ts`, `has-own`, `js-logger` — are measured
-   false-blocks. Each must either appear in the table or be printed with the
-   registry-data reason it does not qualify. A canary with no registry data
-   is a hard failure (the table would silently lose its false-positive
-   regression coverage). A canary legitimately failing to qualify is an
-   expected, printed outcome — not a failure (2026-10-19: `crypto-es` at
-   88k/wk and 29 versions). A third state exists and is also printed: a
-   canary that QUALIFIES but is HELD OUT by rail 3 (`has-own` vs `hasown`,
-   `crypto-ts` vs `crypto-js`, …) — d1 of a popular name with <1% of its
-   traffic is squat-shaped even for a canary, so it stays out of the
-   embedded table and clears at runtime through live metadata instead.
-2. **Multi-signal floor.** A row qualified *only* by the downloads line must
-   be >= 1y old or have >= 10 versions; violators are held out and printed.
-   One hot week is not establishment — it is indistinguishable from a
-   purchased-audience squat.
-3. **d1 ratio watch.** Any row within edit distance 1 (scope-insensitive)
-   of a `npm_popular.txt` name whose weekly downloads are < 1% of that seed
-   name's is held out and the pair printed — squat-shaped regardless of how
-   it qualified.
-4. **Churn.** Against the previous table: top-100 turnover > 10% or total
-   churn > 25% fails. First run prints `first-run baseline` instead.
-5. **Patient-attacker self-test.** After generation, a synthetic probe
-   (55 versions, 15 months old, 120k/wk — 0.01%-of-lodash traffic) is run
-   through the same decision functions. Rail 2 deliberately passes that
-   profile (a patient attacker satisfies the floor by waiting); the probe
-   named `zz-squat-probe` is not actually one edit from `lodash`, so the
-   test also runs an **armed** variant under `lodsh` (a true one-edit
-   lookalike) and asserts the d1 ratio watch holds it. PASS requires the
-   armed variant held by rail 3 and the non-lookalike not held.
-
-Plus corpus-style floors: a table below a per-ecosystem row floor, or
-missing flagship sentinels (react/lodash/express/typescript,
-requests/numpy/boto3/urllib3, serde/tokio/libc/rand), refuses the write.
-
-## Trust channel
-
-The TSVs are **data, reviewed as a PR** — never generated at install time
-and never fetched live by the guard. Between releases the signed
-intelligence-bundle channel (content key `typosquat`) can carry an updated
-table, exactly like the popular seeds. At install time the consumer reads
-only the embedded/reviewed copy and normalizes names; live registry checks
-remain a separate, fail-closed path.
+Every candidate's decision is written to `<cache>/<eco>_census_verdicts.jsonl`
+for review.
 
 ## Usage
 
-From `core/`:
+From `core/`. Keep the cache **outside the repo** (`core/cache` is a Go
+package). npm's name list is never written; the other lists are cached during
+a run and removed when it succeeds; delete the rest of the cache afterwards:
 
 ```sh
-go run ./tools/established-table-gen -ecosystem cargo -cache ./cache -out cli/seeds/established_cargo.tsv
-go run ./tools/established-table-gen -ecosystem pypi -cache ./cache -out cli/seeds/established_pypi.tsv
-go run ./tools/established-table-gen -ecosystem npm   -cache ./cache -concurrency 8 -out cli/seeds/established_npm.tsv
+go run ./tools/established-table-gen -ecosystem pub   -cache /tmp/etg-cache -out cli/seeds/established_pub.tsv
+go run ./tools/established-table-gen -ecosystem pypi  -cache /tmp/etg-cache -out cli/seeds/established_pypi.tsv
+go run ./tools/established-table-gen -ecosystem npm   -cache /tmp/etg-cache -concurrency 8 -out cli/seeds/established_npm.tsv
+go run ./tools/established-table-gen -ecosystem cargo -cache /tmp/etg-cache -out cli/seeds/established_cargo.tsv
+rm -rf /tmp/etg-cache
 ```
 
-`-packages-csv` and `-npm-docs-jsonl` default to the research-dataset paths;
-pass them explicitly when regenerating elsewhere. `go vet` must stay clean.
+Refresh monthly, alongside the popular seeds. The TSVs are data reviewed as a
+PR (or carried by the signed intelligence bundle); the guard never fetches
+them at install time. `go vet` must stay clean.

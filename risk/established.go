@@ -92,6 +92,14 @@ type EstablishedRow struct {
 	// evidence).
 	FirstPublished time.Time
 	LastPublished  time.Time
+	// Releases is the set of versions that existed when the row was built
+	// (the guard table's sixth column). It does not decide establishment —
+	// EstablishedClear never reads it. It decides whether a clear may be
+	// SILENT: the offline guard stays quiet only for an exact pin inside this
+	// set, because a release published after the build is exactly what a
+	// dormant cleared lookalike would ship. nil = unknown, which is never
+	// silent.
+	Releases map[string]struct{}
 }
 
 // EstablishedClear is THE definition of when a package's qualification data

@@ -19,11 +19,24 @@ package cli
 // first/last publish dates), embedded at build time and consulted BEFORE the
 // typosquat lane can set a verdict. A row that clears through
 // risk.EstablishedClear — the SAME single definition the server path calls —
-// skips the name-similarity lane entirely. The table is qualification data,
+// caps the name-similarity lane at a WARNING, and is silent only when the
+// install pins an exact version the table saw at build time (see THE VERSION
+// GATE below). The table is qualification data,
 // NOT a popularity corpus: membership does not exempt a package from
 // anything else, and confers no exact-match privileges (unlike the popular
 // corpus, being in this table clears nothing by itself — a row only clears
 // when the qualification LINES fire).
+//
+// ─── THE VERSION GATE (2026-10-21) ───────────────────────────────────────────
+//
+// The clear used to skip the lane for ANY version, including one published
+// after the table was built: a dormant lookalike that qualified years ago and
+// then ships a malicious release was cleared on its history alone. A clear now
+// lowers a block to a printed warning naming the lookalike target. It is
+// silent only when the request is an exact pin inside the row's build-time
+// release set (establishedPinnedRelease). A version check alone could not
+// close this: `npm install jsonp` and `faiss-gpu>=1` reach the guard with no
+// version at all, so "no version" must warn rather than clear.
 //
 // ─── WHAT THE CLEAR DOES NOT CLEAR ──────────────────────────────────────────
 //
@@ -44,7 +57,13 @@ package cli
 //
 // The format (one row per package, '#' header lines skipped):
 //
-//	name<TAB>weekly_downloads(int)<TAB>version_count(int)<TAB>first_published(YYYY-MM-DD or empty)<TAB>last_published(YYYY-MM-DD or empty)
+//	name<TAB>weekly_downloads(int)<TAB>version_count(int)<TAB>first_published(YYYY-MM-DD or empty)<TAB>last_published(YYYY-MM-DD or empty)[<TAB>releases(comma-separated)]
+//
+// The optional sixth column is the set of versions that existed at build
+// time (risk.EstablishedRow.Releases). The generator writes it only for rows
+// the typosquat detector can flag — every other row never reaches the clear.
+// A five-column row (an older table) parses with no release set, which is
+// the safe reading: its clear can only ever WARN, never go silent.
 //
 // Empty date fields mean unknown; unknown dates fail the lines that need
 // them (see risk.EstablishedRow). Malformed rows are skipped LOUDLY — a
@@ -214,9 +233,9 @@ func parseEstablishedTable(ecosystem string, data []byte) (rows map[string]risk.
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 5 {
+		if len(fields) != 5 && len(fields) != 6 {
 			skipped++
-			slog.Warn("chainsaw: established table: malformed row (want 5 tab-separated fields)",
+			slog.Warn("chainsaw: established table: malformed row (want 5 or 6 tab-separated fields)",
 				"ecosystem", ecosystem, "row", sanitizeForTerminal(line))
 			continue
 		}
@@ -260,6 +279,16 @@ func parseEstablishedTable(ecosystem string, data []byte) (rows map[string]risk.
 		if bad {
 			skipped++
 			continue
+		}
+		if len(fields) == 6 {
+			for _, v := range strings.Split(fields[5], ",") {
+				if v = strings.TrimSpace(v); v != "" {
+					if row.Releases == nil {
+						row.Releases = map[string]struct{}{}
+					}
+					row.Releases[v] = struct{}{}
+				}
+			}
 		}
 		// First occurrence wins, mirroring core/typosquat's established
 		// reference: a duplicated line cannot forge a stronger row.
@@ -310,6 +339,36 @@ func establishedClears(ecosystem, name string, now time.Time) (reason string, ro
 		return "", r, false
 	}
 	return reason, r, true
+}
+
+// establishedPinnedRelease reports whether an install request names exactly
+// one of the releases the table saw at build time — the ONLY case in which an
+// established clear stays silent. Everything else warns: an empty version
+// (`npm install jsonp`, `pip install faiss-gpu`), a range or tag (`^0.2.0`,
+// `latest`, `>=1`), and an exact version the table never saw, which is the
+// shape of a dormant cleared lookalike shipping a new release. npm and pip
+// accept a leading "=" or "v" on an exact version; nothing else is folded, so
+// a spelling the table does not carry errs toward the warning.
+func establishedPinnedRelease(row risk.EstablishedRow, version string) bool {
+	v := strings.TrimLeft(strings.TrimSpace(version), "=v")
+	if v == "" || len(row.Releases) == 0 {
+		return false
+	}
+	_, ok := row.Releases[v]
+	return ok
+}
+
+// establishedWarnReason renders the warning an established clear leaves
+// behind when the install is not an exact pin the table knows: the
+// typosquat claim (which names the lookalike target), why the name counts as
+// established, and why that was not enough to stay quiet.
+func establishedWarnReason(spec packageSpec, hitReason, why string) string {
+	pin := "no exact version was requested"
+	if strings.TrimSpace(spec.Version) != "" {
+		pin = fmt.Sprintf("version %q is not a release the established table recorded", spec.Version)
+	}
+	return fmt.Sprintf("%s — %s is established (%s), so this is a warning, not a refusal; %s",
+		hitReason, spec.Name, why, pin)
 }
 
 // establishedClearsNotice renders the per-verdict informational line for a

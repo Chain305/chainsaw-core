@@ -68,8 +68,43 @@ func NormalizeCargo(name string) string {
 // different owners are unrelated, and dropping the prefix would collapse
 // "github.com/attacker/cobra" into "github.com/spf13/cobra" for typosquat
 // comparison purposes, producing false "exact popular match" hits.
+//
+// The one part of the path that is NOT identity is a major-version suffix:
+// "github.com/shirou/gopsutil/v4" is the same module line as ".../v3", and
+// "gopkg.in/yaml.v3" the same as "gopkg.in/yaml.v2". Comparing them raw made
+// every new major a distance-1 "typosquat" of the previous one (gopsutil/v4,
+// helm.sh/helm/v4 blocked) and, worse, hid squats behind the suffix
+// (github.com/sirupsem/logrus/v2 was compared against nothing). The suffix
+// is stripped — /v2 and up, any number of digits, and gopkg.in's .vN — and
+// the owner stays, so github.com/attacker/x/v4 is still compared against
+// github.com/owner/x.
 func NormalizeGo(name string) string {
-	return strings.ToLower(name)
+	name = strings.ToLower(name)
+	if strings.HasPrefix(name, "gopkg.in/") {
+		if i := strings.LastIndex(name, ".v"); i > len("gopkg.in/") && i > strings.LastIndex(name, "/") && allDigits(name[i+2:]) {
+			return name[:i]
+		}
+		return name
+	}
+	if i := strings.LastIndex(name, "/v"); i > 0 {
+		if n := name[i+2:]; allDigits(n) && n[0] != '0' && n != "1" {
+			return name[:i]
+		}
+	}
+	return name
+}
+
+// allDigits reports whether s is a non-empty run of ASCII digits.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // NormalizeCocoapods lowercases the pod name. Cocoapods spec names are

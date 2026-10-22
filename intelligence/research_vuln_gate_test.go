@@ -25,7 +25,7 @@ package intelligence
 // refresher prod runs):
 //
 //	CHAINSAW_OSV_BUNDLE_PATH=/path/osv-bundle.json.gz \
-//	RESEARCH_DIR="/Users/zeeshan/Desktop/Chain305 Research" \
+//	RESEARCH_DIR="$HOME/research-dataset" \
 //	  go test ./core/intelligence/ -run TestResearchVulnGateOverDataset -count=1 -v
 //
 // Output: analysis/chainsaw_vuln_gate.csv (one row per fix action) and a

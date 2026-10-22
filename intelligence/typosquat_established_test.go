@@ -328,3 +328,35 @@ func TestScanClearsLongLivedTyposquat(t *testing.T) {
 		}
 	}
 }
+
+// TestServerClearIsVersionBlindKnownGap PINS a known gap; it does not endorse
+// it. The offline guard stopped clearing silently on 2026-10-21 unless the
+// install pins a release its table saw (core/cli/guard_established.go, THE
+// VERSION GATE). The server's downloads and release-history lines still read
+// package-wide data, so a lookalike that qualified long ago and then ships a
+// brand-new release is cleared on its history, whatever that release holds.
+// (The long-lived line is already version-aware: it needs the SCANNED
+// release to be a year old.) Deliberately unfixed in this change — a server
+// verdict change needs a prod replay first; see
+// docs/PLANS_INTELLIGENCE.md#plan-server-established-version-gate. When that
+// fix lands this test must flip, and it should be rewritten, not deleted.
+func TestServerClearIsVersionBlindKnownGap(t *testing.T) {
+	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	yesterday := now.AddDate(0, 0, -1)
+	first := time.Date(2016, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	byDownloads := squatReport(dlPtr(419_678), "json5")
+	byDownloads.Release.PublishedAt = &yesterday
+
+	byHistory := squatReport(nil, "lodash")
+	byHistory.Maintenance.VersionCount = 60
+	byHistory.Maintenance.FirstPublishedAt = &first
+	byHistory.Release.PublishedAt = &yesterday
+
+	for name, r := range map[string]*Report{"downloads line": byDownloads, "release-history line": byHistory} {
+		clearEstablishedTyposquat(r, now)
+		if r.SupplyChain.TyposquatStatus != "clean" {
+			t.Errorf("%s: the known gap closed (status %q) — update this pin and the plan section", name, r.SupplyChain.TyposquatStatus)
+		}
+	}
+}

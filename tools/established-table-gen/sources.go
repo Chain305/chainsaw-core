@@ -16,10 +16,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -59,100 +59,10 @@ func readLines(path string) ([]string, error) {
 // names for one ecosystem. Registry names cannot contain commas, so a
 // three-way split is exact; malformed rows are refused, not skipped — a shape
 // change in the SBOM export must not silently shrink the universe.
-func readPackagesCSV(path, eco string) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	seen := map[string]bool{}
-	var names []string
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	lineNo := 0
-	for sc.Scan() {
-		lineNo++
-		line := strings.TrimSpace(sc.Text())
-		if lineNo == 1 {
-			if line != "ecosystem,name,version" {
-				return nil, fmt.Errorf("%s: unexpected header %q", path, line)
-			}
-			continue
-		}
-		if line == "" {
-			continue
-		}
-		parts := strings.Split(line, ",")
-		if len(parts) != 3 {
-			return nil, fmt.Errorf("%s:%d: malformed row %q", path, lineNo, line)
-		}
-		if parts[0] != eco {
-			continue // other ecosystems' rows are well-formed, just not ours
-		}
-		if parts[1] == "" {
-			return nil, fmt.Errorf("%s:%d: empty %s name %q", path, lineNo, eco, line)
-		}
-		n := strings.Trim(strings.TrimSpace(parts[1]), `"`)
-		if !seen[n] {
-			seen[n] = true
-			names = append(names, n)
-		}
-	}
-	return names, sc.Err()
-}
-
-// readNpmDocsNames reads the cached abbreviated npm docs (one JSON object per
-// line, {"name": ..., "versions": {...}}) and keeps only the names: the size
-// payload is irrelevant here, the file widens the candidate universe.
-func readNpmDocsNames(path string) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var names []string
-	seen := map[string]bool{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<22), 1<<22)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var doc struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal([]byte(line), &doc); err != nil {
-			return nil, fmt.Errorf("%s: bad JSONL line: %w", path, err)
-		}
-		if doc.Name != "" && !seen[doc.Name] {
-			seen[doc.Name] = true
-			names = append(names, doc.Name)
-		}
-	}
-	return names, sc.Err()
-}
-
-// unionNames merges name sources deterministically (sorted output) and
-// reports the per-source sizes for the header.
-func unionNames(sources map[string][]string) ([]string, map[string]int) {
-	seen := map[string]bool{}
-	var all []string
-	for _, names := range sources {
-		for _, n := range names {
-			if !seen[n] {
-				seen[n] = true
-				all = append(all, n)
-			}
-		}
-	}
-	sort.Strings(all)
-	counts := make(map[string]int, len(sources))
-	for label, names := range sources {
-		counts[label] = len(names)
-	}
-	return all, counts
-}
+// pseudonymRE is the SBOM export's pseudonym for a private package,
+// "internal-<8 hex>". Exact shape, not the prefix: internal-slot is a real
+// npm package.
+var pseudonymRE = regexp.MustCompile(`^internal-[0-9a-f]{8}$`)
 
 // ---------------------------------------------------------------------------
 // fetch plumbing
@@ -162,6 +72,7 @@ func unionNames(sources map[string][]string) ([]string, map[string]int) {
 // to api.npmjs.org share one fetcher with a minimum interval.
 type fetcher struct {
 	hc          *http.Client
+	accept      string // Accept header; "" = application/json
 	mu          sync.Mutex
 	nextAllowed time.Time
 	minInterval time.Duration
@@ -200,6 +111,12 @@ func (f *fetcher) throttle() {
 // Retry-After when sent), and truncated-but-200 transfers fail as parse
 // errors and retry too. Bodies are capped.
 func (f *fetcher) getJSON(u string, out any, maxBytes int64) error {
+	return f.get(u, maxBytes, func(b []byte) error { return json.Unmarshal(b, out) })
+}
+
+// get is getJSON with the body decoder supplied by the caller (the crates.io
+// sparse index serves one JSON object per line, not one document).
+func (f *fetcher) get(u string, maxBytes int64, parse func([]byte) error) error {
 	var lastErr error
 	backoff := 500 * time.Millisecond
 	for attempt := 0; attempt < 12; attempt++ {
@@ -217,7 +134,12 @@ func (f *fetcher) getJSON(u string, out any, maxBytes int64) error {
 			return err
 		}
 		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("Accept", "application/json")
+		accept := f.accept
+		if accept == "" {
+			accept = "application/json"
+		}
+		req.Header.Set("Accept", accept)
+		countRequest(req.URL.Host)
 		resp, err := f.hc.Do(req)
 		if err != nil {
 			lastErr = err
@@ -243,7 +165,7 @@ func (f *fetcher) getJSON(u string, out any, maxBytes int64) error {
 		case resp.StatusCode != http.StatusOK:
 			return fmt.Errorf("GET %s: %s", u, resp.Status)
 		}
-		if err := json.Unmarshal(body, out); err != nil {
+		if err := parse(body); err != nil {
 			// A truncated transfer (huge docs cut mid-stream) parses like a
 			// malformed one; retry before giving up.
 			lastErr = fmt.Errorf("parse %s: %w", u, err)
@@ -367,12 +289,12 @@ func loadJSONLCache[T any](dir, name string, key func(T) string) (map[string]T, 
 // fetched once and only these fields are cached (a full-doc JSONL would be
 // gigabytes; this distillation is everything the clear lines read).
 type npmDocRec struct {
-	Name         string `json:"name"`
-	OK           bool   `json:"ok"` // false = 404/unpublished: known-absent, never qualifies
-	Created      string `json:"created,omitempty"`
-	Last         string `json:"last,omitempty"`
-	Versions     int    `json:"versions,omitempty"`
-	SecurityOnly bool   `json:"security_only,omitempty"` // every version is npm's "-security" holding placeholder
+	Name        string   `json:"name"`
+	OK          bool     `json:"ok"` // false = 404/unpublished: known-absent, never qualifies
+	Created     string   `json:"created,omitempty"`
+	Last        string   `json:"last,omitempty"`
+	Versions    int      `json:"versions,omitempty"`
+	VersionList []string `json:"version_list,omitempty"` // every published version: the table's release set, and npmPlaceholder's input
 }
 
 func (r npmDocRec) key() string { return r.Name }
@@ -394,7 +316,9 @@ func fetchNPMDocs(cacheDir string, names []string, conc int, progress *progress)
 
 	var missing []string
 	for _, n := range names {
-		if _, ok := cached[n]; !ok {
+		// A record cached before version lists existed is refetched: a row
+		// without its releases could only ever warn.
+		if rec, ok := cached[n]; !ok || (rec.OK && rec.Versions > 0 && len(rec.VersionList) == 0) {
 			missing = append(missing, n)
 		}
 	}
@@ -440,14 +364,9 @@ func fetchOneNPMDoc(f *fetcher, name string) (npmDocRec, error) {
 		return npmDocRec{}, err
 	}
 	rec := npmDocRec{Name: name, OK: true, Versions: len(doc.Versions)}
-	securityOnly := len(doc.Versions) > 0
 	for v := range doc.Versions {
-		if !strings.HasSuffix(v, "-security") {
-			securityOnly = false
-			break
-		}
+		rec.VersionList = append(rec.VersionList, v)
 	}
-	rec.SecurityOnly = securityOnly
 
 	// time.created is the doc creation (first publish); last is the newest
 	// per-version time, excluding the bookkeeping created/modified keys and
@@ -630,6 +549,8 @@ type pypiRec struct {
 	First    string `json:"first,omitempty"`
 	Last     string `json:"last,omitempty"`
 	Versions int    `json:"versions,omitempty"`
+	// VersionList: the releases with files, for the table's release set.
+	VersionList []string `json:"version_list,omitempty"`
 }
 
 func (r pypiRec) key() string { return r.Name }
@@ -660,6 +581,9 @@ func fetchPyPI(cacheDir string, names []string, conc int, progress *progress) (m
 	// seed/csv spelling, so resolve through the PEP503 form.
 	byNorm := map[string]pypiRec{}
 	for _, rec := range cached {
+		if rec.OK && rec.Versions > 0 && len(rec.VersionList) == 0 {
+			continue // cached before version lists existed: refetch
+		}
 		byNorm[pep503(rec.Name)] = rec
 	}
 	var missing []string
@@ -700,11 +624,12 @@ func fetchPyPI(cacheDir string, names []string, conc int, progress *progress) (m
 			rec.Name = n
 		}
 		first, last := "", ""
-		for _, files := range doc.Releases {
+		for ver, files := range doc.Releases {
 			if len(files) == 0 {
 				continue // a version with no files never shipped
 			}
 			rec.Versions++
+			rec.VersionList = append(rec.VersionList, ver)
 			for _, file := range files {
 				d := file.UploadTime
 				if len(d) > 10 {
@@ -738,117 +663,6 @@ func fetchPyPI(cacheDir string, names []string, conc int, progress *progress) (m
 // ---------------------------------------------------------------------------
 // cargo
 
-type cargoRec struct {
-	Name        string `json:"name"`
-	Created     string `json:"created"` // YYYY-MM-DD from created_at
-	Updated     string `json:"updated"` // YYYY-MM-DD from updated_at
-	Downloads   int64  `json:"downloads"`
-	NumVersions int    `json:"num_versions"`
-}
-
-func (r cargoRec) key() string { return r.Name }
-
-// fetchCargoListing pages the crates.io sort=downloads listing. The listing
-// already carries created_at, updated_at, total downloads and num_versions,
-// so no per-crate second call is needed (v1 covers the top pages fully —
-// 30 pages = top 3,000 crates). crates.io asks for a descriptive User-Agent
-// and modest rates: sequential pages with a pause.
-func fetchCargoListing(cacheDir string, pages int) ([]cargoRec, error) {
-	cached, err := loadJSONLCache(cacheDir, "cargo_crates.jsonl", func(r cargoRec) string { return r.Name })
-	if err != nil {
-		return nil, err
-	}
-	f := newFetcher()
-	for page := 1; page <= pages; page++ {
-		if page > 1 {
-			time.Sleep(700 * time.Millisecond)
-		}
-		u := fmt.Sprintf("https://crates.io/api/v1/crates?sort=downloads&per_page=100&page=%d", page)
-		var doc struct {
-			Crates []struct {
-				Name        string `json:"name"`
-				CreatedAt   string `json:"created_at"`
-				UpdatedAt   string `json:"updated_at"`
-				Downloads   int64  `json:"downloads"`
-				NumVersions int    `json:"num_versions"`
-			} `json:"crates"`
-			Meta struct {
-				NextPage *string `json:"next_page"` // URL of the next page, or null on the last page
-			} `json:"meta"`
-		}
-		if err := f.getJSON(u, &doc, 16<<20); err != nil {
-			return nil, fmt.Errorf("cargo page %d: %w", page, err)
-		}
-		if len(doc.Crates) == 0 {
-			break
-		}
-		for _, c := range doc.Crates {
-			cached[c.Name] = cargoRec{
-				Name:        c.Name,
-				Created:     day(c.CreatedAt),
-				Updated:     day(c.UpdatedAt),
-				Downloads:   c.Downloads,
-				NumVersions: c.NumVersions,
-			}
-		}
-		fmt.Fprintf(os.Stderr, "cargo listing: page %d -> %d crates (total known %d)\n", page, len(doc.Crates), len(cached))
-		if doc.Meta.NextPage == nil {
-			break
-		}
-	}
-	// The listing is rank-ordered; the cache from a previous run may hold
-	// more pages than this run asks for, so keep only what this run covers.
-	// (Cheap and keeps reruns with a smaller -cargo-pages honest.)
-	if err := writeCargoCache(cacheDir, cached); err != nil {
-		return nil, err
-	}
-	out := make([]cargoRec, 0, len(cached))
-	for _, rec := range cached {
-		out = append(out, rec)
-	}
-	// Deterministic: by downloads desc, then name.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Downloads != out[j].Downloads {
-			return out[i].Downloads > out[j].Downloads
-		}
-		return out[i].Name < out[j].Name
-	})
-	if len(out) > pages*100 {
-		out = out[:pages*100]
-	}
-	return out, nil
-}
-
-// writeCargoCache rewrites the cargo cache for this run's page depth. The
-// cargo source is a single listing (not 8k individual docs), so a compact
-// rewrite on each run is simpler than append-only and keeps the cache
-// exactly in step with the last run's -cargo-pages.
-func writeCargoCache(cacheDir string, recs map[string]cargoRec) error {
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return err
-	}
-	f, err := os.Create(filepath.Join(cacheDir, "cargo_crates.jsonl"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	names := make([]string, 0, len(recs))
-	for n := range recs {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		b, err := json.Marshal(recs[n])
-		if err != nil {
-			return err
-		}
-		w.Write(b)
-		w.WriteByte('\n')
-	}
-	return w.Flush()
-}
-
 // day truncates an RFC3339 timestamp to its YYYY-MM-DD date.
 func day(ts string) string {
 	if len(ts) >= 10 {
@@ -875,4 +689,20 @@ func (p *progress) done(total int, label string) {
 	if p.doneN%250 == 0 {
 		fmt.Fprintf(os.Stderr, "%s: %d/%d\n", label, p.doneN, p.total)
 	}
+}
+
+// requestCounts tallies upstream requests per host (retries included) for the
+// end-of-run report.
+var requestCounts sync.Map
+
+func countRequest(host string) {
+	v, _ := requestCounts.LoadOrStore(host, new(atomic.Int64))
+	v.(*atomic.Int64).Add(1)
+}
+
+func printRequestCounts() {
+	requestCounts.Range(func(k, v any) bool {
+		fmt.Fprintf(os.Stderr, "upstream requests: %-24s %d\n", k, v.(*atomic.Int64).Load())
+		return true
+	})
 }

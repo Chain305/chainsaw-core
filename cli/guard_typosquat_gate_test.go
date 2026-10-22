@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/chain305/chainsaw-core/malware"
+	"github.com/chain305/chainsaw-core/risk"
 	"github.com/chain305/chainsaw-core/typosquat"
 )
 
@@ -351,11 +352,14 @@ func TestGuardTyposquatArgsTieBreakIsDeterministic(t *testing.T) {
 // TestGuardTyposquatFalseBlockReproducesWithGateOff turns every predicate off
 // and shows the old behaviour returning. This keeps the defect legible: if
 // this ever stops reproducing the block, the gate is no longer what holds the
-// false positive back and the fix has silently moved somewhere else.
+// false positive back and the fix has silently moved somewhere else. The
+// established tables are emptied for the same reason: args (1.3M a week) is a
+// census row, and its warning must not stand in for the gate's.
 func TestGuardTyposquatFalseBlockReproducesWithGateOff(t *testing.T) {
 	orig := guardTyposquatBlockGate
 	t.Cleanup(func() { guardTyposquatBlockGate = orig })
 	guardTyposquatBlockGate = typosquatBlockGate{}
+	setEstablishedTablesForTest(t, map[string]map[string]risk.EstablishedRow{})
 
 	g := newSeedOnlyGuard(t)
 	ctx := context.Background()

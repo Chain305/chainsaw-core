@@ -85,7 +85,8 @@ func mustDay(s string) time.Time {
 // a would-be d=1 BLOCK into a clean allow — no typosquat block, no
 // typosquat warn, no policyWarn — while evaluate() FALLS THROUGH to the
 // byte-scan step (scanAttempted advances) and records the clear on the
-// verdict.
+// verdict. Silence needs an exact pin inside the row's build-time release
+// set (guard_established_version_test.go covers every other request).
 //
 // `lodahs` (transposition of lodash, #101) is a d=1 in-cutoff hit that BLOCKS
 // without a table; the row gives it csrf-scale weekly downloads.
@@ -101,13 +102,14 @@ func TestEstablishedClearSkipsTyposquatLaneNotTheRest(t *testing.T) {
 	setEstablishedTablesForTest(t, map[string]map[string]risk.EstablishedRow{
 		"npm": func() map[string]risk.EstablishedRow {
 			name, row := establishedNPMRow("lodahs", 1_277_456, 0, "", "")
+			row.Releases = map[string]struct{}{"1.0.0": {}}
 			return map[string]risk.EstablishedRow{name: row}
 		}(),
 	})
 
 	g2 := newSeedOnlyGuard(t)
 	before := GuardEstablishedClearsCount()
-	v := g2.evaluate(ctx, packageSpec{Ecosystem: "npm", Name: "lodahs"})
+	v := g2.evaluate(ctx, packageSpec{Ecosystem: "npm", Name: "lodahs", Version: "1.0.0"})
 
 	if v.Block {
 		t.Fatalf("established candidate must not block: %+v", v)
@@ -244,6 +246,7 @@ func TestEstablishedClearFallsThroughToBehavioralBlock(t *testing.T) {
 	t.Setenv(intelligence.BundleEnvVar, "")
 
 	name, row := establishedNPMRow("lodahs", 5_000_000, 0, "", "")
+	row.Releases = map[string]struct{}{"1.0.0": {}}
 	setEstablishedTablesForTest(t, map[string]map[string]risk.EstablishedRow{
 		"npm": {name: row},
 	})

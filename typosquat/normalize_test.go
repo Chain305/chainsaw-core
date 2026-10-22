@@ -125,3 +125,32 @@ func contains(xs []string, s string) bool {
 	}
 	return false
 }
+
+// TestNormalizeGoMajorVersionSuffix: a major-version suffix is not module
+// identity. /v2 and up — any number of digits, which a /v[2-9] pattern
+// misses at /v10 — and gopkg.in's .vN fold onto the base path; the owner
+// does not, so a cross-owner copy is still compared.
+func TestNormalizeGoMajorVersionSuffix(t *testing.T) {
+	for in, want := range map[string]string{
+		"github.com/shirou/gopsutil/v4":   "github.com/shirou/gopsutil",
+		"github.com/shirou/gopsutil/v3":   "github.com/shirou/gopsutil",
+		"github.com/Owner/Repo/v12":       "github.com/owner/repo",
+		"github.com/owner/repo/v10":       "github.com/owner/repo",
+		"github.com/owner/repo/v99":       "github.com/owner/repo",
+		"helm.sh/helm/v4":                 "helm.sh/helm",
+		"gopkg.in/yaml.v3":                "gopkg.in/yaml",
+		"gopkg.in/src-d/go-git.v4":        "gopkg.in/src-d/go-git",
+		"github.com/attacker/gopsutil/v4": "github.com/attacker/gopsutil",
+		// Not major suffixes: v0/v1 are never written, a non-numeric tail is
+		// a path element, and only gopkg.in uses the .vN form.
+		"github.com/owner/repo/v1":  "github.com/owner/repo/v1",
+		"github.com/owner/repo/v0":  "github.com/owner/repo/v0",
+		"github.com/owner/repo/v2x": "github.com/owner/repo/v2x",
+		"github.com/owner/repo.v3":  "github.com/owner/repo.v3",
+		"gopkg.in/yaml":             "gopkg.in/yaml",
+	} {
+		if got := NormalizeGo(in); got != want {
+			t.Errorf("NormalizeGo(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

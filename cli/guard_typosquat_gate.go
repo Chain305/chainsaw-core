@@ -129,6 +129,7 @@ package cli
 //     rank #500–2500 targets.
 
 import (
+	"strings"
 	"unicode/utf8"
 
 	"github.com/chain305/chainsaw-core/typosquat"
@@ -305,6 +306,9 @@ func (s typosquatEditShape) interiorEdit() bool {
 // shape needs that check.
 func typosquatTargetLongEnough(ecosystem, candidate string, res typosquat.DetectionResult) bool {
 	n := utf8.RuneCountInString(res.SimilarTo)
+	if seg, ok := goEditedSegment(ecosystem, candidate, res.SimilarTo); ok {
+		n = utf8.RuneCountInString(seg)
+	}
 	if n >= guardTyposquatBlockMinTargetLen {
 		return true
 	}
@@ -316,6 +320,36 @@ func typosquatTargetLongEnough(ecosystem, candidate string, res typosquat.Detect
 		return false
 	}
 	return true
+}
+
+// goEditedSegment returns the target path segment a Go module's single edit
+// lands in, after the major-version suffix is stripped (typosquat.NormalizeGo).
+// P2 measures a Go target by that segment, the way it measures an npm name by
+// its own length: the full path is long by construction, so measured whole,
+// gopkg.in/inf.v0 against gopkg.in/ini.v1 — an inf/ini collision between two
+// 3-rune names that only the stripped major digits used to keep apart — was
+// "long enough" to block. An edit in a long segment (an owner squat such as
+// github.com/gin-gonlc/gin) keeps the long measure. ok=false when the paths do
+// not differ in exactly one segment; the caller then keeps the full length.
+func goEditedSegment(ecosystem, candidate, target string) (string, bool) {
+	switch strings.ToLower(ecosystem) {
+	case "go", "gomod", "golang":
+	default:
+		return "", false
+	}
+	c := strings.Split(typosquat.NormalizeGo(candidate), "/")
+	t := strings.Split(typosquat.NormalizeGo(target), "/")
+	if len(c) != len(t) {
+		return "", false
+	}
+	seg, diffs := "", 0
+	for i := range t {
+		if c[i] != t[i] {
+			seg = t[i]
+			diffs++
+		}
+	}
+	return seg, diffs == 1
 }
 
 // typosquatEditIsTypoShaped is predicate P1: the single edit separating the

@@ -421,8 +421,10 @@ type guardVerdict struct {
 
 	// ClearedReason records that the ESTABLISHED TABLE (guard_established.go)
 	// cleared this candidate's typosquat lane: the detector suspected the
-	// name, the candidate is an established package, and the claim was wrong
-	// rather than weak. It rides the verdict that was actually returned —
+	// name, the candidate is an established package, the install pinned a
+	// release the table saw at build time, and the claim was wrong rather
+	// than weak. (Any other request on an established name is not a clear:
+	// it warns, see THE VERSION GATE.) It rides the verdict that was actually returned —
 	// exactly like WaivedSeverity — because a clear is orthogonal to the
 	// outcome: the user needs to be told both "the typosquat claim was
 	// cleared by establishment data" and whatever the rest of the ladder
@@ -833,11 +835,16 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 			// a squat wearing a popular face; it IS the popular face, and the
 			// typosquat claim about it is wrong rather than weak.
 			//
-			// Skips the WHOLE lane: no pendingWarn, no policyWarn, no
-			// allowlist consult (there is nothing to waive — a waived typosquat
-			// notice beside a cleared one would tell the user two opposite
-			// things). The clear itself is recorded on ClearedReason and
-			// counted, so it is never silent.
+			// A clear is SILENT only for an exact pin inside the row's
+			// build-time release set (establishedPinnedRelease): then it skips
+			// the WHOLE lane — no pendingWarn, no policyWarn, no allowlist
+			// consult (a waived typosquat notice beside a cleared one would
+			// tell the user two opposite things) — and is recorded on
+			// ClearedReason and counted. Every other request (no version, a
+			// range, a version newer than the table) keeps the lane and has
+			// a BLOCK lowered to a printed warning (establishedWhy below): a
+			// dormant cleared lookalike shipping a new release must not be
+			// waved through on its history.
 			//
 			// NEVER an early return: evaluate() falls through to the origin
 			// stop, the byte scan and policy below. An established package
@@ -852,11 +859,16 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 			// exactly the ~1-in-9 real-package population the silence exists
 			// to protect.
 			clearedLane := false
+			establishedWhy := ""
 			if res.Confidence != "low" {
-				if why, _, ok := establishedClears(spec.Ecosystem, spec.Name, time.Now()); ok {
-					guardEstablishedClears.Add(1)
-					clearedReason = establishedClearsNotice(spec, guardTyposquatReason(res), why)
-					clearedLane = true
+				if why, row, ok := establishedClears(spec.Ecosystem, spec.Name, time.Now()); ok {
+					if establishedPinnedRelease(row, spec.Version) {
+						guardEstablishedClears.Add(1)
+						clearedReason = establishedClearsNotice(spec, guardTyposquatReason(res), why)
+						clearedLane = true
+					} else {
+						establishedWhy = why
+					}
 				}
 			}
 			if !clearedLane {
@@ -913,6 +925,13 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 				case res.Confidence == "high" || res.Confidence == "medium":
 					lane = guardVerdict{Spec: spec, Block: false, Severity: guardSeverityTyposquatMedium, Reason: reason()}
 				}
+				// An established row that did not earn silence lowers a block
+				// to a warning — the demoted severity, so --quiet cannot hide
+				// it. Warn-level lanes stay exactly what the evidence earned.
+				if establishedWhy != "" && lane.Block {
+					lane = guardVerdict{Spec: spec, Block: false, Severity: guardSeverityTyposquatDemoted,
+						Reason: establishedWarnReason(spec, reason(), establishedWhy)}
+				}
 
 				// The ONE allowlist consult (guard_allow.go). It gates the whole
 				// typosquat lane and nothing else, which is what makes the security
@@ -920,9 +939,10 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 				//   - known-malicious and known-vulnerable already returned ABOVE, so
 				//     a waiver is physically incapable of clearing either;
 				//   - the homoglyph arm returned above it too;
-				//   - the established-table clear returned above it as well — a
-				//     cleared candidate never reaches a consult, so the two
-				//     suppressions can never both fire on one verdict;
+				//   - a SILENT established-table clear skipped this block as well —
+				//     it never reaches a consult, so the two suppressions can never
+				//     both fire on one verdict (an established WARNING does reach
+				//     it, and a waiver of that warning is reported like any other);
 				//   - the byte-level scan below is downstream and unconditioned, so a
 				//     cleared name falls through to it exactly as a clean name does — a
 				//     waiver can never mask a behavioral block, which is the failure the

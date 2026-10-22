@@ -12,12 +12,13 @@ package cli
 //     insert, m5d by transposition — priced on the OpenSSF recall harness at
 //     exactly five demotions, 1,030 → 1,025). Every one an interior edit
 //     against a 2-3-rune target, and none is established (they are squats).
-//   - CLEARED, not demoted: the measured false-block class pug (of pg #1434)
-//     and md-5 (of md5 #2202) — same shapes as the squats above, but both
-//     carry established-table rows (pug ~2M weekly downloads; md-5 a
-//     long-lived RustCrypto crate), so the clear wins before the floor is
-//     ever consulted. Belt-and-suspenders: even without their table rows the
-//     interior floor would demote them.
+//   - CLEARED when pinned, demoted otherwise: the measured false-block class
+//     pug (of pg #1434) and md-5 (of md5 #2202) — same shapes as the squats
+//     above, but both carry established-table rows (pug ~2M weekly
+//     downloads; md-5 a long-lived RustCrypto crate). An exact pin of a
+//     build-time release clears silently; anything else keeps the floor's
+//     printed warning (the established clear is silent only for a release
+//     the table saw).
 //   - KEEP BLOCKING: uudi (transposition of uuid #44, a 4-rune target) and
 //     loadash (interior insert of lodash, a 6-rune target) — the recall
 //     class the floor must not touch.
@@ -25,6 +26,7 @@ package cli
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // TestGuardInteriorFloorAdjudicatedDemotions: every feed-squat name demotes
@@ -51,19 +53,35 @@ func TestGuardInteriorFloorAdjudicatedDemotions(t *testing.T) {
 }
 
 // TestGuardInteriorFloorFalseBlockClassClears: the measured false-block
-// names take the established clear (no block, no warn, ClearedReason set)
-// — the floor is their fallback, not their verdict.
+// names never block. An exact pin of a release the established table saw
+// takes the silent clear (no warn, ClearedReason set); an unpinned install
+// keeps the floor's printed warning, because a clear is silent only for a
+// build-time release (guard_established.go, THE VERSION GATE).
 func TestGuardInteriorFloorFalseBlockClassClears(t *testing.T) {
 	g := newSeedOnlyGuard(t)
 	ctx := context.Background()
 	for _, c := range []struct{ eco, name string }{
-		{"npm", "pug"},  // interior insert of pg — ~2M weekly downloads
+		{"npm", "pug"},    // interior insert of pg — ~2M weekly downloads
 		{"cargo", "md-5"}, // interior delete of md5 — long-lived RustCrypto crate
 	} {
 		v := g.evaluate(ctx, packageSpec{Ecosystem: c.eco, Name: c.name})
-		if v.Block || v.Severity != "" || v.ClearedReason == "" {
-			t.Errorf("%s:%s must CLEAR via the established table (no block, no warn, ClearedReason set), got %+v",
+		if v.Block || v.Severity != guardSeverityTyposquatDemoted || v.ClearedReason != "" {
+			t.Errorf("%s:%s unpinned must WARN (demoted, printed under --quiet), never block or clear silently, got %+v",
 				c.eco, c.name, v)
+		}
+		_, row, ok := establishedClears(c.eco, c.name, time.Now())
+		if !ok || len(row.Releases) == 0 {
+			t.Fatalf("%s:%s has no clearing row with a release set in the embedded table — regenerate it", c.eco, c.name)
+		}
+		pin := ""
+		for r := range row.Releases {
+			pin = r
+			break
+		}
+		v = g.evaluate(ctx, packageSpec{Ecosystem: c.eco, Name: c.name, Version: pin})
+		if v.Block || v.Severity != "" || v.ClearedReason == "" {
+			t.Errorf("%s:%s@%s (a build-time release) must CLEAR silently (no warn, ClearedReason set), got %+v",
+				c.eco, c.name, pin, v)
 		}
 	}
 }

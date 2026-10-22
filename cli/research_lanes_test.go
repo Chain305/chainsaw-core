@@ -6,9 +6,9 @@ package cli
 // dataset, so published numbers are receipts from product code, not a
 // re-implementation.
 //
-// Skipped unless RESEARCH_DIR points at the "Chain305 Research" directory:
+// Skipped unless RESEARCH_DIR points at the research dataset directory:
 //
-//	RESEARCH_DIR=/Users/zeeshan/Desktop/Chain305 Research \
+//	RESEARCH_DIR="$HOME/research-dataset" \
 //	  go test ./core/cli/ -run TestResearchGuardOverDataset -count=1 -v -timeout 30m
 //
 // What it runs, deliberately split by determinism:

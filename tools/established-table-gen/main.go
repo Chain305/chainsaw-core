@@ -1,79 +1,52 @@
-// Command established-table-gen regenerates the install guard's embedded
-// established-package tables (core/cli/seeds/established_<eco>.tsv): every
-// registry package in the candidate universe that meets ANY clear line, as
-// real per-package registry data — not a popularity ranking.
+// Command established-table-gen builds the install guard's embedded
+// established tables (core/cli/seeds/established_<eco>.tsv) as a CENSUS: from
+// the registry's full public name list, every name one edit from a
+// block-eligible typosquat target that the registry shows is long-standing
+// AND heavily used — first published >= 2 years before the build and >= 100k
+// downloads a week (or the ecosystem's equivalent). Each row carries its
+// exact build-time release set; the guard is silent only for an exact pin in
+// it and warns on every other install of the name.
 //
-// This replaces a rejected corpus-row design. The adversarial finding: a
-// package with 20k weekly downloads, 8 years of history and 60 versions must
-// CLEAR a typosquat verdict, yet it will never appear in a top-10k popularity
-// corpus. The table therefore keys establishment (the clear lines mirrored
-// from core/risk/established.go and core/intelligence/typosquat_established.go)
-// instead of rank, and every row carries the numbers that qualified it so the
-// consumer re-adjudicates offline with zero network.
+// Sources (public only — never a customer inventory; see README.md):
 //
-// Sources (see README.md for the trust channel — reviewed data PR or signed
-// bundle, never live at install time):
+//	npm:   replicate.npmjs.com/_all_docs ids; registry docs; api.npmjs.org last-week
+//	pypi:  pypi.org/simple (PEP 691); pypi.org/pypi/<name>/json; pypistats.org last_week
+//	cargo: crates.io listing (seek pages, 1/s); /api/v1/crates/<name>; index.crates.io
+//	pub:   pub.dev/api/package-names; /api/packages/<name>; /score downloadCount30Days
 //
-//	npm:   universe = cli/seeds/npm_popular.txt ∪ packages.csv(npm) ∪
-//	       npm_docs.jsonl names ∪ canary pins. Per name: the FULL registry
-//	       doc (time.created, per-version times, len(versions)) plus
-//	       api.npmjs.org last-week downloads (bulk batches for unscoped
-//	       names, point calls for scoped).
-//	pypi:  universe = cli/seeds/pypi_popular.txt ∪ packages.csv(pypi).
-//	       pypi.org/pypi/<PEP503>/json releases (version_count = releases
-//	       with files; first/last from upload_time). Downloads unknown -> 0.
-//	cargo: crates.io/api/v1/crates?sort=downloads top pages; the listing
-//	       carries created_at/updated_at/downloads/num_versions.
-//
-// Anti-poisoning rails (refuse-don't-report-zero, after the corpus floor
-// discipline in popular-corpus-gen): canary adjudication for every measured
-// false-block, a multi-signal floor for downloads-only rows, a d1-of-popular
-// ratio watch, churn limits against the previous table, and a patient-attacker
-// self-test. Any hard rail failure refuses the write and exits non-zero.
+// Never admitted: known-malicious feed names, npm security placeholders,
+// names with no registry data. Rails: a self-test of the admission lines,
+// sentinel names that must be admitted, and a churn limit against the previous
+// census. Any hard failure refuses the write and exits non-zero.
 //
 // Usage (from core/):
 //
-//	go run ./tools/established-table-gen -ecosystem npm \
-//	  -packages-csv "/path/to/packages.csv" \
-//	  -npm-docs-jsonl "/path/to/npm_docs.jsonl" \
-//	  -cache ./cache -out cli/seeds/established_npm.tsv
+//	go run ./tools/established-table-gen -ecosystem npm -cache /tmp/etg-cache -out cli/seeds/established_npm.tsv
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
-// canaries are the measured false-blocks of the typosquat gate (npm). Every
-// one must be adjudicated on real registry data each run: in the table, or
-// listed with the reason it does not qualify. A canary we cannot fetch is a
-// hard failure — the table would silently lose its regression coverage.
-var canaries = []string{
-	"pug", "jsdoc", "uglify-es", "flatten", "lodash.set", "charset",
-	"parseuri", "clui", "as-number", "hable", "crypto-es", "crypto-ts",
-	"has-own", "js-logger",
-}
-
 func main() {
-	eco := flag.String("ecosystem", "", "npm | pypi | cargo")
+	eco := flag.String("ecosystem", "", "npm | pypi | cargo | pub")
 	out := flag.String("out", "", "output TSV path (refused on any hard rail failure)")
-	cacheDir := flag.String("cache", "./cache", "JSONL fetch-cache dir; reruns resume from it")
-	packagesCSV := flag.String("packages-csv",
-		"/Users/zeeshan/Desktop/Chain305 Research/publish/sbom/packages.csv",
-		"SBOM packages.csv (ecosystem,name,version); the non-seed half of the universe")
-	npmDocsJSONL := flag.String("npm-docs-jsonl",
-		"/Users/zeeshan/Desktop/Chain305 Research/analysis/sizes/npm_docs.jsonl",
-		"cached abbreviated npm docs; names only, used to widen the universe")
+	// Not ./cache: run from core/, that is the core/cache Go package.
+	cacheDir := flag.String("cache", filepath.Join(os.TempDir(), "established-table-gen-cache"), "cache dir (name lists + JSONL fetch caches); keep it outside the repo, reruns resume from it")
 	npmSeed := flag.String("npm-popular-seed", "cli/seeds/npm_popular.txt", "popular npm seed (ranked corpus)")
 	pypiSeed := flag.String("pypi-popular-seed", "cli/seeds/pypi_popular.txt", "popular pypi seed (ranked corpus)")
-	cargoPages := flag.Int("cargo-pages", 30, "crates.io listing pages to fetch (100 crates each)")
+	malwareFeed := flag.String("malware-feed", defaultMalwareFeed(),
+		"known-malicious OSV feed (the `chainsaw guard update` cache); every name in it is excluded. Required: an unreadable feed refuses the run")
+	candidatesOnly := flag.Bool("candidates-only", false, "list names and count candidates, then stop (no per-candidate requests)")
 	conc := flag.Int("concurrency", 6, "concurrent registry fetches (kept modest on purpose)")
 	flag.Parse()
 
 	if *eco == "" || *out == "" {
-		fmt.Fprintln(os.Stderr, "usage: established-table-gen -ecosystem npm|pypi|cargo -out <tsv> [-cache dir] [-concurrency N]")
+		fmt.Fprintln(os.Stderr, "usage: established-table-gen -ecosystem npm|pypi|cargo|pub -out <tsv> [-cache dir] [-malware-feed path] [-concurrency N]")
 		os.Exit(2)
 	}
 	started := time.Now()
@@ -81,13 +54,13 @@ func main() {
 		eco:         *eco,
 		out:         *out,
 		cacheDir:    *cacheDir,
-		packagesCSV: *packagesCSV,
-		npmDocs:     *npmDocsJSONL,
 		npmSeed:     *npmSeed,
 		pypiSeed:    *pypiSeed,
-		cargoPages:  *cargoPages,
+		malwareFeed: *malwareFeed,
 		conc:        *conc,
-		now:         time.Now().UTC(),
+
+		candidatesOnly: *candidatesOnly,
+		now:            time.Now().UTC(),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "established-table-gen: %v\n", err)
@@ -95,4 +68,14 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "established-table-gen: %s done in %s (%d rows -> %s)\n",
 		*eco, time.Since(started).Round(time.Second), gen, *out)
+}
+
+// defaultMalwareFeed is where `chainsaw guard update` writes the full OpenSSF
+// known-malicious set (cli.guardDBPath).
+func defaultMalwareFeed() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "chainsaw", "known_malicious.json")
 }
