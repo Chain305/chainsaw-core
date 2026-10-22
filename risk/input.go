@@ -61,6 +61,15 @@ type Input struct {
 	IsSuspectedTyposquat bool
 	TyposquatConfidence  string // "high"|"medium"|"low"
 	TyposquatSimilarTo   string
+	// DormantLookalike* carry a typosquat hit the server CLEARED on a
+	// package-wide line (downloads or release history) although the scanned
+	// release is under a year old and came after at least
+	// DormancyGapThreshold of silence. They feed sc.dormant_lookalike_release;
+	// empty SimilarTo means no such clear.
+	DormantLookalikeSimilarTo    string
+	DormantLookalikeConfidence   string
+	DormantLookalikePriorVersion string
+	DormantLookalikeGapDays      int
 
 	PublisherChanged bool
 	// PublisherChangeEvaluated and VersionAnomalyEvaluated record that the

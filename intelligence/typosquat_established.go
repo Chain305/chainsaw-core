@@ -68,7 +68,19 @@ func clearEstablishedTyposquat(r *Report, now time.Time) {
 	m := r.Maintenance
 	why := risk.EstablishedReason(downloadsCount(m.Downloads), downloadsWindow(m.Downloads),
 		m.WeeklyDownloads, projectedVersionCount(r), m.FirstPublishedAt, now)
-	if why == "" {
+	if why != "" {
+		// The downloads and release-history lines describe the package, not
+		// this release; record a dormant fresh release before the hit is
+		// reset (sc.dormant_lookalike_release warns on it).
+		if prior, gap, ok := dormantFreshRelease(r, now); ok {
+			sc.TyposquatDormantRelease = &TyposquatDormantRelease{
+				SimilarTo:    sc.TyposquatSimilarTo,
+				Confidence:   sc.TyposquatConfidence,
+				PriorVersion: prior,
+				GapDays:      int(gap.Hours() / 24),
+			}
+		}
+	} else {
 		why = longLivedReason(r, now)
 	}
 	if why == "" {
@@ -84,6 +96,33 @@ func clearEstablishedTyposquat(r *Report, now time.Time) {
 	sc.TyposquatStatus = "clean"
 	sc.TyposquatConfidence = ""
 	sc.TyposquatSimilarTo = ""
+}
+
+// dormantFreshRelease reports whether the scanned release is under
+// risk.EstablishedLongLivedVersionAge old and came at least
+// risk.DormancyGapThreshold after the release before it, returning that
+// release and the gap. No previous release, or an unknown or NuGet-sentinel
+// date on the scanned release or ANY other release, reports false: an
+// undated release could sit inside the gap, so the gap is not measured.
+func dormantFreshRelease(r *Report, now time.Time) (string, time.Duration, bool) {
+	pub := versionPublishedAt(r)
+	if pub == nil || pub.Year() <= 1901 || now.Sub(*pub) >= risk.EstablishedLongLivedVersionAge {
+		return "", 0, false
+	}
+	for _, v := range r.Maintenance.VersionTimeline {
+		if v.PublishedAt.Year() <= 1901 && !strings.EqualFold(v.Version, r.Identity.Version) {
+			return "", 0, false
+		}
+	}
+	prior, priorAt := priorReleaseOf(r, pub)
+	if priorAt == nil {
+		return "", 0, false
+	}
+	gap := pub.Sub(*priorAt)
+	if gap < risk.DormancyGapThreshold {
+		return "", 0, false
+	}
+	return prior, gap, true
 }
 
 // longLivedReason reports why a candidate has outlived any squat, or "" when

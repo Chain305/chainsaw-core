@@ -458,6 +458,10 @@ var maxFireRate = map[sigEco]fireCeiling{
 		"go.mongodb.org/mongo-driver (v1) both carry the module's own `// Deprecated:` " +
 		"pointing at a successor. Whether a deprecation that names a replacement should " +
 		"keep warning is plan_public_package_lookup Open 7."},
+
+	// ── NEW 2026-10-22: a true provenance downgrade on a benign package ───
+	{"sc.provenance_downgrade", "pypi"}: {2, "True claim, see acceptedServerRiskFires: " +
+		"annotated-doc 0.0.2-0.0.4 carry PyPI attestations and 0.0.5 does not."},
 }
 
 // ─── ASSERTION 3: ACCEPTED (SIGNAL, COORDINATE) SET ─────────────────────────
@@ -491,11 +495,22 @@ type sigCoord struct {
 // same spirit as the per-entry justifications above acceptedBenignFalseBlocks.
 // Adding a name means asserting that reason, in writing, here.
 //
-// It ships EMPTY: measured 0/400 on 2026-08-25 — no high- or critical-severity
+// It shipped EMPTY: measured 0/400 on 2026-08-25 — no high- or critical-severity
 // signal fired on any of the 400 benign top-download coordinates. That is a
 // result, not an omission, and it means the first entry anyone adds is a real
 // event.
-var acceptedServerRiskFires = map[sigCoord]string{}
+//
+// 2026-10-22: the first entry. It fired once the corpus was rebuilt on code
+// that reads PyPI attestations.
+var acceptedServerRiskFires = map[sigCoord]string{
+	{"sc.provenance_downgrade", "pypi:annotated-doc"}: "The claim is true and the " +
+		"package is benign. PyPI's integrity API returns a provenance for 0.0.2, " +
+		"0.0.3 and 0.0.4 and 404 for 0.0.5 (checked 2026-10-22). 0.0.5 was " +
+		"uploaded 2026-07-28 13:50:57Z by the same fastapi/annotated-doc " +
+		"\"Publish release\" workflow that published the attested three (run " +
+		"started 13:49:01Z, tag 0.0.5), so the attestation stopped, not the " +
+		"publisher. A dropped attestation is exactly what the signal reports.",
+}
 
 // maxNegativeSignalsPerPackage is a BACKSTOP, deliberately loose. It is not
 // the gate — assertions 2 and 3 are.
@@ -536,6 +551,7 @@ func TestServerRiskFalsePositives(t *testing.T) {
 		sigWeight   = map[string]float64{}
 		verdicts    = map[string]int{}
 		unknownRows []string
+		dormantRows []string
 		negFires    int
 		total       int
 		// probeSeen[i] counts the rows on which probe i's field carried
@@ -570,6 +586,15 @@ func TestServerRiskFalsePositives(t *testing.T) {
 			// rate computed over it is deflated by a row that measured
 			// nothing. Collected and fatal'd in assertion 1.
 			unknownRows = append(unknownRows, coord+"@"+r.Ver)
+		}
+		// osv_bundle_dormant (core/intelligence/report.go): the scan held no
+		// OSV corpus, so no vuln.* signal could fire on this row. Collected
+		// and fatal'd in assertion 1.
+		for _, w := range rep.Observation.Warnings {
+			if w.Provider == "osv" && w.Code == "osv_bundle_dormant" {
+				dormantRows = append(dormantRows, coord+"@"+r.Ver)
+				break
+			}
 		}
 
 		// A signal appears once per evaluation; dedupe defensively across
@@ -724,6 +749,18 @@ func TestServerRiskFalsePositives(t *testing.T) {
 			"every rate they sit in:\n  %s\nRe-resolve them (the version may have "+
 			"been yanked) or drop them from the seed and re-derive the counts.",
 			len(unknownRows), strings.Join(unknownRows, "\n  "))
+	}
+	// A corpus scanned without an OSV bundle cannot see a benign coordinate
+	// that has since gained an advisory. Until 2026-10-22 every row was
+	// scanned that way, and the gate read green while certifi, pillow, braces
+	// and log4j-core carried real ones.
+	if len(dormantRows) > 0 {
+		sort.Strings(dormantRows)
+		t.Fatalf("CORPUS FAULT: %d of %d row(s) were scanned with no OSV corpus "+
+			"(osv_bundle_dormant), so no vuln.* signal could fire on them and a "+
+			"vulnerable \"benign\" coordinate reads clean. Rebuild with `make "+
+			"server-fp-corpus`, which carries a fresh bundle. First rows:\n  %s",
+			len(dormantRows), total, strings.Join(dormantRows[:min(len(dormantRows), 5)], "\n  "))
 	}
 
 	// ─── 2. PER-(SIGNAL, ECOSYSTEM) FIRE-RATE CEILING ──────────────────────

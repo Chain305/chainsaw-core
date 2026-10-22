@@ -180,8 +180,10 @@ func TestMain(m *testing.M) {
 	// the sandbox above redirected it. This is the developer's real one.
 	realHome := realConfigHomeAtStartup
 	before := snapshotConfigHome(realHome)
+	sweepStaleTestScratch()
 
 	code := m.Run()
+	removeSharedChainsawBinary()
 
 	// A test that lands here rather than in its own t.TempDir() is still
 	// missing isolation: the same code leaks for real in any package without

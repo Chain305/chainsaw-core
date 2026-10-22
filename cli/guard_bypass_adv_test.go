@@ -34,13 +34,13 @@ package cli
 // subprocess helpers).
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -434,55 +434,20 @@ func TestGuardBypass_ValueFlagWithoutValueKeepsVerb(t *testing.T) {
 // Subprocess: end-to-end os.Exit block path with a fake package manager.
 // ---------------------------------------------------------------------------
 
-var (
-	guardBypassBinOnce sync.Once
-	guardBypassBinPath string
-	guardBypassBinErr  error
-)
-
-// guardBypassBuildBinary compiles cmd/chainsaw once for the whole file. Skips
-// (never fails) when the go toolchain is unavailable so constrained CI stays
-// green. Namespaced to avoid clashing with build helpers in sibling test files.
+// guardBypassBuildBinary returns the package's shared cmd/chainsaw build (see
+// chainsaw_testbin_test.go). Skips when the go toolchain is unavailable so
+// constrained CI stays green; a real build failure fails the test.
 func guardBypassBuildBinary(t *testing.T) string {
 	t.Helper()
-	guardBypassBinOnce.Do(func() {
-		goTool, err := exec.LookPath("go")
-		if err != nil {
-			guardBypassBinErr = err
-			return
-		}
-		dir, err := os.MkdirTemp("", "chainsaw-guardbypass-bin")
-		if err != nil {
-			guardBypassBinErr = err
-			return
-		}
-		bin := filepath.Join(dir, "chainsaw")
-		if runtime.GOOS == "windows" {
-			bin += ".exe"
-		}
-		// This test runs from core/cli; the binary main lives at ../cmd/chainsaw.
-		cmd := exec.Command(goTool, "build", "-o", bin, "../cmd/chainsaw")
-		if out, berr := cmd.CombinedOutput(); berr != nil {
-			guardBypassBinErr = &guardBypassBuildError{out: string(out), err: berr}
-			return
-		}
-		guardBypassBinPath = bin
-	})
-	if guardBypassBinErr != nil {
-		if _, ok := guardBypassBinErr.(*guardBypassBuildError); ok {
-			t.Fatalf("build chainsaw binary: %v", guardBypassBinErr)
-		}
-		t.Skipf("go toolchain unavailable, skipping subprocess guard-bypass test: %v", guardBypassBinErr)
+	bin, err := sharedChainsawBinary()
+	if errors.Is(err, exec.ErrNotFound) {
+		t.Skipf("go toolchain unavailable, skipping subprocess guard-bypass test: %v", err)
 	}
-	return guardBypassBinPath
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bin
 }
-
-type guardBypassBuildError struct {
-	out string
-	err error
-}
-
-func (e *guardBypassBuildError) Error() string { return e.err.Error() + "\n" + e.out }
 
 // guardBypassFakePMDir creates a temp dir containing a fake package-manager
 // script for `name` that prints a sentinel line (so any invocation is

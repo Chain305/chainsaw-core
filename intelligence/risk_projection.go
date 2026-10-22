@@ -497,6 +497,10 @@ func ProjectToRiskInput(r *Report) risk.Input {
 	}
 	in.NewerVersion, in.NewerVersionAt = newerStableVersion(r, in.VersionPublishedAt)
 	in.PriorReleaseVersion, in.PriorReleaseAt = priorReleaseOf(r, in.VersionPublishedAt)
+	if d := r.SupplyChain.TyposquatDormantRelease; d != nil {
+		in.DormantLookalikeSimilarTo, in.DormantLookalikeConfidence = d.SimilarTo, d.Confidence
+		in.DormantLookalikePriorVersion, in.DormantLookalikeGapDays = d.PriorVersion, d.GapDays
+	}
 	if d := r.SupplyChain.ProvenanceDowngrade; d != nil {
 		in.ProvenanceDowngradeFrom, in.ProvenanceDowngradePriorCount = d.LastAttestedVersion, d.PriorAttestedCount
 	}

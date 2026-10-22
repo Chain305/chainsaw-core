@@ -601,6 +601,15 @@ type ArtifactScanSection struct {
 // any reintroduction. Reports persisted before the removal still carry the
 // key inside their stored JSONB; that is inert (unknown keys are ignored on
 // unmarshal) and no migration rewrote those rows.
+// TyposquatDormantRelease is the lookalike a dormant fresh release was
+// cleared against, and the silence before it.
+type TyposquatDormantRelease struct {
+	SimilarTo    string `json:"similarTo"`
+	Confidence   string `json:"confidence,omitempty"`
+	PriorVersion string `json:"priorVersion"`
+	GapDays      int    `json:"gapDays"`
+}
+
 type SupplyChainSection struct {
 	MalwareStatus          string     `json:"malwareStatus,omitempty"` // clean|malicious|unknown
 	MalwareID              string     `json:"malwareId,omitempty"`
@@ -640,6 +649,13 @@ type SupplyChainSection struct {
 	// is incomplete" — a clean RolledUp score with partial coverage is
 	// not the same signal as a clean score with full coverage.
 	TransitiveCoverage *TransitiveCoverage `json:"transitiveCoverage,omitempty"`
+
+	// TyposquatDormantRelease is set when the established clear
+	// (clearEstablishedTyposquat) reset a typosquat hit on the downloads or
+	// release-history line although the scanned release is under a year old
+	// and followed at least risk.DormancyGapThreshold of silence. The clear
+	// stands; this fact feeds the warn-level sc.dormant_lookalike_release.
+	TyposquatDormantRelease *TyposquatDormantRelease `json:"typosquatDormantRelease,omitempty"`
 }
 
 // ProvenanceDowngrade is the evidence for SupplyChainSection.ProvenanceDowngrade:

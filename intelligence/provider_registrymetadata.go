@@ -6775,9 +6775,10 @@ func applyTimeline(pr *PartialReport, timeline []VersionRelease, latest string, 
 		pr.Maintenance = &MaintenanceSection{}
 	}
 	pr.Maintenance.VersionTimeline = timeline
-	// First non-zero publish time wins after the sort above.
+	// First non-zero publish time wins after the sort above. NuGet's
+	// 1900-01-01 unlisted sentinel sorts first and is not a release date.
 	for i := range timeline {
-		if !timeline[i].PublishedAt.IsZero() {
+		if !timeline[i].PublishedAt.IsZero() && timeline[i].PublishedAt.Year() > 1901 {
 			t := timeline[i].PublishedAt
 			pr.Maintenance.FirstPublishedAt = &t
 			break

@@ -132,6 +132,11 @@ func loneFireFixtures() map[string]Input {
 		SignalSCHiddenUnicode: set(func(in *Input) {
 			in.HasHiddenUnicode = true
 		}),
+		SignalSCDormantLookalikeRelease: set(func(in *Input) {
+			in.DormantLookalikeSimilarTo = "popular-lib"
+			in.DormantLookalikePriorVersion = "1.0.0"
+			in.DormantLookalikeGapDays = 900
+		}),
 		SignalSCRepoOwnershipMismatch: set(func(in *Input) {
 			in.RepoLinkStatus = "ownership_mismatch"
 		}),
@@ -338,6 +343,11 @@ func TestP802BandBoundaryVerdicts(t *testing.T) {
 			wantVerdict: VerdictWarn,
 			note:        "ceiling moved 60 → 59.",
 		},
+		{
+			signal:      SignalSCDormantLookalikeRelease,
+			wantVerdict: VerdictWarn,
+			note:        "a dormant fresh release of a cleared lookalike warns, never quarantines.",
+		},
 	}
 
 	for _, tc := range cases {
@@ -367,6 +377,7 @@ func TestBand2CeilingsSitBelowTheWarnThreshold(t *testing.T) {
 		SignalSCHiddenUnicode,
 		SignalSCRepoArchived,
 		SignalSCRepoMissing,
+		SignalSCDormantLookalikeRelease,
 	} {
 		sig := Registry[id]
 		if sig.MaxImpact != ThresholdWarn-1 {

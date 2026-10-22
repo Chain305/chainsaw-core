@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/chain305/chainsaw-core/risk"
 )
 
 func squatReport(downloads *int, similarTo string) *Report {
@@ -329,34 +331,152 @@ func TestScanClearsLongLivedTyposquat(t *testing.T) {
 	}
 }
 
-// TestServerClearIsVersionBlindKnownGap PINS a known gap; it does not endorse
-// it. The offline guard stopped clearing silently on 2026-10-21 unless the
-// install pins a release its table saw (core/cli/guard_established.go, THE
-// VERSION GATE). The server's downloads and release-history lines still read
-// package-wide data, so a lookalike that qualified long ago and then ships a
-// brand-new release is cleared on its history, whatever that release holds.
-// (The long-lived line is already version-aware: it needs the SCANNED
-// release to be a year old.) Deliberately unfixed in this change — a server
-// verdict change needs a prod replay first; see
-// docs/PLANS_INTELLIGENCE.md#plan-server-established-version-gate. When that
-// fix lands this test must flip, and it should be rewritten, not deleted.
-func TestServerClearIsVersionBlindKnownGap(t *testing.T) {
+// dormantReport is a lookalike the server clears on a package-wide line
+// (downloads or release history) whose scanned release 3.0.0 is published at
+// pub, the release before it, 2.0.0, at prior.
+func dormantReport(downloads *int, versions int, prior, pub time.Time) *Report {
+	first := time.Date(2016, 1, 1, 0, 0, 0, 0, time.UTC)
+	r := squatReport(downloads, "json5")
+	r.Identity.Ecosystem, r.Identity.Package, r.Identity.Version = "npm", "jsom5", "3.0.0"
+	r.Maintenance.VersionCount = versions
+	r.Maintenance.FirstPublishedAt = &first
+	r.Release.PublishedAt = &pub
+	r.Maintenance.VersionTimeline = []VersionRelease{
+		{Version: "1.0.0", PublishedAt: first},
+		{Version: "2.0.0", PublishedAt: prior},
+		{Version: "3.0.0", PublishedAt: pub},
+	}
+	return r
+}
+
+// TestServerClearFlagsDormantLookalikeRelease closes the gap
+// TestServerClearIsVersionBlindKnownGap pinned until 2026-10-22: the
+// downloads and release-history lines read package-wide data, so a lookalike
+// that qualified long ago and then ships a fresh release after years of
+// silence was cleared on its history. Owner decision (2026-10-22): keep the
+// clear — 38 of 46 orgs run the seeded isSuspectedTyposquat block rule, so
+// re-flagging would block — and carry a warn-level fact instead
+// (sc.dormant_lookalike_release). See
+// docs/PLANS_INTELLIGENCE.md#plan-server-established-version-gate.
+func TestServerClearFlagsDormantLookalikeRelease(t *testing.T) {
 	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
 	yesterday := now.AddDate(0, 0, -1)
-	first := time.Date(2016, 1, 1, 0, 0, 0, 0, time.UTC)
+	silent := yesterday.AddDate(-3, 0, 0)
 
-	byDownloads := squatReport(dlPtr(419_678), "json5")
-	byDownloads.Release.PublishedAt = &yesterday
-
-	byHistory := squatReport(nil, "lodash")
-	byHistory.Maintenance.VersionCount = 60
-	byHistory.Maintenance.FirstPublishedAt = &first
-	byHistory.Release.PublishedAt = &yesterday
-
-	for name, r := range map[string]*Report{"downloads line": byDownloads, "release-history line": byHistory} {
+	for name, r := range map[string]*Report{
+		"downloads line":       dormantReport(dlPtr(419_678), 3, silent, yesterday),
+		"release-history line": dormantReport(nil, 60, silent, yesterday),
+	} {
 		clearEstablishedTyposquat(r, now)
 		if r.SupplyChain.TyposquatStatus != "clean" {
-			t.Errorf("%s: the known gap closed (status %q) — update this pin and the plan section", name, r.SupplyChain.TyposquatStatus)
+			t.Fatalf("%s: status %q, want the clear kept (the seeded block rule must not fire)", name, r.SupplyChain.TyposquatStatus)
+		}
+		d := r.SupplyChain.TyposquatDormantRelease
+		if d == nil {
+			t.Fatalf("%s: dormant fresh release cleared with no dormant-release fact", name)
+		}
+		if d.SimilarTo != "json5" || d.Confidence != "high" || d.PriorVersion != "2.0.0" || d.GapDays < 1090 {
+			t.Fatalf("%s: fact %+v", name, d)
+		}
+		in := ProjectToRiskInput(r)
+		if in.IsSuspectedTyposquat || in.DormantLookalikeSimilarTo != "json5" || in.DormantLookalikeGapDays != d.GapDays {
+			t.Fatalf("%s: projection %+v", name, in)
+		}
+		ev := risk.EvaluatePackage(in, risk.Options{Now: func() time.Time { return now }})
+		if !firedIn(ev, risk.SignalSCDormantLookalikeRelease) {
+			t.Fatalf("%s: sc.dormant_lookalike_release did not fire", name)
 		}
 	}
+}
+
+// TestServerClearNoDormantFactWhenNotDormant: each half of the trigger is
+// required, and missing or sentinel dates trigger nothing.
+func TestServerClearNoDormantFactWhenNotDormant(t *testing.T) {
+	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	yesterday := now.AddDate(0, 0, -1)
+	twoYearsAgo := now.AddDate(-2, 0, 0)
+	sentinel := time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	single := dormantReport(dlPtr(1_000_000), 1, yesterday, yesterday)
+	single.Maintenance.VersionTimeline = []VersionRelease{{Version: "3.0.0", PublishedAt: yesterday}}
+	unlistedPrior := dormantReport(dlPtr(1_000_000), 3, sentinel, yesterday)
+	undated := dormantReport(dlPtr(1_000_000), 3, yesterday.AddDate(-3, 0, 0), yesterday)
+	undated.Release.PublishedAt = nil
+	undated.Maintenance.VersionTimeline[2].PublishedAt = time.Time{}
+
+	for name, r := range map[string]*Report{
+		// nuxt 4.6.2: 1.38M a week, previous release three weeks earlier.
+		"frequent releaser":         dormantReport(dlPtr(1_378_576), 410, yesterday.AddDate(0, 0, -21), yesterday),
+		"gap just under two years":  dormantReport(dlPtr(1_000_000), 3, yesterday.Add(-risk.DormancyGapThreshold+time.Hour), yesterday),
+		"old established release":   dormantReport(dlPtr(1_000_000), 3, twoYearsAgo.AddDate(-3, 0, 0), twoYearsAgo),
+		"no previous release":       single,
+		"previous release unlisted": unlistedPrior,
+		"release date unknown":      undated,
+	} {
+		clearEstablishedTyposquat(r, now)
+		if r.SupplyChain.TyposquatStatus != "clean" {
+			t.Fatalf("%s: not cleared (status %q)", name, r.SupplyChain.TyposquatStatus)
+		}
+		if d := r.SupplyChain.TyposquatDormantRelease; d != nil {
+			t.Errorf("%s: dormant-release fact set: %+v", name, d)
+		}
+		ev := risk.EvaluatePackage(ProjectToRiskInput(r), risk.Options{Now: func() time.Time { return now }})
+		if firedIn(ev, risk.SignalSCDormantLookalikeRelease) {
+			t.Errorf("%s: sc.dormant_lookalike_release fired", name)
+		}
+	}
+}
+
+// TestServerClearLongLivedLineNeverDormant: the long-lived line already needs
+// the scanned release to be a year old, so it never carries the fact.
+func TestServerClearLongLivedLineNeverDormant(t *testing.T) {
+	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	pub := now.AddDate(-1, 0, -1)
+	r := dormantReport(nil, 3, pub.AddDate(-4, 0, 0), pub)
+	clearEstablishedTyposquat(r, now)
+	if r.SupplyChain.TyposquatStatus != "clean" || r.SupplyChain.TyposquatDormantRelease != nil {
+		t.Fatalf("status %q fact %+v", r.SupplyChain.TyposquatStatus, r.SupplyChain.TyposquatDormantRelease)
+	}
+}
+
+// TestServerClearNuGetSentinelFirstPublished: four production NuGet rows
+// (Microsoft.CodeAnalysis.*, Microsoft.AspNetCore.Mvc.Core) cleared on "N
+// versions since 1900-01-01" — the unlisted-version sentinel, sorted first by
+// applyTimeline. The sentinel alone must not satisfy the history line, and
+// applyTimeline must take the first REAL date, so those rows keep clearing on
+// evidence (2014-04-01 for Microsoft.CodeAnalysis.CSharp).
+func TestServerClearNuGetSentinelFirstPublished(t *testing.T) {
+	now := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	sentinel := time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+	real := time.Date(2014, 4, 1, 1, 18, 57, 0, time.UTC)
+
+	r := squatReport(nil, "Microsoft.CodeAnalysis")
+	r.Identity.Ecosystem, r.Identity.Package, r.Identity.Version = "nuget", "Microsoft.CodeAnalysis.CSharp", "2.8.0"
+	r.Maintenance.VersionCount = 110
+	r.Maintenance.FirstPublishedAt = &sentinel
+	clearEstablishedTyposquat(r, now)
+	if r.SupplyChain.TyposquatStatus != "suspected" {
+		t.Fatal("the 1900 sentinel satisfied the release-history line's age half")
+	}
+
+	pr := &PartialReport{}
+	applyTimeline(pr, []VersionRelease{
+		{Version: "0.6.0-beta", PublishedAt: sentinel},
+		{Version: "1.0.0", PublishedAt: real},
+		{Version: "2.8.0", PublishedAt: real.AddDate(4, 0, 0)},
+	}, "", nil)
+	if got := pr.Maintenance.FirstPublishedAt; got == nil || !got.Equal(real) {
+		t.Fatalf("applyTimeline FirstPublishedAt = %v, want the first real date %v", got, real)
+	}
+}
+
+func firedIn(ev *risk.Evaluation, id string) bool {
+	for _, cs := range ev.DirectScore.Categories {
+		for _, f := range cs.FiredSignals {
+			if f.ID == id {
+				return true
+			}
+		}
+	}
+	return false
 }

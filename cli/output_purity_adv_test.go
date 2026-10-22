@@ -40,9 +40,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -318,46 +316,17 @@ func TestColor_GuardStderrOptOutMatrix(t *testing.T) {
 // Subprocess harness — built once, exercised only for os.Exit-bearing paths.
 // ---------------------------------------------------------------------------
 
-var (
-	purityBinOnce sync.Once
-	purityBinPath string
-	purityBinErr  error
-)
-
-// purityChainsawBinary compiles cmd/chainsaw ONCE for the whole file's
-// subprocess tests. Skips (not fails) when the go toolchain is unavailable so
-// the suite stays runnable in constrained environments. The binary is named
-// distinctly from sibling helpers to avoid any cross-file symbol collision.
+// purityChainsawBinary returns the package's shared cmd/chainsaw build (see
+// chainsaw_testbin_test.go). Skips (not fails) when the go toolchain is
+// unavailable or the build fails so the suite stays runnable in constrained
+// environments.
 func purityChainsawBinary(t *testing.T) string {
 	t.Helper()
-	purityBinOnce.Do(func() {
-		goTool, err := exec.LookPath("go")
-		if err != nil {
-			purityBinErr = err
-			return
-		}
-		dir, err := os.MkdirTemp("", "chainsaw-purity-bin")
-		if err != nil {
-			purityBinErr = err
-			return
-		}
-		bin := filepath.Join(dir, "chainsaw")
-		if runtime.GOOS == "windows" {
-			bin += ".exe"
-		}
-		// The test runs from core/cli; main lives at ../cmd/chainsaw.
-		out, err := exec.Command(goTool, "build", "-o", bin, "../cmd/chainsaw").CombinedOutput()
-		if err != nil {
-			purityBinErr = err
-			t.Logf("build chainsaw binary failed: %v\n%s", err, out)
-			return
-		}
-		purityBinPath = bin
-	})
-	if purityBinErr != nil {
-		t.Skipf("go toolchain unavailable or build failed; skipping subprocess test: %v", purityBinErr)
+	bin, err := sharedChainsawBinary()
+	if err != nil {
+		t.Skipf("go toolchain unavailable or build failed; skipping subprocess test: %v", err)
 	}
-	return purityBinPath
+	return bin
 }
 
 // purityRun runs the built binary with a fully-isolated environment (only the

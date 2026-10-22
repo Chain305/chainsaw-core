@@ -40,9 +40,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -222,45 +220,16 @@ func TestExitCodeError_NilErr_NoStderrErrorLine(t *testing.T) {
 // exitBinOnce builds the CLI exactly once for every subprocess test in this
 // file. A private, uniquely-named helper so it never collides with the
 // buildChainsawBinary helper that lives in the external cli_test package.
-var (
-	exitBinOnce sync.Once
-	exitBinPath string
-	exitBinErr  error
-)
-
-// buildChainsawBinForExit compiles cmd/chainsaw once and returns the path.
-// Skips (never fails) when the go toolchain is unavailable so constrained CI
-// stays runnable. The binary is placed under a stable temp dir (not t.TempDir,
-// which is per-test) so the sync.Once result survives across tests.
+// buildChainsawBinForExit returns the package's shared cmd/chainsaw build (see
+// chainsaw_testbin_test.go). Skips (never fails) when the go toolchain is
+// unavailable so constrained CI stays runnable.
 func buildChainsawBinForExit(t *testing.T) string {
 	t.Helper()
-	exitBinOnce.Do(func() {
-		goTool, err := exec.LookPath("go")
-		if err != nil {
-			exitBinErr = fmt.Errorf("go toolchain not on PATH")
-			return
-		}
-		dir, err := os.MkdirTemp("", "chainsaw-exitbin-")
-		if err != nil {
-			exitBinErr = err
-			return
-		}
-		bin := filepath.Join(dir, "chainsaw")
-		if runtime.GOOS == "windows" {
-			bin += ".exe"
-		}
-		// Test cwd is core/cli; the binary main lives at ../cmd/chainsaw.
-		cmd := exec.Command(goTool, "build", "-o", bin, "../cmd/chainsaw")
-		if out, berr := cmd.CombinedOutput(); berr != nil {
-			exitBinErr = fmt.Errorf("build failed: %v\n%s", berr, out)
-			return
-		}
-		exitBinPath = bin
-	})
-	if exitBinErr != nil {
-		t.Skipf("skipping subprocess exit-code test: %v", exitBinErr)
+	bin, err := sharedChainsawBinary()
+	if err != nil {
+		t.Skipf("skipping subprocess exit-code test: %v", err)
 	}
-	return exitBinPath
+	return bin
 }
 
 // runChainsawExit runs the built binary in a throwaway temp cwd with a clean,

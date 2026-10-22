@@ -164,7 +164,9 @@ func EstablishedReason(downloads *int, window string, weekly *int, versions int,
 		}
 	}
 	row := EstablishedRow{VersionCount: versions}
-	if first != nil {
+	// NuGet dates unlisted versions 1900-01-01; a date that old is the
+	// sentinel, not a first release, and must not meet the age half.
+	if first != nil && first.Year() > 1901 {
 		row.FirstPublished = *first
 	}
 	reason, _ := EstablishedClear(row, now)

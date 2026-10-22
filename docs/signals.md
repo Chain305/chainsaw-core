@@ -1,6 +1,6 @@
 # Risk signals
 
-Chainsaw registers **99 risk signals**. Each is scored, not merely
+Chainsaw registers **100 risk signals**. Each is scored, not merely
 boolean: a signal carries a severity and a weight, and the evaluator rolls the
 fired set up into an overall score.
 
@@ -23,15 +23,15 @@ a configured server.
 
 | Category | Signals |
 |---|---:|
-| Supply chain | 69 |
+| Supply chain | 70 |
 | Vulnerability | 8 |
 | Licence | 8 |
 | Maintenance | 8 |
 | Quality | 6 |
-| **Total** | **99** |
+| **Total** | **100** |
 
 
-## Supply chain (69)
+## Supply chain (70)
 
 | ID | Severity | Weight | What it means |
 |---|---|---:|---|
@@ -80,6 +80,7 @@ a configured server.
 | `sc.filesystem_access_appeared` | low | -10.00 | Filesystem access introduced in this version |
 | `sc.env_access_appeared` | low | -10.00 | Environment-variable access introduced in this version |
 | `sc.release_after_dormancy` | info | 0.00 | Release after long dormancy |
+| `sc.dormant_lookalike_release` | medium | -20.00 | Lookalike name, fresh release after long dormancy |
 | `sc.known_malicious` | critical | -1000.00 | Known-malicious package |
 | `sc.maintainer_account_somewhat_young` | low | -5.00 | Maintainer account under 6 months |
 | `sc.maintainer_account_very_young` | high | -25.00 | Maintainer account very young (<30 days) |
