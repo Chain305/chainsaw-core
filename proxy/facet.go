@@ -423,6 +423,11 @@ func (f *facet) fetchAndStore(fetchCtx context.Context, req *Request, remote Rem
 	// follows adds the PROXY's OWN conditional, derived from the entry
 	// we hold. The two must not be confused — hence strip, then add.
 	stripConditionalHeaders(header)
+	// The facet stores whole objects, so it fetches whole objects. A
+	// forwarded client Range made upstream answer 206, and the slice was
+	// cached as the artifact. The server serves the client's range from
+	// the whole, enforced body.
+	header.Del("Range")
 	revalidating := f.addRevalidationHeaders(fetchCtx, logicalPath, header)
 
 	remoteResp, fetchErr := f.fetchWithRetry(fetchCtx, remote, logicalPath, header)
@@ -520,6 +525,13 @@ func (f *facet) handleUpstreamStatus(fetchCtx context.Context, logicalPath, cach
 			StatusCode: http.StatusNotModified,
 			Headers:    cloneHeader(remoteResp.Header),
 		}
+	}
+
+	// A 206 is a slice, never the object. The facet sends no Range, so
+	// this is an upstream misbehaving; storing it would cache the slice
+	// as the artifact.
+	if remoteResp.StatusCode == http.StatusPartialContent {
+		return true, &Response{StatusCode: http.StatusBadGateway, Headers: make(http.Header)}
 	}
 
 	if remoteResp.StatusCode >= 500 {

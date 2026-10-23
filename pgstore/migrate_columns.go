@@ -85,12 +85,18 @@ func (s *Store) ensureEnhancedColumns() error {
 	if err := s.ensureArtifactAnalysesSchema(); err != nil {
 		return err
 	}
-	// Runs LAST, and must: it UPDATEs package_metadata columns that
-	// ensurePackageRegistryColumns adds above (migrate_packages.go:114-126),
+	// Must follow ensurePackageRegistryColumns: it UPDATEs package_metadata
+	// columns that call adds above (migrate_packages.go:114-126),
 	// so ordering it before that call would fail on a pre-Phase-5 database.
 	// See migrate_attestation_identity.go for why unverified attestation
 	// identity has to be cleared rather than merely stopped at the writer.
 	if _, err := s.clearUnverifiedAttestationIdentity(); err != nil {
+		return err
+	}
+	// After ensurePolicyColumns: it reads policies.kind and writes
+	// policies.expires_at, both added there. One-shot; see
+	// migrate_exception_expiry.go for why it must not run twice.
+	if _, err := s.stampLapsingLegacyExceptions(); err != nil {
 		return err
 	}
 	return nil

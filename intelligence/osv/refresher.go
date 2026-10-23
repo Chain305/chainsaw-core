@@ -167,6 +167,16 @@ type Refresher struct {
 	totalFailures atomic.Int64
 }
 
+// ecosystemSuccessRecorder is told, per ecosystem, when a refresh that
+// fetched it has been written and swapped in. The proxy wires it into
+// chainsaw_datasource_last_success_timestamp_seconds{source="osv/<eco>"}.
+var ecosystemSuccessRecorder func(ecosystem string, at time.Time)
+
+// SetEcosystemSuccessRecorder installs the recorder. Pass nil to disable.
+func SetEcosystemSuccessRecorder(rec func(ecosystem string, at time.Time)) {
+	ecosystemSuccessRecorder = rec
+}
+
 // DefaultRefreshInterval matches the cadence of the other data-source
 // refreshers (Trivy DB OCI updater, EPSS source, ClamAV) so OSV doesn't
 // stale relative to its peers between deploys.
@@ -338,7 +348,7 @@ func (r *Refresher) runOnce(ctx context.Context) error {
 		return nil
 	}
 	start := r.cfg.now()
-	advisories, err := r.fetchAll(ctx)
+	advisories, fresh, err := r.fetchAll(ctx)
 	if err != nil {
 		r.totalFailures.Add(1)
 		r.logger.Warn("osv refresher: fetch failed; keeping prior bundle",
@@ -371,7 +381,17 @@ func (r *Refresher) runOnce(ctx context.Context) error {
 		r.cfg.Swap(idx)
 	}
 	r.totalRefreshes.Add(1)
-	r.lastSwapAt.Store(r.cfg.now().UnixNano())
+	swappedAt := r.cfg.now()
+	r.lastSwapAt.Store(swappedAt.UnixNano())
+	// Per ecosystem, and only the ones fetched THIS tick: a tick succeeds
+	// when one ecosystem does, and the failed ones are carried over from
+	// the prior bundle, so a tick-level timestamp would call a feed fresh
+	// that has not refreshed in days.
+	if rec := ecosystemSuccessRecorder; rec != nil {
+		for _, eco := range fresh {
+			rec(eco, swappedAt)
+		}
+	}
 	r.logger.Info("osv refresher: swapped",
 		"path", r.cfg.Path,
 		"advisories", idx.Total(),
@@ -384,19 +404,18 @@ func (r *Refresher) runOnce(ctx context.Context) error {
 // one ecosystem succeeds the tick succeeds, and the ecosystems that failed
 // keep the advisories the prior bundle held for them (keepPriorFor). If ALL
 // ecosystems fail we return an aggregate error so the caller keeps the
-// prior bundle whole.
+// prior bundle whole. fresh names the ecosystems fetched this tick.
 //
 // Writing only what came back is NOT safe: the bundle is the whole corpus,
 // so a failed ecosystem would vanish from it until the next good tick, and
 // every coordinate scanned meanwhile is stored clean. That happened to
 // crates.io on 2026-10-05 — rsa@0.9.10 (RUSTSEC-2023-0071) and seven other
 // vulnerable crates were stored allow/100 and served that way for ~38h.
-func (r *Refresher) fetchAll(ctx context.Context) ([]Advisory, error) {
+func (r *Refresher) fetchAll(ctx context.Context) (advisories []Advisory, fresh []string, err error) {
 	var (
 		out    []Advisory
 		errs   []string
 		failed []string
-		any    bool
 	)
 	for _, eco := range r.cfg.Ecosystems {
 		eco := strings.TrimSpace(eco)
@@ -411,13 +430,13 @@ func (r *Refresher) fetchAll(ctx context.Context) ([]Advisory, error) {
 				"ecosystem", eco, "err", err)
 			continue
 		}
-		any = true
+		fresh = append(fresh, eco)
 		out = append(out, recs...)
 	}
-	if !any {
-		return nil, fmt.Errorf("all ecosystems failed: %s", strings.Join(errs, "; "))
+	if len(fresh) == 0 {
+		return nil, nil, fmt.Errorf("all ecosystems failed: %s", strings.Join(errs, "; "))
 	}
-	return append(out, r.keepPriorFor(failed)...), nil
+	return append(out, r.keepPriorFor(failed)...), fresh, nil
 }
 
 // keepPriorFor returns the prior on-disk bundle's advisories for the given

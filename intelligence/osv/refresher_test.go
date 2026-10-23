@@ -359,3 +359,73 @@ func mustGzipJSON(t *testing.T, advs []Advisory) []byte {
 	}
 	return buf.Bytes()
 }
+
+// TestRefresher_EcosystemSuccessRecorder_OnlyFreshEcosystems is the
+// producer proof for the proxy's
+// chainsaw_datasource_last_success_timestamp_seconds{source="osv/<eco>"}.
+// A tick succeeds when ONE ecosystem does and carries the failed ones
+// over from the prior bundle, so only the ecosystems fetched this tick
+// may be reported fresh. A failed tick reports nothing.
+func TestRefresher_EcosystemSuccessRecorder_OnlyFreshEcosystems(t *testing.T) {
+	var got []string
+	var at []time.Time
+	prev := ecosystemSuccessRecorder
+	SetEcosystemSuccessRecorder(func(eco string, when time.Time) {
+		got = append(got, eco)
+		at = append(at, when)
+	})
+	t.Cleanup(func() { ecosystemSuccessRecorder = prev })
+
+	zipBytes := buildSyntheticZip(t, []map[string]any{{
+		"id": "GHSA-fake-0002",
+		"affected": []map[string]any{{
+			"package":  map[string]any{"ecosystem": "npm", "name": "synthetic-pkg"},
+			"versions": []string{"1.0.0"},
+		}},
+	}})
+	pypiDown := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if pypiDown && strings.HasPrefix(req.URL.Path, "/PyPI/") {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(zipBytes)
+	}))
+	defer srv.Close()
+
+	fixed := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	r := &Refresher{
+		cfg: RefresherConfig{
+			Path:       filepath.Join(t.TempDir(), "osv-bundle.json.gz"),
+			Ecosystems: []string{"npm", "PyPI"},
+			now:        func() time.Time { return fixed },
+		},
+		client:  srv.Client(),
+		logger:  testLogger(t),
+		baseURL: srv.URL,
+	}
+	if err := r.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce with one ecosystem up: %v", err)
+	}
+	if len(got) != 1 || got[0] != "npm" || !at[0].Equal(fixed) {
+		t.Fatalf("recorded %v at %v, want only npm at %v (PyPI failed this tick)", got, at, fixed)
+	}
+
+	pypiDown = false
+	got, at = nil, nil
+	if err := r.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce with both up: %v", err)
+	}
+	if strings.Join(got, ",") != "npm,PyPI" {
+		t.Fatalf("recorded %v, want npm,PyPI", got)
+	}
+
+	srv.Close()
+	got = nil
+	if err := r.runOnce(context.Background()); err == nil {
+		t.Fatal("precondition: runOnce with upstream down returned nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("a failed tick reported %v fresh", got)
+	}
+}
