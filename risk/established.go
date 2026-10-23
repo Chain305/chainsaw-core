@@ -139,6 +139,53 @@ func EstablishedClear(row EstablishedRow, now time.Time) (reason string, cleared
 	return "", false
 }
 
+// EstablishedCensusOldWeeklyDownloads is the downloads half of the census's
+// old-package line (EstablishedTableClear): a name on its registry for
+// EstablishedLongLivedPackageAge (5 years) that still draws this much a week.
+// The busiest real squat on record drew 8,167 a week (expres), so this line
+// does not separate squats from real packages by traffic alone — it is
+// acceptable only because the guard never stays silent on it unpinned.
+const EstablishedCensusOldWeeklyDownloads = 1_000
+
+// EstablishedCensusOldBlockWeeklyDownloads is the old-package line's downloads
+// half for a BLOCK-tier hit (a single edit from a target inside the guard's
+// block cutoff). At 1,000 a week the line admitted typo-catchers of the most
+// popular names — loadash (lodash, 2 releases, 14.4k a week) and expres
+// (express, 2.9k) — and lowered their blocks to warnings (2026-10-23). The
+// npm false blocks the line exists for draw 34k–88k a week (as-number, clui,
+// hable, crypto-es) and faiss-gpu 21k; crypto-ts at 8.1k stays blocked.
+const EstablishedCensusOldBlockWeeklyDownloads = 20_000
+
+// EstablishedTableClear is the offline guard's table clear: EstablishedClear,
+// or the census's old-package line — first published >=
+// EstablishedLongLivedPackageAge ago AND >= EstablishedCensusOldWeeklyDownloads
+// weekly downloads (EstablishedCensusOldBlockWeeklyDownloads when blockTier:
+// the hit is a single edit from a target inside the block cutoff).
+//
+// The old-package line is guard-only on purpose. It drops the long-lived
+// line's "no release in the last year" half, which is what stops a sleeper
+// from inheriting its name's history. The guard can afford that because a
+// table clear is silent only for an exact pin in the row's build-time release
+// set and lowers a block to a printed warning otherwise; the server path has
+// no build-time release set and keeps EstablishedClear. A row only reaches
+// the guard through the census (core/tools/established-table-gen), which
+// admits on the same two halves.
+func EstablishedTableClear(row EstablishedRow, now time.Time, blockTier bool) (reason string, cleared bool) {
+	if reason, ok := EstablishedClear(row, now); ok {
+		return reason, true
+	}
+	line := int64(EstablishedCensusOldWeeklyDownloads)
+	if blockTier {
+		line = EstablishedCensusOldBlockWeeklyDownloads
+	}
+	if row.WeeklyDownloads >= line && !row.FirstPublished.IsZero() &&
+		now.Sub(row.FirstPublished) >= EstablishedLongLivedPackageAge {
+		return fmt.Sprintf("published since %s, %d downloads per week",
+			row.FirstPublished.Format("2006-01-02"), row.WeeklyDownloads), true
+	}
+	return "", false
+}
+
 // EstablishedReason reports why a package counts as established, or "" when
 // it does not. Missing data establishes nothing; a failed fetch (-1) is
 // below every line.

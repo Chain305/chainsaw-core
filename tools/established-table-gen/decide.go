@@ -18,6 +18,12 @@ const (
 	// half of census admission; every ecosystem is scaled to a week so the
 	// guard's runtime clear (risk.EstablishedClear) agrees with the census.
 	weeklyDownloadsLine = 100_000
+	// oldWeeklyDownloadsLine is risk.EstablishedCensusOldWeeklyDownloads, the
+	// downloads half of the old-package line (census.go, censusOldAge).
+	oldWeeklyDownloadsLine = 1_000
+	// oldBlockWeeklyDownloadsLine is risk.EstablishedCensusOldBlockWeeklyDownloads:
+	// the old-package line for a block-tier candidate.
+	oldBlockWeeklyDownloadsLine = 20_000
 	// churnTotalLimit: the share of a previous census's rows a regeneration
 	// may lose before it is refused.
 	churnTotalLimit = 0.25

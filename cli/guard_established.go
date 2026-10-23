@@ -21,7 +21,10 @@ package cli
 // risk.EstablishedClear — the SAME single definition the server path calls —
 // caps the name-similarity lane at a WARNING, and is silent only when the
 // install pins an exact version the table saw at build time (see THE VERSION
-// GATE below). The table is qualification data,
+// GATE below). Since 2026-10-23 the table clear also takes the census's
+// old-package line (risk.EstablishedTableClear: on the registry 5+ years AND
+// >= 1,000 downloads a week, >= 20,000 for a block-tier hit), which the
+// server does not: it is safe only because of that version gate. The table is qualification data,
 // NOT a popularity corpus: membership does not exempt a package from
 // anything else, and confers no exact-match privileges (unlike the popular
 // corpus, being in this table clears nothing by itself — a row only clears
@@ -310,14 +313,17 @@ func parseEstablishedTable(ecosystem string, data []byte) (rows map[string]risk.
 
 // establishedClears reports whether the ESTABLISHED TABLE clears this
 // candidate's typosquat lane: the row (if any) run through
-// risk.EstablishedClear — the one definition the server path also calls.
+// risk.EstablishedTableClear — risk.EstablishedClear (the one definition the
+// server path also calls) plus the census's guard-only old-package line, whose
+// downloads bar depends on blockTier (the census's tier rule: a single edit
+// from a target inside the block cutoff).
 //
 // ok=false means "no row, or the row's data clears nothing" — both leave the
 // typosquat lane exactly as it was. The lookup is name-keyed under the
 // detector's own per-ecosystem normalizer (applied to the CANONICAL
 // ecosystem, so an alias spelling like "python" normalizes as pip/PEP 503
 // rather than falling to the generic normalizer), offline, once per process.
-func establishedClears(ecosystem, name string, now time.Time) (reason string, row risk.EstablishedRow, ok bool) {
+func establishedClears(ecosystem, name string, now time.Time, blockTier bool) (reason string, row risk.EstablishedRow, ok bool) {
 	if strings.TrimSpace(name) == "" {
 		return "", risk.EstablishedRow{}, false
 	}
@@ -334,7 +340,7 @@ func establishedClears(ecosystem, name string, now time.Time) (reason string, ro
 	if !found {
 		return "", risk.EstablishedRow{}, false
 	}
-	reason, cleared := risk.EstablishedClear(r, now)
+	reason, cleared := risk.EstablishedTableClear(r, now, blockTier)
 	if !cleared {
 		return "", r, false
 	}

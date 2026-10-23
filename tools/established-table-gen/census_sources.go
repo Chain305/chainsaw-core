@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -58,39 +60,69 @@ func fetchPyPIWeekly(cacheDir string, names []string) (map[string]int64, error) 
 	return out, nil
 }
 
-// topPyPIURL is the public monthly-download ranking of the top 15,000 PyPI
-// projects (hugovk/top-pypi-packages, from the PyPI BigQuery/ClickHouse
-// dataset).
-const topPyPIURL = "https://hugovk.dev/top-pypi-packages/top-pypi-packages.min.json"
+// pypiDownloadsSQL is ClickHouse's public copy of the PyPI download logs (the
+// dataset behind clickpy.clickhouse.com), read as its read-only demo user.
+// The census sends it two aggregate queries and no package name. The demo
+// user is capped at 60,000 result rows an hour, so the per-project answer
+// comes back as ONE row (groupArray joined into a string, TSVRaw). It also
+// stops reading at 1B rows and by default returns what it has read so far:
+// the daily table (1.1B rows, not pruned by date) came back with a different
+// subset on every run, which dropped fastapi-sso and 141 other existing rows.
+// So the census reads the monthly table (~50M rows) and sets
+// read_overflow_mode='throw' — a truncated scan is an error, never an answer.
+const pypiDownloadsSQL = "https://sql-clickhouse.clickhouse.com/?user=demo&query="
 
-// fetchTopPyPI returns PEP 503 name -> 30-day downloads for the top 15,000
-// projects, and the smallest count in the list (the cutoff). The census uses
-// it only to skip pypistats calls for projects that cannot reach the
-// downloads line: if the cutoff is not far below the line, the list cannot
-// prove that and the run refuses.
-func fetchTopPyPI() (map[string]int64, int64, error) {
-	var resp struct {
-		Rows []struct {
-			Count   int64  `json:"download_count"`
-			Project string `json:"project"`
-		} `json:"rows"`
+// fetchPyPIRecent returns PEP 503 name -> downloads a week (the last complete
+// month x 7/30) for every project at or above floor a week. It decides only
+// who is worth a pypistats call — admission reads pypistats — and refuses
+// when the dataset is stale or too small to rule a name out.
+func fetchPyPIRecent(now time.Time, floor int64) (map[string]int64, error) {
+	f := newFetcher()
+	f.accept = "text/tab-separated-values"
+	query := func(q string, line func([]string) error) error {
+		q += " SETTINGS read_overflow_mode = 'throw' FORMAT TSVRaw"
+		return f.get(pypiDownloadsSQL+url.QueryEscape(q), 64<<20, func(b []byte) error {
+			for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				if err := line(strings.Split(l, "\t")); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 	}
-	if err := newFetcher().getJSON(topPyPIURL, &resp, 64<<20); err != nil {
-		return nil, 0, fmt.Errorf("top-pypi-packages: %w", err)
+	var current time.Time
+	if err := query("SELECT max(month) FROM pypi.pypi_downloads_per_month", func(c []string) (err error) {
+		current, err = time.Parse("2006-01-02", c[0])
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("pypi downloads (clickhouse): %w", err)
+	}
+	// The newest month is still loading: read the one before it.
+	month := current.AddDate(0, -1, 0)
+	if now.Sub(month) > 70*24*time.Hour {
+		return nil, fmt.Errorf("pypi downloads (clickhouse): last complete month %s is stale, refusing", month.Format("2006-01"))
 	}
 	out := map[string]int64{}
-	var cutoff int64 = -1
-	for _, r := range resp.Rows {
-		out[pep503(r.Project)] = r.Count
-		if cutoff < 0 || r.Count < cutoff {
-			cutoff = r.Count
+	if err := query(fmt.Sprintf("SELECT arrayStringConcat(groupArray(concat(project, '\\t', toString(c))), '\\n') FROM "+
+		"(SELECT project, sum(count) AS c FROM pypi.pypi_downloads_per_month WHERE month = '%s' GROUP BY project HAVING c >= %d)",
+		month.Format("2006-01-02"), floor*30/7), func(c []string) error {
+		if len(c) != 2 {
+			return fmt.Errorf("malformed row %q", c)
 		}
+		n, err := strconv.ParseInt(c[1], 10, 64)
+		if err != nil {
+			return err
+		}
+		out[pep503(c[0])] = n * 7 / 30
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("pypi downloads (clickhouse): %w", err)
 	}
-	if len(out) < 10_000 || cutoff < 0 || cutoff*7/30 >= weeklyDownloadsLine/4 {
-		return nil, 0, fmt.Errorf("top-pypi-packages: %d rows, cutoff %d/month — cannot rule out the downloads line, refusing", len(out), cutoff)
+	if len(out) < 10_000 {
+		return nil, fmt.Errorf("pypi downloads (clickhouse): only %d projects >= %d/week in %s, refusing", len(out), floor, month.Format("2006-01"))
 	}
-	fmt.Fprintf(os.Stderr, "top-pypi-packages: %d projects, cutoff %d/month\n", len(out), cutoff)
-	return out, cutoff, nil
+	fmt.Fprintf(os.Stderr, "pypi downloads (clickhouse): %d projects >= %d/week in %s (x 7/30)\n", len(out), floor, month.Format("2006-01"))
+	return out, nil
 }
 
 // fetchPubDownloads reads pub.dev's 30-day download count from the score

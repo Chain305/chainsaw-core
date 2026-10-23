@@ -69,7 +69,7 @@ func TestGuardInteriorFloorFalseBlockClassClears(t *testing.T) {
 			t.Errorf("%s:%s unpinned must WARN (demoted, printed under --quiet), never block or clear silently, got %+v",
 				c.eco, c.name, v)
 		}
-		_, row, ok := establishedClears(c.eco, c.name, time.Now())
+		_, row, ok := establishedClears(c.eco, c.name, time.Now(), true)
 		if !ok || len(row.Releases) == 0 {
 			t.Fatalf("%s:%s has no clearing row with a release set in the embedded table — regenerate it", c.eco, c.name)
 		}

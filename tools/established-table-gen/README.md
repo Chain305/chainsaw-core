@@ -19,19 +19,37 @@ tiers, recorded per candidate: **block** (the d=1 lookalike of a target
 ranked within the block cutoff, 2,500 — `cli.guardTyposquatBlockRankCutoff`)
 and **warn** (every other medium/high hit: distance 2–3 within the
 detector's thresholds, reorder matches, d=1 past the cutoff). A candidate is
-admitted only when the registry shows it is long-standing and heavily used in
-its own right — **both**, the same lines for both tiers:
+admitted only when the registry shows it is long-standing and used in its own
+right — **both halves of either line**, the same lines for both tiers:
 
-| line | value |
-| --- | --- |
-| age | first published ≥ 2 years before the build |
-| downloads | ≥ 100,000 a week (npm last-week; PyPI pypistats `last_week`; crates.io 90-day × 7/90; pub.dev 30-day × 7/30) |
+| line | age (first published, before the build) | downloads a week |
+| --- | --- | --- |
+| downloads line | ≥ 2 years | ≥ 100,000 |
+| old-package line (2026-10-23), warn tier | ≥ 5 years | ≥ 1,000 |
+| old-package line, block tier | ≥ 5 years | ≥ 20,000 |
 
-Downloads alone is a pumped young package; a version count alone is cheap
-(create-jst shipped 28 versions in 30 days), so neither admits on its own.
+Downloads are npm last-week, PyPI pypistats `last_week`, crates.io 90-day ×
+7/90 and pub.dev 30-day × 7/30. Downloads alone is a pumped young package; a
+version count alone is cheap (create-jst shipped 28 versions in 30 days), so
+neither admits on its own. The old-package line is low on purpose and safe
+only because of the version gate below: downloads are cheap to inflate and
+old dormant names get taken over, so a row admitted on it still warns on
+every install that is not an exact build-time pin. The block tier's higher
+bar is measured: at 1,000 a week the line admitted `loadash` (lodash, 2
+releases, 14.4k a week) and `expres` (express, 2.9k), the guard's canary
+squats, and lowered their blocks to warnings; no version-count rule separates
+them from `as-number` (1 release, 47k). The guard's runtime clear
+takes the same line (`risk.EstablishedTableClear`); the server's clear
+(`risk.EstablishedClear`) does not, because it has no release set to gate on.
 **Never admitted:** a name in the known-malicious feed, an npm security
 placeholder (highest version is npm's `-security` holding release:
-`npm:http`), a name with no registry data.
+`npm:http`), a name with no registry data, and a name on the **reviewed
+keep-blocked list** (`keepBlocked` in `census.go`: ecosystem, name, reason,
+review date), applied after admission. The list holds names that meet a line
+but whose traffic an expert hand-review found to be mis-installs of the
+target (2026-10-23: npm `user`; PyPI `websocket`, `config-parser`, `slack`,
+`google-oauth`). `TestKeepBlockedNeverAdmitted` fails if any is ever
+admitted.
 
 Row format (TSV):
 
@@ -69,8 +87,8 @@ name one edit from a popular seed with under 1% of its traffic. Two defects:
 
 | eco | name list | per-candidate |
 | --- | --- | --- |
-| npm | `replicate.npmjs.com/_all_docs` ids (~4.5M, 10k/page, 2/s), held in memory only | `api.npmjs.org` last-week (unscoped: 128 per bulk request, first; scoped: one point call each, after the doc shows ≥2y); registry doc only for names on the line and scoped names |
-| pypi | `pypi.org/simple/` (PEP 691 JSON) | `hugovk.dev/top-pypi-packages` (top 15,000 by 30-day downloads, one request) decides who is worth more: a candidate under half the line there (or absent — the list's cutoff is ~53k/month, an eighth of the line) gets no further call; the rest get `pypi.org/pypi/<name>/json` and, if ≥2y, `pypistats.org` recent (1/1.1s) |
+| npm | `replicate.npmjs.com/_all_docs` ids (~4.5M, 10k/page, 2/s), held in memory only | `api.npmjs.org` last-week (unscoped: 128 per bulk request, first; scoped: one point call each, after the doc shows ≥2y); registry doc only for names at ≥ 1,000/week and scoped names |
+| pypi | `pypi.org/simple/` (PEP 691 JSON) | ClickHouse's public PyPI download dataset (`sql-clickhouse.clickhouse.com`, demo user; two aggregate queries on the monthly table, no package name sent, `read_overflow_mode='throw'` so a truncated scan fails the run) decides who is worth more: a candidate under 500 a week there (last complete month × 7/30) gets no further call; the rest get `pypi.org/pypi/<name>/json` and, if a line can still admit it, `pypistats.org` recent (1/1.1s), which is what admission reads |
 | cargo | `crates.io/api/v1/crates` seek pages (100/page, 1/s — the 2 GB db dump does not fit the release machine); the listing carries created date, 90-day downloads and version count, so no per-crate call | `index.crates.io` releases for admissible crates |
 | pub | `pub.dev/api/package-names` | `/api/packages/<name>`; `/api/packages/<name>/score` if ≥2y |
 
@@ -81,7 +99,7 @@ the warn tier is refused without a per-name request.
 Every request carries the descriptive User-Agent
 (`chain305 established-table-gen (github.com/chain305/chainsaw)`), goes through
 a per-host limiter, and backs off on 429/5xx honouring `Retry-After`. Downloads
-are fetched only for candidates that already pass the age half. The run ends
+are fetched only for candidates a line can still admit. The run ends
 by printing upstream request counts per host.
 
 **Never a customer inventory.** As a second guard, any `internal-<8 hex>` name
@@ -93,14 +111,19 @@ by printing upstream request counts per host.
 Any failure refuses the write and exits non-zero:
 
 1. **Self-test** of the admission lines on synthetic rows: a pumped young
-   package, an old quiet one, a version-count-only one, a feed name and a
-   placeholder are refused; a dormant old package with two versions and real
-   traffic is admitted.
+   package, an old quiet one (500/week), a 3-year-old one at 50k/week, a
+   version-count-only one, a feed name and a placeholder are refused; a
+   dormant old package with two versions and real traffic, and a 5-year-old
+   one at 1,000/week, are admitted; a block-tier one at 14k/week is refused
+   and one at 47k/week admitted.
 2. **Sentinels** — measured false blocks that must be admitted (npm: `pug`,
    `jsonp`, `is-blob`; pub: `dartx`).
-3. **Churn** — a regeneration that loses more than 25% of the previous census's
+3. **Canaries** — the guard's canary squats (npm `lodahs`, `loadash`,
+   `crossenv`, `expres`, `chalkk`; PyPI `reqeusts`, `beautifulsoup5`; cargo
+   `proc-macro1`) must not be admitted.
+4. **Churn** — a regeneration that loses more than 25% of the previous census's
    rows is refused (first census run: baseline).
-4. **Feed** — `-malware-feed` (default: the `chainsaw guard update` cache)
+5. **Feed** — `-malware-feed` (default: the `chainsaw guard update` cache)
    plus the embedded floor; an unreadable or empty feed refuses the run.
 
 Every candidate's decision is written to `<cache>/<eco>_census_verdicts.jsonl`

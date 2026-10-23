@@ -160,3 +160,37 @@ func derefTime(t *time.Time) time.Time {
 	}
 	return *t
 }
+
+// TestEstablishedTableClearOldLine: the guard-only census line — 5+ years on
+// the registry AND >= 1,000 a week — clears a row EstablishedClear does not
+// (a recent release fails the long-lived line), and nothing below it.
+func TestEstablishedTableClearOldLine(t *testing.T) {
+	recent := clearDay("2026-10-01")
+	for _, tc := range []struct {
+		name        string
+		row         EstablishedRow
+		server, tab bool
+	}{
+		{"5y+ at 1k, released this month", EstablishedRow{WeeklyDownloads: 1_000, VersionCount: 9, FirstPublished: clearDay("2014-09-17"), LastPublished: recent}, false, true},
+		{"5y+ at 999", EstablishedRow{WeeklyDownloads: 999, VersionCount: 9, FirstPublished: clearDay("2014-09-17"), LastPublished: recent}, false, false},
+		{"a day under 5y at 50k", EstablishedRow{WeeklyDownloads: 50_000, FirstPublished: clearDay("2021-10-21"), LastPublished: recent}, false, false},
+		{"5y+ at 1k, first publish unknown", EstablishedRow{WeeklyDownloads: 1_000, LastPublished: recent}, false, false},
+		{"downloads line", EstablishedRow{WeeklyDownloads: EstablishedWeeklyDownloads}, true, true},
+	} {
+		_, server := EstablishedClear(tc.row, clearNow)
+		reason, tab := EstablishedTableClear(tc.row, clearNow, false)
+		if server != tc.server || tab != tc.tab {
+			t.Errorf("%s: EstablishedClear=%v EstablishedTableClear=%v (%q), want %v/%v", tc.name, server, tab, reason, tc.server, tc.tab)
+		}
+	}
+	// A block-tier hit needs EstablishedCensusOldBlockWeeklyDownloads.
+	for _, tc := range []struct {
+		weekly int64
+		want   bool
+	}{{EstablishedCensusOldBlockWeeklyDownloads, true}, {EstablishedCensusOldBlockWeeklyDownloads - 1, false}, {14_436, false}} {
+		row := EstablishedRow{WeeklyDownloads: tc.weekly, FirstPublished: clearDay("2016-09-22"), LastPublished: recent}
+		if _, got := EstablishedTableClear(row, clearNow, true); got != tc.want {
+			t.Errorf("block tier at %d/week: cleared=%v, want %v", tc.weekly, got, tc.want)
+		}
+	}
+}

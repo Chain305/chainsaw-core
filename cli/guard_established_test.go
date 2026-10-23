@@ -135,6 +135,50 @@ func TestEstablishedClearSkipsTyposquatLaneNotTheRest(t *testing.T) {
 	}
 }
 
+// TestEstablishedOldLineDormantSquatOnlyWarns: the census's old-package line
+// (5+ years AND >= 1,000 a week; >= 20,000 for a block-tier hit) admits
+// squat-shaped names. Admission must never weaken a block beyond the version
+// gate: every install but an exact pin of a build-time release warns, whether
+// the name has been dormant for years or woke up last week (a sleeper the
+// server's long-lived line would refuse). And a block-tier lookalike under the
+// block bar that woke up keeps BLOCKING: lodahs is one edit from lodash, the
+// loadash/expres shape (2026-10-23).
+func TestEstablishedOldLineDormantSquatOnlyWarns(t *testing.T) {
+	ctx := context.Background()
+	recent := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
+	for _, c := range []struct {
+		weekly int64
+		last   string
+		block  bool
+	}{
+		{1_200, "2019-02-01", false}, // dormant: the long-lived line clears it
+		{1_200, recent, true},        // woke up, under the block bar: no clear
+		{25_000, recent, false},      // woke up, over the block bar: old-package line
+	} {
+		name, row := establishedNPMRow("lodahs", c.weekly, 2, "2018-03-01", c.last)
+		row.Releases = map[string]struct{}{"1.0.0": {}, "1.0.1": {}}
+		setEstablishedTablesForTest(t, map[string]map[string]risk.EstablishedRow{"npm": {name: row}})
+		g := newSeedOnlyGuard(t)
+		for _, version := range []string{"", "^1.0.0", "latest", "1.0.2"} {
+			v := g.evaluate(ctx, packageSpec{Ecosystem: "npm", Name: "lodahs", Version: version})
+			if c.block {
+				if !v.Block || v.Severity != guardSeverityTyposquatHigh {
+					t.Errorf("%d/wk last=%s version=%q: must BLOCK, got %+v", c.weekly, c.last, version, v)
+				}
+				continue
+			}
+			if v.Block || v.Severity != guardSeverityTyposquatDemoted || v.ClearedReason != "" ||
+				!strings.Contains(v.Reason, "lodash") || !strings.Contains(v.Reason, "lodahs is established") {
+				t.Errorf("%d/wk last=%s version=%q: must WARN naming lodash, got %+v", c.weekly, c.last, version, v)
+			}
+		}
+		v := g.evaluate(ctx, packageSpec{Ecosystem: "npm", Name: "lodahs", Version: "1.0.1"})
+		if c.block != v.Block || (!c.block && (v.Severity != "" || v.ClearedReason == "")) {
+			t.Errorf("%d/wk last=%s: exact pin of a build-time release: got %+v", c.weekly, c.last, v)
+		}
+	}
+}
+
 // TestEstablishedClearDoesNotTouchHomoglyph: byte-level evidence is above
 // data clears. `nаn` (Cyrillic U+0430) against corpus `nan` has an
 // established row keyed under its EXACT confusable name — the row would clear
@@ -148,7 +192,7 @@ func TestEstablishedClearDoesNotTouchHomoglyph(t *testing.T) {
 	})
 
 	// The row really would clear — through the very lookup evaluate() uses.
-	if _, _, ok := establishedClears("npm", cyrillicNan, guardEstablishedNow); !ok {
+	if _, _, ok := establishedClears("npm", cyrillicNan, guardEstablishedNow, true); !ok {
 		t.Fatal("fixture row does not clear — the test cannot prove the arm ordering without it")
 	}
 
@@ -268,8 +312,9 @@ func TestEstablishedClearFallsThroughToBehavioralBlock(t *testing.T) {
 
 // TestGuardClearMatchesEstablishedClear is the guard half of the conformance
 // pair (the server half: core/intelligence, TestServerClearMatches…). The
-// guard's table lookup must decide exactly what risk.EstablishedClear — the
-// same function the server path routes through — decides for the same row.
+// guard's table lookup must decide exactly what risk.EstablishedTableClear
+// decides for the same row: risk.EstablishedClear — the function the server
+// path routes through — plus the census's guard-only old-package line.
 func TestGuardClearMatchesEstablishedClear(t *testing.T) {
 	rows := []risk.EstablishedRow{
 		{Name: "csrf", WeeklyDownloads: 1_277_456},
@@ -281,6 +326,10 @@ func TestGuardClearMatchesEstablishedClear(t *testing.T) {
 		{Name: "jamespath", FirstPublished: mustDay("2013-11-27"), LastPublished: mustDay("2013-11-27")},
 		{Name: "long-lived-last-unknown", FirstPublished: mustDay("2010-01-01")},
 		{Name: "sleeper", FirstPublished: mustDay("2015-01-01"), LastPublished: mustDay("2026-06-01")},
+		// The census's old-package line: the guard's table clear only.
+		{Name: "old-at-1k", WeeklyDownloads: risk.EstablishedCensusOldWeeklyDownloads, FirstPublished: mustDay("2015-01-01"), LastPublished: mustDay("2026-06-01")},
+		{Name: "old-at-999", WeeklyDownloads: risk.EstablishedCensusOldWeeklyDownloads - 1, FirstPublished: mustDay("2015-01-01"), LastPublished: mustDay("2026-06-01")},
+		{Name: "old-at-block-bar", WeeklyDownloads: risk.EstablishedCensusOldBlockWeeklyDownloads, FirstPublished: mustDay("2015-01-01"), LastPublished: mustDay("2026-06-01")},
 		{Name: "no-data"},
 	}
 	table := make(map[string]risk.EstablishedRow, len(rows))
@@ -290,21 +339,23 @@ func TestGuardClearMatchesEstablishedClear(t *testing.T) {
 	setEstablishedTablesForTest(t, map[string]map[string]risk.EstablishedRow{"npm": table})
 
 	for _, r := range rows {
-		wantReason, wantCleared := risk.EstablishedClear(r, guardEstablishedNow)
-		gotReason, gotRow, ok := establishedClears("npm", r.Name, guardEstablishedNow)
-		if ok != wantCleared {
-			t.Errorf("%s: establishedClears ok=%v, risk.EstablishedClear cleared=%v (%q) — the guard and the server disagree",
-				r.Name, ok, wantCleared, wantReason)
-			continue
-		}
-		if !ok {
-			continue
-		}
-		if gotRow.Name != r.Name {
-			t.Errorf("%s: lookup returned the wrong row (%q)", r.Name, gotRow.Name)
-		}
-		if gotReason != wantReason {
-			t.Errorf("%s: reason %q, want the shared definition's %q", r.Name, gotReason, wantReason)
+		for _, blockTier := range []bool{false, true} {
+			wantReason, wantCleared := risk.EstablishedTableClear(r, guardEstablishedNow, blockTier)
+			gotReason, gotRow, ok := establishedClears("npm", r.Name, guardEstablishedNow, blockTier)
+			if ok != wantCleared {
+				t.Errorf("%s (block tier %v): establishedClears ok=%v, risk.EstablishedTableClear cleared=%v (%q)",
+					r.Name, blockTier, ok, wantCleared, wantReason)
+				continue
+			}
+			if !ok {
+				continue
+			}
+			if gotRow.Name != r.Name {
+				t.Errorf("%s: lookup returned the wrong row (%q)", r.Name, gotRow.Name)
+			}
+			if gotReason != wantReason {
+				t.Errorf("%s: reason %q, want the shared definition's %q", r.Name, gotReason, wantReason)
+			}
 		}
 	}
 }
@@ -322,7 +373,7 @@ func TestEstablishedClearsKeysByDetectorNormalization(t *testing.T) {
 	})
 	for _, eco := range []string{"pip", "pypi", "python"} { // …looked up by the guard's verb and its aliases
 		for _, spelling := range []string{"django-filter", "Django_Filter", "django.filter", "DJANGO__FILTER"} {
-			reason, gotRow, ok := establishedClears(eco, spelling, guardEstablishedNow)
+			reason, gotRow, ok := establishedClears(eco, spelling, guardEstablishedNow, true)
 			if !ok {
 				t.Errorf("establishedClears(%q, %q) missed the row — normalization keying is broken", eco, spelling)
 				continue
@@ -334,10 +385,10 @@ func TestEstablishedClearsKeysByDetectorNormalization(t *testing.T) {
 	}
 	// npm's normalizer does NOT fold delimiters: a pip row never answers an
 	// npm lookup, and vice versa a pip-spelled npm name is a different key.
-	if _, _, ok := establishedClears("npm", "django-filter", guardEstablishedNow); ok {
+	if _, _, ok := establishedClears("npm", "django-filter", guardEstablishedNow, true); ok {
 		t.Error("an npm lookup must not consult the pypi table (per-ecosystem keying)")
 	}
-	if _, _, ok := establishedClears("pip", "django", guardEstablishedNow); ok {
+	if _, _, ok := establishedClears("pip", "django", guardEstablishedNow, true); ok {
 		t.Error("a different name must not match")
 	}
 }
@@ -416,16 +467,16 @@ func TestParseEstablishedTableDecisions(t *testing.T) {
 		"clears-weekly\t500000\t0\t\t\n"+
 		"clears-history\t100\t50\t2020-01-01\t\n"+
 		"clears-longlived\t0\t0\t2015-01-01\t2025-06-01\n"+
-		"stays\t99999\t49\t2020-01-01\t\n"))
+		"stays\t99999\t49\t2022-01-01\t\n"))
 	table := "pip"
 	for _, name := range []string{"clears-weekly", "clears-history", "clears-longlived"} {
 		setEstablishedTablesForTest(t, map[string]map[string]risk.EstablishedRow{table: rows})
-		if _, _, ok := establishedClears("pip", name, guardEstablishedNow); !ok {
+		if _, _, ok := establishedClears("pip", name, guardEstablishedNow, true); !ok {
 			t.Errorf("%s should clear through the shared definition", name)
 		}
 	}
 	setEstablishedTablesForTest(t, map[string]map[string]risk.EstablishedRow{table: rows})
-	if _, _, ok := establishedClears("pip", "stays", guardEstablishedNow); ok {
+	if _, _, ok := establishedClears("pip", "stays", guardEstablishedNow, true); ok {
 		t.Error("a row below every line must not clear")
 	}
 }
@@ -468,7 +519,8 @@ func TestEstablishedPlaceholderCarriesNoRows(t *testing.T) {
 // TestEmbeddedEstablishedTablesAreSelfConsistent runs over whatever real
 // tables are embedded TODAY: every parsed row must be retrievable through
 // establishedClears under its own name and must agree with the shared
-// definition. Skips with a clear message while only the placeholder exists —
+// definition (risk.EstablishedTableClear, block tier), and must clear at the
+// warn tier at least — a row the guard never clears is a census bug. Skips with a clear message while only the placeholder exists —
 // the seed pipeline lands seeds/established_*.tsv separately — and runs for
 // real the moment they do.
 func TestEmbeddedEstablishedTablesAreSelfConsistent(t *testing.T) {
@@ -492,8 +544,11 @@ func TestEmbeddedEstablishedTablesAreSelfConsistent(t *testing.T) {
 	}
 	for eco, rows := range tables {
 		for key, row := range rows {
-			wantReason, wantCleared := risk.EstablishedClear(row, guardEstablishedNow)
-			gotReason, _, ok := establishedClears(eco, row.Name, guardEstablishedNow)
+			if _, ok := risk.EstablishedTableClear(row, guardEstablishedNow, false); !ok {
+				t.Errorf("%s:%s: embedded row clears at no tier", eco, row.Name)
+			}
+			wantReason, wantCleared := risk.EstablishedTableClear(row, guardEstablishedNow, true)
+			gotReason, _, ok := establishedClears(eco, row.Name, guardEstablishedNow, true)
 			if ok != wantCleared {
 				t.Errorf("%s:%s (key %q): lookup ok=%v, shared definition cleared=%v — keying or decision diverged",
 					eco, row.Name, key, ok, wantCleared)

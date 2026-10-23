@@ -2,15 +2,16 @@
 // established tables (core/cli/seeds/established_<eco>.tsv) as a CENSUS: from
 // the registry's full public name list, every name one edit from a
 // block-eligible typosquat target that the registry shows is long-standing
-// AND heavily used — first published >= 2 years before the build and >= 100k
-// downloads a week (or the ecosystem's equivalent). Each row carries its
+// AND used — first published >= 2 years before the build and >= 100k
+// downloads a week (or the ecosystem's equivalent), or >= 5 years and >= 1k
+// a week. Each row carries its
 // exact build-time release set; the guard is silent only for an exact pin in
 // it and warns on every other install of the name.
 //
 // Sources (public only — never a customer inventory; see README.md):
 //
 //	npm:   replicate.npmjs.com/_all_docs ids; registry docs; api.npmjs.org last-week
-//	pypi:  pypi.org/simple (PEP 691); pypi.org/pypi/<name>/json; pypistats.org last_week
+//	pypi:  pypi.org/simple (PEP 691); ClickHouse public PyPI downloads (prefilter); pypi.org/pypi/<name>/json; pypistats.org last_week
 //	cargo: crates.io listing (seek pages, 1/s); /api/v1/crates/<name>; index.crates.io
 //	pub:   pub.dev/api/package-names; /api/packages/<name>; /score downloadCount30Days
 //

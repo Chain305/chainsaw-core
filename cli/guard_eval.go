@@ -858,10 +858,19 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 			// clear, and announcing an established row for one would leak
 			// exactly the ~1-in-9 real-package population the silence exists
 			// to protect.
+			// d1InCutoff is the population the block-lane gate speaks for: a
+			// single edit against a target inside the rank cutoff. Splitting it
+			// out is what lets a hit the GATE demoted be labelled differently
+			// from a hit that was never block-eligible in the first place.
+			// (The homoglyph arm returned above, before the allowlist consult.)
+			// It is also the census's block tier, which the established
+			// table's old-package line holds to a higher downloads bar.
+			d1InCutoff := res.Method == "edit-distance" && res.Distance == 1 &&
+				res.TargetRank > 0 && res.TargetRank <= guardTyposquatBlockRankCutoff
 			clearedLane := false
 			establishedWhy := ""
 			if res.Confidence != "low" {
-				if why, row, ok := establishedClears(spec.Ecosystem, spec.Name, time.Now()); ok {
+				if why, row, ok := establishedClears(spec.Ecosystem, spec.Name, time.Now(), d1InCutoff); ok {
 					if establishedPinnedRelease(row, spec.Version) {
 						guardEstablishedClears.Add(1)
 						clearedReason = establishedClearsNotice(spec, guardTyposquatReason(res), why)
@@ -899,13 +908,6 @@ func (g *localGuard) evaluate(ctx context.Context, spec packageSpec) guardVerdic
 				// and a string built for a verdict that can never be emitted reads to
 				// the next person as a dropped result.
 				reason := func() string { return guardTyposquatReason(res) }
-				// d1InCutoff is the population the block-lane gate speaks for: a
-				// single edit against a target inside the rank cutoff. Splitting it
-				// out is what lets a hit the GATE demoted be labelled differently
-				// from a hit that was never block-eligible in the first place.
-				// (The homoglyph arm returned above, before the allowlist consult.)
-				d1InCutoff := res.Method == "edit-distance" && res.Distance == 1 &&
-					res.TargetRank > 0 && res.TargetRank <= guardTyposquatBlockRankCutoff
 				// lane is the verdict the EVIDENCE earns, computed before the
 				// allowlist is consulted. That order is what makes a waiver
 				// reportable rather than silent: "your allowlist suppressed this"

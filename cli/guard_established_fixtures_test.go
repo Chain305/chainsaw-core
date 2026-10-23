@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chain305/chainsaw-core/typosquat"
 )
 
 // TestEstablishedCanarySquatsStillBlock: the recall floor. None of these is
@@ -25,6 +27,41 @@ func TestEstablishedCanarySquatsStillBlock(t *testing.T) {
 		v := g.evaluate(context.Background(), s)
 		if !v.Block || v.Severity != guardSeverityTyposquatHigh {
 			t.Errorf("%s:%s must keep BLOCKING as a typosquat, got %+v", s.Ecosystem, s.Name, v)
+		}
+	}
+}
+
+// TestEstablishedKeepBlocked: names the census lines admit but an expert
+// review kept out (the generator's keepBlocked list, 2026-10-23) —
+// typo-catchers whose traffic is mis-installs of the target. They must not be
+// in the embedded tables, and no verdict may call them established.
+// config-parser, slack and google-oauth BLOCK; user (vs bser) and websocket
+// (vs websockets) never blocked — the block-lane gate demotes those shapes —
+// so they keep the gate's warning, without an establishment claim.
+func TestEstablishedKeepBlocked(t *testing.T) {
+	g := newSeedOnlyGuard(t)
+	for _, c := range []struct {
+		s     packageSpec
+		block bool
+	}{
+		{packageSpec{Ecosystem: "npm", Name: "user"}, false},
+		{packageSpec{Ecosystem: "pip", Name: "websocket"}, false},
+		{packageSpec{Ecosystem: "pip", Name: "config-parser"}, true},
+		{packageSpec{Ecosystem: "pip", Name: "slack"}, true},
+		{packageSpec{Ecosystem: "pip", Name: "google-oauth"}, true},
+	} {
+		if table, _ := establishedTableFor(c.s.Ecosystem); table != nil {
+			if _, present := table[typosquat.NormalizerForFormat(establishedTableEcosystem(c.s.Ecosystem))(c.s.Name)]; present {
+				t.Errorf("%s:%s is in the embedded established table", c.s.Ecosystem, c.s.Name)
+			}
+		}
+		v := g.evaluate(context.Background(), c.s)
+		wantSev := guardSeverityTyposquatDemoted
+		if c.block {
+			wantSev = guardSeverityTyposquatHigh
+		}
+		if v.Block != c.block || v.Severity != wantSev || strings.Contains(v.Reason, "is established") || v.ClearedReason != "" {
+			t.Errorf("%s:%s: want block=%v severity %s and no establishment claim, got %+v", c.s.Ecosystem, c.s.Name, c.block, wantSev, v)
 		}
 	}
 }
@@ -63,7 +100,7 @@ func TestPubEstablishedTableClearsDartx(t *testing.T) {
 		!strings.Contains(v.Reason, "dartx is established") {
 		t.Fatalf("pub:dartx unpinned must WARN naming dartz and the establishment, got %+v", v)
 	}
-	_, row, ok := establishedClears("pub", "dartx", time.Now())
+	_, row, ok := establishedClears("pub", "dartx", time.Now(), true)
 	if !ok {
 		t.Fatal("pub:dartx has no clearing row in the embedded pub table")
 	}
@@ -123,12 +160,13 @@ func TestEstablishedNoBareInstallIsSilent(t *testing.T) {
 // TestEstablishedInventoryFalseBlocks pins the 13 inventory false blocks
 // against the census tables (built from public registry name lists only, so
 // this inventory is out of sample). None may clear silently on an unpinned
-// install. Ten no longer block: gopsutil/v4 (Go suffix), dartx (pub census),
+// install. Twelve no longer block: gopsutil/v4 (Go suffix), dartx (pub census),
 // and jsonp, pegjs, is-blob, js-logger, has-own (npm census: on the registry
-// 7+ years with >= 100k downloads a week). The rest stay blocked because the
-// registry does not show them established by the census lines — under 100k
-// downloads a week: as-number, clui, crypto-es, crypto-ts, hable; faiss-gpu
-// likewise on PyPI. Changing that is a decision about the lines, not a table
+// 7+ years with >= 100k downloads a week); as-number, clui, crypto-es, hable
+// (npm) and faiss-gpu (PyPI) by the old-package line (2026-10-23: 5+ years
+// and, being block-tier lookalikes, >= 20k a week). crypto-ts stays blocked:
+// 8.1k a week, under the block-tier bar that keeps the canary squats loadash
+// and expres blocked. Changing that is a decision about the lines, not a table
 // edit.
 func TestEstablishedInventoryFalseBlocks(t *testing.T) {
 	g := newSeedOnlyGuard(t)
@@ -144,12 +182,12 @@ func TestEstablishedInventoryFalseBlocks(t *testing.T) {
 		{packageSpec{Ecosystem: "npm", Name: "is-blob"}, false},
 		{packageSpec{Ecosystem: "npm", Name: "js-logger"}, false},
 		{packageSpec{Ecosystem: "npm", Name: "has-own"}, false},
-		{packageSpec{Ecosystem: "npm", Name: "as-number"}, true},
-		{packageSpec{Ecosystem: "npm", Name: "clui"}, true},
-		{packageSpec{Ecosystem: "npm", Name: "crypto-es"}, true},
+		{packageSpec{Ecosystem: "npm", Name: "as-number"}, false},
+		{packageSpec{Ecosystem: "npm", Name: "clui"}, false},
+		{packageSpec{Ecosystem: "npm", Name: "crypto-es"}, false},
 		{packageSpec{Ecosystem: "npm", Name: "crypto-ts"}, true},
-		{packageSpec{Ecosystem: "npm", Name: "hable"}, true},
-		{packageSpec{Ecosystem: "pip", Name: "faiss-gpu"}, true},
+		{packageSpec{Ecosystem: "npm", Name: "hable"}, false},
+		{packageSpec{Ecosystem: "pip", Name: "faiss-gpu"}, false},
 	} {
 		v := g.evaluate(ctx, c.s)
 		if v.ClearedReason != "" {
