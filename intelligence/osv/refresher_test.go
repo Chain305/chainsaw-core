@@ -68,9 +68,9 @@ func TestSeveritySummary_CVSSParity(t *testing.T) {
 			wantScore: 7.5, wantLabel: "HIGH",
 		},
 		{
-			name:      "CVSS:4.0 vector skipped (no inline lookup)",
+			name:      "CVSS:4.0-only vector scored (FIRST calculator 9.3)",
 			entries:   []SeverityEntry{{Type: "CVSS_V4", Score: "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"}},
-			wantScore: 0.0, wantLabel: "",
+			wantScore: 9.3, wantLabel: "CRITICAL",
 		},
 		{
 			name:      "malformed vector returns 0",

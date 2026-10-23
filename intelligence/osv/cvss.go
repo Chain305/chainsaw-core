@@ -8,9 +8,8 @@ package osv
 // in build.sh and re-run dockerized/test-osv-severity.sh.
 //
 // Spec reference: https://www.first.org/cvss/v3.1/specification-document §7.1.
-// The 4.0 algorithm requires a 270-entry MacroVector lookup table that
-// neither path implements; CVSS 4.0 vectors return (0, "") here exactly
-// as build.sh does.
+// CVSS 4.0 vectors are scored by parseCVSS4Vector (cvss4.go), mirrored by
+// cvss4_score() in build.sh.
 
 import (
 	"math"
@@ -145,14 +144,20 @@ type SeverityEntry struct {
 //
 //   - Highest score across entries wins.
 //   - CVSS 3.0 / 3.1 vectors are parsed via parseCVSS3Vector.
-//   - CVSS 4.0 vectors are skipped (the 4.0 MacroVector lookup is too
-//     large to inline; build.sh has the same gap).
 //   - Bare-float scores ("7.5") are accepted as a legacy fallback.
+//   - CVSS 4.0 vectors (parseCVSS4Vector) price the record ONLY when no
+//     entry above produced a score. Until 2026-10-23 they were skipped, so an
+//     advisory whose only severity is a 4.0 vector and that carries no GitHub
+//     label (RUSTSEC-2026-0352, wasmtime-wasi: 8.8) scored 0 and passed a
+//     cvssMin 7 rule. Fallback-only keeps every record that already had a
+//     score byte-identical; with a GitHub label the band rule (BandScore)
+//     then decides, as for any other score.
 //
 // Returns (0, "") when no usable entry is present.
 func SeveritySummary(entries []SeverityEntry) (float64, string) {
 	score := 0.0
 	label := ""
+	v4 := 0.0
 	for _, sev := range entries {
 		s := strings.TrimSpace(sev.Score)
 		if s == "" {
@@ -166,7 +171,9 @@ func SeveritySummary(entries []SeverityEntry) (float64, string) {
 		case strings.HasPrefix(s, "CVSS:3.0/"), strings.HasPrefix(s, "CVSS:3.1/"):
 			f, ok = parseCVSS3Vector(s)
 		case strings.HasPrefix(s, "CVSS:4.0/"):
-			// build.sh skips 4.0 vectors — no in-script lookup table.
+			if f4, ok4 := parseCVSS4Vector(s); ok4 && f4 > v4 {
+				v4 = f4
+			}
 			continue
 		default:
 			parsed, err := strconv.ParseFloat(s, 64)
@@ -184,6 +191,9 @@ func SeveritySummary(entries []SeverityEntry) (float64, string) {
 				label = cvssLabel(score)
 			}
 		}
+	}
+	if score == 0 && v4 > 0 {
+		return v4, cvssLabel(v4)
 	}
 	return score, label
 }

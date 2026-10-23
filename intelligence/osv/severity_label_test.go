@@ -64,7 +64,7 @@ func TestSeverityFromLabelIsTheFloorNotTheMidpoint(t *testing.T) {
 // lets the label RAISE a vector below its band (GitHub rates the advisory
 // higher than its own v3 says), but it still never LOWERS a parsed vector
 // unless the record carries a CVSS 4.0 vector with real impact. A 4.0-only
-// record has no parseable vector and IS recovered.
+// record is priced by its 4.0 vector.
 func TestLabelNeverLowersAParsedVectorWithoutV4(t *testing.T) {
 	withVector := osvRecord{
 		ID: "GHSA-test-vector",
@@ -108,10 +108,12 @@ func TestLabelNeverLowersAParsedVectorWithoutV4(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("no rows for the 4.0-only record")
 	}
-	if rows[0].CVSSScore != 7.0 || rows[0].Severity != "HIGH" {
-		t.Errorf("a CVSS:4.0-only advisory flattened to (%v, %q), want (7, HIGH) — "+
-			"4.0 vectors are skipped by SeveritySummary, so the label is the only "+
-			"thing that can price them and this is the whole point of the fallback",
+	// Since 2026-10-23 the 4.0 vector is scored (8.7, in the HIGH band, so the
+	// label leaves it alone); before, the label floor 7.0 was all it got.
+	if rows[0].CVSSScore != 8.7 || rows[0].Severity != "HIGH" {
+		t.Errorf("a CVSS:4.0-only advisory flattened to (%v, %q), want (8.7, HIGH) — "+
+			"the 4.0 vector prices a record with no other score, and a label in "+
+			"the same band neither raises nor lowers it",
 			rows[0].CVSSScore, rows[0].Severity)
 	}
 }
