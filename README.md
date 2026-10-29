@@ -694,6 +694,15 @@ installer's signature check is opt-in and says so rather than pretending to
 verify. In a supply-chain security tool that gap is worth naming plainly: verify
 the checksum, or build from source, until it closes.
 
+## Further reading
+
+- [What is a package firewall?](https://chain305.com/what-is-a-package-firewall/)
+- [How to block malicious npm packages with npm settings](https://chain305.com/learn/block-malicious-npm-packages/)
+- [Typosquatting: lookalike package names and how to catch them](https://chain305.com/learn/typosquatting/)
+- [Slopsquatting: package names AI tools invent](https://chain305.com/slopsquatting/)
+- Teardowns: [the axios npm compromise](https://chain305.com/teardowns/axios-npm-compromise/) and [Mini Shai-Hulud on TanStack](https://chain305.com/teardowns/mini-shai-hulud-tanstack/)
+- Comparisons: [Socket](https://chain305.com/vs-socket/), [GitHub package firewall](https://chain305.com/vs-github-package-firewall/), [JFrog Curation](https://chain305.com/jfrog-curation-alternative/), [SCA tools](https://chain305.com/vs-sca/)
+
 ---
 
 [Docs](https://docs.chain305.com) · [chain305.com](https://chain305.com) ·
