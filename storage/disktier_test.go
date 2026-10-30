@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chain305/chainsaw-core/blobstore"
 )
@@ -394,4 +395,75 @@ func TestBlobOpsCountsStoreTrafficOnly(t *testing.T) {
 		t.Fatalf("after a store read = %s, want 1/1", ops.String())
 	}
 	_ = tier
+}
+
+// A blob stored before Put recorded its digest (every prod entry cached
+// before v0.22.128) has no SHA256, so the tier could never hold it and
+// every hit stayed an S3 read. Its first full read must record the digest
+// and keep the copy, so the next read skips the blob store.
+func TestDiskTierLearnsTheDigestOfALegacyEntry(t *testing.T) {
+	s, store, tier := newTierStorage(t, 1<<20)
+	ctx := context.Background()
+	s.SetDiskTier(nil)
+	body := []byte(strings.Repeat("legacy packument ", 256))
+	if _, err := s.Put(ctx, "chalk", bytes.NewReader(body), ContentMetadata{}); err != nil {
+		t.Fatal(err)
+	}
+	blobPath := mustBlobPath(t, s, "chalk")
+	meta, ok, err := s.metaStore.Get(ctx, blobPath)
+	if err != nil || !ok {
+		t.Fatalf("meta: %v %v", ok, err)
+	}
+	meta.SHA256 = "" // as stored before the digest was recorded
+	if err := s.metaStore.Put(ctx, blobPath, OrgFromContext(ctx), s.repo, meta); err != nil {
+		t.Fatal(err)
+	}
+	s.metaCache.Invalidate(blobPath)
+	s.SetDiskTier(tier)
+
+	c, err := s.Get(ctx, "chalk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readAll(t, c); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("first read: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		m, _, _ := s.metaStore.Get(ctx, blobPath)
+		if m.SHA256 != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first full read did not record the blob's digest: the entry can never use the tier")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	opens := store.opens.Load()
+	c, err = s.Get(ctx, "chalk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readAll(t, c); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("second read: %v", err)
+	}
+	if store.opens.Load() != opens {
+		t.Fatal("the read after the digest was learned went to the blob store, not the tier")
+	}
+}
+
+// A short read must not teach a digest: hashing a truncated body would
+// record the wrong SHA256 and pin a broken copy.
+func TestDiskTierLearnsNothingFromAShortBody(t *testing.T) {
+	s, _, tier := newTierStorage(t, 1<<20)
+	r := tier.learn("k", 100, io.NopCloser(strings.NewReader("only ten b")), func(string) {
+		t.Error("a body shorter than its recorded size taught a digest")
+	})
+	_, _ = io.ReadAll(r)
+	_ = r.Close()
+	if files := tierFiles(t, tier); len(files) != 0 {
+		t.Fatalf("a short body filled the tier: %v", files)
+	}
+	_ = s
 }

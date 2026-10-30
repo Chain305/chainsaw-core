@@ -467,6 +467,26 @@ func (f *facet) fetchAndStore(fetchCtx context.Context, req *Request, remote Rem
 		}
 	}
 
+	// Upstream confirmed OUR copy, but our copy could not be served (the
+	// blob read failed or the entry went). The client sent no conditional,
+	// so a bare 304 is an empty body it cannot use: npm read it as
+	// "invalid json response body" (prod, 2026-10-30, Contabo S3 GETs
+	// timing out). Fetch the whole document instead.
+	if revalidating && remoteResp.StatusCode == http.StatusNotModified {
+		if fresh := f.serveRevalidated(fetchCtx, logicalPath); fresh != nil {
+			return fresh, nil
+		}
+		_ = remoteResp.Body.Close()
+		stripConditionalHeaders(header)
+		var refetchErr error
+		remoteResp, refetchErr = f.fetchWithRetry(fetchCtx, remote, logicalPath, header)
+		if refetchErr != nil {
+			return nil, refetchErr
+		}
+		defer remoteResp.Body.Close()
+		f.recordCircuitOutcome(remoteResp.StatusCode)
+	}
+
 	if handled, resp := f.handleUpstreamStatus(fetchCtx, logicalPath, cacheKey, remoteResp); handled {
 		return resp, nil
 	}
@@ -1072,6 +1092,7 @@ func (f *facet) serveRevalidated(ctx context.Context, logicalPath string) *Respo
 	}
 	content, err := f.storage.Get(ctx, logicalPath)
 	if err != nil || content == nil {
+		f.logRevalidatedUnservable(logicalPath, err)
 		return nil
 	}
 	meta := content.Metadata
@@ -1094,9 +1115,19 @@ func (f *facet) serveRevalidated(ctx context.Context, logicalPath string) *Respo
 	// sent no conditional. Build the response directly.
 	resp, respErr := f.respondFromCache(ctx, logicalPath, content, false)
 	if respErr != nil || resp == nil {
+		f.logRevalidatedUnservable(logicalPath, respErr)
 		return nil
 	}
 	return resp
+}
+
+// logRevalidatedUnservable records why a 304-confirmed entry could not be
+// served; the caller then fetches the whole document again.
+func (f *facet) logRevalidatedUnservable(logicalPath string, err error) {
+	if f.logger != nil {
+		f.logger.Warn("revalidated entry could not be served from cache; refetching it whole",
+			"path", logicalPath, "error", err)
+	}
 }
 
 // tryStaleCache attempts to serve a previously cached copy of the artifact.

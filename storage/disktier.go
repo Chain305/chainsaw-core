@@ -174,12 +174,33 @@ func (t *DiskTier) fill(blobKey, sha string, src io.ReadCloser) io.ReadCloser {
 	if w == nil {
 		return src
 	}
-	return &fillingReader{src: src, w: w, h: sha256.New(), commit: func(got string) {
+	return &fillingReader{src: src, w: w, h: sha256.New(), commit: func(got string, _ int64) {
 		if strings.EqualFold(got, sha) {
 			w.commit(blobKey, sha)
 			return
 		}
 		w.abort()
+	}}
+}
+
+// learn is fill for an entry stored before Put recorded a digest: there is
+// no SHA256 to check against, so the copy is kept under the digest of the
+// bytes read, and onSHA records it so the next lookup can use the tier.
+// Only a read of exactly size bytes (when size is known) teaches anything,
+// so a truncated body never pins a wrong digest. onSHA runs in its own
+// goroutine; the caller's read never waits on a metadata write.
+func (t *DiskTier) learn(blobKey string, size int64, src io.ReadCloser, onSHA func(sha string)) io.ReadCloser {
+	w := t.newWriter()
+	if w == nil {
+		return src
+	}
+	return &fillingReader{src: src, w: w, h: sha256.New(), commit: func(got string, n int64) {
+		if size > 0 && n != size {
+			w.abort()
+			return
+		}
+		w.commit(blobKey, got)
+		go onSHA(got)
 	}}
 }
 
@@ -344,7 +365,8 @@ type fillingReader struct {
 	src    io.ReadCloser
 	w      *tierWriter
 	h      hash.Hash
-	commit func(got string)
+	commit func(got string, n int64)
+	n      int64
 	ended  bool
 }
 
@@ -353,10 +375,11 @@ func (r *fillingReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		r.h.Write(p[:n])
 		_, _ = r.w.Write(p[:n])
+		r.n += int64(n)
 	}
 	if errors.Is(err, io.EOF) && !r.ended {
 		r.ended = true
-		r.commit(hex.EncodeToString(r.h.Sum(nil)))
+		r.commit(hex.EncodeToString(r.h.Sum(nil)), r.n)
 	}
 	return n, err
 }

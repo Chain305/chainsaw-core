@@ -76,6 +76,9 @@ type CachedContent struct {
 	// ops counts this content's blob-store reads for the request that
 	// looked it up (nil: not counted).
 	ops *BlobOps
+	// learnSHA, when set, records the digest of a legacy entry (no
+	// Metadata.SHA256) after its first full read, so the tier can hold it.
+	learnSHA func(sha string)
 }
 
 // NewInMemoryContent returns content served from data rather than a stored
@@ -107,6 +110,8 @@ func (c *CachedContent) Open() (io.ReadCloser, error) {
 	}
 	if err == nil && c.tier != nil && sha != "" {
 		rc = c.tier.fill(c.path, sha, rc)
+	} else if err == nil && c.tier != nil && c.learnSHA != nil {
+		rc = c.tier.learn(c.path, c.Metadata.Size, rc, c.learnSHA)
 	}
 	return rc, err
 }
@@ -324,6 +329,29 @@ func (s *LocalStorage) content(ctx context.Context, blobPath string, meta Conten
 			defer cancel()
 			s.dropMeta(ctx, blobPath)
 		},
+		learnSHA: func(sha string) {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			s.recordSHA(ctx, blobPath, sha)
+		},
+	}
+}
+
+// recordSHA stores the digest learned from a legacy entry's first full
+// read. It reads the row again rather than writing the caller's copy, so a
+// concurrent CachedAt refresh is not rolled back, and it never overwrites a
+// digest already recorded.
+func (s *LocalStorage) recordSHA(ctx context.Context, blobPath, sha string) {
+	meta, ok, err := s.metaStore.Get(ctx, blobPath)
+	if err != nil || !ok || meta.SHA256 != "" {
+		return
+	}
+	meta.SHA256 = sha
+	if err := s.metaStore.Put(ctx, blobPath, OrgFromContext(ctx), s.repo, meta); err != nil {
+		return
+	}
+	if s.metaCache != nil {
+		s.metaCache.Put(blobPath, meta)
 	}
 }
 

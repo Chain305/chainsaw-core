@@ -27,13 +27,22 @@ type freshStorage struct {
 	// updateErr, when set, makes UpdateMetadata fail — used to pin the
 	// behaviour when the CachedAt refresh cannot be written.
 	updateErr error
-	puts      int
-	updates   int
+	// getErrAfter, when > 0, makes every Get after the first getErrAfter
+	// fail: the cached body became unreadable between the expiry check
+	// and the 304 (an S3 read timeout in prod, 2026-10-30).
+	getErrAfter int
+	gets        int
+	puts        int
+	updates     int
 }
 
 func (s *freshStorage) Get(context.Context, string) (*storage.CachedContent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.gets++
+	if s.getErrAfter > 0 && s.gets > s.getErrAfter && s.puts == 0 {
+		return nil, io.ErrUnexpectedEOF
+	}
 	if !s.present {
 		return nil, storage.ErrNotFound
 	}
@@ -540,6 +549,50 @@ func TestNotModifiedSurvivesAFailedStampRefresh(t *testing.T) {
 	}
 	if resp.Content == nil {
 		t.Fatal("no content served")
+	}
+}
+
+// TestNotModifiedWithUnreadableCacheRefetchesWhole pins the 2026-10-30
+// prod defect: the proxy revalidated an expired npm packument, upstream
+// answered 304, and the cached copy could not be read (a Contabo S3 GET
+// timed out). The client, which sent no conditional, got an empty 304 and
+// npm failed with "invalid json response body". The proxy must fetch the
+// whole document unconditionally instead and serve that.
+//
+// Verified by deletion: removing the refetch in fetchAndStore makes this
+// fail with StatusCode 304.
+func TestNotModifiedWithUnreadableCacheRefetchesWhole(t *testing.T) {
+	store := &freshStorage{meta: expiredNpmEntry(), present: true, getErrAfter: 3}
+
+	var conditional, unconditional int
+	f, _ := newRevalidationFacet(t, store, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			conditional++
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		unconditional++
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `W/"616f"`)
+		_, _ = io.WriteString(w, `{"dist-tags":{"latest":"7.0.0"}}`)
+	})
+
+	resp, err := f.Get(context.Background(), &Request{
+		LogicalPath: "undici", Method: http.MethodGet, Header: http.Header{},
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200: a client that sent no conditional "+
+			"must never receive a bare 304", resp.StatusCode)
+	}
+	if conditional != 1 || unconditional != 1 {
+		t.Errorf("upstream saw %d conditional and %d unconditional fetches, want 1 and 1",
+			conditional, unconditional)
+	}
+	if store.puts != 1 {
+		t.Errorf("storage Put count = %d, want 1 (the refetched body replaces the unreadable one)", store.puts)
 	}
 }
 
