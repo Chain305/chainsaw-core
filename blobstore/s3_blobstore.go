@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // S3BlobStore stores blobs in any S3-API-compatible bucket (AWS S3,
@@ -356,10 +357,18 @@ func (s *S3BlobStore) open(key string, offset int64) (io.ReadCloser, error) {
 	headerTimer.Stop()
 	release()
 	if err != nil {
+		// ctx is Open's own: only headerTimer cancels it before here, so a
+		// cancelled ctx means the store did not answer in time. The SDK
+		// reports that as context.Canceled, which the classifier cannot
+		// tell from a caller giving up, so name it here.
+		timedOut := ctx.Err() != nil
 		cancel()
 		if isS3NotFound(err) {
 			s.observeOp("get", key, start, ErrBlobNotFound)
 			return nil, ErrBlobNotFound
+		}
+		if timedOut {
+			err = fmt.Errorf("no response headers within %s: %w: %w", s.getTimeout, context.DeadlineExceeded, err)
 		}
 		s.observeOp("get", key, start, err)
 		return nil, s3OpError("get", key, err)
@@ -548,6 +557,12 @@ func isS3Unavailable(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// The request never got an HTTP answer (connection refused or reset,
+	// TLS failure): the store is unreachable, not the object wrong.
+	var se *smithyhttp.RequestSendError
+	if errors.As(err, &se) {
 		return true
 	}
 	var re interface{ HTTPStatusCode() int }
