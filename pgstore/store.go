@@ -14,6 +14,10 @@ import (
 type Store struct {
 	db     *sql.DB
 	readDB *sql.DB
+	// bgDB is the optional background pool (background.go).
+	bgDB *sql.DB
+	// mig is set only while migrate() runs; see migexec.go.
+	mig *migSession
 }
 
 func Open(dsn string) (*Store, error) {
@@ -144,6 +148,11 @@ func (s *Store) Close() error {
 	var firstErr error
 	if s.readDB != nil {
 		if err := s.readDB.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if s.bgDB != nil {
+		if err := s.bgDB.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

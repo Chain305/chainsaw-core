@@ -432,11 +432,11 @@ func nonCanonicalPredicate(rule CanonicalNameRuleSpec) (string, []any) {
 // rows. It counts candidates, not outcomes — the pass itself reports the
 // rename / merge / retain split, and a retained row stays put.
 func (s *Store) CanonicalNameCleanupCounts(ctx context.Context) (map[string]int, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, nil
 	}
 	pred, args := nonCanonicalPredicate(CanonicalNameRule())
-	rows, err := s.sql.DB().QueryContext(ctx, `
+	rows, err := s.db(ctx).QueryContext(ctx, `
 		SELECT ecosystem, count(*) FROM intelligence_reports
 		WHERE `+pred+`
 		GROUP BY 1 ORDER BY 2 DESC, 1`, args...)
@@ -465,7 +465,7 @@ func (s *Store) CanonicalNameCleanupCounts(ctx context.Context) (map[string]int,
 // from an operator-triggered path after reading
 // CanonicalNameCleanupCounts. limit <= 0 means no limit.
 func (s *Store) CanonicaliseReportNames(ctx context.Context, limit int) (CanonicalCleanupResult, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return CanonicalCleanupResult{}, nil
 	}
 	return canonicaliseReportNames(ctx, storeCanonicalBackend{s: s}, limit)
@@ -521,7 +521,7 @@ func (s *DefaultService) CanonicaliseReportNames(ctx context.Context, limit int)
 }
 
 func (s *Store) listNonCanonicalKeys(ctx context.Context, limit int) ([]Key, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, nil
 	}
 	pred, args := nonCanonicalPredicate(CanonicalNameRule())
@@ -530,7 +530,7 @@ func (s *Store) listNonCanonicalKeys(ctx context.Context, limit int) ([]Key, err
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	rows, err := s.sql.DB().QueryContext(ctx, q, args...)
+	rows, err := s.db(ctx).QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list non-canonical report keys: %w", err)
 	}
@@ -547,11 +547,11 @@ func (s *Store) listNonCanonicalKeys(ctx context.Context, limit int) ([]Key, err
 }
 
 func (s *Store) reportAuthorOrg(ctx context.Context, k Key) (string, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return "", nil
 	}
 	var org string
-	err := s.sql.DB().QueryRowContext(ctx, `
+	err := s.db(ctx).QueryRowContext(ctx, `
 		SELECT COALESCE(authored_by_org, '') FROM intelligence_reports
 		WHERE ecosystem=$1 AND package_name=$2 AND version=$3
 	`, k.Ecosystem, k.Package, k.Version).Scan(&org)
@@ -562,7 +562,7 @@ func (s *Store) reportAuthorOrg(ctx context.Context, k Key) (string, error) {
 }
 
 func (s *Store) renameReportKey(ctx context.Context, from, to Key) (bool, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return false, nil
 	}
 	// Both key columns move: the fold rewrites the ecosystem as well as the
@@ -573,7 +573,7 @@ func (s *Store) renameReportKey(ctx context.Context, from, to Key) (bool, error)
 	// row appeared since the listing, the rename is a no-op and the caller
 	// leaves the row for the next pass rather than clobbering the sibling.
 	// The guard reads the DESTINATION key, not the source.
-	res, err := s.sql.DB().ExecContext(ctx, `
+	res, err := s.db(ctx).ExecContext(ctx, `
 		UPDATE intelligence_reports SET ecosystem=$1, package_name=$2
 		WHERE ecosystem=$3 AND package_name=$4 AND version=$5
 		  AND NOT EXISTS (
@@ -588,10 +588,10 @@ func (s *Store) renameReportKey(ctx context.Context, from, to Key) (bool, error)
 }
 
 func (s *Store) deleteReportKey(ctx context.Context, k Key) (bool, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return false, nil
 	}
-	res, err := s.sql.DB().ExecContext(ctx, `
+	res, err := s.db(ctx).ExecContext(ctx, `
 		DELETE FROM intelligence_reports
 		WHERE ecosystem=$1 AND package_name=$2 AND version=$3
 	`, k.Ecosystem, k.Package, k.Version)

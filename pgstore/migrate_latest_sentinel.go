@@ -208,7 +208,7 @@ func (s *Store) PurgeLatestSentinelCoordinates(ctx context.Context, rule LatestS
 		 WHERE %s
 		   AND NOT (%s)`, pred, retainedClause)
 
-	res, err := s.db.ExecContext(ctx, query, args...)
+	res, err := s.migExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("purge latest-sentinel coordinates: %w", err)
 	}

@@ -8,12 +8,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
@@ -45,6 +50,46 @@ type S3BlobStore struct {
 	// records duration + outcome. nil is the default (no-op) so tests
 	// don't have to wire a metrics registry.
 	observer Observer
+
+	// inflight caps S3 requests being started at once (a GET holds its
+	// slot until its headers arrive, not while the body streams). A burst
+	// past the store's throttle threshold only buys 429s and retries.
+	inflight chan struct{}
+	// getTimeout and headTimeout bound waiting for a slot plus the
+	// response headers. Contabo under load answers some HEADs with nothing
+	// at all; 30 s held the request that long.
+	getTimeout, headTimeout time.Duration
+}
+
+// S3 request concurrency defaults, overridable by CHAINSAW_S3_MAX_INFLIGHT
+// and CHAINSAW_S3_MAX_CONNS. Set them from the store's measured throttle
+// threshold (docs/REPORTS.md#backend-perf-load-test-2026-10-29 J.2 A0).
+const (
+	defaultS3MaxInflight = 16
+	defaultS3MaxConns    = 64
+)
+
+func envPositiveInt(name string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name))); err == nil && n > 0 {
+		return n
+	}
+	return def
+}
+
+// acquire takes an in-flight slot, giving up at timeout with ErrUnavailable
+// (the caller answers a retriable 503).
+func (s *S3BlobStore) acquire(timeout time.Duration) (func(), error) {
+	if s.inflight == nil {
+		return func() {}, nil
+	}
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case s.inflight <- struct{}{}:
+		return func() { <-s.inflight }, nil
+	case <-t.C:
+		return nil, fmt.Errorf("s3: no request slot within %s: %w", timeout, ErrUnavailable)
+	}
 }
 
 // SetObserver installs a metrics/logging observer on this store. Safe
@@ -61,18 +106,11 @@ func (s *S3BlobStore) SetObserver(o Observer) {
 // logged key under 80 chars so we don't blow out the log line on
 // requests like `maven/2-byte-shard/very/deep/group/artifact/1.2.3/...`.
 func (s *S3BlobStore) observeOp(op, key string, start time.Time, err error) {
-	outcome := "ok"
-	if err != nil {
-		if errors.Is(err, ErrBlobNotFound) {
-			outcome = "not_found"
-		} else {
-			outcome = "error"
-		}
-	}
+	outcome := s3Outcome(err)
 	if s.observer != nil {
 		s.observer.ObserveOp(op, outcome, time.Since(start).Seconds())
 	}
-	if outcome == "error" && s.logger != nil {
+	if outcome != "ok" && outcome != "not_found" && s.logger != nil {
 		s.logger.Warn("s3 blob op failed",
 			slog.String("op", op),
 			slog.String("bucket", s.bucket),
@@ -118,7 +156,7 @@ func NewS3BlobStore(cfg S3Config, logger *slog.Logger) (BlobStore, error) {
 		return nil, fmt.Errorf("blobstore: load aws config: %w", err)
 	}
 
-	clientOpts := []func(*s3.Options){}
+	clientOpts := []func(*s3.Options){func(o *s3.Options) { o.Retryer = s3Retryer() }}
 	if cfg.UsePathStyle {
 		clientOpts = append(clientOpts, func(o *s3.Options) {
 			o.UsePathStyle = true
@@ -142,6 +180,12 @@ func NewS3BlobStore(cfg S3Config, logger *slog.Logger) (BlobStore, error) {
 		})
 	}
 
+	maxConns := envPositiveInt("CHAINSAW_S3_MAX_CONNS", defaultS3MaxConns)
+	clientOpts = append(clientOpts, func(o *s3.Options) {
+		o.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+			tr.MaxConnsPerHost = maxConns
+		})
+	})
 	client := s3.NewFromConfig(awsCfg, clientOpts...)
 	uploader := manager.NewUploader(client, func(u *manager.Uploader) {
 		u.PartSize = 16 * 1024 * 1024 // 16 MB
@@ -155,6 +199,9 @@ func NewS3BlobStore(cfg S3Config, logger *slog.Logger) (BlobStore, error) {
 		keyPrefix:    strings.Trim(cfg.KeyPrefix, "/"),
 		logger:       logger,
 		usePathStyle: cfg.UsePathStyle,
+		inflight:     make(chan struct{}, envPositiveInt("CHAINSAW_S3_MAX_INFLIGHT", defaultS3MaxInflight)),
+		getTimeout:   10 * time.Second,
+		headTimeout:  5 * time.Second,
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.SSE)) {
 	case "":
@@ -280,14 +327,34 @@ func (s *S3BlobStore) WriteForOrg(orgID, repo, logicalPath string, src io.Reader
 // anything but a tiny object 502'd (2026-10-10). The SDK's HTTP client
 // owns idle/read timeouts on the stream itself.
 func (s *S3BlobStore) Open(key string) (io.ReadCloser, error) {
+	return s.open(key, 0)
+}
+
+// OpenRange is Open from offset: a ranged GET, so the bytes before it are
+// never transferred.
+func (s *S3BlobStore) OpenRange(key string, offset int64) (io.ReadCloser, error) {
+	return s.open(key, offset)
+}
+
+func (s *S3BlobStore) open(key string, offset int64) (io.ReadCloser, error) {
 	start := time.Now()
+	release, err := s.acquire(s.getTimeout)
+	if err != nil {
+		s.observeOp("get", key, start, err)
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	headerTimer := time.AfterFunc(30*time.Second, cancel)
-	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+	headerTimer := time.AfterFunc(s.getTimeout-time.Since(start), cancel)
+	input := &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	})
+	}
+	if offset > 0 {
+		input.Range = aws.String("bytes=" + strconv.FormatInt(offset, 10) + "-")
+	}
+	out, err := s.client.GetObject(ctx, input)
 	headerTimer.Stop()
+	release()
 	if err != nil {
 		cancel()
 		if isS3NotFound(err) {
@@ -295,7 +362,7 @@ func (s *S3BlobStore) Open(key string) (io.ReadCloser, error) {
 			return nil, ErrBlobNotFound
 		}
 		s.observeOp("get", key, start, err)
-		return nil, fmt.Errorf("s3 get %s: %w", key, err)
+		return nil, s3OpError("get", key, err)
 	}
 	s.observeOp("get", key, start, nil)
 	return &cancelOnClose{ReadCloser: out.Body, cancel: cancel}, nil
@@ -316,7 +383,13 @@ func (c *cancelOnClose) Close() error {
 // Stat returns minimal metadata for the blob at the given key.
 func (s *S3BlobStore) Stat(key string) (os.FileInfo, error) {
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	release, err := s.acquire(s.headTimeout)
+	if err != nil {
+		s.observeOp("stat", key, start, err)
+		return nil, err
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), s.headTimeout-time.Since(start))
 	defer cancel()
 	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -328,7 +401,7 @@ func (s *S3BlobStore) Stat(key string) (os.FileInfo, error) {
 			return nil, ErrBlobNotFound
 		}
 		s.observeOp("stat", key, start, err)
-		return nil, fmt.Errorf("s3 head %s: %w", key, err)
+		return nil, s3OpError("head", key, err)
 	}
 	s.observeOp("stat", key, start, nil)
 	size := int64(0)
@@ -421,6 +494,96 @@ func (s *S3BlobStore) joinKey(segments ...string) string {
 func s3Shard(logicalPath string) string {
 	sum := sha1.Sum([]byte(logicalPath))
 	return hex.EncodeToString(sum[:1]) + "/" + hex.EncodeToString(sum[1:2])
+}
+
+// s3OpError wraps a failed S3 call. Throttling and timeouts also wrap
+// ErrUnavailable, so the proxy can answer 503 + Retry-After instead of an
+// untyped 502.
+func s3OpError(op, key string, err error) error {
+	if isS3Unavailable(err) {
+		return fmt.Errorf("s3 %s %s: %w: %w", op, key, ErrUnavailable, err)
+	}
+	return fmt.Errorf("s3 %s %s: %w", op, key, err)
+}
+
+// s3Outcome is the operation's outcome label. throttled and timeout are
+// split out of error because they are the store pushing back (the
+// measured failure mode: Contabo 429s at three concurrent installs), not a
+// fault on our side, and they are what a retry or a disk-tier hit absorbs.
+func s3Outcome(err error) string {
+	switch {
+	case err == nil:
+		return "ok"
+	case errors.Is(err, ErrBlobNotFound):
+		return "not_found"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case isS3Throttle(err):
+		return "throttled"
+	}
+	return "error"
+}
+
+// isS3Throttle reports a rate-limit answer: HTTP 429 or a throttling code.
+func isS3Throttle(err error) bool {
+	var re interface{ HTTPStatusCode() int }
+	if errors.As(err, &re) && re.HTTPStatusCode() == 429 {
+		return true
+	}
+	var ae smithy.APIError
+	if errors.As(err, &ae) {
+		switch ae.ErrorCode() {
+		case "TooManyRequests", "SlowDown", "Throttling", "ThrottlingException":
+			return true
+		}
+	}
+	return false
+}
+
+// isS3Unavailable reports a backend-side failure: 429/503, SlowDown-style
+// throttling codes, or a timeout. Contabo answers bursts with 429 and, under
+// load, with HEADs that never return headers (StatusCode 0, deadline).
+func isS3Unavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var re interface{ HTTPStatusCode() int }
+	if errors.As(err, &re) {
+		switch re.HTTPStatusCode() {
+		case 429, 500, 502, 503, 504:
+			return true
+		}
+	}
+	var ae smithy.APIError
+	if errors.As(err, &ae) {
+		switch ae.ErrorCode() {
+		case "TooManyRequests", "SlowDown", "Throttling", "ThrottlingException", "RequestTimeout", "ServiceUnavailable":
+			return true
+		}
+	}
+	return false
+}
+
+// s3Retryer adds Contabo's throttle answers to the SDK's standard retry set.
+// A HEAD 429 has no body, so the SDK derives the code "TooManyRequests" from
+// the status text; that code is not in DefaultThrottleErrorCodes and 429 is
+// not in DefaultRetryableHTTPStatusCodes, so every HEAD 429 failed on the
+// first attempt and the proxy answered 502. The retry token bucket is off:
+// under a burst of 429s it would itself refuse retries ("retry quota
+// exceeded"), which is the case retries exist for.
+func s3Retryer() aws.Retryer {
+	return retry.NewStandard(func(o *retry.StandardOptions) {
+		o.MaxAttempts = 4
+		o.MaxBackoff = time.Second
+		o.RateLimiter = ratelimit.None
+		o.Retryables = append([]retry.IsErrorRetryable{
+			retry.RetryableHTTPStatusCode{Codes: map[int]struct{}{429: {}}},
+			retry.RetryableErrorCode{Codes: map[string]struct{}{"TooManyRequests": {}, "SlowDown": {}}},
+		}, o.Retryables...)
+	})
 }
 
 func isS3NotFound(err error) bool {

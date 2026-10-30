@@ -16,6 +16,11 @@ import (
 var (
 	// ErrBlobNotFound indicates the requested blob is missing.
 	ErrBlobNotFound = errors.New("blob not found")
+
+	// ErrUnavailable marks a failure of the backend itself (throttled,
+	// overloaded, timed out) rather than of the request: the same call is
+	// expected to succeed shortly. Callers answer it with a retriable 503.
+	ErrUnavailable = errors.New("blob store unavailable")
 )
 
 // FileBlobStore is a simple file-backed blob store analogous to Nexus' FileBlobStore.
@@ -142,6 +147,19 @@ func (b *FileBlobStore) Open(path string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// OpenRange opens a blob positioned at offset.
+func (b *FileBlobStore) OpenRange(path string, offset int64) (io.ReadCloser, error) {
+	rc, err := b.Open(path)
+	if err != nil || offset == 0 {
+		return rc, err
+	}
+	if _, err := rc.(*os.File).Seek(offset, io.SeekStart); err != nil {
+		rc.Close()
+		return nil, err
+	}
+	return rc, nil
 }
 
 // Stat returns os.FileInfo for the provided blob path.

@@ -208,6 +208,7 @@ func registryMetadataHTTPClient() *http.Client {
 		registryMetadataUpstream = upstreamhttp.New(
 			upstreamhttp.FromEnv(),
 			upstreamhttp.WithBaseClient(base),
+			upstreamhttp.WithLimiter(upstreamhttp.SharedLimiter()),
 			upstreamhttp.WithMaxRetries(0),
 		)
 		registryMetadataClient = registryMetadataUpstream.HTTPClient()
@@ -679,6 +680,11 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 		req.Header.Set("Accept", accept)
 	}
 	req.Header.Set("User-Agent", UserAgent("registry-metadata"))
+	cacheKey := etagCacheKey(endpoint, accept)
+	cached, haveCached := etagCacheGet(cacheKey)
+	if haveCached {
+		req.Header.Set("If-None-Match", cached.etag)
+	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -705,7 +711,20 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified && haveCached {
+		// The document is the one kept from the last 200 (I13-4): decode
+		// that, exactly as the 200 was decoded.
+		if err := decode(bytes.NewReader(cached.body)); err != nil {
+			etagCacheDrop(cacheKey)
+			return &Warning{Provider: "registrymetadata", Code: WarnRegistryDecode, Message: err.Error(), At: p.now()}, true, resp.StatusCode, err
+		}
+		if hc, ok := ctx.Value(headerCaptureKey{}).(*http.Header); ok && hc != nil {
+			*hc = cached.header.Clone()
+		}
+		return nil, false, http.StatusOK, nil
+	}
 	if resp.StatusCode == http.StatusNotFound {
+		etagCacheDrop(cacheKey)
 		return &Warning{Provider: "registrymetadata", Code: WarnRegistryNotFound, Message: endpoint, At: p.now()}, false, resp.StatusCode, nil
 	}
 	if resp.StatusCode >= 500 {
@@ -744,7 +763,17 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 	// Exhausting the limit is therefore reported as its own code. It is a
 	// DID-NOT-COMPLETE, not a verdict about the registry.
 	limited := &io.LimitedReader{R: resp.Body, N: registryMaxBodyBytes}
-	if err := decode(limited); err != nil {
+	// Keep the body for the next conditional GET when it carries an ETag
+	// and fits the cache's per-document cap.
+	var body io.Reader = limited
+	var kept *cappedBuffer
+	if etag := resp.Header.Get("ETag"); etag != "" {
+		if max := etagEntryMax(); max > 0 {
+			kept = &cappedBuffer{max: max}
+			body = io.TeeReader(limited, kept)
+		}
+	}
+	if err := decode(body); err != nil {
 		code, msg := WarnRegistryDecode, err.Error()
 		if ctx.Err() != nil {
 			// The deadline ended the body read, not a malformed document:
@@ -762,7 +791,33 @@ func (p *registryMetadataProvider) fetchOnce(ctx context.Context, endpoint, acce
 	if hc, ok := ctx.Value(headerCaptureKey{}).(*http.Header); ok && hc != nil {
 		*hc = resp.Header.Clone()
 	}
+	if kept != nil && !kept.over {
+		// The decoder may stop before EOF; the rest is part of the document
+		// the next 304 stands for.
+		if _, err := io.Copy(kept, limited); err == nil && !kept.over && limited.N > 0 {
+			etagCachePut(cacheKey, etagEntry{etag: resp.Header.Get("ETag"), body: kept.buf, header: resp.Header.Clone()})
+		}
+	}
 	return nil, false, resp.StatusCode, nil
+}
+
+// cappedBuffer collects up to max bytes and then only records that it
+// overflowed.
+type cappedBuffer struct {
+	buf  []byte
+	max  int64
+	over bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if !c.over {
+		if int64(len(c.buf)+len(p)) > c.max {
+			c.over, c.buf = true, nil
+		} else {
+			c.buf = append(c.buf, p...)
+		}
+	}
+	return len(p), nil
 }
 
 // headerCaptureKey lets a caller read the response headers of a successful
@@ -4683,19 +4738,22 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 		return PartialReport{}, nil
 	}
 	ver = goProxyVersion(ver)
+	// One go.mod fetch per version per scan: when the requested version is
+	// the latest, the retraction read and the dependency read are the same
+	// file (docs/REPORTS.md#backend-perf-load-test-2026-10-29 J.4 I13-2).
+	mods := goModCache{}
 	infoURL := fmt.Sprintf("%s/%s/@v/%s.info", p.endpoints.goproxy, module, url.PathEscape(ver))
-	var info struct {
-		Version string `json:"Version"`
-		Time    string `json:"Time"`
-		Origin  struct {
-			URL  string `json:"URL"`
-			Ref  string `json:"Ref"`
-			Hash string `json:"Hash"`
-		} `json:"Origin"`
-	}
-	warn, err := p.fetchJSON(ctx, infoURL, "application/json", &info)
-	if err != nil {
-		return PartialReport{}, err
+	info, cached := goInfoCacheGet(infoURL)
+	var warn *Warning
+	if !cached {
+		var err error
+		warn, err = p.fetchJSON(ctx, infoURL, "application/json", &info)
+		if err != nil {
+			return PartialReport{}, err
+		}
+		if warn == nil {
+			goInfoCachePut(infoURL, ver, info)
+		}
 	}
 	pr := PartialReport{}
 	if warn != nil {
@@ -4748,7 +4806,7 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 		// Retractions and the module deprecation live in the go.mod of the
 		// LATEST version — that is where the go command reads them, so a
 		// retraction is a fact a user of `go get` is already shown.
-		if yanked, why := p.fetchGoModState(ctx, module, latest.Version, ver); yanked || why != "" {
+		if yanked, why := p.fetchGoModState(ctx, module, latest.Version, ver, mods); yanked || why != "" {
 			if yanked {
 				y := true
 				release.Yanked = &y
@@ -4803,7 +4861,7 @@ func (p *registryMetadataProvider) runGo(ctx context.Context, pkg, ver string) (
 	// MVS would resolve — full MVS would require a `go` toolchain on
 	// PATH and a full module graph walk. This matches what most CVE
 	// scanners do today.
-	if deps := p.fetchGoMod(ctx, module, ver, &pr); deps != nil && len(deps.Direct) > 0 {
+	if deps := p.fetchGoMod(ctx, module, ver, &pr, mods); deps != nil && len(deps.Direct) > 0 {
 		pr.Dependencies = deps
 	}
 
@@ -4910,14 +4968,8 @@ func goModuleRepoURL(module string) string {
 //
 // One extra GET, and a duplicate one when ver IS the latest version —
 // accepted rather than threading the parsed file out of fetchGoMod.
-func (p *registryMetadataProvider) fetchGoModState(ctx context.Context, module, latest, ver string) (retracted bool, why string) {
-	modURL := fmt.Sprintf("%s/%s/@v/%s.mod", p.endpoints.goproxy, module, url.PathEscape(goProxyVersion(latest)))
-	var body []byte
-	warn, err := p.fetchDecoded(ctx, modURL, "text/plain", func(r io.Reader) error {
-		b, rerr := io.ReadAll(io.LimitReader(r, 1<<20))
-		body = b
-		return rerr
-	})
+func (p *registryMetadataProvider) fetchGoModState(ctx context.Context, module, latest, ver string, mods goModCache) (retracted bool, why string) {
+	body, warn, err := p.goModBody(ctx, module, latest, mods)
 	if err != nil || warn != nil {
 		return false, ""
 	}
@@ -4926,6 +4978,41 @@ func (p *registryMetadataProvider) fetchGoModState(ctx context.Context, module, 
 		return false, ""
 	}
 	return goModState(f, goProxyVersion(ver))
+}
+
+// goModCache holds the go.mod fetches of one runGo call, by URL.
+type goModCache map[string]goModFetch
+
+type goModFetch struct {
+	body []byte
+	warn *Warning
+	err  error
+}
+
+func (p *registryMetadataProvider) goModURL(module, ver string) string {
+	// An un-prefixed version 404s on the proxy; goProxyVersion is
+	// idempotent.
+	return fmt.Sprintf("%s/%s/@v/%s.mod", p.endpoints.goproxy, module, url.PathEscape(goProxyVersion(ver)))
+}
+
+// goModBody fetches a version's go.mod once per mods.
+func (p *registryMetadataProvider) goModBody(ctx context.Context, module, ver string, mods goModCache) ([]byte, *Warning, error) {
+	modURL := p.goModURL(module, ver)
+	if got, ok := mods[modURL]; ok {
+		return got.body, got.warn, got.err
+	}
+	var body []byte
+	warn, err := p.fetchDecoded(ctx, modURL, "text/plain", func(r io.Reader) error {
+		// 1 MiB ceiling: real-world go.mod files are <50KB; this is
+		// purely a guard against a misbehaving proxy.
+		b, rerr := io.ReadAll(io.LimitReader(r, 1<<20))
+		body = b
+		return rerr
+	})
+	if mods != nil {
+		mods[modURL] = goModFetch{body: body, warn: warn, err: err}
+	}
+	return body, warn, err
 }
 
 // goModState is the pure half of fetchGoModState.
@@ -4959,21 +5046,9 @@ func goModState(f *modfile.File, ver string) (retracted bool, why string) {
 // "v0.0.0-20240101000000-abc123def") are propagated verbatim — the
 // downstream constraint resolver matches them against cached
 // intelligence rows as exact version strings.
-func (p *registryMetadataProvider) fetchGoMod(ctx context.Context, module, ver string, pr *PartialReport) *DependenciesSection {
-	// Defensive: runGo already normalised, but this is reachable from any
-	// future caller and an un-prefixed version 404s on the proxy.
-	modURL := fmt.Sprintf("%s/%s/@v/%s.mod", p.endpoints.goproxy, module, url.PathEscape(goProxyVersion(ver)))
-	var body []byte
-	warn, err := p.fetchDecoded(ctx, modURL, "text/plain", func(r io.Reader) error {
-		// 1 MiB ceiling: real-world go.mod files are <50KB; this is
-		// purely a guard against a misbehaving proxy.
-		b, rerr := io.ReadAll(io.LimitReader(r, 1<<20))
-		if rerr != nil {
-			return rerr
-		}
-		body = b
-		return nil
-	})
+func (p *registryMetadataProvider) fetchGoMod(ctx context.Context, module, ver string, pr *PartialReport, mods goModCache) *DependenciesSection {
+	modURL := p.goModURL(module, ver)
+	body, warn, err := p.goModBody(ctx, module, ver, mods)
 	if err != nil || warn != nil {
 		// 404 is silent: legacy modules pre-go.mod era ship without a
 		// .mod entry on the proxy. No deps to surface, no signal worth

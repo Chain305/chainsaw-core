@@ -48,6 +48,7 @@ package intelligence
 import (
 	"context"
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/pgstore"
 	"github.com/chain305/chainsaw-core/upstreamhttp"
 	"os"
 	"strings"
@@ -171,6 +172,11 @@ func warmDirectDepsAtDepth(ctx context.Context, parent *Report, svc *DefaultServ
 	// Warm-up is best-effort: its registry requests take a bounded share
 	// of each host's rate and cannot starve the scans someone waits on.
 	bg = upstreamhttp.WithBackground(bg)
+	bg = pgstore.WithBackground(bg)
+	// A warmed package does not start a dependency walk of its own. bg has
+	// no dependency depth, so without this every warm scan re-entered the
+	// enqueuer at depth 0 and the "depth <= 2" bound never held.
+	bg = withDepDepth(bg, maxAutoDepDepth)
 
 	// Collect the (eco, name, version) triples we'll actually warm so the
 	// semaphore-bounded goroutine pool is sized to exactly the work that

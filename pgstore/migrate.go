@@ -57,7 +57,21 @@ func (s *Store) migrate() error {
 	defer func() {
 		_, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockID)
 		_, _ = conn.ExecContext(ctx, `RESET statement_timeout`)
+		_, _ = conn.ExecContext(ctx, `RESET lock_timeout`)
 	}()
+
+	// Every migration statement runs on this connection, bounded by
+	// lock_timeout, and skips what the catalog already answers. See
+	// migexec.go for why.
+	if _, err := conn.ExecContext(ctx, `SET lock_timeout = '`+migLockTimeout+`'`); err != nil {
+		return fmt.Errorf("set migration lock timeout: %w", err)
+	}
+	session := &migSession{conn: conn}
+	if err := session.load(ctx); err != nil {
+		return fmt.Errorf("read catalog for migration: %w", err)
+	}
+	s.mig = session
+	defer func() { s.mig = nil }()
 
 	return s.migrateSchema()
 }
@@ -403,8 +417,18 @@ func (s *Store) migrateSchema() error {
 		// All three statements use IF [NOT] EXISTS so the migration runs
 		// safely on every boot regardless of starting state.
 		`ALTER TABLE running_artifacts ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE running_artifacts DROP CONSTRAINT IF EXISTS running_artifacts_pkey`,
-		`ALTER TABLE running_artifacts ADD PRIMARY KEY (org_id, cluster, namespace, workload, image_digest, package_ecosystem, package_name, package_version)`,
+		// Rewrites the primary key only while it does not yet include
+		// org_id; it used to be dropped and re-added on every boot.
+		`DO $mig$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_index i
+				JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+				WHERE i.indrelid = 'running_artifacts'::regclass AND i.indisprimary AND a.attname = 'org_id'
+			) THEN
+				ALTER TABLE running_artifacts DROP CONSTRAINT IF EXISTS running_artifacts_pkey;
+				ALTER TABLE running_artifacts ADD PRIMARY KEY (org_id, cluster, namespace, workload, image_digest, package_ecosystem, package_name, package_version);
+			END IF;
+		END $mig$`,
 		`CREATE INDEX IF NOT EXISTS idx_running_artifacts_pkg
 			ON running_artifacts (org_id, package_ecosystem, package_name, package_version, last_observed_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_running_artifacts_observed
@@ -1543,16 +1567,29 @@ func (s *Store) migrateSchema() error {
 		// and deduplicate collisions by keeping the most-recently-collected
 		// row per (ecosystem, package_name, version).
 		//
-		// Each statement is idempotent: re-running after the migration
-		// has landed is a no-op.
-		`ALTER TABLE intelligence_reports DROP CONSTRAINT IF EXISTS intelligence_reports_pkey`,
-		`DELETE FROM intelligence_reports a USING intelligence_reports b
-			WHERE a.ctid < b.ctid
-			  AND a.ecosystem = b.ecosystem
-			  AND a.package_name = b.package_name
-			  AND a.version = b.version`,
-		`ALTER TABLE intelligence_reports DROP COLUMN IF EXISTS org_id`,
+		// Gated on the legacy org_id column, in one DO block. These used to
+		// run as separate statements on EVERY boot: the primary key was
+		// dropped and re-added (two autocommits, so a rolling deploy's old
+		// pod saw a window with no PK and its ON CONFLICT upserts failed
+		// with 42P10), the self-join DELETE scanned the table, and the
+		// indexes were rebuilt, all under ACCESS EXCLUSIVE locks on the
+		// hottest table. Once org_id is gone there is nothing to do.
 		`DO $mig$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'intelligence_reports' AND column_name = 'org_id'
+			) THEN
+				ALTER TABLE intelligence_reports DROP CONSTRAINT IF EXISTS intelligence_reports_pkey;
+				DELETE FROM intelligence_reports a USING intelligence_reports b
+					WHERE a.ctid < b.ctid
+					  AND a.ecosystem = b.ecosystem
+					  AND a.package_name = b.package_name
+					  AND a.version = b.version;
+				ALTER TABLE intelligence_reports DROP COLUMN IF EXISTS org_id;
+				DROP INDEX IF EXISTS idx_intelligence_reports_collected_at;
+				DROP INDEX IF EXISTS idx_intelligence_reports_ecosystem;
+				DROP INDEX IF EXISTS idx_intelligence_reports_malicious;
+			END IF;
 			IF NOT EXISTS (
 				SELECT 1 FROM pg_constraint WHERE conname = 'intelligence_reports_pkey'
 			) THEN
@@ -1561,20 +1598,22 @@ func (s *Store) migrateSchema() error {
 					PRIMARY KEY (ecosystem, package_name, version);
 			END IF;
 		END $mig$`,
-		`DROP INDEX IF EXISTS idx_intelligence_reports_collected_at`,
-		`DROP INDEX IF EXISTS idx_intelligence_reports_ecosystem`,
-		`DROP INDEX IF EXISTS idx_intelligence_reports_malicious`,
 		`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_collected_at ON intelligence_reports(collected_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_ecosystem ON intelligence_reports(ecosystem)`,
 		`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_malicious ON intelligence_reports(is_malicious) WHERE is_malicious = TRUE`,
 
-		`ALTER TABLE intelligence_latest_probes DROP CONSTRAINT IF EXISTS intelligence_latest_probes_pkey`,
-		`DELETE FROM intelligence_latest_probes a USING intelligence_latest_probes b
-			WHERE a.ctid < b.ctid
-			  AND a.ecosystem = b.ecosystem
-			  AND a.package_name = b.package_name`,
-		`ALTER TABLE intelligence_latest_probes DROP COLUMN IF EXISTS org_id`,
 		`DO $mig$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'intelligence_latest_probes' AND column_name = 'org_id'
+			) THEN
+				ALTER TABLE intelligence_latest_probes DROP CONSTRAINT IF EXISTS intelligence_latest_probes_pkey;
+				DELETE FROM intelligence_latest_probes a USING intelligence_latest_probes b
+					WHERE a.ctid < b.ctid
+					  AND a.ecosystem = b.ecosystem
+					  AND a.package_name = b.package_name;
+				ALTER TABLE intelligence_latest_probes DROP COLUMN IF EXISTS org_id;
+			END IF;
 			IF NOT EXISTS (
 				SELECT 1 FROM pg_constraint WHERE conname = 'intelligence_latest_probes_pkey'
 			) THEN
@@ -1668,6 +1707,33 @@ func (s *Store) migrateSchema() error {
 			PRIMARY KEY (job_id, ecosystem, name, version)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_scan_job_pending_job_id ON scan_job_pending (job_id)`,
+
+		// artifact_jobs backs the direct artifact-upload API
+		// (POST /api/v1/artifacts) when CHAINSAW_SCAN_STORE=postgres, so a
+		// poll answered by another replica finds the job
+		// (docs/REPORTS.md#backend-perf-load-test-2026-10-29 HA stage 1).
+		// The job document is JSONB; status, owner and sha are columns
+		// for the dedupe lookup and the conditional transitions.
+		`CREATE TABLE IF NOT EXISTS artifact_jobs (
+			id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			owner_kind TEXT NOT NULL DEFAULT '',
+			owner_id TEXT NOT NULL DEFAULT '',
+			sha256 TEXT NOT NULL DEFAULT '',
+			expires_at TIMESTAMPTZ NOT NULL,
+			job JSONB NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifact_jobs_dedupe ON artifact_jobs (owner_kind, owner_id, sha256)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifact_jobs_expires_at ON artifact_jobs (expires_at)`,
+
+		// upstream_feed_checkpoints keeps a change feed's position (npm's
+		// _changes sequence) across restarts and leader changes, so a
+		// missed window is replayed rather than skipped.
+		`CREATE TABLE IF NOT EXISTS upstream_feed_checkpoints (
+			feed TEXT PRIMARY KEY,
+			seq TEXT NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 
 		// codeowners_mappings persists parsed GitHub CODEOWNERS files
 		// keyed by repo_id (the GitHub "owner/name" slug). Each row is
@@ -2518,7 +2584,7 @@ func (s *Store) migrateSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_pending_2fa_expires_at ON pending_2fa(expires_at)`,
 	}
 	for _, stmt := range stmts {
-		if _, err := s.db.Exec(stmt); err != nil {
+		if _, err := s.migExec(stmt); err != nil {
 			return fmt.Errorf("apply migration %q: %w", stmt[:min(len(stmt), 60)], err)
 		}
 	}
@@ -2537,7 +2603,7 @@ func (s *Store) migrateSchema() error {
 	// so every column named in the GRANT exists by the time it is granted
 	// — a GRANT on a missing column is an error, not a no-op.
 	for _, stmt := range billyRLSStatements() {
-		if _, err := s.db.Exec(stmt); err != nil {
+		if _, err := s.migExec(stmt); err != nil {
 			return fmt.Errorf("apply billy RLS migration %q: %w", stmt[:min(len(stmt), 60)], err)
 		}
 	}
@@ -2554,7 +2620,7 @@ func (s *Store) migrateSchema() error {
 	// (source, requesting_ip, ...) must exist before the hash function is
 	// defined over them.
 	for _, stmt := range auditAppendOnlyStatements() {
-		if _, err := s.db.Exec(stmt); err != nil {
+		if _, err := s.migExec(stmt); err != nil {
 			return fmt.Errorf("apply audit append-only migration %q: %w", stmt[:min(len(stmt), 60)], err)
 		}
 	}

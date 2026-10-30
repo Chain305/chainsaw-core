@@ -106,7 +106,7 @@ type CoverageRecomputeSource interface {
 // The PK tiebreak makes the total order strict, which is what the keyset
 // comparison requires.
 func (s *Store) IterateCoverageStale(ctx context.Context, after CoverageStaleCursor, limit int) ([]CoverageStaleRow, CoverageStaleCursor, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, CoverageStaleCursor{}, nil
 	}
 	if limit <= 0 {
@@ -134,7 +134,7 @@ func (s *Store) IterateCoverageStale(ctx context.Context, after CoverageStaleCur
 		LIMIT $%d
 	`, coverageResolvedExpr, coverageIncompleteExpr, keyset, len(args))
 
-	rows, err := s.sql.DB().QueryContext(ctx, query, args...)
+	rows, err := s.db(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, CoverageStaleCursor{}, fmt.Errorf("intelligence: iterate coverage-stale: %w", err)
 	}
@@ -170,13 +170,13 @@ func (s *Store) IterateCoverageStale(ctx context.Context, after CoverageStaleCur
 // CountCoverageStale returns the size of the incomplete-coverage backlog.
 // Producer for the chainsaw_intel_coverage_backlog gauge.
 func (s *Store) CountCoverageStale(ctx context.Context) (int, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return 0, nil
 	}
 	var n int
 	query := fmt.Sprintf(
 		`SELECT COUNT(*) FROM intelligence_reports WHERE %s = 'false'`, coverageIncompleteExpr)
-	if err := s.sql.DB().QueryRowContext(ctx, query).Scan(&n); err != nil {
+	if err := s.db(ctx).QueryRowContext(ctx, query).Scan(&n); err != nil {
 		return 0, fmt.Errorf("intelligence: count coverage-stale: %w", err)
 	}
 	return n, nil

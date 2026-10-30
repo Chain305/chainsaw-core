@@ -65,7 +65,10 @@ func TestReportProvisionalRegistryCancelled(t *testing.T) {
 func TestProvisionalFreshnessIsReadAtBothGates(t *testing.T) {
 	for file, want := range map[string]string{
 		"scanner.go":   "age < cached.freshFor(maxStale)",
-		"refresher.go": "priorReport.freshFor(r.cfg.MaxStaleness)",
+		// The refresher reads it against the row's tier window
+		// (refresher_tiers.go), which is MaxStaleness for every report a
+		// provisional verdict could be (a verdict other than allow is hot).
+		"refresher.go": "priorReport.freshFor(window)",
 	} {
 		b, err := os.ReadFile(file)
 		if err != nil {

@@ -219,6 +219,14 @@ func hostBoundaryOK(body string, start int, match string) bool {
 // "BracketedPaste." near the top and embed a genuine sink lower down, and
 // rejecting the first match must not blind the scan to the second.
 func findExfilHost(body string) string {
+	return findExfilHostFolded(fold(body))
+}
+
+func findExfilHostFolded(t foldedText) string {
+	if !t.mayMatch(exfilHostLits) {
+		return ""
+	}
+	body := t.raw
 	for _, loc := range exfilHostRE.FindAllStringIndex(body, -1) {
 		m := body[loc[0]:loc[1]]
 		if hostBoundaryOK(body, loc[0], m) {
@@ -272,7 +280,7 @@ func findPublicIPURL(body string) string {
 // exfilSend reports whether body makes an outbound request of any shape the
 // exfil_host tier and the public-IP rule accept as coupling.
 func exfilSend(body string) bool {
-	return netSendRE.MatchString(body) || nodeSendRE.MatchString(body) || beaconSendRE.MatchString(body)
+	return netSendMatch(body) || nodeSendRE.MatchString(body) || beaconSendRE.MatchString(body)
 }
 
 // fileSends is exfilSend for JS/Python, scriptSendRE for PHP and Ruby.
@@ -374,7 +382,9 @@ func Scan(files map[string][]byte) Result {
 	// The shipping bucket always wins — see the tier-2 branch below.
 	stealerHit, stealerFile := false, ""
 	weakStealerHit, weakStealerFile := false, ""
-	sinkOrSend := false
+	// sinkOrSend is only read when a stealer string hit, so the send check
+	// over every file runs at the end, and only then (sendCandidates).
+	var sendCandidates []string
 
 	// weakExfil records an exfil-host hit seen ONLY in test / docs / vendored
 	// content, so it can be reported as a warning if no shipping-code hit turns
@@ -409,7 +419,7 @@ func Scan(files map[string][]byte) Result {
 		// names .ngrok.io, metasm's Windows export table matches the stealer
 		// strings. The stealer tier and the feed's coupling read JS/Python.
 		script := WantsScriptSource(name)
-		if m := findExfilHost(hostText); m != "" {
+		if m := findExfilHostFolded(fold(hostText)); m != "" {
 			hit := Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + strings.TrimSpace(m) + viaBase64(body, m)}
 			if !isNonShippingPath(name) {
 				hit.Coupled = fileSends(name, hostText)
@@ -429,21 +439,20 @@ func Scan(files map[string][]byte) Result {
 				hit.Detail += " (test/docs/vendored path — not shipping code)"
 				weakExfil = &hit
 			}
-		} else if !isNonShippingPath(name) && fileSends(name, hostText) {
+		} else if !isNonShippingPath(name) {
 			// A public IP literal counts only coupled: addresses are named in
 			// configs and comments far more often than hostnames on the list.
-			if ip := findPublicIPURL(hostText); ip != "" {
+			// The address is looked for first: it is rare and its pattern
+			// starts with a literal, while the send check is the costly one.
+			if ip := findPublicIPURL(hostText); ip != "" && fileSends(name, hostText) {
 				return Result{Detected: true, Kind: "exfil_host", Detail: name + ": " + ip + viaBase64(body, ip), Coupled: true}
 			}
 		}
 		if script {
 			continue
 		}
-		if netSendRE.MatchString(body) {
-			sinkOrSend = true
-		}
-		if credStoreRE.MatchString(body) || tokenGrabRE.MatchString(body) ||
-			walletRE.MatchString(body) || keyloggerRE.MatchString(body) {
+		sendCandidates = append(sendCandidates, body)
+		if stealerMatch(fold(body)) {
 			if isNonShippingPath(name) {
 				if !weakStealerHit {
 					weakStealerHit, weakStealerFile = true, name
@@ -456,6 +465,16 @@ func Scan(files map[string][]byte) Result {
 
 	if exfil != nil {
 		return *exfil
+	}
+
+	sinkOrSend := false
+	if stealerHit || weakStealerHit {
+		for _, body := range sendCandidates {
+			if netSendMatch(body) {
+				sinkOrSend = true
+				break
+			}
+		}
 	}
 
 	// Tier 2: a stealer string only counts when the package also has a sink or

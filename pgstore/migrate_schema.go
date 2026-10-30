@@ -18,7 +18,7 @@ import "fmt"
 // (e.g. {"count": 42, "by_ecosystem": {"npm": 30, "pypi": 12}}) without
 // another schema bump.
 func (s *Store) ensureAnalyticsRollupSchema() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS analytics_daily_rollups (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS analytics_daily_rollups (
 		org_id TEXT NOT NULL,
 		date DATE NOT NULL,
 		metric_key TEXT NOT NULL,
@@ -28,10 +28,10 @@ func (s *Store) ensureAnalyticsRollupSchema() error {
 	)`); err != nil {
 		return fmt.Errorf("create analytics_daily_rollups: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_analytics_daily_rollups_org_date ON analytics_daily_rollups(org_id, date DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_analytics_daily_rollups_org_date ON analytics_daily_rollups(org_id, date DESC)`); err != nil {
 		return fmt.Errorf("create analytics_daily_rollups org_date index: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_analytics_daily_rollups_metric ON analytics_daily_rollups(org_id, metric_key, date DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_analytics_daily_rollups_metric ON analytics_daily_rollups(org_id, metric_key, date DESC)`); err != nil {
 		return fmt.Errorf("create analytics_daily_rollups metric index: %w", err)
 	}
 	// Chain the intelligence-reports denorm-column migration so it runs
@@ -61,27 +61,27 @@ func (s *Store) ensureAnalyticsRollupSchema() error {
 // column on every row — fine on a fresh install, painful at scale.
 // Adding the columns + indexes is the regression-proof fix.
 func (s *Store) ensureIntelligenceReportsDenormColumns() error {
-	if _, err := s.db.Exec(`ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS verdict TEXT`); err != nil {
+	if _, err := s.migExec(`ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS verdict TEXT`); err != nil {
 		return fmt.Errorf("add intelligence_reports.verdict: %w", err)
 	}
-	if _, err := s.db.Exec(`ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS overall_score INT`); err != nil {
+	if _, err := s.migExec(`ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS overall_score INT`); err != nil {
 		return fmt.Errorf("add intelligence_reports.overall_score: %w", err)
 	}
 	// Backfill from the JSONB risk_evaluation column. Safe to re-run —
 	// the WHERE clause skips rows that are already populated. The cast
 	// to INT is on a JSON number, so jsonb arithmetic does not apply;
 	// we extract as text and cast.
-	if _, err := s.db.Exec(`UPDATE intelligence_reports
+	if _, err := s.migExec(`UPDATE intelligence_reports
 		SET verdict = COALESCE(verdict, risk_evaluation->>'verdict'),
 		    overall_score = COALESCE(overall_score, NULLIF(risk_evaluation->'rolledUp'->>'overall', '')::INT)
 		WHERE risk_evaluation IS NOT NULL
 		  AND (verdict IS NULL OR overall_score IS NULL)`); err != nil {
 		return fmt.Errorf("backfill intelligence_reports denorm: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_verdict ON intelligence_reports(verdict)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_verdict ON intelligence_reports(verdict)`); err != nil {
 		return fmt.Errorf("create idx_intelligence_reports_verdict: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_overall_score ON intelligence_reports(overall_score)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_intelligence_reports_overall_score ON intelligence_reports(overall_score)`); err != nil {
 		return fmt.Errorf("create idx_intelligence_reports_overall_score: %w", err)
 	}
 	return nil
@@ -105,7 +105,7 @@ func (s *Store) ensureIntelligenceReportsDenormColumns() error {
 // `sbom_doc` is JSONB on Postgres (we hint it via the column type; SQLite —
 // used by tests — accepts JSONB transparently and stores it as TEXT).
 func (s *Store) ensureSBOMSnapshotsSchema() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS sbom_snapshots (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS sbom_snapshots (
 		snapshot_id BIGSERIAL PRIMARY KEY,
 		org_id TEXT NOT NULL,
 		client_id TEXT,
@@ -117,10 +117,10 @@ func (s *Store) ensureSBOMSnapshotsSchema() error {
 	)`); err != nil {
 		return fmt.Errorf("create sbom_snapshots: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sbom_snapshots_org_taken ON sbom_snapshots(org_id, taken_at DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_sbom_snapshots_org_taken ON sbom_snapshots(org_id, taken_at DESC)`); err != nil {
 		return fmt.Errorf("create sbom_snapshots org_taken index: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sbom_snapshots_org_client_taken ON sbom_snapshots(org_id, client_id, taken_at DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_sbom_snapshots_org_client_taken ON sbom_snapshots(org_id, client_id, taken_at DESC)`); err != nil {
 		return fmt.Errorf("create sbom_snapshots org_client_taken index: %w", err)
 	}
 	// ADR-012 Item 4: persist the frozen transitive dependency graph +
@@ -142,7 +142,7 @@ func (s *Store) ensurePlanAssignmentAndAuditSchema() error {
 	//   - org_id : CASCADE delete — orphan rows should not outlive the org.
 	// Dedupe first to avoid FK violations on legacy rows that reference a
 	// plan id that no longer exists.
-	if _, err := s.db.Exec(`
+	if _, err := s.migExec(`
 		UPDATE org_plan_assignments
 		SET plan_id = (SELECT id FROM pricing_plans WHERE is_default = 1 LIMIT 1),
 		    assigned_at = CURRENT_TIMESTAMP
@@ -170,7 +170,7 @@ func (s *Store) ensurePlanAssignmentAndAuditSchema() error {
 	// Plan-change audit trail (fix 11). Separate from the repository `events`
 	// table — that one is repo-op-only, this one captures admin / billing
 	// surface mutations.
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS audit_events (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS audit_events (
 		id TEXT PRIMARY KEY,
 		org_id TEXT NOT NULL,
 		actor_user_id TEXT,
@@ -186,10 +186,10 @@ func (s *Store) ensurePlanAssignmentAndAuditSchema() error {
 	)`); err != nil {
 		return fmt.Errorf("create audit_events: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_events_org_created ON audit_events(org_id, created_at DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_audit_events_org_created ON audit_events(org_id, created_at DESC)`); err != nil {
 		return fmt.Errorf("create audit_events index: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(action, created_at DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(action, created_at DESC)`); err != nil {
 		return fmt.Errorf("create audit_events action index: %w", err)
 	}
 	// DESIGN.md §19 (D5/D6): backfill audit_events with correlation+diff
@@ -246,7 +246,7 @@ func (s *Store) ensurePlanAssignmentAndAuditSchema() error {
 // every mutating MCP tool call so undo_last_action and list_recent_actions
 // can provide rollback and audit over the agent-driven surface.
 func (s *Store) ensureAgentActionLogSchema() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS agent_action_log (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS agent_action_log (
 		id TEXT PRIMARY KEY,
 		org_id TEXT NOT NULL,
 		user_id TEXT NOT NULL DEFAULT '',
@@ -262,10 +262,10 @@ func (s *Store) ensureAgentActionLogSchema() error {
 	)`); err != nil {
 		return fmt.Errorf("create agent_action_log: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_agent_action_log_org_created ON agent_action_log(org_id, created_at DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_agent_action_log_org_created ON agent_action_log(org_id, created_at DESC)`); err != nil {
 		return fmt.Errorf("create agent_action_log org index: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_agent_action_log_tool ON agent_action_log(tool_name, created_at DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_agent_action_log_tool ON agent_action_log(tool_name, created_at DESC)`); err != nil {
 		return fmt.Errorf("create agent_action_log tool index: %w", err)
 	}
 	// Backfill columns for existing deployments that have the old schema.
@@ -287,7 +287,7 @@ func (s *Store) ensureAgentActionLogSchema() error {
 // attestations are recorded as audit_events with action=compliance_reported,
 // so this table only keeps the current state for fast dashboard queries.
 func (s *Store) ensureComplianceAttestationsSchema() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS compliance_attestations (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS compliance_attestations (
 		org_id TEXT NOT NULL,
 		device_id TEXT NOT NULL,
 		user_identifier TEXT NOT NULL DEFAULT '',
@@ -303,10 +303,10 @@ func (s *Store) ensureComplianceAttestationsSchema() error {
 	)`); err != nil {
 		return fmt.Errorf("create compliance_attestations: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_compliance_attestations_org_reported ON compliance_attestations(org_id, last_reported_at DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_compliance_attestations_org_reported ON compliance_attestations(org_id, last_reported_at DESC)`); err != nil {
 		return fmt.Errorf("create compliance_attestations reported index: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_compliance_attestations_egress ON compliance_attestations(org_id, direct_registry_egress)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_compliance_attestations_egress ON compliance_attestations(org_id, direct_registry_egress)`); err != nil {
 		return fmt.Errorf("create compliance_attestations egress index: %w", err)
 	}
 	return nil
@@ -328,7 +328,7 @@ func (s *Store) ensureComplianceAttestationsSchema() error {
 // is what resolveOwningTeam / upsertOwnershipOverride match on. Additive new
 // table only — no existing table is altered.
 func (s *Store) ensureInventoryOwnershipSchema() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS inventory_ownership_overrides (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS inventory_ownership_overrides (
 		org_id TEXT NOT NULL,
 		repository TEXT NOT NULL,
 		package_name TEXT NOT NULL DEFAULT '',
@@ -339,7 +339,7 @@ func (s *Store) ensureInventoryOwnershipSchema() error {
 	)`); err != nil {
 		return fmt.Errorf("create inventory_ownership_overrides: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_inventory_ownership_overrides_org_repo ON inventory_ownership_overrides(org_id, repository)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_inventory_ownership_overrides_org_repo ON inventory_ownership_overrides(org_id, repository)`); err != nil {
 		return fmt.Errorf("create inventory_ownership_overrides org_repo index: %w", err)
 	}
 	return nil
@@ -357,7 +357,7 @@ func (s *Store) ensureInventoryOwnershipSchema() error {
 // (org_id, status, created_at DESC) index serves the hot "list my pending
 // proposals" query. Additive new table only — no existing table is altered.
 func (s *Store) ensureBillyProposalsSchema() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS billy_proposals (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS billy_proposals (
 		id TEXT PRIMARY KEY,
 		org_id TEXT NOT NULL,
 		proposed_by TEXT,
@@ -374,7 +374,7 @@ func (s *Store) ensureBillyProposalsSchema() error {
 	)`); err != nil {
 		return fmt.Errorf("create billy_proposals: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_billy_proposals_org_status_created ON billy_proposals(org_id, status, created_at DESC)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_billy_proposals_org_status_created ON billy_proposals(org_id, status, created_at DESC)`); err != nil {
 		return fmt.Errorf("create billy_proposals org_status_created index: %w", err)
 	}
 	return nil
@@ -419,7 +419,7 @@ func (s *Store) ensureBillyProposalsSchema() error {
 // (core/intelligence/supplychain_alert.go:60-79), which are a wire contract.
 // Do not change this default.
 func (s *Store) ensureMonitoredTargetsSchema() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS monitored_targets (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS monitored_targets (
 		target_id BIGSERIAL PRIMARY KEY,
 		org_id TEXT NOT NULL CHECK (octet_length(org_id) BETWEEN 1 AND 128),
 		repo_label TEXT NOT NULL CHECK (octet_length(repo_label) BETWEEN 1 AND 512),
@@ -439,7 +439,7 @@ func (s *Store) ensureMonitoredTargetsSchema() error {
 	// The "who is due a tick" query: live targets, oldest scan first. NULLs
 	// FIRST is the default for ASC in Postgres and it is what we want — a
 	// target that has never been scanned is maximally due.
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_monitored_targets_due ON monitored_targets(archived_at, last_scanned_at)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_monitored_targets_due ON monitored_targets(archived_at, last_scanned_at)`); err != nil {
 		return fmt.Errorf("create monitored_targets due index: %w", err)
 	}
 	// The "who ELSE declares this coordinate" query:
@@ -462,7 +462,7 @@ func (s *Store) ensureMonitoredTargetsSchema() error {
 	// the key-existence operators (`?`, `?|`, `?&`) that jsonb_ops would be
 	// required for — if a future caller needs one, it will get a seq scan
 	// rather than a wrong answer, and that is the safe direction.
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_monitored_targets_package_set
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_monitored_targets_package_set
 		ON monitored_targets USING GIN (package_set jsonb_path_ops)`); err != nil {
 		return fmt.Errorf("create monitored_targets package_set index: %w", err)
 	}

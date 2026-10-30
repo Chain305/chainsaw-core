@@ -85,7 +85,7 @@ import "fmt"
 // a migration that keeps reporting work on every boot is one that is not
 // converging.
 func (s *Store) clearUnverifiedAttestationIdentity() (int64, error) {
-	res, err := s.db.Exec(`
+	res, err := s.migExec(`
 		UPDATE package_metadata
 		SET attestation_builder_id       = NULL,
 		    attestation_issuer           = NULL,

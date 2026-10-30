@@ -296,3 +296,33 @@ func TestPruneVerdictHistoryDeletesOnlyOldRows(t *testing.T) {
 		t.Errorf("fresh row was pruned: %d rows, want 1", len(fresh))
 	}
 }
+
+// The Upsert promises that a verdict-history failure "must not fail the
+// scan". On Postgres a failed INSERT aborts the transaction, so before the
+// savepoint the report row itself was lost whenever the history write
+// failed.
+func TestVerdictHistoryFailureDoesNotLoseTheReport(t *testing.T) {
+	store, db := verdictHistoryStore(t)
+	ctx := context.Background()
+	pkg := "vhfail-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+	// Reject history rows for this package only, so nothing else is touched.
+	if _, err := db.DB().Exec(`ALTER TABLE verdict_history ADD CONSTRAINT vh_test_reject_` + pkg[7:] +
+		` CHECK (package_name <> '` + pkg + `') NOT VALID`); err != nil {
+		t.Fatalf("add constraint: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.DB().Exec(`ALTER TABLE verdict_history DROP CONSTRAINT IF EXISTS vh_test_reject_` + pkg[7:])
+		_, _ = db.DB().Exec(`DELETE FROM intelligence_reports WHERE package_name = $1`, pkg)
+	})
+
+	if err := store.Upsert(ctx, "org-a", verdictReport(pkg, "1.0.0", "allow", 92)); err != nil {
+		t.Fatalf("upsert with a failing history write: %v — the history is the record, not the product", err)
+	}
+	var n int
+	if err := db.DB().QueryRow(`SELECT COUNT(*) FROM intelligence_reports WHERE package_name = $1`, pkg).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("report rows = %d after a history failure, want 1", n)
+	}
+}

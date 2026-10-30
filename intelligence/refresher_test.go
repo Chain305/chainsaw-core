@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chain305/chainsaw-core/metadata"
+	"github.com/chain305/chainsaw-core/pgstore"
 )
 
 type fakeMetadataSource struct {
@@ -541,5 +542,181 @@ func TestRefresher_StaleRowStillScansWhenProbeFailed(t *testing.T) {
 		t.Errorf("a STALE row was skipped on a failed probe (scanned=%d skipped=%d); "+
 			"the skip must be gated on report freshness or a package that returns is never rescanned",
 			summary.Scanned, summary.Skipped)
+	}
+}
+
+// Cancelling a tick while every slot is busy must still let RunOnce return.
+// The walk used to `break` out of the select only, start a goroutine for the
+// next row anyway, and that goroutine released a slot it never took — the
+// last real release then blocked forever and wg.Wait() hung, so shutdown ran
+// into the pod's grace period.
+func TestRefresher_CancelWithAllSlotsBusyReturns(t *testing.T) {
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	var rows []metadata.PackageMetadataRow
+	for _, v := range []string{"1.0.0", "2.0.0", "3.0.0"} {
+		rows = append(rows, metadata.PackageMetadataRow{
+			OrgID: "org1",
+			PackageMetadata: metadata.PackageMetadata{
+				Repository: "npmjs", Package: "lodash", Version: v,
+				UpdatedAt: now.Add(-48 * time.Hour),
+			},
+		})
+	}
+	entered := make(chan struct{}, 1)
+	ref := NewRefresher(RefresherConfig{
+		Service:      &fakeService{},
+		Metadata:     &fakeMetadataSource{rows: rows},
+		MaxStaleness: 24 * time.Hour,
+		Concurrency:  1,
+		PageSize:     10,
+		LatestProber: func(ctx context.Context, row metadata.PackageMetadataRow) (string, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-ctx.Done() // hold the only slot until the tick is cancelled
+			return "", ctx.Err()
+		},
+		EcosystemResolver: func(string) string { return "npm" },
+	})
+	ref.now = func() time.Time { return now }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ref.RunOnce(ctx)
+		close(done)
+	}()
+	<-entered
+	time.Sleep(50 * time.Millisecond) // let the walk block waiting for a slot
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunOnce did not return after cancel with every slot busy")
+	}
+}
+
+// A replica that does not hold the lease must not walk: with N replicas and
+// no gate every one of them scans the whole table each tick.
+func TestRefresher_RunGatedSkipsWalkWhenGateDeclines(t *testing.T) {
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	src := &fakeMetadataSource{
+		rows: []metadata.PackageMetadataRow{{
+			OrgID: "org1",
+			PackageMetadata: metadata.PackageMetadata{
+				Repository: "npmjs", Package: "lodash", Version: "4.17.21",
+				UpdatedAt: now.Add(-48 * time.Hour),
+			},
+		}},
+	}
+	newRef := func(gate func(context.Context, func(context.Context)) bool) (*Refresher, *fakeService) {
+		svc := &fakeService{}
+		ref := NewRefresher(RefresherConfig{
+			Service: svc, Metadata: src, MaxStaleness: 24 * time.Hour,
+			Concurrency: 1, PageSize: 10, TickGate: gate,
+			EcosystemResolver: func(string) string { return "npm" },
+		})
+		ref.now = func() time.Time { return now }
+		return ref, svc
+	}
+
+	ref, svc := newRef(func(context.Context, func(context.Context)) bool { return false })
+	if _, ran := ref.RunGated(context.Background()); ran {
+		t.Fatal("RunGated reported a walk the gate declined")
+	}
+	if svc.scans.Load() != 0 {
+		t.Fatalf("declined gate still scanned %d rows", svc.scans.Load())
+	}
+
+	ref, svc = newRef(func(ctx context.Context, walk func(context.Context)) bool { walk(ctx); return true })
+	summary, ran := ref.RunGated(context.Background())
+	if !ran || summary.Scanned != 1 || svc.scans.Load() != 1 {
+		t.Fatalf("granted gate: ran=%v scanned=%d scans=%d, want true 1 1", ran, summary.Scanned, svc.scans.Load())
+	}
+}
+
+// While the database is busy the walk waits and keeps its place, then
+// finishes every row; a walk paused when the tick is cancelled stops without
+// scanning.
+func TestRefresher_PausesWhileDatabaseUnderPressure(t *testing.T) {
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	src := &fakeMetadataSource{}
+	for _, name := range []string{"a", "b", "c"} {
+		src.rows = append(src.rows, metadata.PackageMetadataRow{
+			OrgID: "org1",
+			PackageMetadata: metadata.PackageMetadata{
+				Repository: "npmjs", Package: name, Version: "1.0.0",
+				UpdatedAt: now.Add(-48 * time.Hour),
+			},
+		})
+	}
+	newRef := func(svc *fakeService, pressure func() bool) *Refresher {
+		ref := NewRefresher(RefresherConfig{
+			Service: svc, Metadata: src, MaxStaleness: 24 * time.Hour,
+			Concurrency: 1, PageSize: 10, Pressure: pressure,
+			EcosystemResolver: func(string) string { return "npm" },
+		})
+		ref.now = func() time.Time { return now }
+		ref.pressurePoll = time.Millisecond
+		return ref
+	}
+
+	svc := &fakeService{}
+	var checks, scansWhileBusy atomic.Int64
+	ref := newRef(svc, func() bool {
+		if checks.Add(1) <= 5 {
+			scansWhileBusy.Add(svc.scans.Load())
+			return true
+		}
+		return false
+	})
+	if got := ref.RunOnce(context.Background()); got.Scanned != 3 {
+		t.Fatalf("scanned %d rows after the pressure cleared, want all 3", got.Scanned)
+	}
+	if checks.Load() <= 5 || scansWhileBusy.Load() != 0 {
+		t.Fatalf("checks=%d scansWhileBusy=%d: the walk did not wait out the pressure", checks.Load(), scansWhileBusy.Load())
+	}
+
+	svc = &fakeService{}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	ref = newRef(svc, func() bool { return true })
+	if got := ref.RunOnce(ctx); got.Scanned != 0 || svc.scans.Load() != 0 {
+		t.Fatalf("walk scanned %d rows under constant pressure, want 0", svc.scans.Load())
+	}
+}
+
+// ctxCapturingService records whether Scan ran on a background-marked
+// context.
+type ctxCapturingService struct {
+	fakeService
+	background atomic.Bool
+}
+
+func (s *ctxCapturingService) Scan(ctx context.Context, req Request) (*Report, error) {
+	s.background.Store(pgstore.IsBackground(ctx))
+	return s.fakeService.Scan(ctx, req)
+}
+
+// The refresher's database work is marked background, so it runs on the
+// background pool when one is configured (J.3).
+func TestRefresherScansOnBackgroundContext(t *testing.T) {
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	src := &fakeMetadataSource{rows: []metadata.PackageMetadataRow{{
+		OrgID: "org1",
+		PackageMetadata: metadata.PackageMetadata{
+			Repository: "npmjs", Package: "x", Version: "1.0.0", UpdatedAt: now.Add(-48 * time.Hour),
+		},
+	}}}
+	svc := &ctxCapturingService{}
+	ref := NewRefresher(RefresherConfig{Service: svc, Metadata: src, MaxStaleness: 24 * time.Hour,
+		Concurrency: 1, PageSize: 10, EcosystemResolver: func(string) string { return "npm" }})
+	ref.now = func() time.Time { return now }
+	if got := ref.RunOnce(context.Background()); got.Scanned != 1 {
+		t.Fatalf("scanned %d, want 1", got.Scanned)
+	}
+	if !svc.background.Load() {
+		t.Fatal("the refresher's Scan ran on a context not marked background")
 	}
 }

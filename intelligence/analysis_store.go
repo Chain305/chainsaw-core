@@ -75,7 +75,7 @@ type ArtifactAnalysisKey struct {
 func (s *Store) LoadArtifactAnalyses(ctx context.Context, sha256, ecosystem string, want map[string]AcceptedAnalysis) (map[string]PartialReport, error) {
 	sha256 = strings.ToLower(strings.TrimSpace(sha256))
 	ecosystem = strings.ToLower(strings.TrimSpace(ecosystem))
-	if s == nil || s.sql == nil || s.sql.DB() == nil || sha256 == "" || ecosystem == "" || len(want) == 0 {
+	if s == nil || s.sql == nil || s.db(ctx) == nil || sha256 == "" || ecosystem == "" || len(want) == 0 {
 		return nil, nil
 	}
 
@@ -86,7 +86,7 @@ func (s *Store) LoadArtifactAnalyses(ctx context.Context, sha256, ecosystem stri
 	// same place the version manifest is built, so the two cannot drift. The
 	// row count is bounded by the number of analyzer generations ever written
 	// for one artifact — tens, not thousands.
-	rows, err := s.sql.DB().QueryContext(ctx, `
+	rows, err := s.db(ctx).QueryContext(ctx, `
 		SELECT analyzer, analyzer_version, analyzer_config, partial
 		  FROM artifact_analyses
 		 WHERE artifact_sha256 = $1 AND ecosystem = $2`, sha256, ecosystem)
@@ -140,7 +140,7 @@ func (s *Store) SaveArtifactAnalysis(ctx context.Context, key ArtifactAnalysisKe
 	sha := strings.ToLower(strings.TrimSpace(key.SHA256))
 	analyzer := strings.TrimSpace(key.Analyzer)
 	eco := strings.ToLower(strings.TrimSpace(key.Ecosystem))
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil
 	}
 	if sha == "" || analyzer == "" || eco == "" || key.Version <= AnalyzerNotCacheable {
@@ -153,7 +153,7 @@ func (s *Store) SaveArtifactAnalysis(ctx context.Context, key ArtifactAnalysisKe
 	if len(payload) > maxStoredAnalysisBytes {
 		return nil
 	}
-	if _, err := s.sql.DB().ExecContext(ctx, `
+	if _, err := s.db(ctx).ExecContext(ctx, `
 		INSERT INTO artifact_analyses (
 			artifact_sha256, ecosystem, analyzer, analyzer_version, analyzer_config,
 			partial, analyzed_at
@@ -178,11 +178,11 @@ func (s *Store) SaveArtifactAnalysis(ctx context.Context, key ArtifactAnalysisKe
 // it eventually falls to zero.
 func (s *Store) CountStaleAnalyses(ctx context.Context, analyzer string, currentVersion int) (int, error) {
 	analyzer = strings.TrimSpace(analyzer)
-	if s == nil || s.sql == nil || s.sql.DB() == nil || analyzer == "" {
+	if s == nil || s.sql == nil || s.db(ctx) == nil || analyzer == "" {
 		return 0, nil
 	}
 	var n int
-	if err := s.sql.DB().QueryRowContext(ctx, `
+	if err := s.db(ctx).QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM intelligence_reports
 		 WHERE `+reportArtifactSHAExpr+` IS NOT NULL
 		   AND EXISTS (
@@ -224,11 +224,11 @@ func StaleAnalyzerScope(analyzer string, currentVersion int) (StaleReportScope, 
 // analysisRowCount is a test/diagnostic helper: how many rows the table holds
 // for one digest. Kept unexported — nothing in production reads a raw count.
 func (s *Store) analysisRowCount(ctx context.Context, sha256 string) (int, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return 0, nil
 	}
 	var n int
-	err := s.sql.DB().QueryRowContext(ctx,
+	err := s.db(ctx).QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM artifact_analyses WHERE artifact_sha256 = $1`,
 		strings.ToLower(strings.TrimSpace(sha256))).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {

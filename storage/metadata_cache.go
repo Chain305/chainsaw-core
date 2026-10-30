@@ -28,7 +28,7 @@ const (
 
 type metaCacheEntry struct {
 	meta       ContentMetadata
-	accessedAt int64 // unix nano, updated on read
+	accessedAt atomic.Int64 // unix nano, updated on read under the read lock
 }
 
 // metadataInvalidationMessage is the wire format for cross-instance
@@ -81,8 +81,9 @@ func (c *MetadataCache) Get(blobPath string) (ContentMetadata, bool) {
 		c.misses.Add(1)
 		return ContentMetadata{}, false
 	}
-	// Update access time (racy but acceptable for approximate LRU).
-	entry.accessedAt = time.Now().UnixNano()
+	// Readers update this under the read lock, so it is atomic: a plain
+	// write raced every concurrent hit on the same entry.
+	entry.accessedAt.Store(time.Now().UnixNano())
 	c.hits.Add(1)
 	return entry.meta, true
 }
@@ -96,10 +97,9 @@ func (c *MetadataCache) Put(blobPath string, meta ContentMetadata) {
 	if len(c.entries) >= c.maxSize {
 		c.evictLocked()
 	}
-	c.entries[blobPath] = &metaCacheEntry{
-		meta:       meta,
-		accessedAt: time.Now().UnixNano(),
-	}
+	entry := &metaCacheEntry{meta: meta}
+	entry.accessedAt.Store(time.Now().UnixNano())
+	c.entries[blobPath] = entry
 	c.mu.Unlock()
 	publishMetadataInvalidation(blobPath)
 }
@@ -131,9 +131,9 @@ func (c *MetadataCache) evictLocked() {
 		var oldestTime int64
 		first := true
 		for k, e := range c.entries {
-			if first || e.accessedAt < oldestTime {
+			if at := e.accessedAt.Load(); first || at < oldestTime {
 				oldestKey = k
-				oldestTime = e.accessedAt
+				oldestTime = at
 				first = false
 			}
 		}

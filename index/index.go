@@ -201,7 +201,25 @@ func (idx *Index) VersionPaths(repo, packageName, version string) []string {
 }
 
 // VersionInfo returns stored metadata for a package version.
+//
+// Deprecated: it reports a lookup error as "not found", which on an
+// enforcement path reads as "not quarantined" and serves the version. Use
+// VersionInfoContext, which returns the error.
 func (idx *Index) VersionInfo(repo, packageName, version string) (VersionInfo, bool) {
+	info, found, err := idx.VersionInfoContext(context.Background(), repo, packageName, version)
+	if err != nil {
+		idx.logger.Error("fetch version info failed", "repository", repo, "package", packageName, "version", version, "error", err)
+		return VersionInfo{}, false
+	}
+	return info, found
+}
+
+// VersionInfoContext returns stored metadata for a package version. found is
+// false only when no row exists; any other failure comes back as err, so a
+// caller enforcing quarantine can refuse rather than treat it as "not
+// quarantined". ctx bounds the query, so an exhausted pool fails instead of
+// waiting forever.
+func (idx *Index) VersionInfoContext(ctx context.Context, repo, packageName, version string) (VersionInfo, bool, error) {
 	var (
 		rawPaths sql.NullString
 		reason   sql.NullString
@@ -210,15 +228,14 @@ func (idx *Index) VersionInfo(repo, packageName, version string) (VersionInfo, b
 		source   sql.NullString
 	)
 	orgID := tenancy.NormalizeOrgID(idx.orgID)
-	err := idx.store.DB().QueryRow(`SELECT logical_paths, quarantine_reason, quarantine_at, quarantine_removed_artifacts, quarantine_source
+	err := idx.store.DB().QueryRowContext(ctx, `SELECT logical_paths, quarantine_reason, quarantine_at, quarantine_removed_artifacts, quarantine_source
 		FROM index_entries WHERE org_id=? AND repository=? AND package=? AND version=?`,
 		orgID, repo, packageName, version).Scan(&rawPaths, &reason, &at, &removed, &source)
 	if errors.Is(err, sql.ErrNoRows) {
-		return VersionInfo{}, false
+		return VersionInfo{}, false, nil
 	}
 	if err != nil {
-		idx.logger.Error("fetch version info failed", "repository", repo, "package", packageName, "version", version, "error", err)
-		return VersionInfo{}, false
+		return VersionInfo{}, false, err
 	}
 	info := VersionInfo{
 		LogicalPaths: decodePaths(rawPaths.String),
@@ -231,7 +248,7 @@ func (idx *Index) VersionInfo(repo, packageName, version string) (VersionInfo, b
 			Source:           source.String,
 		}
 	}
-	return info, true
+	return info, true, nil
 }
 
 // MarkQuarantined records quarantine metadata for a package version.

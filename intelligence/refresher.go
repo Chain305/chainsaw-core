@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chain305/chainsaw-core/metadata"
+	"github.com/chain305/chainsaw-core/pgstore"
 )
 
 // Refresher walks package_metadata on a ticker and drives intelligence.Scan
@@ -53,6 +54,9 @@ type Refresher struct {
 	lastSkipped atomic.Int64
 	lastNewVers atomic.Int64
 	lastTickEnd atomic.Int64 // unix nanos
+
+	// pressurePoll is how often a paused walk re-checks Pressure.
+	pressurePoll time.Duration
 
 	// advisoryForced counts the rows the advisory gate forced a rescan for
 	// in the CURRENT tick. Reset at the top of RunOnce because the budget it
@@ -118,6 +122,24 @@ type RefresherConfig struct {
 	Concurrency     int
 	PageSize        int
 	ArtifactEnabled bool
+
+	// TieredRefreshDisabled rescans every row once per MaxStaleness, as
+	// before tiering (refresher_tiers.go). Off by default: the zero value
+	// tiers.
+	TieredRefreshDisabled bool
+
+	// TickGate, when non-nil, decides whether this process walks on a given
+	// tick. It calls walk at most once, with a context it may cancel early
+	// (for example when a leader lease is lost), and reports whether walk
+	// ran. Nil walks every tick: correct for one replica, and N times the
+	// upstream and database load for N replicas.
+	TickGate func(ctx context.Context, walk func(context.Context)) bool
+
+	// Pressure, when non-nil, reports that the database is busy serving
+	// requests. The walk checks it before starting each row and waits while
+	// it holds, keeping its place, so a refresh never competes with installs
+	// for connections. Nil never pauses.
+	Pressure func() bool
 
 	// RecomputeMaxRows caps how many matcher-stale coordinates one tick
 	// recomputes. Zero means DefaultRecomputeMaxRows.
@@ -324,7 +346,7 @@ func (r *Refresher) Run(ctx context.Context) {
 	// Prime the pump once so a fresh boot starts walking immediately
 	// rather than sitting idle for the first Interval. The walk honours
 	// ctx cancellation internally.
-	r.RunOnce(ctx)
+	r.RunGated(ctx)
 
 	ticker := time.NewTicker(r.cfg.Interval)
 	defer ticker.Stop()
@@ -334,9 +356,52 @@ func (r *Refresher) Run(ctx context.Context) {
 			r.cfg.Logger.Info("intelligence refresher stopping", "reason", ctx.Err())
 			return
 		case <-ticker.C:
-			r.RunOnce(ctx)
+			r.RunGated(ctx)
 		}
 	}
+}
+
+// waitForHeadroom blocks while Pressure reports a busy database. It returns
+// false only when ctx ends first.
+func (r *Refresher) waitForHeadroom(ctx context.Context) bool {
+	if r.cfg.Pressure == nil || !r.cfg.Pressure() {
+		return true
+	}
+	poll := r.pressurePoll
+	if poll <= 0 {
+		poll = time.Second
+	}
+	start := time.Now()
+	t := time.NewTicker(poll)
+	defer t.Stop()
+	for r.cfg.Pressure() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+		}
+	}
+	r.cfg.Logger.Info("intelligence refresher resumed after database pressure", "paused", time.Since(start).Round(time.Millisecond))
+	return true
+}
+
+// RunGated runs one walk through TickGate. ran is false when the gate
+// declined (another replica holds the walk); summary is then the last one
+// this process recorded.
+func (r *Refresher) RunGated(ctx context.Context) (summary TickSummary, ran bool) {
+	if r == nil {
+		return TickSummary{}, false
+	}
+	if r.cfg.TickGate == nil {
+		return r.RunOnce(ctx), true
+	}
+	ran = r.cfg.TickGate(ctx, func(walkCtx context.Context) {
+		summary = r.RunOnce(walkCtx)
+	})
+	if !ran {
+		return r.LastSummary(), false
+	}
+	return summary, true
 }
 
 // RunOnce performs a single end-to-end walk of package_metadata. Exported
@@ -373,6 +438,8 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 	// cache-warm they trigger — to the refresher, so D-2 can divide refresh
 	// egress by refreshed coordinates instead of by all egress.
 	ctx = httpclient.WithEgressCaller(ctx, httpclient.EgressCallerRefresh)
+	// Its database work runs on the background pool when one is open.
+	ctx = pgstore.WithBackground(ctx)
 	start := r.now()
 	var scanned, skipped, newVers atomic.Int64
 	// Per-tick budget, so it resets with the tick rather than accumulating
@@ -383,6 +450,7 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 	var wg sync.WaitGroup
 
 	var cursor metadata.PackageMetadataCursor
+walk:
 	for {
 		if ctx.Err() != nil {
 			break
@@ -397,12 +465,18 @@ func (r *Refresher) RunOnce(ctx context.Context) TickSummary {
 		}
 		for _, row := range rows {
 			if ctx.Err() != nil {
-				break
+				break walk
 			}
+			if !r.waitForHeadroom(ctx) {
+				break walk
+			}
+			// Labelled: a bare break here leaves only the select, and the
+			// goroutine below would then release a slot it never took — the
+			// last real release blocks forever and wg.Wait() never returns.
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
-				break
+				break walk
 			}
 			wg.Add(1)
 			go func(row metadata.PackageMetadataRow) {
@@ -540,7 +614,7 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 	probeAnswered := false
 	if r.cfg.LatestProber != nil {
 		probe := r.lookupProbe(ctx, row.OrgID, ecosystem, row.Package)
-		if probe != nil && probe.FreshUntil.After(r.now()) {
+		if probe != nil && probe.FreshUntil.After(r.now()) && probeWithinFeedBound(probe, r.now(), r.cfg.MaxStaleness) {
 			latest = probe.LatestVersion
 			probeAnswered = true
 		} else {
@@ -601,8 +675,12 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 	// read cannot serve the very row we are refreshing. The artifact fetch is
 	// deliberately NOT skipped — see the comment at its call site.
 	forcedByAdvisory := false
-	reportFresh := reportIsFresh(priorReport, r.cfg.Store != nil, row.UpdatedAt, staleAfter) &&
-		!(priorReport != nil && r.now().Sub(priorReport.Observation.CollectedAt) >= priorReport.freshFor(r.cfg.MaxStaleness))
+	// The row's own report is judged against its tier (refresher_tiers.go);
+	// staleAfter, the 24h bound, still decides whether the latest version's
+	// report exists below.
+	window := r.refreshWindow(row, priorReport)
+	reportFresh := reportIsFresh(priorReport, r.cfg.Store != nil, row.UpdatedAt, r.now().Add(-window)) &&
+		!(priorReport != nil && r.now().Sub(priorReport.Observation.CollectedAt) >= priorReport.freshFor(window))
 	if reportFresh && probeAnswered && (latest == "" || latest == row.Version) {
 		// `latest == ""` is the part that was missing, and it was a 24x
 		// amplifier on exactly the rows least worth rescanning.
@@ -829,12 +907,18 @@ func (r *Refresher) storeProbe(ctx context.Context, orgID, ecosystem, pkg, lates
 	if probeErr != nil {
 		errStr = probeErr.Error()
 	}
+	// A successful answer lives longer while a change feed would expire it
+	// on a change (npm_changes.go); a failure is re-asked on the usual bound.
+	ttl := r.cfg.MaxStaleness
+	if errStr == "" && latest != "" {
+		ttl = probeTTL(ecosystem, ttl)
+	}
 	_ = r.cfg.Store.UpsertLatestVersionProbe(ctx, orgID, LatestVersionProbe{
 		Ecosystem:     ecosystem,
 		Package:       pkg,
 		LatestVersion: latest,
 		ProbedAt:      now,
-		FreshUntil:    now.Add(r.cfg.MaxStaleness),
+		FreshUntil:    now.Add(ttl),
 		Error:         errStr,
 	})
 }
@@ -845,6 +929,7 @@ func (r *Refresher) storeProbe(ctx context.Context, orgID, ecosystem, pkg, lates
 // Service / Metadata / LatestProber themselves.
 func RefresherConfigFromEnv() RefresherConfig {
 	var cfg RefresherConfig
+	cfg.TieredRefreshDisabled = strings.TrimSpace(os.Getenv("CHAINSAW_INTELLIGENCE_REFRESH_TIERED")) == "0"
 	if v := strings.TrimSpace(os.Getenv("CHAINSAW_INTELLIGENCE_REFRESH_INTERVAL")); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Interval = d

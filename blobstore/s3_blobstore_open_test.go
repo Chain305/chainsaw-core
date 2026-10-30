@@ -51,3 +51,39 @@ func TestS3OpenBodySurvivesAfterHeaders(t *testing.T) {
 		t.Fatalf("read %d bytes, want %d", len(got), len(chunk)*chunks)
 	}
 }
+
+// A ranged open is a ranged GET: the bytes before the offset are never
+// transferred (J.2 D).
+func TestS3OpenRangeSendsRangeHeader(t *testing.T) {
+	var gotRange string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRange = r.Header.Get("Range")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("tail"))
+	}))
+	defer srv.Close()
+	bs, err := NewS3BlobStore(S3Config{
+		Bucket: "b", Region: "us-east-1", Endpoint: srv.URL, UsePathStyle: true,
+		AccessKey: "k", SecretKey: "s",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := bs.(RangeOpener).OpenRange("some/key", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if gotRange != "bytes=1000-" || string(got) != "tail" {
+		t.Fatalf("Range %q body %q, want bytes=1000- and the tail", gotRange, got)
+	}
+	rc, err = bs.Open("some/key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Close()
+	if gotRange != "" {
+		t.Fatalf("a whole-object Open sent Range %q", gotRange)
+	}
+}

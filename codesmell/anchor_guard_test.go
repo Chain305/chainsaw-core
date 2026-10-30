@@ -22,8 +22,8 @@ func TestEveryRuleAnchorIsInEveryMatch(t *testing.T) {
 	checked := 0
 	for _, s := range allRuleSets {
 		for lang, rules := range s.ByLang {
-			if s.Anchors[lang] != nil && len(s.Anchors[lang]) != len(rules) {
-				t.Fatalf("lang %d: %d anchors for %d rules", lang, len(s.Anchors[lang]), len(rules))
+			if s.RuleAnchors[lang] != nil && len(s.RuleAnchors[lang]) != len(rules) {
+				t.Fatalf("lang %d: %d anchor sets for %d rules", lang, len(s.RuleAnchors[lang]), len(rules))
 			}
 			for i, r := range rules {
 				re, err := syntax.Parse(r.Re.String(), syntax.Perl)
@@ -40,11 +40,15 @@ func TestEveryRuleAnchorIsInEveryMatch(t *testing.T) {
 						continue
 					}
 					checked++
-					if s.Anchors[lang] == nil {
+					if s.RuleAnchors[lang] == nil {
 						continue // no prefilter for this language: the regex runs on every file
 					}
-					if a := string(s.Anchors[lang][i]); !strings.Contains(hit, a) {
-						t.Errorf("rule %s matches %q but its anchor %q is not in it: the prefilter skips this file", r.Re, hit, a)
+					found := false
+					for _, a := range s.RuleAnchors[lang][i] {
+						found = found || strings.Contains(hit, a)
+					}
+					if !found {
+						t.Errorf("rule %s matches %q but none of its anchors %q is in it: the prefilter skips this file", r.Re, hit, s.RuleAnchors[lang][i])
 					}
 				}
 			}
@@ -134,6 +138,8 @@ func TestAnchorPrefilterRealMisses(t *testing.T) {
 		{"php exec", ScanShell, "src/Runner.php", "<?php\n$out = exec(\"ls -la\");\n"},
 		{"python urllib3", ScanNetwork, "client.py", "import urllib3\nhttp = urllib3.PoolManager()\n"},
 		{"js import https", ScanNetwork, "index.mjs", "import https from 'node:https';\n"},
+		{"js spawnSync", ScanShell, "install.js", "require('child_process').spawnSync('sh', ['-c', cmd]);\n"},
+		{"php passthru", ScanShell, "src/Run.php", "<?php passthru($cmd);\n"},
 	} {
 		if !tc.scan(map[string][]byte{tc.file: []byte(tc.body)}).Fired {
 			t.Errorf("%s: did not fire on %q", tc.name, tc.body)

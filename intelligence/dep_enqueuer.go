@@ -25,14 +25,19 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
+	"golang.org/x/time/rate"
 
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/pgstore"
 	"github.com/chain305/chainsaw-core/upstreamhttp"
 )
 
@@ -46,6 +51,80 @@ const maxAutoDepDepth = 2
 // we'll fire. Protects against degenerate manifests with thousands of
 // listed deps. The hot 95th-percentile package has ~30.
 const autoDepFanoutCap = 64
+
+// Process-wide bounds on the dependency walk. Per-scan limits alone let
+// every parent launch up to 64 resolvers, each a full upstream fetch with
+// no limiter, and the same dependency was resolved again under every parent
+// that lists it: on 2026-10-22..29 this walk was 46% of all upstream fetches
+// (caller=refresh_dep, 395k of 852k) with almost no user traffic.
+//
+//   - depEnqueueConcurrency: at most this many dependency scans run at once
+//     in the process. Taken non-blocking BEFORE a goroutine starts; a full
+//     budget skips the dependency (counted) instead of parking a goroutine,
+//     the shape that took the pool down on 2026-09-14.
+//   - inFlightDeps: one walk per eco|name at a time across all parents.
+//   - depResolveLimiter: the "resolve latest" upstream calls, at
+//     CHAINSAW_DEP_ENQUEUE_RPS per second (default 2; 0 turns the walk off).
+//
+// A skipped dependency leaves its parent's transitive coverage incomplete,
+// the same state as a cold cache; the coverage sweep and the refresher reach
+// it later. Every package a client actually installs is still scanned on
+// its own request.
+const depEnqueueConcurrency = 4
+
+const depEnqueueRPSEnv = "CHAINSAW_DEP_ENQUEUE_RPS"
+
+var (
+	depEnqueueBudget  = make(chan struct{}, depEnqueueConcurrency)
+	inFlightDeps      sync.Map
+	depEnqueueSkipped atomic.Uint64
+
+	depResolveLimiterOnce sync.Once
+	depResolveLimiterVal  *rate.Limiter
+)
+
+// depResolveLimiter returns the process-wide resolve limiter, or nil when
+// CHAINSAW_DEP_ENQUEUE_RPS=0 disables the dependency walk.
+func depResolveLimiter() *rate.Limiter {
+	depResolveLimiterOnce.Do(func() {
+		rps := 2.0
+		if v := strings.TrimSpace(os.Getenv(depEnqueueRPSEnv)); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+				rps = f
+			}
+		}
+		if rps > 0 {
+			depResolveLimiterVal = rate.NewLimiter(rate.Limit(rps), 1)
+		}
+	})
+	return depResolveLimiterVal
+}
+
+// tryStartDep claims the process-wide slot and the per-dependency lock for
+// key. finishDep must be called exactly once when it returns true.
+func tryStartDep(key string) bool {
+	if _, busy := inFlightDeps.LoadOrStore(key, struct{}{}); busy {
+		return false
+	}
+	select {
+	case depEnqueueBudget <- struct{}{}:
+		return true
+	default:
+		inFlightDeps.Delete(key)
+		depEnqueueSkipped.Add(1)
+		return false
+	}
+}
+
+func finishDep(key string) {
+	<-depEnqueueBudget
+	inFlightDeps.Delete(key)
+}
+
+// DepEnqueueSkippedCount is how many dependency scans the process-wide
+// budget dropped since start. A steady rise with no install traffic means
+// the walk is still trying to fan out more than the budget allows.
+func DepEnqueueSkippedCount() uint64 { return depEnqueueSkipped.Load() }
 
 // autoDepArtifactCap caps how big a transitive tarball we'll spool
 // into RAM for the artifact follow-up. Same value as the proxy hot-
@@ -86,6 +165,9 @@ func (s *DefaultService) enqueueDependencyScans(parentCtx context.Context, paren
 	}
 	depth := depthFromCtx(parentCtx)
 	if depth >= maxAutoDepDepth {
+		return
+	}
+	if depResolveLimiter() == nil {
 		return
 	}
 
@@ -130,11 +212,15 @@ func (s *DefaultService) enqueueDependencyScans(parentCtx context.Context, paren
 			continue
 		}
 		seen[key] = struct{}{}
+		if !tryStartDep(key) {
+			continue
+		}
 		wg.Add(1)
-		go func(eco, name string) {
+		go func(eco, name, key string) {
 			defer wg.Done()
+			defer finishDep(key)
 			s.scanTransitiveDep(eco, name, depth+1, caller)
-		}(eco, name)
+		}(eco, name, key)
 	}
 	// Don't block the parent on the children — fire-and-forget. The
 	// wg is here for tests that want to await completion via
@@ -164,8 +250,9 @@ func (s *DefaultService) scanTransitiveDep(eco, name string, depth int, caller s
 	// Best-effort: its registry requests take a bounded share of each
 	// host's rate and cannot starve the scans someone is waiting on.
 	ctx = upstreamhttp.WithBackground(ctx)
+	ctx = pgstore.WithBackground(ctx)
 
-	version := s.resolveLatestVersion(ctx, eco, name)
+	version := s.depLatestVersion(ctx, eco, name)
 	if version == "" {
 		return
 	}
@@ -177,10 +264,10 @@ func (s *DefaultService) scanTransitiveDep(eco, name string, depth int, caller s
 		if cached, err := s.store.Get(ctx, "", Key{Ecosystem: eco, Package: name, Version: version}); err == nil && !cached.MatcherStale() {
 			age := s.now().Sub(cached.Observation.CollectedAt)
 			if age < DefaultMaxStaleness {
-				// Still propagate the recursion when grand-children
-				// haven't been seen yet — the cached parent might be
-				// older than the latest dep section.
-				s.enqueueDependencyScans(ctx, cached)
+				// Fresh: nothing to do. This used to walk the cached
+				// child's own dependencies again, so a fully cached tree
+				// was re-resolved upstream on every parent rescan; the
+				// refresher reaches stale grandchildren on its own cadence.
 				return
 			}
 		}
@@ -192,6 +279,10 @@ func (s *DefaultService) scanTransitiveDep(eco, name string, depth int, caller s
 		Options: Options{
 			RefreshReason: "transitive_auto",
 			AllowStale:    false,
+			// No cache-warm from a dependency scan: the warm would start
+			// its own walk, on a context without this depth, and the two
+			// walkers kept resetting each other's bound.
+			WarmDepth: maxWarmDepth,
 		},
 	}
 	if handle := s.tryFetchArtifact(ctx, eco, name, version); handle != nil {
@@ -238,6 +329,36 @@ func canAutoResolve(eco string) bool {
 		}
 	}
 	return false
+}
+
+// depLatestVersion answers "latest" from the shared
+// intelligence_latest_probes row when it is current, and only otherwise
+// spends a rate-limited registry call, whose answer it writes back. The
+// refresher reads and writes the same row, so a package both walks touch
+// costs one upstream lookup per freshness window instead of one per parent
+// rescan (docs/REPORTS.md#backend-perf-load-test-2026-10-29 I12a). Failures
+// are not written: the refresher reads an errored row as answered and would
+// stop probing that package until it expired.
+func (s *DefaultService) depLatestVersion(ctx context.Context, eco, name string) string {
+	if s.store != nil {
+		if p, err := s.store.GetLatestVersionProbe(ctx, "", eco, name); err == nil &&
+			p.Error == "" && strings.TrimSpace(p.LatestVersion) != "" && p.FreshUntil.After(s.now()) &&
+			probeWithinFeedBound(p, s.now(), DefaultMaxStaleness) {
+			return p.LatestVersion
+		}
+	}
+	if lim := depResolveLimiter(); lim == nil || lim.Wait(ctx) != nil {
+		return ""
+	}
+	version := s.resolveLatestVersion(ctx, eco, name)
+	if version != "" && s.store != nil {
+		now := s.now()
+		_ = s.store.UpsertLatestVersionProbe(ctx, "", LatestVersionProbe{
+			Ecosystem: eco, Package: name, LatestVersion: version,
+			ProbedAt: now, FreshUntil: now.Add(DefaultMaxStaleness),
+		})
+	}
+	return version
 }
 
 // resolveLatestVersion makes a single registry call to discover the
@@ -296,10 +417,17 @@ func (s *DefaultService) tryFetchArtifact(ctx context.Context, eco, name, versio
 // and this is the one outbound path in the package that did not. It becomes
 // load-bearing the moment GOPROXY or an enterprise registry mirror is made
 // configurable, which is the obvious next request for this code.
-var autoDepHTTPClient = httpclient.New(
-	httpclient.WithTimeout(autoDepResolveTimeout),
-	httpclient.WithSSRFGuard(),
-)
+// It goes through the process-wide limiter, so the background mark on a
+// dependency scan's context holds it to its share of each host's rate and a
+// host's 429 pauses it.
+var autoDepHTTPClient = upstreamhttp.New(upstreamhttp.FromEnv(),
+	upstreamhttp.WithBaseClient(httpclient.New(
+		httpclient.WithTimeout(autoDepResolveTimeout),
+		httpclient.WithSSRFGuard(),
+	)),
+	upstreamhttp.WithLimiter(upstreamhttp.SharedLimiter()),
+	upstreamhttp.WithMaxRetries(0),
+).HTTPClient()
 
 // artifactURLFor returns the canonical tarball URL + Content-Type for
 // the given coordinate. Empty url means we don't know how to fetch
@@ -428,7 +556,10 @@ func resolveNpmLatest(ctx context.Context, name string) (string, error) {
 	var pack struct {
 		DistTags map[string]string `json:"dist-tags"`
 	}
-	if err := autoDepGetJSON(ctx, endpoint, &pack); err != nil {
+	// The abbreviated (install) document carries dist-tags at a fraction of
+	// the full packument, which for a large package passes the 8 MiB read
+	// cap and fails to decode at all.
+	if err := autoDepGetJSONAccept(ctx, endpoint, npmAbbreviatedAccept, &pack); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(pack.DistTags["latest"]), nil
@@ -482,11 +613,19 @@ func resolveRubyGemsLatest(ctx context.Context, name string) (string, error) {
 // it doesn't share state with the registrymetadata provider's client
 // (different timeout regime; we want resolution to fail fast).
 func autoDepGetJSON(ctx context.Context, endpoint string, out any) error {
+	return autoDepGetJSONAccept(ctx, endpoint, "application/json", out)
+}
+
+// npmAbbreviatedAccept asks the npm registry for the abbreviated packument,
+// falling back to the full one from a registry that does not serve it.
+const npmAbbreviatedAccept = "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8"
+
+func autoDepGetJSONAccept(ctx context.Context, endpoint, accept string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	req.Header.Set("User-Agent", UserAgent("deps"))
 	resp, err := autoDepHTTPClient.Do(req)
 	if err != nil {

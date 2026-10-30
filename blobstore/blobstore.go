@@ -70,6 +70,15 @@ type ContextStore interface {
 	ListCtx(ctx context.Context, prefix string, fn func(BlobInfo) error) error
 }
 
+// RangeOpener is an optional extension for backends that can start a read
+// part-way into a blob (an S3 ranged GET, a file seek), so a client Range
+// does not cost reading and discarding everything before it.
+type RangeOpener interface {
+	// OpenRange returns a reader from offset to the end of the blob.
+	// Returns [ErrBlobNotFound] when the object is missing.
+	OpenRange(path string, offset int64) (io.ReadCloser, error)
+}
+
 // BlobInfo is the metadata returned by [ContextStore.ListCtx]. It is
 // deliberately small — full attributes require a Stat call.
 type BlobInfo struct {

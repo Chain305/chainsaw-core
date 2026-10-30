@@ -92,13 +92,13 @@ func (s *Store) stampLapsingLegacyExceptions() (int64, error) {
 // own orgs and its own marker on a shared database. scope is ANDed onto
 // the predicate; its placeholders start at $2 ($1 is the marker).
 func (s *Store) stampLapsingLegacyExceptionsScoped(marker, scope string, scopeArgs ...any) (int64, error) {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS data_backfills (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS data_backfills (
 		name TEXT PRIMARY KEY,
 		applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`); err != nil {
 		return 0, fmt.Errorf("create data_backfills: %w", err)
 	}
-	res, err := s.db.Exec(`
+	res, err := s.migExec(`
 		WITH marker AS (
 			INSERT INTO data_backfills (name) VALUES ($1)
 			ON CONFLICT (name) DO NOTHING

@@ -184,6 +184,9 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			// response-path below.
 			return nil, err
 		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			c.pauseBackground(host, resp)
+		}
 		// A 429 from Maven Central starts a stand-off and is never retried:
 		// asking again inside a block is what lengthens it.
 		if sonatypeEdge.observe(host, resp) || !shouldRetry(resp.StatusCode) || attempt == c.cfg.MaxRetries {
@@ -210,6 +213,25 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("upstreamhttp: retry loop exhausted without response")
+}
+
+// pauseBackground stops background requests to host for the 429's
+// Retry-After (30s when absent, at most 5m), on limiters that support it.
+// Foreground requests keep their own retry handling.
+func (c *Client) pauseBackground(host string, resp *http.Response) {
+	p, ok := c.limiter.(interface{ PauseBackground(string, time.Time) })
+	if !ok {
+		return
+	}
+	now := c.now()
+	d, ok := parseRetryAfter(resp.Header.Get("Retry-After"), now)
+	if !ok || d <= 0 {
+		d = defaultBackgroundPause
+	}
+	if d > maxBackgroundPause {
+		d = maxBackgroundPause
+	}
+	p.PauseBackground(host, now.Add(d))
 }
 
 // normaliseHost extracts the lowercased hostname from a request URL.

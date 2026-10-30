@@ -15,7 +15,7 @@ func (s *Store) ensureDefaultOrg() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	_, err := s.db.Exec(`INSERT INTO orgs(id, name, slug, created_at, updated_at)
+	_, err := s.migExec(`INSERT INTO orgs(id, name, slug, created_at, updated_at)
 		VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
 		tenancy.DefaultOrgID, tenancy.DefaultOrgName, tenancy.DefaultOrgSlug, currentTimestamp(), currentTimestamp())
 	if err != nil {
@@ -42,7 +42,7 @@ func (s *Store) backfillDefaultPlanAssignment() error {
 		return err
 	}
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`
+	_, err := s.migExec(`
 		INSERT INTO org_plan_assignments (org_id, plan_id, billing_period_start, billing_period_end, assigned_at)
 		SELECT o.id, ?, ?, ?, ?
 		FROM orgs o
@@ -209,7 +209,7 @@ func (s *Store) seedPricingPlans() error {
 			return fmt.Errorf("marshal features for plan %s: %w", p.id, err)
 		}
 
-		_, err = s.db.Exec(`
+		_, err = s.migExec(`
 			INSERT INTO pricing_plans (
 				id, name, description,
 				storage_bytes_limit, bandwidth_bytes_limit,

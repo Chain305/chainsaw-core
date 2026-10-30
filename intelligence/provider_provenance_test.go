@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/chain305/chainsaw-core/provenance"
 )
@@ -91,5 +92,39 @@ func TestProvenanceProvider_UnsupportedEcosystem(t *testing.T) {
 	p := newProvenanceProvider(checker)
 	if p.Supports("nonsense-ecosystem") {
 		t.Fatalf("unknown ecosystem must not be supported")
+	}
+}
+
+// A verified attestation is reused for a month instead of verified again on
+// every rescan; anything else, or an older result, is checked again (J.4
+// I13-2). The checker here is offline, so a fresh check can only answer
+// unavailable: a verified answer proves the prior was reused.
+func TestProvenanceProvider_ReusesARecentVerifiedResult(t *testing.T) {
+	p := newProvenanceProvider(provenance.NewChecker(discardProvenanceLogger(), provenance.WithOfflineMode()))
+	req := Request{Key: Key{Ecosystem: "npm", Package: "lodash", Version: "4.17.21"}}
+	prior := func(verified bool, age time.Duration) *Report {
+		r := &Report{}
+		r.Provenance = ProvenanceSection{Verified: verified, Available: true, Status: string(provenance.StatusVerified), SourceRepo: "https://github.com/lodash/lodash"}
+		r.Observation.CollectedAt = time.Now().Add(-age)
+		return r
+	}
+	got, _ := p.Run(context.Background(), req, prior(true, 24*time.Hour))
+	if got.Provenance == nil || !got.Provenance.Verified || got.URLs == nil || got.URLs.SourceRepoURL == "" {
+		t.Fatalf("recent verified result not reused: %+v", got.Provenance)
+	}
+	// The way the scanner actually calls a tier-1 provider: prior nil, the
+	// stored row on the request.
+	got, _ = p.Run(context.Background(), req.WithStoredRowForTest(prior(true, 24*time.Hour)), nil)
+	if got.Provenance == nil || !got.Provenance.Verified {
+		t.Fatalf("stored row on the request not reused: %+v", got.Provenance)
+	}
+	for name, pr := range map[string]*Report{
+		"not verified": prior(false, time.Hour),
+		"too old":      prior(true, 40*24*time.Hour),
+	} {
+		got, _ := p.Run(context.Background(), req, pr)
+		if got.Provenance == nil || got.Provenance.Status != string(provenance.StatusUnavailable) {
+			t.Errorf("%s: reused instead of checked again: %+v", name, got.Provenance)
+		}
 	}
 }

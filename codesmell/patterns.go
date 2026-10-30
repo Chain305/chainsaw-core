@@ -27,12 +27,16 @@ type pattern struct {
 type signalRules struct {
 	ByLang   [9][]pattern
 	Combined [9]*regexp.Regexp
-	// Anchors holds the per-language set of literal byte sequences
-	// that MUST appear in any possible match. bytes.Contains over
+	// Anchors holds the per-language set of literal byte sequences, one
+	// of which MUST appear in any possible match. bytes.Contains over
 	// these anchors is a linear-scan fast-path — a file that carries
 	// none of them cannot match any rule, so we skip the regex pass
 	// entirely.
 	Anchors [9][][]byte
+	// RuleAnchors is Anchors per rule: every match of ByLang[lang][i]
+	// contains at least one of RuleAnchors[lang][i]. Kept for the guard
+	// test that holds each rule to that contract.
+	RuleAnchors [9][][]string
 }
 
 // compilePatterns converts a (pattern, tag) table into a slice of
@@ -87,7 +91,7 @@ func finalizeRules(sets ...*signalRules) {
 	for _, s := range sets {
 		for i := range s.ByLang {
 			s.Combined[i] = combinePatterns(s.ByLang[i])
-			s.Anchors[i] = anchorsFor(s.ByLang[i])
+			s.RuleAnchors[i], s.Anchors[i] = anchorsFor(s.ByLang[i])
 		}
 		allRuleSets = append(allRuleSets, s)
 	}
@@ -106,47 +110,118 @@ func ensureRules() {
 	})
 }
 
-// anchorsFor returns one literal byte sequence per rule, each one a substring
-// EVERY match of that rule must contain, so a single bytes.Contains sweep can
-// reject a file without running the regex engine. If any rule has no such
-// literal (of 3+ bytes) it returns nil and the driver runs the combined regex
-// on every file.
-func anchorsFor(rules []pattern) [][]byte {
-	out := make([][]byte, 0, len(rules))
+// anchorsFor returns, per rule, a set of literals at least one of which EVERY
+// match of that rule contains, plus their union, so a single bytes.Contains
+// sweep can reject a file without running the regex engine. If any rule has
+// no such set (each literal 3+ bytes) it returns nil and the driver runs the
+// combined regex on every file of that language.
+//
+// Sets, not single literals: `\b(?:exec|execSync|spawn|spawnSync)\s*\(`
+// shares no literal across its branches, so one rule like it switched the
+// prefilter off for the whole language. JS's shell rule did that, and
+// ScanShell ran the combined regex over every JavaScript file (537 ms/op).
+func anchorsFor(rules []pattern) ([][]string, [][]byte) {
+	perRule := make([][]string, 0, len(rules))
+	seen := map[string]bool{}
+	var union [][]byte
 	for _, r := range rules {
-		anchor := requiredLiteral(r.Re.String())
-		if len(anchor) < 3 {
-			return nil
+		set := requiredLiterals(r.Re.String())
+		if len(set) == 0 {
+			return nil, nil
 		}
-		out = append(out, []byte(anchor))
+		perRule = append(perRule, set)
+		for _, a := range set {
+			if !seen[a] {
+				seen[a] = true
+				union = append(union, []byte(a))
+			}
+		}
 	}
-	return out
+	return perRule, union
 }
 
-// requiredLiteral returns the longest literal that every match of the regex
-// contains, or "".
+// minAnchor is the shortest literal worth a bytes.Contains sweep.
+const minAnchor = 3
+
+// requiredLiterals returns a set of literals, each minAnchor bytes or more,
+// at least one of which every match of the regex contains; nil when there is
+// none. A single shared literal is preferred; otherwise an alternation
+// contributes one literal per branch.
 //
-// It replaced a scan of the regex SOURCE for its longest literal run, which
-// was usually inside one alternation branch: `std::env::(?:var|vars)` got
-// "vars" and so never saw std::env::var("HOME"); Python's import rule got
-// "http.client" and never saw `import socket`; PHP's shell rule got
-// "shell_exec" and never saw exec("ls"). Here the parsed regex is walked:
-// a concatenation joins adjacent fixed pieces, an alternation keeps only what
-// all its branches share, and anything optional contributes nothing.
-func requiredLiteral(src string) string {
+// It walks the parsed regex. It replaced a scan of the regex SOURCE for its
+// longest literal run, which was usually inside one alternation branch:
+// `std::env::(?:var|vars)` got "vars" and so never saw std::env::var("HOME");
+// Python's import rule got "http.client" and never saw `import socket`; PHP's
+// shell rule got "shell_exec" and never saw exec("ls"). A concatenation joins
+// adjacent fixed pieces, an alternation keeps what all its branches share (or
+// failing that, one literal per branch), and anything optional contributes
+// nothing.
+func requiredLiterals(src string) []string {
 	re, err := syntax.Parse(src, syntax.Perl)
 	if err != nil {
-		return ""
+		return nil
 	}
-	return reqLit(re.Simplify()).best
+	return reqLit(re.Simplify()).anchors()
 }
 
 // litInfo: exact is set when the node always matches exactly s; best is the
-// longest literal every match of the node contains.
+// longest literal every match of the node contains; alts, when non-nil, is a
+// set of literals every match contains at least one of.
 type litInfo struct {
 	exact bool
 	s     string
 	best  string
+	alts  []string
+}
+
+// anchors is the node's usable anchor set: best alone when it is long
+// enough, else alts.
+func (l litInfo) anchors() []string {
+	if len(l.best) >= minAnchor {
+		return []string{l.best}
+	}
+	return l.alts
+}
+
+// betterSet prefers the set whose shortest literal is longest: that literal
+// bounds how often the prefilter lets a clean file through.
+func betterSet(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	if len(a) == 0 || shortest(b) > shortest(a) {
+		return b
+	}
+	return a
+}
+
+func shortest(set []string) int {
+	n := -1
+	for _, s := range set {
+		if n < 0 || len(s) < n {
+			n = len(s)
+		}
+	}
+	return n
+}
+
+// minimalSet drops any literal that contains another member: a file holding
+// the longer one holds the shorter one too.
+func minimalSet(set []string) []string {
+	var out []string
+	for i, a := range set {
+		redundant := false
+		for j, b := range set {
+			if i != j && strings.Contains(a, b) && (len(b) < len(a) || j < i) {
+				redundant = true
+				break
+			}
+		}
+		if !redundant {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func reqLit(re *syntax.Regexp) litInfo {
@@ -170,7 +245,7 @@ func reqLit(re *syntax.Regexp) litInfo {
 		return reqLit(re.Sub[0])
 	case syntax.OpPlus:
 		c := reqLit(re.Sub[0])
-		return litInfo{best: c.best}
+		return litInfo{best: c.best, alts: c.anchors()}
 	case syntax.OpRepeat:
 		if re.Min < 1 {
 			return litInfo{}
@@ -179,7 +254,7 @@ func reqLit(re *syntax.Regexp) litInfo {
 		if re.Min == 1 && re.Max == 1 {
 			return c
 		}
-		return litInfo{best: c.best}
+		return litInfo{best: c.best, alts: c.anchors()}
 	case syntax.OpConcat:
 		out := litInfo{exact: true}
 		run := ""
@@ -191,6 +266,7 @@ func reqLit(re *syntax.Regexp) litInfo {
 			}
 			out.exact = false
 			out.best = longer(out.best, longer(run, c.best))
+			out.alts = betterSet(out.alts, c.alts)
 			run = ""
 		}
 		out.best = longer(out.best, run)
@@ -207,7 +283,16 @@ func reqLit(re *syntax.Regexp) litInfo {
 		for _, b := range branches[1:] {
 			common = longestCommonSubstring(common, b.best)
 		}
-		return litInfo{best: common}
+		var alts []string
+		for _, b := range branches {
+			set := b.anchors()
+			if len(set) == 0 {
+				alts = nil
+				break
+			}
+			alts = append(alts, set...)
+		}
+		return litInfo{best: common, alts: minimalSet(alts)}
 	}
 	return litInfo{} // star, quest, any-char: nothing required
 }

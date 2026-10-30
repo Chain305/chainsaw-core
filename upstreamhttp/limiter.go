@@ -42,6 +42,31 @@ const minFetchAfterWait = 500 * time.Millisecond
 // would arrive too late to make it. The upstream was never asked.
 var ErrRateLimitedLocally = errors.New("upstreamhttp: local rate limit: no time left to fetch after the queue wait")
 
+// ErrBackgroundPaused refuses background work for a host that answered 429
+// recently. Asking again inside the host's back-off is what lengthens it,
+// and background work is the part that can wait.
+var ErrBackgroundPaused = errors.New("upstreamhttp: background requests paused after an upstream 429")
+
+// Background pause bounds after a 429: the host's Retry-After, clamped.
+const (
+	defaultBackgroundPause = 30 * time.Second
+	maxBackgroundPause     = 5 * time.Minute
+)
+
+var (
+	sharedLimiterOnce sync.Once
+	sharedLimiter     *InProcessHostLimiter
+)
+
+// SharedLimiter is the process-wide limiter, built from FromEnv on first
+// use. Every production Client passes it (WithLimiter), so a host's budget
+// is one budget for the process; a Client built without it gets private
+// buckets, and the per-host rates add up across clients.
+func SharedLimiter() *InProcessHostLimiter {
+	sharedLimiterOnce.Do(func() { sharedLimiter = NewInProcessHostLimiter(FromEnv()) })
+	return sharedLimiter
+}
+
 // HostLimiter gates outbound HTTP requests by host. Wait must block
 // until a token is available for host (or ctx is cancelled). Host is
 // the case-insensitive hostname portion of the URL (u.Hostname()) and
@@ -70,9 +95,10 @@ type HostLimiter interface {
 type InProcessHostLimiter struct {
 	cfg Config
 
-	mu         sync.Mutex
-	limiters   map[string]*rate.Limiter
-	background map[string]*rate.Limiter
+	mu          sync.Mutex
+	limiters    map[string]*rate.Limiter
+	background  map[string]*rate.Limiter
+	pausedUntil map[string]time.Time
 }
 
 // NewInProcessHostLimiter constructs a limiter from the supplied
@@ -91,10 +117,41 @@ func NewInProcessHostLimiter(cfg Config) *InProcessHostLimiter {
 		cfg.Burst = DefaultBurst
 	}
 	return &InProcessHostLimiter{
-		cfg:        cfg,
-		limiters:   map[string]*rate.Limiter{},
-		background: map[string]*rate.Limiter{},
+		cfg:         cfg,
+		limiters:    map[string]*rate.Limiter{},
+		background:  map[string]*rate.Limiter{},
+		pausedUntil: map[string]time.Time{},
 	}
+}
+
+// PauseBackground refuses background requests to host until until. A later
+// call only ever extends the pause.
+func (l *InProcessHostLimiter) PauseBackground(host string, until time.Time) {
+	h := strings.ToLower(host)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if until.After(l.pausedUntil[h]) {
+		l.pausedUntil[h] = until
+	}
+}
+
+// Charge records a request to host made outside this limiter (the proxy's
+// own upstream fetch for an install), without waiting. It is charged to the
+// host's background bucket, so a burst of installs leaves background work
+// (dependency walks, cache warm) less of the host's rate, while foreground
+// lookups, which have a 3 s budget, are not slowed by it
+// (docs/REPORTS.md#backend-perf-load-test-2026-10-29 J.4 I13-1).
+func (l *InProcessHostLimiter) Charge(host string) {
+	if l == nil || host == "" {
+		return
+	}
+	_ = l.backgroundFor(host).Reserve() // a debt, not a wait
+}
+
+func (l *InProcessHostLimiter) backgroundPaused(host string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return time.Now().Before(l.pausedUntil[strings.ToLower(host)])
 }
 
 // Wait blocks until a token is available for the given host or ctx is
@@ -114,6 +171,9 @@ func (l *InProcessHostLimiter) Wait(ctx context.Context, host string) error {
 		return nil
 	}
 	if isBackground(ctx) {
+		if l.backgroundPaused(host) {
+			return ErrBackgroundPaused
+		}
 		if err := waitLeavingTime(ctx, l.backgroundFor(host)); err != nil {
 			return err
 		}

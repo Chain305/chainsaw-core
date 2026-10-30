@@ -1,11 +1,15 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
@@ -33,11 +37,14 @@ type ContentMetadata struct {
 	// values: "model", "dataset", "space", "agent-tool", "mcp-server",
 	// "prompt-template". Empty for traditional ecosystems. Set by the
 	// proxy facet from the resolver's coordinate output.
-	PackageSubtype  string            `json:"package_subtype,omitempty"`
-	ReleasedAt      time.Time         `json:"released_at"`
-	CachedAt        time.Time         `json:"cached_at"`
-	LastVerified    time.Time         `json:"last_verified"`
-	Size            int64             `json:"size"`
+	PackageSubtype string    `json:"package_subtype,omitempty"`
+	ReleasedAt     time.Time `json:"released_at"`
+	CachedAt       time.Time `json:"cached_at"`
+	LastVerified   time.Time `json:"last_verified"`
+	Size           int64     `json:"size"`
+	// SHA256 is the hex digest of the stored bytes, computed as Put writes
+	// them. Empty on rows written before it existed.
+	SHA256          string            `json:"sha256,omitempty"`
 	ClamAVScannedAt time.Time         `json:"clamav_scanned_at,omitempty"`
 	ClamAVDBVersion string            `json:"clamav_db_version,omitempty"`
 	ClamAVSHA256    string            `json:"clamav_sha256,omitempty"`
@@ -56,11 +63,105 @@ type CachedContent struct {
 	Metadata ContentMetadata
 	path     string
 	store    blobstore.BlobStore
+	// onMissing, when set, is called once Open finds the blob gone.
+	onMissing func()
+	// data, when non-nil, is served instead of the blob (NewInMemoryContent).
+	data []byte
+	// tier, when set and Metadata.SHA256 is known, is read before the blob
+	// store and filled from it.
+	tier *DiskTier
+	// file, when set, is a local spool served instead of the blob
+	// (LocalStorage.PutOrSpool).
+	file string
+	// ops counts this content's blob-store reads for the request that
+	// looked it up (nil: not counted).
+	ops *BlobOps
+}
+
+// NewInMemoryContent returns content served from data rather than a stored
+// blob. Used for a per-request transform of a cached response, which used to
+// be written back to the blob store on every cache hit.
+func NewInMemoryContent(meta ContentMetadata, data []byte) *CachedContent {
+	meta.Size = int64(len(data))
+	return &CachedContent{Metadata: meta, data: data}
 }
 
 // Open opens the underlying blob for reading.
 func (c *CachedContent) Open() (io.ReadCloser, error) {
-	return c.store.Open(c.path)
+	if c.data != nil {
+		return io.NopCloser(bytes.NewReader(c.data)), nil
+	}
+	if c.file != "" {
+		return os.Open(c.file)
+	}
+	sha := c.Metadata.SHA256
+	if c.tier != nil && sha != "" {
+		if rc, ok := c.tier.open(c.path, sha); ok {
+			return rc, nil
+		}
+	}
+	c.ops.get()
+	rc, err := c.store.Open(c.path)
+	if err != nil && c.onMissing != nil && (errors.Is(err, blobstore.ErrBlobNotFound) || errors.Is(err, os.ErrNotExist)) {
+		c.onMissing()
+	}
+	if err == nil && c.tier != nil && sha != "" {
+		rc = c.tier.fill(c.path, sha, rc)
+	}
+	return rc, err
+}
+
+// OpenAt opens the content positioned at offset, for serving a client Range.
+// A disk-tier or spool copy is seeked, and a blob store that supports it is
+// asked for the range directly (an S3 ranged GET), so the bytes before
+// offset are not transferred. Otherwise the prefix is read and discarded.
+//
+// A ranged read of a tier copy is not digest-checked: only a full read can
+// be. The copy was checked when it was written, and a full read checks it
+// again.
+func (c *CachedContent) OpenAt(offset int64) (io.ReadCloser, error) {
+	switch {
+	case offset <= 0:
+		return c.Open()
+	case c.data != nil:
+		return io.NopCloser(bytes.NewReader(c.data[min(offset, int64(len(c.data))):])), nil
+	case c.file != "":
+		return openFileAt(c.file, offset)
+	}
+	if c.tier != nil && c.Metadata.SHA256 != "" {
+		if rc, ok := c.tier.openAt(c.path, c.Metadata.SHA256, offset); ok {
+			return rc, nil
+		}
+	}
+	if ro, ok := c.store.(blobstore.RangeOpener); ok {
+		c.ops.get()
+		rc, err := ro.OpenRange(c.path, offset)
+		if err != nil && c.onMissing != nil && (errors.Is(err, blobstore.ErrBlobNotFound) || errors.Is(err, os.ErrNotExist)) {
+			c.onMissing()
+		}
+		return rc, err
+	}
+	rc, err := c.Open()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+		rc.Close()
+		return nil, err
+	}
+	return rc, nil
+}
+
+func openFileAt(path string, offset int64) (io.ReadCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // NewCachedContentForTest returns a CachedContent wired to an
@@ -89,6 +190,7 @@ type LocalStorage struct {
 	db        *sql.DB
 	metaCache *MetadataCache
 	metaStore MetaStore
+	tier      *DiskTier
 }
 
 // NewLocalStorage returns a storage facet for a repository. The
@@ -122,109 +224,210 @@ func (s *LocalStorage) SetMetaStore(ms MetaStore) {
 	s.metaStore = ms
 }
 
+// SetDiskTier puts a local-disk cache in front of the blob store. Nil turns
+// it off.
+func (s *LocalStorage) SetDiskTier(t *DiskTier) {
+	if s != nil {
+		s.tier = t
+	}
+}
+
 // Get loads a cached asset.
+//
+// Existence is decided by the metadata row, not by asking the blob store:
+// Put writes the blob before the row and Remove deletes the row after the
+// blob, so a row means the bytes were stored. The Stat this replaces was an
+// S3 HEAD on every cache hit (p50 256 ms, p90 1.9 s on Contabo, and the
+// first call to be throttled under load). If the bytes turn out to be gone
+// anyway, CachedContent.Open drops the row so the next request refetches.
 func (s *LocalStorage) Get(ctx context.Context, logicalPath string) (*CachedContent, error) {
 	orgID := OrgFromContext(ctx)
-	blobPath, err := s.blobStore.BlobPathForOrg(orgID, s.repo, logicalPath)
+	blobPath, meta, err := s.lookup(ctx, orgID, logicalPath)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.blobStore.Stat(blobPath); err != nil {
-		if (errors.Is(err, blobstore.ErrBlobNotFound) || errors.Is(err, os.ErrNotExist)) && orgID == tenancy.DefaultOrgID {
-			legacyPath, legacyErr := s.blobStore.BlobPath(s.repo, logicalPath)
-			if legacyErr != nil {
-				return nil, legacyErr
-			}
-			if _, legacyErr = s.blobStore.Stat(legacyPath); legacyErr == nil {
-				blobPath = legacyPath
-			} else if errors.Is(legacyErr, blobstore.ErrBlobNotFound) || errors.Is(legacyErr, os.ErrNotExist) {
-				return nil, ErrNotFound
-			} else {
-				return nil, legacyErr
-			}
-		} else if errors.Is(err, blobstore.ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNotFound
-		} else {
-			return nil, err
+	return s.content(ctx, blobPath, meta), nil
+}
+
+// lookup resolves logicalPath to its blob key and metadata, falling back to
+// the pre-tenancy key for the default org. ErrNotFound when neither has a row.
+func (s *LocalStorage) lookup(ctx context.Context, orgID, logicalPath string) (string, ContentMetadata, error) {
+	blobPath, err := s.blobStore.BlobPathForOrg(orgID, s.repo, logicalPath)
+	if err != nil {
+		return "", ContentMetadata{}, err
+	}
+	meta, ok, err := s.readMeta(ctx, blobPath)
+	if err != nil {
+		return "", ContentMetadata{}, err
+	}
+	if ok {
+		return blobPath, meta, nil
+	}
+	if orgID == tenancy.DefaultOrgID {
+		legacyPath, err := s.blobStore.BlobPath(s.repo, logicalPath)
+		if err != nil {
+			return "", ContentMetadata{}, err
+		}
+		meta, ok, err := s.readMeta(ctx, legacyPath)
+		if err != nil {
+			return "", ContentMetadata{}, err
+		}
+		if ok {
+			return legacyPath, meta, nil
 		}
 	}
-	// Check in-memory metadata cache before reading from the meta store.
+	return "", ContentMetadata{}, ErrNotFound
+}
+
+// readMeta reads a blob's metadata through the in-memory cache.
+func (s *LocalStorage) readMeta(ctx context.Context, blobPath string) (ContentMetadata, bool, error) {
 	if s.metaCache != nil {
 		if cached, ok := s.metaCache.Get(blobPath); ok {
-			return &CachedContent{
-				Metadata: cached,
-				path:     blobPath,
-				store:    s.blobStore,
-			}, nil
+			return cached, true, nil
 		}
 	}
 	meta, ok, err := s.metaStore.Get(ctx, blobPath)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, ErrNotFound
+	if err != nil || !ok {
+		return ContentMetadata{}, false, err
 	}
 	if s.metaCache != nil {
 		s.metaCache.Put(blobPath, meta)
 	}
+	return meta, true, nil
+}
+
+// dropMeta deletes a blob's metadata row AND its in-memory cache entry.
+// Since Get decides existence from metadata, a row (or cached copy of one)
+// left behind after its blob is removed makes the blob look present.
+func (s *LocalStorage) dropMeta(ctx context.Context, blobPath string) {
+	if s.metaCache != nil {
+		s.metaCache.Invalidate(blobPath)
+	}
+	if s.tier != nil {
+		s.tier.drop(blobPath)
+	}
+	_ = s.metaStore.Delete(ctx, blobPath)
+}
+
+// content builds a CachedContent whose Open drops the metadata row when the
+// blob it points at is missing, so a stale row costs one failed request
+// rather than every request until it is noticed.
+func (s *LocalStorage) content(ctx context.Context, blobPath string, meta ContentMetadata) *CachedContent {
 	return &CachedContent{
 		Metadata: meta,
 		path:     blobPath,
 		store:    s.blobStore,
-	}, nil
+		tier:     s.tier,
+		ops:      blobOpsFrom(ctx),
+		onMissing: func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s.dropMeta(ctx, blobPath)
+		},
+	}
 }
 
 // Put persists a new blob + metadata.
 func (s *LocalStorage) Put(ctx context.Context, logicalPath string, src io.Reader, meta ContentMetadata) (*CachedContent, error) {
+	c, _, err := s.put(ctx, logicalPath, src, meta, false)
+	return c, err
+}
+
+// PutOrSpool is Put for a proxy fill, whose bytes can be fetched again: when
+// the blob store write fails and a disk tier is configured, it reads the
+// rest of src into the tier and serves that copy instead of failing the
+// download. No metadata row is written, so the next request refetches and
+// stores again. stored reports whether the blob store write succeeded.
+// Never use it for a hosted upload: there the stored copy is the only one.
+func (s *LocalStorage) PutOrSpool(ctx context.Context, logicalPath string, src io.Reader, meta ContentMetadata) (c *CachedContent, stored bool, err error) {
+	return s.put(ctx, logicalPath, src, meta, true)
+}
+
+func (s *LocalStorage) put(ctx context.Context, logicalPath string, src io.Reader, meta ContentMetadata, spool bool) (*CachedContent, bool, error) {
 	orgID := OrgFromContext(ctx)
-	blob, err := s.blobStore.WriteForOrg(orgID, s.repo, logicalPath, src)
+	hash := sha256.New()
+	var tw *tierWriter
+	if s.tier != nil {
+		tw = s.tier.newWriter()
+	}
+	sink := io.Writer(hash)
+	if tw != nil {
+		sink = io.MultiWriter(hash, tw)
+	}
+	tee := io.TeeReader(src, sink)
+	blobOpsFrom(ctx).put()
+	blob, err := s.blobStore.WriteForOrg(orgID, s.repo, logicalPath, tee)
 	if err != nil {
-		return nil, err
+		if !spool || tw == nil {
+			tw.abort()
+			return nil, false, err
+		}
+		return serveSpool(logicalPath, tee, hash, tw, meta, err)
 	}
 	meta.LogicalPath = logicalPath
 	meta.Size = blob.Size
+	meta.SHA256 = hex.EncodeToString(hash.Sum(nil))
 	if meta.CachedAt.IsZero() {
 		meta.CachedAt = time.Now()
 	}
 	if err := s.metaStore.Put(ctx, blob.Path, orgID, s.repo, meta); err != nil {
-		return nil, err
+		tw.abort()
+		return nil, false, err
 	}
 	if s.metaCache != nil {
 		s.metaCache.Put(blob.Path, meta)
 	}
-	return &CachedContent{
-		Metadata: meta,
-		path:     blob.Path,
-		store:    s.blobStore,
-	}, nil
+	tw.commit(blob.Path, meta.SHA256)
+	return s.content(ctx, blob.Path, meta), true, nil
+}
+
+// spoolTTL is how long a spooled fill stays readable. The request that
+// spooled it is served well inside it; NewDiskTier clears any left behind.
+const spoolTTL = 15 * time.Minute
+
+// serveSpool finishes reading a fill whose blob store write failed into a
+// local spool file and returns content served from it. The file is kept
+// outside the tier's LRU, so eviction cannot pull it out from under the
+// request. The digest is of every byte read from src: exactly what upstream
+// sent.
+func serveSpool(logicalPath string, rest io.Reader, hash hash.Hash, tw *tierWriter, meta ContentMetadata, storeErr error) (*CachedContent, bool, error) {
+	if _, err := io.Copy(io.Discard, rest); err != nil {
+		tw.abort()
+		return nil, false, fmt.Errorf("%w (spooling the rest also failed: %v)", storeErr, err)
+	}
+	if tw.failed {
+		tw.abort()
+		return nil, false, storeErr
+	}
+	info, statErr := tw.f.Stat()
+	if err := tw.f.Close(); err != nil || statErr != nil {
+		tw.abort()
+		return nil, false, storeErr
+	}
+	tw.done = true
+	spool := tw.f.Name()
+	time.AfterFunc(spoolTTL, func() { _ = os.Remove(spool) })
+	meta.LogicalPath = logicalPath
+	meta.Size = info.Size()
+	meta.SHA256 = hex.EncodeToString(hash.Sum(nil))
+	if meta.CachedAt.IsZero() {
+		meta.CachedAt = time.Now()
+	}
+	return &CachedContent{Metadata: meta, file: spool}, false, nil
 }
 
 // UpdateMetadata replaces the metadata sidecar for an existing cached blob.
 func (s *LocalStorage) UpdateMetadata(ctx context.Context, logicalPath string, meta ContentMetadata) (*CachedContent, error) {
 	orgID := OrgFromContext(ctx)
-	blobPath, err := s.blobStore.BlobPathForOrg(orgID, s.repo, logicalPath)
+	// Same existence rule as Get: the metadata row, not a blob HEAD.
+	blobPath, prev, err := s.lookup(ctx, orgID, logicalPath)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.blobStore.Stat(blobPath); err != nil {
-		if (errors.Is(err, blobstore.ErrBlobNotFound) || errors.Is(err, os.ErrNotExist)) && orgID == tenancy.DefaultOrgID {
-			legacyPath, legacyErr := s.blobStore.BlobPath(s.repo, logicalPath)
-			if legacyErr != nil {
-				return nil, legacyErr
-			}
-			if _, legacyErr = s.blobStore.Stat(legacyPath); legacyErr == nil {
-				blobPath = legacyPath
-			} else if errors.Is(legacyErr, blobstore.ErrBlobNotFound) || errors.Is(legacyErr, os.ErrNotExist) {
-				return nil, ErrNotFound
-			} else {
-				return nil, legacyErr
-			}
-		} else if errors.Is(err, blobstore.ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNotFound
-		} else {
-			return nil, err
-		}
+	// The bytes did not change, so neither did their digest; callers
+	// building a fresh ContentMetadata would otherwise erase it.
+	if meta.SHA256 == "" {
+		meta.SHA256 = prev.SHA256
 	}
 	meta.LogicalPath = logicalPath
 	if meta.CachedAt.IsZero() {
@@ -236,11 +439,7 @@ func (s *LocalStorage) UpdateMetadata(ctx context.Context, logicalPath string, m
 	if s.metaCache != nil {
 		s.metaCache.Put(blobPath, meta)
 	}
-	return &CachedContent{
-		Metadata: meta,
-		path:     blobPath,
-		store:    s.blobStore,
-	}, nil
+	return s.content(ctx, blobPath, meta), nil
 }
 
 // Remove deletes a cached artifact and its metadata if present.
@@ -252,6 +451,9 @@ func (s *LocalStorage) Remove(ctx context.Context, logicalPath string) error {
 	}
 	if s.metaCache != nil {
 		s.metaCache.Invalidate(blobPath)
+	}
+	if s.tier != nil {
+		s.tier.drop(blobPath)
 	}
 	if cs, ok := s.blobStore.(blobstore.ContextStore); ok {
 		if err := cs.RemoveCtx(ctx, blobPath); err != nil {
@@ -268,12 +470,18 @@ func (s *LocalStorage) Remove(ctx context.Context, logicalPath string) error {
 		if legacyErr != nil {
 			return nil
 		}
+		if s.tier != nil {
+			s.tier.drop(legacyPath)
+		}
 		if cs, ok := s.blobStore.(blobstore.ContextStore); ok {
 			if err := cs.RemoveCtx(ctx, legacyPath); err != nil {
 				return fmt.Errorf("remove legacy blob: %w", err)
 			}
 		} else if err := os.Remove(legacyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove legacy blob: %w", err)
+		}
+		if s.metaCache != nil {
+			s.metaCache.Invalidate(legacyPath)
 		}
 		if err := s.metaStore.Delete(ctx, legacyPath); err != nil {
 			return fmt.Errorf("remove legacy metadata: %w", err)
@@ -414,7 +622,7 @@ func (s *LocalStorage) PurgeAll(ctx context.Context) (int, error) {
 		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, _ error) error {
 			if d != nil && !d.IsDir() && !strings.HasSuffix(d.Name(), ".meta") {
 				removed++
-				_ = s.metaStore.Delete(ctx, p)
+				s.dropMeta(ctx, p)
 			}
 			return nil
 		})
@@ -438,7 +646,7 @@ func (s *LocalStorage) PurgeAll(ctx context.Context) (int, error) {
 			if err := cs.RemoveCtx(ctx, k); err != nil {
 				return fmt.Errorf("remove %s: %w", k, err)
 			}
-			_ = s.metaStore.Delete(ctx, k)
+			s.dropMeta(ctx, k)
 		}
 		return nil
 	}

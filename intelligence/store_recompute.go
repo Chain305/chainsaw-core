@@ -102,7 +102,7 @@ type RecomputeSource interface {
 // The PK tiebreak makes the total order strict, which is what the keyset
 // comparison requires; within one epoch the order is arbitrary but stable.
 func (s *Store) IterateMatcherStale(ctx context.Context, after MatcherStaleCursor, limit int) ([]MatcherStaleRow, MatcherStaleCursor, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, MatcherStaleCursor{}, nil
 	}
 	if limit <= 0 {
@@ -133,7 +133,7 @@ func (s *Store) IterateMatcherStale(ctx context.Context, after MatcherStaleCurso
 		LIMIT $%d
 	`, matcherEpochExpr, matcherEpochExpr, keyset, len(args))
 
-	rows, err := s.sql.DB().QueryContext(ctx, query, args...)
+	rows, err := s.db(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, MatcherStaleCursor{}, fmt.Errorf("intelligence: iterate matcher-stale: %w", err)
 	}
@@ -178,13 +178,13 @@ func (s *Store) IterateMatcherStale(ctx context.Context, after MatcherStaleCurso
 // stopped draining to be noticed by anything other than a person who happened
 // to remember yesterday's number.
 func (s *Store) CountMatcherStale(ctx context.Context) (int, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return 0, nil
 	}
 	var n int
 	query := fmt.Sprintf(
 		`SELECT COUNT(*) FROM intelligence_reports WHERE %s < $1`, matcherEpochExpr)
-	if err := s.sql.DB().QueryRowContext(ctx, query, CurrentMatcherEpoch).Scan(&n); err != nil {
+	if err := s.db(ctx).QueryRowContext(ctx, query, CurrentMatcherEpoch).Scan(&n); err != nil {
 		return 0, fmt.Errorf("intelligence: count matcher-stale: %w", err)
 	}
 	return n, nil

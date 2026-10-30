@@ -23,6 +23,7 @@ import (
 	"github.com/chain305/chainsaw-core/depparser/origin"
 	"github.com/chain305/chainsaw-core/pgstore"
 	"github.com/chain305/chainsaw-core/tenancy"
+	"golang.org/x/sync/singleflight"
 )
 
 // ErrPolicyNotFound indicates the requested policy does not exist.
@@ -2248,6 +2249,18 @@ type CachedStore struct {
 	cache map[string]cachedEntry
 	ttl   time.Duration
 
+	// Loads run outside mu, one per org at a time (loads). They used to
+	// run under the write lock, so one org's slow List() stalled every
+	// org's cached read. gen/allGen count invalidations: a load caches its
+	// result only if no Invalidate happened while it ran, and callers that
+	// arrive after an Invalidate start a new load instead of joining one
+	// that began before it.
+	loads  singleflight.Group
+	gen    map[string]uint64
+	allGen uint64
+	// load overrides c.inner.ForOrg(orgID).List; a seam for tests.
+	load func(orgID string) ([]Policy, error)
+
 	// busMu guards publisher (which may be reset at runtime). Reads
 	// take an RLock, writes take a Lock.
 	busMu     sync.RWMutex
@@ -2288,6 +2301,7 @@ func NewCachedStore(inner *Store, ttl time.Duration, downstream ...func(orgID st
 	cs := &CachedStore{
 		inner:      inner,
 		cache:      make(map[string]cachedEntry),
+		gen:        make(map[string]uint64),
 		ttl:        ttl,
 		downstream: downstream,
 	}
@@ -2383,23 +2397,30 @@ func (c *CachedStore) ListPolicies(orgID string) ([]Policy, error) {
 		c.mu.RUnlock()
 		return result, nil
 	}
+	gen, allGen := c.gen[orgID], c.allGen
 	c.mu.RUnlock()
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if entry, ok := c.cache[orgID]; ok && time.Since(entry.loadedAt) < c.ttl {
-		result := make([]Policy, len(entry.policies))
-		copy(result, entry.policies)
-		return result, nil
-	}
-
-	policies, err := c.inner.ForOrg(orgID).List()
+	key := fmt.Sprintf("%s\x00%d\x00%d", orgID, gen, allGen)
+	v, err, _ := c.loads.Do(key, func() (any, error) {
+		load := c.load
+		if load == nil {
+			load = func(orgID string) ([]Policy, error) { return c.inner.ForOrg(orgID).List() }
+		}
+		policies, err := load(orgID)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		if c.gen[orgID] == gen && c.allGen == allGen {
+			c.cache[orgID] = cachedEntry{policies: policies, loadedAt: time.Now()}
+		}
+		c.mu.Unlock()
+		return policies, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	c.cache[orgID] = cachedEntry{policies: policies, loadedAt: time.Now()}
-
+	policies := v.([]Policy)
 	result := make([]Policy, len(policies))
 	copy(result, policies)
 	return result, nil
@@ -2434,6 +2455,10 @@ func (c *CachedStore) localInvalidate(orgID string) {
 	orgID = tenancy.NormalizeOrgID(orgID)
 	c.mu.Lock()
 	delete(c.cache, orgID)
+	if c.gen == nil {
+		c.gen = make(map[string]uint64)
+	}
+	c.gen[orgID]++
 	c.mu.Unlock()
 }
 
@@ -2443,5 +2468,6 @@ func (c *CachedStore) localInvalidate(orgID string) {
 func (c *CachedStore) InvalidateAll() {
 	c.mu.Lock()
 	c.cache = make(map[string]cachedEntry)
+	c.allGen++
 	c.mu.Unlock()
 }

@@ -47,5 +47,5 @@ func (s *Store) readerFor(ctx context.Context) *sql.DB {
 	if IsLagTolerantRead(ctx) {
 		return s.sql.ReadDB()
 	}
-	return s.sql.DB()
+	return s.db(ctx)
 }

@@ -121,7 +121,7 @@ func (s *Store) addColumnIfMissing(table, column, definition string) error {
 	qTable := pgx.Identifier{table}.Sanitize()
 	qColumn := pgx.Identifier{column}.Sanitize()
 	stmt := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s`, qTable, qColumn, strings.TrimSpace(definition))
-	if _, err := s.db.Exec(stmt); err != nil {
+	if _, err := s.migExec(stmt); err != nil {
 		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
@@ -165,7 +165,7 @@ func (s *Store) addConstraintIfMissing(table, name, definition string) error {
 	qTable := pgx.Identifier{table}.Sanitize()
 	qName := pgx.Identifier{name}.Sanitize()
 	stmt := fmt.Sprintf(`ALTER TABLE %s ADD CONSTRAINT %s %s`, qTable, qName, strings.TrimSpace(definition))
-	if _, err := s.db.Exec(stmt); err != nil {
+	if _, err := s.migExec(stmt); err != nil {
 		return fmt.Errorf("add constraint %s.%s: %w", table, name, err)
 	}
 	return nil

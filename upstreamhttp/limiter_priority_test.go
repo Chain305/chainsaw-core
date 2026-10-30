@@ -3,7 +3,11 @@ package upstreamhttp
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -145,5 +149,88 @@ func TestInProcessHostLimiter_PrepayWaitIsCapped(t *testing.T) {
 	}
 	if !takeCredit(paid, "busy.example") || !takeCredit(paid, "busy.example") {
 		t.Fatal("both tokens should be credited")
+	}
+}
+
+// A 429 pauses background requests to that host for its Retry-After, so a
+// dependency walk stops asking a host that is already pushing back, while
+// foreground requests keep their own retry handling (I13-1).
+func TestClient_429PausesBackgroundForThatHost(t *testing.T) {
+	t.Setenv("CHAINSAW_ALLOW_PRIVATE_UPSTREAMS", "1")
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	l := NewInProcessHostLimiter(Config{})
+	c := New(Config{}, WithLimiter(l), WithMaxRetries(0))
+	do := func(ctx context.Context) error {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		resp, err := c.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		return err
+	}
+	bg := WithBackground(context.Background())
+
+	if err := do(context.Background()); err != nil { // the 429
+		t.Fatal(err)
+	}
+	if err := do(bg); !errors.Is(err, ErrBackgroundPaused) {
+		t.Fatalf("background after a 429 = %v, want ErrBackgroundPaused", err)
+	}
+	if err := do(context.Background()); err != nil {
+		t.Fatalf("foreground refused after a 429: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("upstream saw %d requests, want 2 (the paused background one never left)", hits.Load())
+	}
+	host := strings.TrimPrefix(srv.URL, "http://")
+	host = host[:strings.LastIndex(host, ":")]
+	if err := l.Wait(WithBackground(context.Background()), "other."+host); err != nil {
+		t.Fatalf("the pause leaked to another host: %v", err)
+	}
+	l.mu.Lock()
+	until := l.pausedUntil[host]
+	l.mu.Unlock()
+	if d := time.Until(until); d < 50*time.Second || d > 61*time.Second {
+		t.Fatalf("pause is %v, want the 60s Retry-After", d)
+	}
+}
+
+func TestSharedLimiterIsOneInstance(t *testing.T) {
+	if SharedLimiter() != SharedLimiter() {
+		t.Fatal("SharedLimiter returned two limiters; host budgets would add up")
+	}
+}
+
+// An install fetch made outside the limiter is charged to the host's
+// background bucket without waiting: background work then waits, while a
+// foreground lookup does not (J.4 I13-1).
+func TestChargeSlowsBackgroundNotForeground(t *testing.T) {
+	l := NewInProcessHostLimiter(Config{HostLimits: map[string]float64{"registry.example": 3}, Burst: 3})
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		l.Charge("registry.example") // never blocks
+	}
+	if time.Since(start) > 50*time.Millisecond {
+		t.Fatal("Charge blocked")
+	}
+	fg, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start = time.Now()
+	if err := l.Wait(fg, "registry.example"); err != nil || time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("foreground waited %v (err %v) after install charges", time.Since(start), err)
+	}
+	bg, cancelBG := context.WithTimeout(WithBackground(context.Background()), 500*time.Millisecond)
+	defer cancelBG()
+	if err := l.Wait(bg, "registry.example"); err == nil {
+		t.Fatal("background was not held back by the install charges")
 	}
 }

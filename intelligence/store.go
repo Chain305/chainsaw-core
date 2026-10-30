@@ -135,6 +135,9 @@ func (s *Store) latestVersionCorroborator(ecosystem, pkg string) (string, bool) 
 	if !probe.FreshUntil.IsZero() && time.Now().After(probe.FreshUntil) {
 		return "", false
 	}
+	if !probeWithinFeedBound(probe, time.Now(), DefaultMaxStaleness) {
+		return "", false
+	}
 	return probe.LatestVersion, true
 }
 
@@ -188,10 +191,10 @@ func (s *Store) Get(ctx context.Context, orgID string, key Key) (*Report, error)
 // orgID is ignored — see the package-level comment.
 func (s *Store) ListVersions(ctx context.Context, orgID, ecosystem, name string) ([]string, error) {
 	_ = orgID
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, nil
 	}
-	rows, err := s.sql.DB().QueryContext(ctx, `
+	rows, err := s.db(ctx).QueryContext(ctx, `
 		SELECT version FROM intelligence_reports
 		WHERE ecosystem=$1 AND package_name=$2
 	`, ecosystem, name)
@@ -246,19 +249,19 @@ func (s *Store) ListVersions(ctx context.Context, orgID, ecosystem, name string)
 // v1.12.1 with 1.7.2 on the public page (2026-10-02). An empty previous
 // (no dated timeline: Maven, Gradle) keeps the collected_at order.
 func (s *Store) PriorVersionScan(ctx context.Context, key Key, previous string) (*ArtifactScanSection, string, string, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, "", "", nil
 	}
 	var version string
 	var payload []byte
 	var row *sql.Row
 	if previous != "" {
-		row = s.sql.DB().QueryRowContext(ctx, `
+		row = s.db(ctx).QueryRowContext(ctx, `
 			SELECT version, report FROM intelligence_reports
 			WHERE ecosystem=$1 AND package_name=$2 AND version=$3
 		`, key.Ecosystem, key.Package, previous)
 	} else {
-		row = s.sql.DB().QueryRowContext(ctx, `
+		row = s.db(ctx).QueryRowContext(ctx, `
 			SELECT version, report FROM intelligence_reports
 			WHERE ecosystem=$1 AND package_name=$2 AND version<>$3
 			ORDER BY collected_at DESC
@@ -362,7 +365,7 @@ func TyposquatIsActionable(status, confidence string) bool {
 }
 
 func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
-	if s == nil || s.sql == nil || s.sql.DB() == nil || r == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil || r == nil {
 		return nil
 	}
 
@@ -399,7 +402,7 @@ func (s *Store) Upsert(ctx context.Context, orgID string, r *Report) error {
 	// SELECT … FOR UPDATE inside this tx blocks concurrent writers on
 	// the existing row's PK; the INSERT path naturally serialises through
 	// the unique index when no prior row exists.
-	tx, err := s.sql.DB().BeginTx(ctx, nil)
+	tx, err := s.db(ctx).BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("intelligence: begin upsert tx: %w", err)
 	}
@@ -987,7 +990,7 @@ func vulnSectionEmpty(v VulnSection) bool {
 // TrustScore and sorting on it still use the persisted values — a stale row
 // keeps its place in the ordering and its place in the counts, and says so.
 func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return &SearchResults{}, nil
 	}
 	limit := q.Limit
@@ -1036,6 +1039,11 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, erro
 	}
 	if q.OnlyArtifactScan {
 		conds = append(conds, "has_artifact_scan = TRUE")
+	}
+	if p := strings.TrimSpace(q.Package); p != "" {
+		conds = append(conds, fmt.Sprintf("package_name = $%d", idx))
+		args = append(args, p)
+		idx++
 	}
 	if qStr := strings.TrimSpace(q.Q); qStr != "" {
 		// Shodan-style free text: match on package name, version, or
@@ -1176,10 +1184,10 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchResults, erro
 // package, or (nil, ErrNotFound) if none exists. orgID is ignored.
 func (s *Store) GetLatestVersionProbe(ctx context.Context, orgID, ecosystem, pkg string) (*LatestVersionProbe, error) {
 	_ = orgID
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, ErrNotFound
 	}
-	row := s.sql.DB().QueryRowContext(ctx, `
+	row := s.db(ctx).QueryRowContext(ctx, `
 		SELECT latest_version, probed_at, fresh_until, error
 		FROM intelligence_latest_probes
 		WHERE ecosystem=$1 AND package_name=$2
@@ -1210,7 +1218,7 @@ func (s *Store) GetLatestVersionProbe(ctx context.Context, orgID, ecosystem, pkg
 // UpsertLatestVersionProbe writes a probe result. orgID is ignored.
 func (s *Store) UpsertLatestVersionProbe(ctx context.Context, orgID string, p LatestVersionProbe) error {
 	_ = orgID
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil
 	}
 	var latest sql.NullString
@@ -1221,7 +1229,7 @@ func (s *Store) UpsertLatestVersionProbe(ctx context.Context, orgID string, p La
 	if p.Error != "" {
 		errStr = sql.NullString{String: p.Error, Valid: true}
 	}
-	_, err := s.sql.DB().ExecContext(ctx, `
+	_, err := s.db(ctx).ExecContext(ctx, `
 		INSERT INTO intelligence_latest_probes
 		  (ecosystem, package_name, latest_version, probed_at, fresh_until, error)
 		VALUES ($1,$2,$3,$4,$5,$6)
@@ -1235,6 +1243,59 @@ func (s *Store) UpsertLatestVersionProbe(ctx context.Context, orgID string, p La
 		return fmt.Errorf("intelligence: upsert latest probe: %w", err)
 	}
 	return nil
+}
+
+// GetFeedCheckpoint returns an upstream feed's stored position.
+func (s *Store) GetFeedCheckpoint(ctx context.Context, feed string) (string, bool, error) {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
+		return "", false, errors.New("intelligence: no store")
+	}
+	var seq string
+	err := s.db(ctx).QueryRowContext(ctx, `SELECT seq FROM upstream_feed_checkpoints WHERE feed = $1`, feed).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("intelligence: load feed checkpoint: %w", err)
+	}
+	return seq, true, nil
+}
+
+// SetFeedCheckpoint stores an upstream feed's position.
+func (s *Store) SetFeedCheckpoint(ctx context.Context, feed, seq string) error {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
+		return errors.New("intelligence: no store")
+	}
+	_, err := s.db(ctx).ExecContext(ctx, `
+		INSERT INTO upstream_feed_checkpoints (feed, seq, updated_at) VALUES ($1, $2, now())
+		ON CONFLICT (feed) DO UPDATE SET seq = EXCLUDED.seq, updated_at = EXCLUDED.updated_at
+	`, feed, seq)
+	if err != nil {
+		return fmt.Errorf("intelligence: store feed checkpoint: %w", err)
+	}
+	return nil
+}
+
+// ExpireLatestProbes makes the named packages' latest-version probes stale
+// now, so the refresher re-asks the registry on its next pass. Only probes
+// still current are touched.
+func (s *Store) ExpireLatestProbes(ctx context.Context, ecosystems, packages []string) (int64, error) {
+	if s == nil || s.sql == nil || s.db(ctx) == nil || len(packages) == 0 {
+		return 0, nil
+	}
+	// Lists travel as JSON: the driver takes no Go slices as arrays.
+	ecos, _ := json.Marshal(ecosystems)
+	names, _ := json.Marshal(packages)
+	res, err := s.db(ctx).ExecContext(ctx, `
+		UPDATE intelligence_latest_probes SET fresh_until = now()
+		WHERE ecosystem IN (SELECT jsonb_array_elements_text($1::jsonb))
+		  AND package_name IN (SELECT jsonb_array_elements_text($2::jsonb))
+		  AND fresh_until > now()
+	`, string(ecos), string(names))
+	if err != nil {
+		return 0, fmt.Errorf("intelligence: expire latest probes: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 // LatestVersionProbe is the in-memory shape for a daily probe.
@@ -1329,7 +1390,7 @@ const transitiveOnlyCVEExpr = `NOT (` + directCVEExpr + `) AND ` + transitiveCVE
 // it.
 func (s *Store) Facets(ctx context.Context, orgID, ecosystem string) (*FacetCounts, error) {
 	_ = orgID
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return &FacetCounts{}, nil
 	}
 	out := &FacetCounts{}
@@ -1341,7 +1402,7 @@ func (s *Store) Facets(ctx context.Context, orgID, ecosystem string) (*FacetCoun
 	// that list still shows them (marked). StalePending answers "how much of
 	// this is awaiting recompute" without moving any of the other numbers.
 	// See FacetCounts.StalePending.
-	row := s.sql.DB().QueryRowContext(ctx, `
+	row := s.db(ctx).QueryRowContext(ctx, `
 		SELECT
 		  COUNT(*),
 		  COUNT(*) FILTER (WHERE is_malicious),
@@ -1382,7 +1443,7 @@ func (s *Store) Facets(ctx context.Context, orgID, ecosystem string) (*FacetCoun
 	// navigation control: it answers "which ecosystems exist and how big are
 	// they", which is what lets a reader move between them. Scoping it would
 	// collapse it to a single row and remove the only way off the page.
-	rows, err := s.sql.DB().QueryContext(ctx, `
+	rows, err := s.db(ctx).QueryContext(ctx, `
 		SELECT ecosystem, COUNT(*) AS c
 		FROM intelligence_reports
 		GROUP BY ecosystem
@@ -1488,4 +1549,11 @@ func vulnFactsDiffer(priorPayload []byte, incoming VulnSection) bool {
 		return true
 	}
 	return a != b
+}
+
+// db is the pool for this call: the background pool for a background-marked
+// ctx when one is configured (pgstore.WithBackground), the main pool
+// otherwise.
+func (s *Store) db(ctx context.Context) *sql.DB {
+	return s.sql.DBFor(ctx)
 }

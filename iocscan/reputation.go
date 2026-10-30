@@ -168,7 +168,7 @@ func (m *reputationMatcher) match(files map[string][]byte, coupleRequired bool) 
 		if len(body) > maxFileSize {
 			body = body[:maxFileSize]
 		}
-		if !sendSeen && netSendRE.MatchString(body) {
+		if !sendSeen && netSendMatch(body) {
 			sendSeen = true
 		}
 		if hitHost == "" {

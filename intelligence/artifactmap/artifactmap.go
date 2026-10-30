@@ -21,6 +21,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"path"
 	"sort"
@@ -122,7 +123,17 @@ const (
 	// its tail. A tar.gz entry is inflated to its end regardless (tar.Next
 	// discards it), a zip entry is not, so this caps the extra work there.
 	maxTailScan = 64 * 1024 * 1024
+	// MaxInflatedBytes caps the decompressed bytes a Build reads, retained or
+	// not. MaxRetainedBytes bounds memory but not work: a tar.gz entry is
+	// inflated to its end even when only its head is kept, so a bomb of one
+	// huge entry burned CPU without limit. Reaching the cap stops the walk and
+	// sets Truncated, the same as the other caps; the artifact is served with
+	// the truncation warning, not refused (owner decision 2026-10-30).
+	MaxInflatedBytes = 1 << 30
 )
+
+// errInflateCap ends a read once MaxInflatedBytes has been spent.
+var errInflateCap = errors.New("artifactmap: inflated-bytes cap reached")
 
 // Options tunes a Build. Zero values fall back to the constants above.
 type Options struct {
@@ -132,6 +143,8 @@ type Options struct {
 	// MaxRetainedBytes caps the sum of retained file bytes (Result.TotalBytes).
 	// Once it is reached Build stops adding entries and sets Truncated.
 	MaxRetainedBytes int64
+	// MaxInflatedBytes caps the decompressed bytes read across the walk.
+	MaxInflatedBytes int64
 }
 
 func (o Options) normalize() Options {
@@ -147,6 +160,9 @@ func (o Options) normalize() Options {
 	if o.MaxRetainedBytes <= 0 {
 		o.MaxRetainedBytes = MaxRetainedBytes
 	}
+	if o.MaxInflatedBytes <= 0 {
+		o.MaxInflatedBytes = MaxInflatedBytes
+	}
 	return o
 }
 
@@ -158,6 +174,29 @@ type Result struct {
 	// TotalBytes is the sum of bytes actually retained (post per-file
 	// cap), not the archive size.
 	TotalBytes int64
+
+	// inflateLeft is what remains of MaxInflatedBytes during a Build.
+	inflateLeft int64
+}
+
+// inflated counts decompressed bytes against res.inflateLeft. Once it is
+// spent the read fails and the walk is marked Truncated.
+type inflated struct {
+	r   io.Reader
+	res *Result
+}
+
+func (c inflated) Read(p []byte) (int, error) {
+	if c.res.inflateLeft <= 0 {
+		c.res.Truncated = true
+		return 0, errInflateCap
+	}
+	if int64(len(p)) > c.res.inflateLeft {
+		p = p[:c.res.inflateLeft]
+	}
+	n, err := c.r.Read(p)
+	c.res.inflateLeft -= int64(n)
+	return n, err
 }
 
 // Build consumes artifact bytes once and returns the populated map.
@@ -169,7 +208,7 @@ type Result struct {
 // overshoot by at most one PerFileCap.
 func Build(payload []byte, opts Options) Result {
 	opts = opts.normalize()
-	res := Result{Files: ArtifactFileMap{}}
+	res := Result{Files: ArtifactFileMap{}, inflateLeft: opts.MaxInflatedBytes}
 	if len(payload) == 0 {
 		return res
 	}
@@ -186,12 +225,12 @@ func Build(payload []byte, opts Options) Result {
 			return res
 		}
 		defer gzr.Close()
-		buildFromTar(gzr, opts, &res, false)
+		buildFromTar(inflated{gzr, &res}, opts, &res, false, nil)
 	default:
 		// Plain tar? Try it; tar.NewReader will fail gracefully if not.
 		// A .gem is a plain tar, so this is the only call that expands
 		// a top-level data.tar.gz.
-		buildFromTar(bytes.NewReader(payload), opts, &res, true)
+		buildFromTar(bytes.NewReader(payload), opts, &res, true, nil)
 	}
 	return res
 }
@@ -211,8 +250,9 @@ func looksLikeGzip(p []byte) bool {
 // shares res, so MaxFiles and MaxRetainedBytes bound both levels together,
 // and it never expands again — one level, not a recursion an attacker can
 // nest.
-func buildFromTar(r io.Reader, opts Options, res *Result, expandGem bool) {
+func buildFromTar(r io.Reader, opts Options, res *Result, expandGem bool, visit Visitor) {
 	tr := tar.NewReader(r)
+	mapping := true
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -222,6 +262,23 @@ func buildFromTar(r io.Reader, opts Options, res *Result, expandGem bool) {
 			// Malformed tar — return whatever we have so far.
 			return
 		}
+		var entry io.Reader = tr
+		if visit != nil {
+			consumed, more := visit(hdr, tr)
+			if !more {
+				visit = nil
+			}
+			if len(consumed) > 0 {
+				// The map reads the entry as if visit had not run.
+				entry = io.MultiReader(bytes.NewReader(consumed), tr)
+			}
+		}
+		if !mapping {
+			if visit == nil {
+				return
+			}
+			continue
+		}
 		// Only regular files. tar.TypeRegA is the legacy "regular" flag
 		// some old npm tarballs still use.
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
@@ -229,7 +286,13 @@ func buildFromTar(r io.Reader, opts Options, res *Result, expandGem bool) {
 		}
 		if len(res.Files) >= opts.MaxFiles || res.TotalBytes >= opts.MaxRetainedBytes {
 			res.Truncated = true
-			return
+			// Without a visitor the walk ends here; with one it goes on
+			// for the visitor only.
+			mapping = false
+			if visit == nil {
+				return
+			}
+			continue
 		}
 		name := sanitizePath(hdr.Name)
 		if name == "" {
@@ -238,18 +301,54 @@ func buildFromTar(r io.Reader, opts Options, res *Result, expandGem bool) {
 		if expandGem && name == "data.tar.gz" {
 			// A data.tar.gz that is not gzip is dropped, not kept: the
 			// failed header read has already consumed part of it.
-			if gzr, gerr := gzip.NewReader(tr); gerr == nil {
-				buildFromTar(gzr, opts, res, false)
+			if gzr, gerr := gzip.NewReader(entry); gerr == nil {
+				buildFromTar(inflated{gzr, res}, opts, res, false, nil)
 				gzr.Close()
 			}
 			continue
 		}
-		body, tail, err := readEntry(tr, name, opts)
+		body, tail, err := readEntry(entry, name, hdr.Size, opts)
 		if err != nil {
 			continue
 		}
 		addFile(res, name, body, tail, hdr.Size)
 	}
+}
+
+// Visitor sees each tar entry before the map does, reading what it wants
+// from r. It must return every byte it read, in order, as consumed (they are
+// replayed to the map); more false stops further visits, not the map.
+type Visitor func(hdr *tar.Header, r io.Reader) (consumed []byte, more bool)
+
+// BuildGzipTarVisit is Build for a gzipped tar that also hands every entry to
+// visit, so a caller that needs its own pass over the entries shares the one
+// decompression (docs/REPORTS.md#backend-perf-load-test-2026-10-29 J.5 step
+// 5). The map is the one Build(payload, opts) returns: whatever visit reads
+// is replayed to it. ok is false, and nothing is visited, when payload is not
+// gzip or its gzip header does not parse; the caller then walks the entries
+// itself.
+//
+// One difference from a separate walk: the visitor shares the map's
+// MaxInflatedBytes budget, so past 1 GiB inflated it stops too (owner
+// decision 2026-10-30: truncate and warn).
+func BuildGzipTarVisit(payload []byte, opts Options, visit Visitor) (res Result, ok bool) {
+	opts = opts.normalize()
+	res = Result{Files: ArtifactFileMap{}, inflateLeft: opts.MaxInflatedBytes}
+	if !looksLikeGzip(payload) || looksLikeZip(payload) {
+		return res, false
+	}
+	if int64(len(payload)) > opts.MaxArtifactBytes {
+		payload = payload[:opts.MaxArtifactBytes]
+		res.Truncated = true
+	}
+	gzr, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		// Nothing was visited; the caller's own walk reports this its way.
+		return res, false
+	}
+	defer gzr.Close()
+	buildFromTar(inflated{gzr, &res}, opts, &res, false, visit)
+	return res, true
 }
 
 func buildFromZip(payload []byte, opts Options, res *Result) {
@@ -261,7 +360,7 @@ func buildFromZip(payload []byte, opts Options, res *Result) {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		if len(res.Files) >= opts.MaxFiles || res.TotalBytes >= opts.MaxRetainedBytes {
+		if len(res.Files) >= opts.MaxFiles || res.TotalBytes >= opts.MaxRetainedBytes || res.inflateLeft <= 0 {
 			res.Truncated = true
 			return
 		}
@@ -273,7 +372,7 @@ func buildFromZip(payload []byte, opts Options, res *Result) {
 		if err != nil {
 			continue
 		}
-		body, tail, rerr := readEntry(rc, name, opts)
+		body, tail, rerr := readEntry(inflated{rc, res}, name, int64(f.UncompressedSize64), opts)
 		rc.Close()
 		if rerr != nil {
 			continue
@@ -283,9 +382,31 @@ func buildFromZip(payload []byte, opts Options, res *Result) {
 }
 
 // readEntry reads the first PerFileCap bytes of an entry and, for a source
-// file that runs past them, its last TailCap bytes too.
-func readEntry(r io.Reader, name string, opts Options) (head, tail []byte, err error) {
-	head, err = io.ReadAll(io.LimitReader(r, opts.PerFileCap))
+// file that runs past them, its last TailCap bytes too. declared is the
+// header's size; when it is known the head is read into one buffer of that
+// size instead of grown by doubling, which allocated about 2.3x what it kept.
+// A header that understates the size only costs the old growth path.
+func readEntry(r io.Reader, name string, declared int64, opts Options) (head, tail []byte, err error) {
+	if declared > 0 {
+		buf := make([]byte, min(declared, opts.PerFileCap))
+		var n int
+		n, err = io.ReadFull(r, buf)
+		head = buf[:n]
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+			err = nil
+		}
+		if err == nil && n == len(buf) && int64(n) < opts.PerFileCap {
+			// The header said the entry ends here; probe in case it lied.
+			var one [1]byte
+			if m, _ := io.ReadFull(r, one[:]); m == 1 {
+				var rest []byte
+				rest, err = io.ReadAll(io.LimitReader(r, opts.PerFileCap-int64(n)-1))
+				head = append(append(head, one[0]), rest...)
+			}
+		}
+	} else {
+		head, err = io.ReadAll(io.LimitReader(r, opts.PerFileCap))
+	}
 	if err != nil || int64(len(head)) < opts.PerFileCap {
 		return head, nil, err
 	}

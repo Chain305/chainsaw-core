@@ -13,6 +13,7 @@ package intelligence
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/chain305/chainsaw-core/httpclient"
 	"github.com/chain305/chainsaw-core/provenance"
@@ -50,9 +51,39 @@ func (p *provenanceProvider) Supports(ecosystem string) bool {
 // override, swift registry overrides, apt/dnf repo selection) threads
 // through. Maps provenance.Result → ProvenanceSection + the optional
 // SupplyChain.SourceRepo URL.
+// provenanceReuseFor is how long a verified attestation result is reused
+// instead of verified again. An attestation published with a version is a
+// fact about that version: re-verifying it on every rescan re-fetched the
+// attestation, the bundle and the transparency-log entry (~2 requests per
+// maven/gradle coordinate alone; docs/REPORTS.md
+// #backend-perf-load-test-2026-10-29 J.4 I13-2). The bound re-checks it now
+// and then, which is what notices a revoked signing identity.
+const provenanceReuseFor = 30 * 24 * time.Hour
+
 func (p *provenanceProvider) Run(ctx context.Context, req Request, prior *Report) (PartialReport, error) {
 	if p.checker == nil {
 		return PartialReport{}, nil
+	}
+	// Only a VERIFIED result is reused. Unavailable, absent and failed
+	// results are re-checked every time: a transient failure must be able
+	// to recover, and an attestation can still appear.
+	//
+	// A tier-1 provider is run with prior == nil (the scanner keeps the
+	// merged report away from phase 1); the stored row travels on the
+	// request instead.
+	stored := prior
+	if stored == nil {
+		stored = req.StoredRow()
+	}
+	if stored != nil && stored.Provenance.Verified && !stored.Provenance.CacheStale &&
+		!stored.Observation.CollectedAt.IsZero() && time.Since(stored.Observation.CollectedAt) < provenanceReuseFor {
+		kept := stored.Provenance
+		kept.Warnings = append([]string(nil), stored.Provenance.Warnings...)
+		partial := PartialReport{Provenance: &kept}
+		if kept.SourceRepo != "" {
+			partial.URLs = &URLSection{SourceRepoURL: kept.SourceRepo}
+		}
+		return partial, nil
 	}
 	// T-1: attestation probes are their own cost class and the largest
 	// refresher egress with no sub-caller before this — ~2 requests per

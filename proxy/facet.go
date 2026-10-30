@@ -134,6 +134,14 @@ type InternalPackageChecker interface {
 	IsInternalVersion(orgID, repoName, packageName, version string) bool
 }
 
+// InternalPackageErrChecker is an InternalPackageChecker that can also report
+// a failed lookup. The facet prefers it: a lookup that errors is refused
+// rather than read as "not internal", which would fetch and store the public
+// namesake of a private package (dependency confusion on a DB error).
+type InternalPackageErrChecker interface {
+	IsInternalVersionErr(orgID, repoName, packageName, version string) (bool, error)
+}
+
 // FacetConfig holds dependencies for building a proxy facet.
 type FacetConfig struct {
 	RepoName string
@@ -578,7 +586,9 @@ func (f *facet) storeUpstream(fetchCtx context.Context, remote RemoteDefinition,
 		}
 	}
 
-	if resp := f.serveInternalOverride(fetchCtx, logicalPath, meta); resp != nil {
+	if resp, err := f.serveInternalOverride(fetchCtx, logicalPath, meta); err != nil {
+		return nil, err
+	} else if resp != nil {
 		return resp, nil
 	}
 
@@ -587,7 +597,18 @@ func (f *facet) storeUpstream(fetchCtx context.Context, remote RemoteDefinition,
 		return nil, prepErr
 	}
 
-	saved, putErr := f.storage.Put(fetchCtx, logicalPath, bodyReader, meta)
+	var saved *storage.CachedContent
+	var putErr error
+	if sp, ok := f.storage.(spoolingStore); ok {
+		var stored bool
+		saved, stored, putErr = sp.PutOrSpool(fetchCtx, logicalPath, bodyReader, meta)
+		if putErr == nil && !stored {
+			f.logger.Warn("blob store write failed; serving the fill from the local disk tier, not cached",
+				"repository", f.repoName, "logical_path", logicalPath)
+		}
+	} else {
+		saved, putErr = f.storage.Put(fetchCtx, logicalPath, bodyReader, meta)
+	}
 	if putErr != nil {
 		return nil, fmt.Errorf("write cache: %w", putErr)
 	}
@@ -599,34 +620,54 @@ func (f *facet) storeUpstream(fetchCtx context.Context, remote RemoteDefinition,
 	}, nil
 }
 
+// spoolingStore is a storage that can serve a proxy fill from local disk
+// when the blob store write fails (storage.LocalStorage.PutOrSpool).
+type spoolingStore interface {
+	PutOrSpool(ctx context.Context, logicalPath string, src io.Reader, meta storage.ContentMetadata) (*storage.CachedContent, bool, error)
+}
+
 // serveInternalOverride returns the cached internal copy when the
 // upstream response would otherwise overwrite an internally published
 // package, preventing upstream content from clobbering internal
-// publishes. Returns nil when no override applies (no checker, missing
-// coords, not internal, or internal version is in DB but missing from
-// storage — in which case we fall through to the normal store path).
-func (f *facet) serveInternalOverride(fetchCtx context.Context, logicalPath string, meta storage.ContentMetadata) *Response {
+// publishes. Returns (nil, nil) when no override applies (no checker,
+// missing coords, not internal).
+//
+// It returns an error, and nothing is stored, when the version is internal
+// but its bytes cannot be read, or when the checker cannot tell whether it is
+// internal. Falling through in either case stored and served the upstream
+// namesake of a private package.
+func (f *facet) serveInternalOverride(fetchCtx context.Context, logicalPath string, meta storage.ContentMetadata) (*Response, error) {
 	if f.internalChecker == nil || meta.PackageName == "" || meta.PackageVersion == "" {
-		return nil
+		return nil, nil
 	}
 	orgID := OrgIDFromContext(fetchCtx)
-	if !f.internalChecker.IsInternalVersion(orgID, f.repoName, meta.PackageName, meta.PackageVersion) {
-		return nil
+	var internal bool
+	if ec, ok := f.internalChecker.(InternalPackageErrChecker); ok {
+		var err error
+		internal, err = ec.IsInternalVersionErr(orgID, f.repoName, meta.PackageName, meta.PackageVersion)
+		if err != nil {
+			return nil, fmt.Errorf("internal package check for %s@%s: %w", meta.PackageName, meta.PackageVersion, err)
+		}
+	} else {
+		internal = f.internalChecker.IsInternalVersion(orgID, f.repoName, meta.PackageName, meta.PackageVersion)
+	}
+	if !internal {
+		return nil, nil
 	}
 	f.logger.Info("skipping upstream store for internal package",
 		"package", meta.PackageName, "version", meta.PackageVersion)
 	// Serve from existing internal storage.
-	internal, intErr := f.storage.Get(fetchCtx, logicalPath)
+	cached, intErr := f.storage.Get(fetchCtx, logicalPath)
 	if intErr != nil {
-		// Internal version exists in DB but not in storage — unusual. Fall through.
-		return nil
+		return nil, fmt.Errorf("internal package %s@%s is published but its stored copy could not be read: %w",
+			meta.PackageName, meta.PackageVersion, intErr)
 	}
 	return &Response{
 		StatusCode: http.StatusOK,
-		Headers:    headersFromMetadata(internal.Metadata),
-		Content:    internal,
+		Headers:    headersFromMetadata(cached.Metadata),
+		Content:    cached,
 		FromCache:  true,
-	}
+	}, nil
 }
 
 func (f *facet) describe(logicalPath string) (common.PackageCoordinate, bool) {
@@ -787,8 +828,20 @@ func (f *facet) fetchFromRemote(ctx context.Context, remote RemoteDefinition, lo
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", UpstreamUserAgent)
 	}
+	if charge := upstreamCharger; charge != nil {
+		charge(req.URL.Hostname())
+	}
 	return remote.Client.Do(req)
 }
+
+// upstreamCharger, when set, is told the host of every upstream fetch the
+// proxy makes for a client. It must not block: installs never wait on it.
+var upstreamCharger func(host string)
+
+// SetUpstreamCharger installs the hook that counts install fetches against
+// the process-wide upstream budget (upstreamhttp.InProcessHostLimiter.Charge).
+// Pass nil to disable.
+func SetUpstreamCharger(f func(host string)) { upstreamCharger = f }
 
 func (f *facet) remoteURL(remote RemoteDefinition, logicalPath string) string {
 	base := remote.BaseURL
@@ -1156,6 +1209,11 @@ func (f *facet) prepareBodyReader(ctx context.Context, logicalPath string, resp 
 	return reader, nil
 }
 
+// rewriteCachedContent applies the response transformer to a cache hit. The
+// result is served from memory and memoised (rewriteMemo); it is never written
+// back to the blob store, which used to happen on every hit from a host
+// different from the last one, and let a concurrent request read the other
+// host's rewrite. Returns (nil, nil) when the stored copy is served as is.
 func (f *facet) rewriteCachedContent(ctx context.Context, logicalPath string, content *storage.CachedContent) (*storage.CachedContent, error) {
 	if f.rewriter == nil || content == nil {
 		return nil, nil
@@ -1164,6 +1222,20 @@ func (f *facet) rewriteCachedContent(ctx context.Context, logicalPath string, co
 	if !f.rewriter.ShouldTransform(logicalPath, resp) {
 		return nil, nil
 	}
+	memo := rewriteMemo()
+	key := strings.Join([]string{
+		f.repoName, storage.OrgFromContext(ctx), logicalPath,
+		strconv.FormatInt(content.Metadata.CachedAt.UnixNano(), 10), content.Metadata.ETag,
+		strconv.FormatInt(content.Metadata.Size, 10),
+		BaseURLFromContext(ctx), OrgSlugFromContext(ctx),
+	}, "\x00")
+	if e, ok := memo.get(key); ok {
+		if e.unchanged {
+			return nil, nil
+		}
+		return storage.NewInMemoryContent(e.meta, e.data), nil
+	}
+
 	reader, err := content.Open()
 	if err != nil {
 		return nil, fmt.Errorf("open cached content: %w", err)
@@ -1183,19 +1255,20 @@ func (f *facet) rewriteCachedContent(ctx context.Context, logicalPath string, co
 		return nil, fmt.Errorf("transform cached response: %w", err)
 	}
 	if bytes.Equal(payload, transformed) {
+		memo.put(rewriteMemoEntry{key: key, unchanged: true})
 		return nil, nil
 	}
-	encoded, err := encodeTransformedPayload(transformed, encoding)
+	encodedReader, err := encodeTransformedPayload(transformed, encoding)
 	if err != nil {
 		return nil, err
 	}
-	meta := content.Metadata
-	meta.CachedAt = content.Metadata.CachedAt
-	updated, err := f.storage.Put(ctx, logicalPath, encoded, meta)
+	encoded, err := io.ReadAll(encodedReader)
 	if err != nil {
-		return nil, fmt.Errorf("rewrite cached content: %w", err)
+		return nil, fmt.Errorf("encode cached response: %w", err)
 	}
-	return updated, nil
+	out := storage.NewInMemoryContent(content.Metadata, encoded)
+	memo.put(rewriteMemoEntry{key: key, meta: out.Metadata, data: encoded})
+	return out, nil
 }
 
 func readBodyWithEncoding(body io.Reader, encoding string) ([]byte, error) {

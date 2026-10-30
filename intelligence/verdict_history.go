@@ -78,6 +78,13 @@ func recordVerdictTransition(ctx context.Context, tx *sql.Tx, r *Report, priorPa
 		observedAt = time.Now().UTC()
 	}
 
+	// Behind a savepoint: on Postgres a failed statement aborts the whole
+	// transaction, so without one a history failure took the report upsert
+	// down with it — the opposite of what the caller's "must not fail the
+	// scan" promises. Costs one round trip, only on a real transition.
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT verdict_history`); err != nil {
+		return fmt.Errorf("intelligence: verdict history savepoint: %w", err)
+	}
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO verdict_history (
 			ecosystem, package_name, version,
@@ -89,7 +96,13 @@ func recordVerdictTransition(ctx context.Context, tx *sql.Tx, r *Report, priorPa
 		"upsert", r.Risk.EngineVersion, strings.TrimSpace(orgID), observedAt,
 	)
 	if err != nil {
+		if _, rbErr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT verdict_history`); rbErr != nil {
+			return fmt.Errorf("intelligence: record verdict transition: %w (rollback to savepoint: %v)", err, rbErr)
+		}
 		return fmt.Errorf("intelligence: record verdict transition: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT verdict_history`); err != nil {
+		return fmt.Errorf("intelligence: release verdict history savepoint: %w", err)
 	}
 	return nil
 }
@@ -154,13 +167,13 @@ func reportVerdictHistoryFailure(r *Report, err error) {
 // This is the "why was this allowed in March" read. limit is clamped;
 // a caller cannot ask for the whole table.
 func (s *Store) VerdictHistory(ctx context.Context, key Key, limit int) ([]VerdictTransition, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, nil
 	}
 	if limit <= 0 || limit > maxVerdictHistoryLimit {
 		limit = maxVerdictHistoryLimit
 	}
-	rows, err := s.sql.DB().QueryContext(ctx, `
+	rows, err := s.db(ctx).QueryContext(ctx, `
 		SELECT history_id, ecosystem, package_name, version,
 		       COALESCE(prior_verdict, ''), next_verdict,
 		       prior_score, next_score,
@@ -216,7 +229,7 @@ const maxVerdictHistoryLimit = 500
 // April is evidence someone may need), and wiring a deleter on a
 // default schedule would answer it by accident.
 func (s *Store) PruneVerdictHistory(ctx context.Context, cutoff time.Time) (int64, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return 0, nil
 	}
 	if cutoff.IsZero() {
@@ -225,7 +238,7 @@ func (s *Store) PruneVerdictHistory(ctx context.Context, cutoff time.Time) (int6
 		// cost of guessing is the audit trail.
 		return 0, fmt.Errorf("intelligence: prune verdict history: cutoff is required")
 	}
-	res, err := s.sql.DB().ExecContext(ctx,
+	res, err := s.db(ctx).ExecContext(ctx,
 		`DELETE FROM verdict_history WHERE observed_at < $1`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("intelligence: prune verdict history: %w", err)

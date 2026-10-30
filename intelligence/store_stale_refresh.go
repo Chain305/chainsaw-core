@@ -255,12 +255,12 @@ func (sc StaleReportScope) where() (string, []any) {
 // CountStaleReports sizes the backlog. Producer for the
 // chainsaw_intel_stale_report_backlog gauge.
 func (s *Store) CountStaleReports(ctx context.Context, scope StaleReportScope) (int, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return 0, nil
 	}
 	var n int
 	pred, args := scope.where()
-	if err := s.sql.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM intelligence_reports WHERE `+pred, args...).Scan(&n); err != nil {
+	if err := s.db(ctx).QueryRowContext(ctx, `SELECT COUNT(*) FROM intelligence_reports WHERE `+pred, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("intelligence: count stale reports: %w", err)
 	}
 	return n, nil
@@ -273,7 +273,7 @@ func (s *Store) CountStaleReports(ctx context.Context, scope StaleReportScope) (
 // oldest row is the one whose stored verdict has had the longest time to stop
 // being true, which is the whole reason this sweep exists.
 func (s *Store) IterateStaleReports(ctx context.Context, scope StaleReportScope, after StaleReportCursor, limit int) ([]StaleReportRow, StaleReportCursor, error) {
-	if s == nil || s.sql == nil || s.sql.DB() == nil {
+	if s == nil || s.sql == nil || s.db(ctx) == nil {
 		return nil, StaleReportCursor{}, nil
 	}
 	if limit <= 0 {
@@ -300,7 +300,7 @@ func (s *Store) IterateStaleReports(ctx context.Context, scope StaleReportScope,
 		LIMIT $%d
 	`, pred, keyset, len(args))
 
-	rows, err := s.sql.DB().QueryContext(ctx, query, args...)
+	rows, err := s.db(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, StaleReportCursor{}, fmt.Errorf("intelligence: iterate stale reports: %w", err)
 	}

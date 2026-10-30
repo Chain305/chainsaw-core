@@ -56,7 +56,7 @@ func (s *Store) ensurePackageRegistryColumns() error {
 	// Widen the enum-style CHECK when new install_script_kind values land.
 	// addConstraintIfMissing cannot update an existing definition, so refresh
 	// this narrow constraint before re-adding the current allowed set.
-	if _, err := s.db.Exec(`ALTER TABLE package_metadata DROP CONSTRAINT IF EXISTS chk_package_metadata_install_script_kind`); err != nil {
+	if _, err := s.migExec(`ALTER TABLE package_metadata DROP CONSTRAINT IF EXISTS chk_package_metadata_install_script_kind`); err != nil {
 		return fmt.Errorf("refresh install_script_kind constraint: %w", err)
 	}
 	if err := s.addConstraintIfMissing("package_metadata", "chk_package_metadata_install_script_kind",
@@ -130,14 +130,14 @@ func (s *Store) ensurePackageRegistryColumns() error {
 	// lookups (PR 2) and publishVelocityAnomaly counts (PR 9). Gated on the
 	// column's existence so the index is created idempotently alongside
 	// the column.
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_package_metadata_publisher_set ON package_metadata USING GIN (publisher_set)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_package_metadata_publisher_set ON package_metadata USING GIN (publisher_set)`); err != nil {
 		return fmt.Errorf("create package_metadata publisher_set index: %w", err)
 	}
 	// Powers the scheduled intelligence refresher's stalest-first keyset
 	// walk (internal/intelligence/refresher.go). Without this, a full-
 	// table scan orders by PRIMARY KEY and skews toward historical rows
 	// while recent activity goes unrefreshed.
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_package_metadata_org_updated_at ON package_metadata(org_id, updated_at)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_package_metadata_org_updated_at ON package_metadata(org_id, updated_at)`); err != nil {
 		return fmt.Errorf("create package_metadata org_updated_at index: %w", err)
 	}
 	// Powers metadata.PackageMetadataHolders — "which orgs hold this
@@ -170,7 +170,7 @@ func (s *Store) ensurePackageRegistryColumns() error {
 	// (internal/server/package_metadata.go). Production's package_metadata is
 	// small, so the build is milliseconds, and the migration advisory lock
 	// already means only one replica builds it.
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_package_metadata_pkg_version ON package_metadata(package, version)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_package_metadata_pkg_version ON package_metadata(package, version)`); err != nil {
 		return fmt.Errorf("create package_metadata pkg_version index: %w", err)
 	}
 
@@ -182,7 +182,7 @@ func (s *Store) ensurePackageRegistryColumns() error {
 	}
 
 	// Popular packages table for typosquat detection index.
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS popular_packages (
+	if _, err := s.migExec(`CREATE TABLE IF NOT EXISTS popular_packages (
 		ecosystem TEXT NOT NULL,
 		name TEXT NOT NULL,
 		rank INTEGER NOT NULL DEFAULT 0,

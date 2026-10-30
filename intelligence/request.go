@@ -246,6 +246,16 @@ func (h *ArtifactHandle) SharedArtifactMap() artifactmap.Result {
 	return h.mapResult
 }
 
+// NewArtifactHandleWithMap returns a handle whose SharedArtifactMap is m,
+// for a caller that already built the map from b in its own walk (see
+// artifactmap.BuildGzipTarVisit). m must be what artifactmap.Build(b,
+// artifactmap.Options{}) returns.
+func NewArtifactHandleWithMap(b []byte, sha256 string, m artifactmap.Result) *ArtifactHandle {
+	h := &ArtifactHandle{Bytes: b, SHA256: sha256}
+	h.mapOnce.Do(func() { h.mapResult = m })
+	return h
+}
+
 // Options control cache behaviour, deadline, and the signal shape.
 type Options struct {
 	// Signals selects which providers run. Zero means SignalAll.
@@ -354,8 +364,14 @@ func prepare(ctx context.Context, p Provider, req Request) context.Context {
 // ecosystem simultaneously so operators can paste a coordinate like
 // "lodash@4.17.21" or a bare name "lodash" and find relevant rows.
 type SearchQuery struct {
-	OrgID         string
-	Q             string // free-text — matches name, version, or ecosystem substring
+	OrgID string
+	Q     string // free-text — matches name, version, or ecosystem substring
+	// Package is an exact package_name match, served by
+	// idx_intelligence_reports_pkg_version. Use it to resolve a known
+	// package: Q is a substring search, and on a common name its 50-row
+	// window filled with longer names (lodash.* for lodash), pushing the
+	// package itself out and turning a cached lookup into a 404.
+	Package       string
 	Ecosystem     string // empty = any
 	OnlyMalicious bool
 	OnlyTyposquat bool

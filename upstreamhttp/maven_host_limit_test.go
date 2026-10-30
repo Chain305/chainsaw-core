@@ -55,7 +55,10 @@ func TestMavenCentralIsTheMostConservativeLimit(t *testing.T) {
 		t.Fatal("repo.maven.apache.org is missing from defaultHostLimits")
 	}
 	for h, r := range defaultHostLimits {
-		if h == "repo.maven.apache.org" {
+		// pypistats.org is a download-stats API, not a registry, and was
+		// measured 429ing at ~10/s; it moved here from the downloads client
+		// when every client began sharing one limiter.
+		if h == "repo.maven.apache.org" || h == "pypistats.org" {
 			continue
 		}
 		if central > r {

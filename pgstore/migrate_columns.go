@@ -124,7 +124,7 @@ func (s *Store) ensureAPIKeySigningColumns() error {
 	}
 	// Index supports the org keyset endpoint's "active keys for org X"
 	// query. Partial index skips legacy rows so it stays compact.
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_api_keys_org_signing ON api_keys(org_id) WHERE signing_alg IS NOT NULL`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_api_keys_org_signing ON api_keys(org_id) WHERE signing_alg IS NOT NULL`); err != nil {
 		return fmt.Errorf("create idx_api_keys_org_signing: %w", err)
 	}
 	return nil
@@ -238,7 +238,7 @@ func (s *Store) ensurePolicyColumns() error {
 	// fresh schema in migrate.go is already BIGINT; this catches the
 	// upgrade path. Best-effort: idempotent ALTER, ignore "already
 	// bigint" / driver-incompatibility errors so a re-run is safe.
-	if _, err := s.db.Exec(`ALTER TABLE policies ALTER COLUMN precedence TYPE BIGINT`); err != nil {
+	if _, err := s.migExec(`ALTER TABLE policies ALTER COLUMN precedence TYPE BIGINT`); err != nil {
 		_ = err
 	}
 	return nil
@@ -296,21 +296,47 @@ func (s *Store) ensureEventColumns() error {
 	if err := s.addColumnIfMissing("events", "team", "TEXT"); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_org_team ON events(org_id, team) WHERE team IS NOT NULL AND team <> ''`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_events_org_team ON events(org_id, team) WHERE team IS NOT NULL AND team <> ''`); err != nil {
 		return fmt.Errorf("create idx_events_org_team: %w", err)
 	}
 	// Index actor + correlation lookups so the audit panel pivot stays
 	// fast on large event tables. Partial-style indexes keep the size
 	// modest by ignoring rows where the column is NULL (the common case
 	// for unauthenticated install events).
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_org_actor_user ON events(org_id, actor_user_id) WHERE actor_user_id IS NOT NULL`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_events_org_actor_user ON events(org_id, actor_user_id) WHERE actor_user_id IS NOT NULL`); err != nil {
 		return fmt.Errorf("create idx_events_org_actor_user: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_org_actor_email ON events(org_id, LOWER(actor_email)) WHERE actor_email IS NOT NULL`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_events_org_actor_email ON events(org_id, LOWER(actor_email)) WHERE actor_email IS NOT NULL`); err != nil {
 		return fmt.Errorf("create idx_events_org_actor_email: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_org_correlation ON events(org_id, correlation_id) WHERE correlation_id IS NOT NULL`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_events_org_correlation ON events(org_id, correlation_id) WHERE correlation_id IS NOT NULL`); err != nil {
 		return fmt.Errorf("create idx_events_org_correlation: %w", err)
+	}
+	// Events retention (datacleanup PruneEvents) deletes across orgs on
+	// recorded_at, which no other events index leads with. BRIN: a few
+	// pages for an append-ordered timestamp, and no cost to HOT updates.
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_events_recorded_at_brin ON events USING BRIN (recorded_at)`); err != nil {
+		return fmt.Errorf("events recorded_at brin index: %w", err)
+	}
+	// intelligence_reports is rewritten in place on every rescan, and only
+	// 0.04% of those updates were HOT (179 of 416k): a full page forces a
+	// new tuple on another page plus every index entry. fillfactor 80
+	// leaves room on the page for the new version (it applies to pages
+	// written from now on), and a 2% autovacuum scale factor keeps dead
+	// tuples from piling up between the default 20% passes
+	// (docs/REPORTS.md#backend-perf-load-test-2026-10-29 J.3 I10). Checked
+	// against reloptions first, so a migrated database takes no lock.
+	if _, err := s.migExec(`DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_class
+		WHERE relname = 'intelligence_reports' AND relnamespace = 'public'::regnamespace
+		  AND reloptions @> ARRAY['fillfactor=80', 'autovacuum_vacuum_scale_factor=0.02']
+	) THEN
+		ALTER TABLE intelligence_reports SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02);
+	END IF;
+END $$`); err != nil {
+		return fmt.Errorf("intelligence_reports storage parameters: %w", err)
 	}
 	return nil
 }
@@ -451,7 +477,7 @@ func (s *Store) ensureSIEMAndSCIMColumns() error {
 	}
 
 	// Make password_hash nullable for SSO-only users (JIT provisioned).
-	if _, err := s.db.Exec(`ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL`); err != nil {
+	if _, err := s.migExec(`ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL`); err != nil {
 		// Ignore errors — column may already be nullable or DB may not support this syntax.
 		_ = err
 	}
@@ -492,7 +518,7 @@ func (s *Store) ensurePricingPlanColumns() error {
 	// Enforce single-default invariant before the unique index is created —
 	// otherwise a legacy DB with two `is_default=1` rows would fail the index
 	// migration. Prefer the seeded `free` row, fall back to lowest id.
-	if _, err := s.db.Exec(`
+	if _, err := s.migExec(`
 		UPDATE pricing_plans
 		SET is_default = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE is_default = 1
@@ -507,7 +533,7 @@ func (s *Store) ensurePricingPlanColumns() error {
 	}
 	// Partial unique index guarantees at most one is_default=1 row going
 	// forward. Matches the fallback queries in plan_features.go / billing.go.
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pricing_plans_default ON pricing_plans(is_default) WHERE is_default = 1`); err != nil {
+	if _, err := s.migExec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pricing_plans_default ON pricing_plans(is_default) WHERE is_default = 1`); err != nil {
 		return fmt.Errorf("create unique index on pricing_plans.is_default: %w", err)
 	}
 	return nil
@@ -537,13 +563,13 @@ func (s *Store) ensureFindingsCodeownersColumns() error {
 	// from a NULL — every List call against a DB with even one legacy
 	// row 500s with CHW-5307. Backfill once, then SET DEFAULT so the
 	// post-default Create path can never reintroduce a NULL.
-	if _, err := s.db.Exec(`UPDATE findings SET owners = '{}' WHERE owners IS NULL`); err != nil {
+	if _, err := s.migExec(`UPDATE findings SET owners = '{}' WHERE owners IS NULL`); err != nil {
 		return fmt.Errorf("backfill findings.owners: %w", err)
 	}
-	if _, err := s.db.Exec(`ALTER TABLE findings ALTER COLUMN owners SET DEFAULT '{}'`); err != nil {
+	if _, err := s.migExec(`ALTER TABLE findings ALTER COLUMN owners SET DEFAULT '{}'`); err != nil {
 		return fmt.Errorf("set findings.owners default: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_findings_codeowners ON findings(org_id, repo_id, logical_path)`); err != nil {
+	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_findings_codeowners ON findings(org_id, repo_id, logical_path)`); err != nil {
 		return fmt.Errorf("create findings codeowners index: %w", err)
 	}
 	return nil

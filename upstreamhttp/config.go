@@ -117,6 +117,13 @@ var defaultHostLimits = map[string]float64{
 	// naming this exact category.
 	"repo.maven.apache.org": 5,
 
+	// pypistats.org answered one request in five with a bare 429 (no
+	// Retry-After) at ~10/s sequential on 2026-09-30, and 7 of 350 corpus
+	// packages came back -1 from it at the 30/s default. api.npmjs.org is
+	// not here: its limit is far below any per-request rate, so the npm path
+	// batches and paces itself (premium/provider_weekly_downloads.go).
+	"pypistats.org": 4,
+
 	// Every remaining host observed in production traffic on 2026-09-23 via
 	// chainsaw_upstream_fetch_total. Each was falling through to
 	// DefaultRateLimit (30/s) purely because nobody had listed it — the same
