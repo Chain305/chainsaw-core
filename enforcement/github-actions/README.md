@@ -3,14 +3,15 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 
 > Consume it pinned to a commit SHA:
-> `uses: Chain305/chainsaw-core/enforcement/github-actions@381b593a7a27187058fa02263fed98a21ac3e645 # v0.22.130`.
+> `uses: Chain305/chainsaw-core/enforcement/github-actions@ad71317eae7cb9cf6263b603281720252694d603 # v0.22.131`.
 > Since v0.22.116 pr-scan blocks every action referenced by tag or branch, this
 > one included, so `@action-v1` fails the check it installs. The SHA above is
-> the open-core commit `action-v1.0.12` points at, whose action installs CLI
-> v0.22.130 (earlier the docs pinned `99a652e` (v0.22.129), `1bbdaa3` (v0.22.128), `dbd3600` (v0.22.127), `8774764` (v0.22.126), `0dc53ae` (v0.22.125), `704e126` (v0.22.124), `1c4b634`
+> the open-core commit `action-v1.0.13` points at, whose action installs CLI
+> v0.22.131 (earlier the docs pinned `381b593` (v0.22.130), `99a652e` (v0.22.129), `1bbdaa3` (v0.22.128), `dbd3600` (v0.22.127), `8774764` (v0.22.126), `0dc53ae` (v0.22.125), `704e126` (v0.22.124), `1c4b634`
 > (v0.22.123), `f3d549a` (v0.22.122), `0b078db` (v0.22.119) and `4b6142b`
-> (v0.22.115)). `action-v1` itself moved on 2026-10-30 to `action-v1.0.12`
-> (open-core `381b593`, CLI v0.22.130), after `action-v1.0.11` (open-core
+> (v0.22.115)). `action-v1` itself moved on 2026-10-31 to `action-v1.0.13`
+> (open-core `ad71317`, CLI v0.22.131), after `action-v1.0.12` (open-core
+> `381b593`, CLI v0.22.130) on 2026-10-30, `action-v1.0.11` (open-core
 > `99a652e`, CLI v0.22.129) the same day, `action-v1.0.10` (open-core
 > `1bbdaa3`, CLI v0.22.128) the same day, `action-v1.0.9` (open-core
 > `dbd3600`, CLI v0.22.127) on 2026-10-23, `action-v1.0.8` (open-core
@@ -53,7 +54,7 @@ jobs:
           # shallow clone does not contain. Without this the pr-scan leg
           # silently scans nothing.
           fetch-depth: 0
-      - uses: Chain305/chainsaw-core/enforcement/github-actions@381b593a7a27187058fa02263fed98a21ac3e645 # v0.22.130
+      - uses: Chain305/chainsaw-core/enforcement/github-actions@ad71317eae7cb9cf6263b603281720252694d603 # v0.22.131
         with:
           mode: warn   # warn | block
 ```
@@ -87,7 +88,7 @@ Example — fail only when blocking policies hit, but always upload the report:
 
 ```yaml
 - id: guard
-  uses: Chain305/chainsaw-core/enforcement/github-actions@381b593a7a27187058fa02263fed98a21ac3e645 # v0.22.130
+  uses: Chain305/chainsaw-core/enforcement/github-actions@ad71317eae7cb9cf6263b603281720252694d603 # v0.22.131
   with:
     mode: warn
 
