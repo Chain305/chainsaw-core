@@ -74,7 +74,7 @@ jobs:
 		t.Fatalf("pr-scan row for the Chainsaw Guard Action @action-v1: want block on unpinned_ref, got %+v %v", gAdded, gErr)
 	}
 	// ...and the SHA-pinned form the docs publish does not.
-	guardPinned := "name: guard\non: pull_request\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: Chain305/chainsaw-core/enforcement/github-actions@dbd3600d396c7f1767c01db7e405a865e3365496 # v0.22.127\n"
+	guardPinned := "name: guard\non: pull_request\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: Chain305/chainsaw-core/enforcement/github-actions@1bbdaa3bbc965e24424537dd5ca564213ef69cb5 # v0.22.128\n"
 	if gp, _, err := diffWorkflow(".github/workflows/guard.yml", nil, []byte(guardPinned)); err != nil || len(gp) != 1 || gp[0].Verdict == "block" {
 		t.Fatalf("pr-scan row for the SHA-pinned Guard Action: want not blocked, got %+v %v", gp, err)
 	}
