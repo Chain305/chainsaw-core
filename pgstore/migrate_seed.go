@@ -165,12 +165,12 @@ func pricingPlanSeeds() []pricingPlanSeed {
 			storageBytes:   0,
 			bandwidthBytes: 0,
 			maxMembers:     0,
-			// Sales-only, "from $24,000/yr". NOT 0: ui_new renders a 0 base
+			// Sales-only, "from $36,000/yr". NOT 0: ui_new renders a 0 base
 			// price as "Free" (change-plan priceLabel), "$0" (billing page),
 			// shows the Upgrade chip (mega-nav / dashboard-topbar), and ranks
 			// plans by it (change-plan planRank, webhook upgrade/downgrade
-			// classification). 200000 = the $24,000/yr floor per month.
-			basePriceCents: 200000,
+			// classification). 300000 = the $36,000/yr floor per month.
+			basePriceCents: 300000,
 			isDefault:      0,
 			// Enterprise adds external integrations (SIEM, ticketing) and on-prem
 			// on top of everything in Pro. SSO/SCIM are no longer exclusive here

@@ -137,7 +137,7 @@ func TestSeededPlanPricing(t *testing.T) {
 	wants := map[string]want{
 		"free":      {"Free", 0, 3, 0, 0},
 		"pro":       {"Team", 2500, 5, 0, 0},
-		"unlimited": {"Enterprise", 200000, 0, 0, 0},
+		"unlimited": {"Enterprise", 300000, 0, 0, 0},
 	}
 	seen := 0
 	for _, p := range pricingPlanSeeds() {
