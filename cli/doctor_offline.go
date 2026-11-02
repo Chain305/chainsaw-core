@@ -138,7 +138,7 @@ var providerMatrix = []providerOfflineRow{
 	{Name: "kev", Category: "refreshable", BundleKey: "kev", Detail: "CISA KEV catalogue (loaded from the bundle offline)"},
 	{Name: "malware", Category: "refreshable", BundleKey: "osv-malware", Detail: "OSV / GHSA malware feed (loaded from the bundle offline)"},
 	// Informational — see providerOfflineRow.Informational.
-	{Name: "cve", Category: "refreshable", BundleKey: "trivy-db", Informational: true, Detail: "Trivy DB snapshot — consumed on-disk at hooks.trivial.db_path (pre-seed the DB), not via the bundle handle, so the bundle cannot decide this row"},
+	{Name: "cve", Category: "refreshable", BundleKey: "trivy-db", Informational: true, Detail: "Trivy DB snapshot — read on-disk at hooks.trivial.db_path; the image ships none, so the offline proxy seeds it from the bundle's trivy-db/db.bolt (when missing or older than the bundle) or refuses to start. The doctor cannot see the server's disk; check /readyz trivy_db and chainsaw_trivy_db_updated_timestamp_seconds"},
 	{Name: "ghsa-swift", Category: "refreshable", BundleKey: "ghsa-swift", Informational: true, Detail: "GHSA snapshot for Swift — RESERVED: shipped in the bundle but no provider consumes it yet"},
 	{Name: "typosquat-refdata", Category: "refreshable", BundleKey: "typosquat", Informational: true, Detail: "BK-tree reference data refresh — the detector runs from embedded seeds; no provider reads this bundle key yet"},
 
@@ -199,6 +199,15 @@ func runDoctorOffline(cmd *cobra.Command, _ []string) error {
 		if row.Informational {
 			// Reported, never graded. Skipping the switch entirely is the
 			// point: no bundle state can turn this row into an ok or a fail.
+			// For cve the bundle's trivy-db key is still worth stating: it
+			// is the only offline source of the DB now the image ships none.
+			if row.BundleKey == "trivy-db" && bundle != nil {
+				if len(bundle.File(row.BundleKey)) > 0 {
+					detail += " — this bundle carries trivy-db"
+				} else {
+					detail += " — this bundle has NO trivy-db: pre-seed db_path or the offline proxy will not start"
+				}
+			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", row.Name, row.Category, g.info, detail)
 			continue
 		}
