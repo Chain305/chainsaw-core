@@ -1852,6 +1852,54 @@ func (s *Store) migrateSchema() error {
 			expires_at TIMESTAMPTZ NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cli_login_links_expires_at ON cli_login_links(expires_at)`,
+		// MCP OAuth (internal/server/mcp_oauth.go): authorization code +
+		// PKCE with dynamic client registration for remote MCP clients.
+		// The access token is an api_keys row (Scopes.resource pins it to
+		// the MCP endpoint), so revoking that key in the API-keys page ends
+		// the whole grant. Codes and refresh tokens are stored as sha256
+		// hashes only; they are 32-byte random values.
+		//
+		// oauth_clients: RFC 7591 public clients. redirect_uris is a JSON
+		// array, matched exactly at /oauth/authorize.
+		`CREATE TABLE IF NOT EXISTS oauth_clients (
+			client_id TEXT PRIMARY KEY,
+			client_name TEXT NOT NULL DEFAULT '',
+			redirect_uris TEXT NOT NULL,
+			created_ip TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		// oauth_auth_codes: one-time codes, 60s TTL. consumed_at is set by
+		// the single UPDATE that redeems the code; api_key_id records the
+		// token minted from it so a replayed code can revoke that token.
+		`CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+			code_hash TEXT PRIMARY KEY,
+			client_id TEXT NOT NULL,
+			redirect_uri TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			org_id TEXT NOT NULL,
+			code_challenge TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			api_key_id TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL,
+			consumed_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_expires_at ON oauth_auth_codes(expires_at)`,
+		// oauth_refresh_tokens: rotated on every use. api_key_id is the
+		// grant (token family): presenting a used token revokes that key.
+		`CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+			token_hash TEXT PRIMARY KEY,
+			api_key_id TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			org_id TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL,
+			used_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_api_key ON oauth_refresh_tokens(api_key_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_expires_at ON oauth_refresh_tokens(expires_at)`,
 		// Repo→Team routing (opt-in). Default OFF: an empty table means
 		// the violation pipeline records team='' exactly as before. The
 		// admin maintains rows via the /api/repo-team-mappings CRUD
