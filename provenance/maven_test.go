@@ -14,6 +14,7 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 
 	"github.com/chain305/chainsaw-core/provenance/pgpverify"
+	"github.com/chain305/chainsaw-core/upstreamhttp"
 )
 
 func TestSplitMavenCoords(t *testing.T) {
@@ -336,4 +337,72 @@ func TestMavenRepoBase(t *testing.T) {
 			t.Errorf("mavenRepoBase(%q, %q) = %q, want %q", c.source, c.group, got, c.want)
 		}
 	}
+}
+
+type errRT struct{ err error }
+
+func (e errRT) RoundTrip(*http.Request) (*http.Response, error) { return nil, e.err }
+
+// A fetch refused for rate checked nothing, so it must not read as the status
+// a tampered artifact gets. 22 of 28 "failed" gradle rows sampled after
+// v0.22.139 were Central 429s or our own limiter.
+func TestMavenCheckerRateLimitedIsUnavailableNotFailed(t *testing.T) {
+	// The sigstore sidecar 404s so the checker reaches the PGP path; the
+	// 429 lands on the .asc and, in the second case, on the jar.
+	for _, tc := range []struct {
+		name   string
+		status func(path string) int
+	}{
+		{"asc", func(p string) int {
+			if strings.HasSuffix(p, ".asc") {
+				return http.StatusTooManyRequests
+			}
+			return http.StatusNotFound
+		}},
+		{"jar", func(p string) int {
+			switch {
+			case strings.HasSuffix(p, ".asc"):
+				return http.StatusOK
+			case strings.HasSuffix(p, ".jar"):
+				return http.StatusTooManyRequests
+			}
+			return http.StatusNotFound
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status(r.URL.Path))
+			}))
+			defer srv.Close()
+			c := newMavenChecker(&http.Client{}, nil)
+			c.baseURL = srv.URL
+			got := c.Check(context.Background(), "org.example:foo", "1.0.0")
+			if got.Status != StatusUnavailable || got.Reason != ReasonRateLimited {
+				t.Errorf("Central 429: got %q/%q, want %q/%q (%+v)",
+					got.Status, got.Reason, StatusUnavailable, ReasonRateLimited, got)
+			}
+		})
+	}
+
+	t.Run("local limiter", func(t *testing.T) {
+		c := newMavenChecker(&http.Client{Transport: errRT{upstreamhttp.ErrUpstreamStandoff}}, nil)
+		got := c.Check(context.Background(), "org.example:foo", "1.0.0")
+		if got.Status != StatusUnavailable || got.Reason != ReasonRateLimited {
+			t.Errorf("standoff: got %q/%q, want %q/%q (%+v)",
+				got.Status, got.Reason, StatusUnavailable, ReasonRateLimited, got)
+		}
+	})
+
+	// Only rate is reclassified: a 500 on the signature is still a failure.
+	t.Run("500 stays failed", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+		c := newMavenChecker(&http.Client{}, nil)
+		c.baseURL = srv.URL
+		if got := c.Check(context.Background(), "org.example:foo", "1.0.0"); got.Status != StatusFailed {
+			t.Errorf("500: got %q, want %q", got.Status, StatusFailed)
+		}
+	})
 }

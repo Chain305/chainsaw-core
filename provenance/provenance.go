@@ -128,6 +128,10 @@ const (
 	ReasonNoAttestationFound = "no_attestation_found"
 )
 
+// ReasonRateLimited — the repository answered 429, or our own limiter refused
+// to ask. Nothing about the artifact was checked.
+const ReasonRateLimited = "rate_limited"
+
 // Result captures the outcome of a provenance check.
 //
 // The SLSA-related fields (SLSALevel, SubjectDigest, AttestationBundle,

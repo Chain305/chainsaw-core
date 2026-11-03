@@ -145,6 +145,15 @@ func (p *provenanceProvider) Run(ctx context.Context, req Request, prior *Report
 			Message:  result.Error,
 		})
 	}
+	// A rate-limited check is unavailable, not failed, but the reason must
+	// still reach the report or the row reads as silently unverified.
+	if result.Status == provenance.StatusUnavailable && result.Reason == provenance.ReasonRateLimited {
+		partial.Warnings = append(partial.Warnings, Warning{
+			Provider: p.Name(),
+			Code:     WarnProvenanceRateLimited,
+			Message:  result.Error,
+		})
+	}
 
 	return partial, nil
 }

@@ -4,10 +4,13 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/chain305/chainsaw-core/coverage"
 	"github.com/chain305/chainsaw-core/provenance"
+	"github.com/chain305/chainsaw-core/upstreamhttp"
 )
 
 func discardProvenanceLogger() *slog.Logger {
@@ -126,5 +129,47 @@ func TestProvenanceProvider_ReusesARecentVerifiedResult(t *testing.T) {
 		if got.Provenance == nil || got.Provenance.Status != string(provenance.StatusUnavailable) {
 			t.Errorf("%s: reused instead of checked again: %+v", name, got.Provenance)
 		}
+	}
+}
+
+type rateLimitedRT struct{}
+
+func (rateLimitedRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, upstreamhttp.ErrRateLimitedLocally
+}
+
+// A rate-limited maven check is unavailable, not failed, and must still say
+// why. Its warning must also not read as an outage to the opt-in fail-closed
+// coverage gate: that would be a new block on a provenance rate limit, which
+// no owner has decided.
+func TestProvenanceProvider_RateLimitedIsUnavailableAndSaysWhy(t *testing.T) {
+	checker := provenance.NewChecker(discardProvenanceLogger(),
+		provenance.WithHTTPClient(&http.Client{Transport: rateLimitedRT{}}))
+	p := newProvenanceProvider(checker)
+
+	partial, err := p.Run(context.Background(), Request{
+		Key: Key{Ecosystem: "maven", Package: "io.netty:netty-buffer", Version: "4.2.17.Final"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+	if partial.Provenance == nil || partial.Provenance.Status != string(provenance.StatusUnavailable) {
+		t.Fatalf("want unavailable provenance, got %+v", partial.Provenance)
+	}
+	var found bool
+	for _, w := range partial.Warnings {
+		if w.Code == WarnParseFailed {
+			t.Errorf("rate limit recorded as %q: %+v", WarnParseFailed, w)
+		}
+		if w.Code == WarnProvenanceRateLimited && w.Message != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no %q warning carrying the error: %+v", WarnProvenanceRateLimited, partial.Warnings)
+	}
+	if got := coverage.StatusForWarnCode(WarnProvenanceRateLimited); got == coverage.StatusUnavailable {
+		t.Errorf("coverage reads %q as %q; that newly blocks closed-mode orgs on a provenance rate limit",
+			WarnProvenanceRateLimited, got)
 	}
 }

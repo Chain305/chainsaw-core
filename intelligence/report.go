@@ -2018,6 +2018,15 @@ const (
 	WarnTransitiveDepConstraintConflict = "transitive_dep_constraint_conflict"
 )
 
+// WarnProvenanceRateLimited: the provenance check was refused for rate
+// (repository 429 or our limiter), so nothing was verified. Deliberately
+// NOT WarnRateLimited: that code is in coverage.unavailableCodes, and
+// emitting it here would let the opt-in fail-closed gate start blocking
+// on a provenance rate limit, which no owner has decided. Unclassified,
+// it reads as coverage StatusError (never blocks), exactly as the
+// parse_failed these rows carried before v0.22.140 did.
+const WarnProvenanceRateLimited = "provenance_rate_limited"
+
 // ProviderTiming captures per-provider runtime (for observability).
 type ProviderTiming struct {
 	Provider string        `json:"provider"`

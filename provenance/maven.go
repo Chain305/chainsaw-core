@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/chain305/chainsaw-core/provenance/pgpverify"
 	"github.com/chain305/chainsaw-core/provenance/sigstoreverify"
+	"github.com/chain305/chainsaw-core/upstreamhttp"
 )
 
 // mavenChecker verifies Maven artifacts via either:
@@ -139,6 +141,9 @@ func (c *mavenChecker) trySigstore(ctx context.Context, jarURL string) Result {
 		if isNotFound(status) {
 			return Result{Status: StatusMissing, Ecosystem: c.ecosystem}
 		}
+		if res, ok := c.rateLimited("fetch sidecar", err); ok {
+			return res
+		}
 		return Result{Status: StatusFailed, Ecosystem: c.ecosystem, Error: err.Error()}
 	}
 
@@ -148,6 +153,9 @@ func (c *mavenChecker) trySigstore(ctx context.Context, jarURL string) Result {
 	// unparseable.
 	digest, err := c.artifactSHA256(ctx, jarURL)
 	if err != nil {
+		if res, ok := c.rateLimited("fetch jar for digest", err); ok {
+			return res
+		}
 		return Result{Status: StatusFailed, Ecosystem: c.ecosystem, Error: fmt.Sprintf("fetch jar for digest: %v", err)}
 	}
 
@@ -212,11 +220,17 @@ func (c *mavenChecker) tryPGP(ctx context.Context, jarURL string) Result {
 		if isNotFound(status) {
 			return Result{Status: StatusMissing, Ecosystem: c.ecosystem}
 		}
+		if res, ok := c.rateLimited("fetch sidecar", err); ok {
+			return res
+		}
 		return Result{Status: StatusFailed, Ecosystem: c.ecosystem, Error: err.Error()}
 	}
 
 	jarStream, closeJar, err := fetchStream(ctx, c.client, jarURL)
 	if err != nil {
+		if res, ok := c.rateLimited("fetch jar", err); ok {
+			return res
+		}
 		return Result{Status: StatusFailed, Ecosystem: c.ecosystem, Error: fmt.Sprintf("fetch jar: %v", err)}
 	}
 	defer closeJar()
@@ -268,6 +282,37 @@ func (c *mavenChecker) tryPGP(ctx context.Context, jarURL string) Result {
 			"pgp key fetched from " + c.pgp.Keyserver() + "; trust not validated (no web-of-trust, no key registry)",
 		},
 	}
+}
+
+// rateLimited maps a fetch refused for rate to StatusUnavailable. StatusFailed
+// is what a tampered artifact gets; a 429 from the repository, or our own
+// limiter refusing to ask (which covers the Sonatype standoff and the paused
+// background bucket), says nothing about the artifact. nuget.go already maps
+// every non-404 fetch error this way. Measured 2026-11-03: after v0.22.139,
+// 22 of the 28 "failed" gradle rows in a 34-row sample were exactly this.
+func (c *mavenChecker) rateLimited(what string, err error) (Result, bool) {
+	if !errors.Is(err, errHTTP429) &&
+		!errors.Is(err, upstreamhttp.ErrRateLimitedLocally) &&
+		!errors.Is(err, upstreamhttp.ErrBackgroundPaused) {
+		return Result{}, false
+	}
+	return Result{
+		Status:    StatusUnavailable,
+		Ecosystem: c.ecosystem,
+		Reason:    ReasonRateLimited,
+		Error:     fmt.Sprintf("%s: %v", what, err),
+	}, true
+}
+
+// errHTTP429 lets rateLimited recognise an upstream 429 by type rather than
+// by message. Its text is the plain "HTTP 429" every other status produces.
+var errHTTP429 = errors.New("HTTP 429")
+
+func httpStatusError(code int) error {
+	if code == http.StatusTooManyRequests {
+		return errHTTP429
+	}
+	return fmt.Errorf("HTTP %d", code)
 }
 
 // splitMavenCoords parses "groupId:artifactId" into its two parts.
@@ -353,7 +398,7 @@ func fetchStream(ctx context.Context, client *http.Client, url string) (io.Reade
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
-		return nil, func() {}, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, func() {}, httpStatusError(resp.StatusCode)
 	}
 	return resp.Body, func() { _ = resp.Body.Close() }, nil
 }
@@ -384,7 +429,7 @@ func fetchBytesBearer(ctx context.Context, client *http.Client, url string, limi
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, resp.StatusCode, httpStatusError(resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
@@ -411,7 +456,7 @@ func fetchBytesDetectTruncation(ctx context.Context, client *http.Client, url st
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, resp.StatusCode, false, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, resp.StatusCode, false, httpStatusError(resp.StatusCode)
 	}
 	// Read limit+1 so a full read of limit+1 bytes proves the body overflowed.
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
@@ -438,7 +483,7 @@ func fetchSHA256(ctx context.Context, client *http.Client, url string) ([32]byte
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return zero, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return zero, httpStatusError(resp.StatusCode)
 	}
 	h := sha256.New()
 	if _, err := io.Copy(h, io.LimitReader(resp.Body, 500<<20)); err != nil { // 500 MiB cap
