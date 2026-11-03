@@ -97,8 +97,17 @@ func (p *provenanceProvider) Run(ctx context.Context, req Request, prior *Report
 		// fetched instead of downloading the jar a second time.
 		checkCtx = provenance.WithArtifactBytes(checkCtx, req.Artifact.Bytes)
 	}
+	source := req.UpstreamURL
+	if source == "" && (req.Key.Ecosystem == "maven" || req.Key.Ecosystem == "gradle") {
+		// Without an upstream hint the checker probes Central (maven) or
+		// the Gradle plugin portal, which 303s to Central: neither hosts
+		// androidx and the rest of Google's namespaces.
+		if g, _, _ := splitMavenCoordinate(req.Key.Package); GroupUsesGoogleMaven(g) {
+			source = provenance.GoogleMavenBase
+		}
+	}
 	result := p.checker.CheckWithSource(checkCtx,
-		req.Key.Ecosystem, req.Key.Package, req.Key.Version, req.UpstreamURL)
+		req.Key.Ecosystem, req.Key.Package, req.Key.Version, source)
 
 	// Context deadlines / cancellations surface as a warning plus the
 	// unavailable status so the Report still records "we tried".

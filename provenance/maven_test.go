@@ -3,6 +3,7 @@ package provenance
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -479,6 +480,67 @@ func TestMavenCheckerPGPVerifiesHeldBytesWithoutRefetchingJar(t *testing.T) {
 			}
 			if jarFetches != tc.wantJarFetch {
 				t.Errorf("jar fetched %d times, want %d", jarFetches, tc.wantJarFetch)
+			}
+		})
+	}
+}
+
+// pathRT answers by path whatever the host, and records every URL asked.
+type pathRT struct {
+	files map[string][]byte // path suffix -> body
+	asked []string
+}
+
+func (rt *pathRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	rt.asked = append(rt.asked, r.URL.Host+r.URL.Path)
+	for suffix, body := range rt.files {
+		if strings.HasSuffix(r.URL.Path, suffix) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: http.Header{}, Request: r}, nil
+		}
+	}
+	return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: r}, nil
+}
+
+// Google Maven hosts androidx as .aar and publishes no sigstore bundles:
+// probing `.jar.asc` read every androidx row as unsigned. A Google base must
+// probe the .aar signature first, skip sigstore, and still find a .jar
+// (annotation-jvm, the Android Gradle plugin) when there is no .aar.
+func TestMavenCheckerGoogleMavenProbesAarThenJar(t *testing.T) {
+	signer, err := openpgp.NewEntity("Android", "", "android@example.com", nil)
+	if err != nil {
+		t.Fatalf("NewEntity: %v", err)
+	}
+	body := []byte("PK\x03\x04 artifact")
+	var sig, pub bytes.Buffer
+	if err := openpgp.ArmoredDetachSign(&sig, signer, bytes.NewReader(body), nil); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	w, _ := armor.Encode(&pub, openpgp.PublicKeyType, nil)
+	_ = signer.Serialize(w)
+	_ = w.Close()
+
+	for _, ext := range []string{"aar", "jar"} {
+		t.Run(ext, func(t *testing.T) {
+			rt := &pathRT{files: map[string][]byte{
+				"-1.9.0." + ext + ".asc": sig.Bytes(),
+				"-1.9.0." + ext:          body,
+				"/vks/v1/by-fingerprint/" + fmt.Sprintf("%X", signer.PrimaryKey.Fingerprint): pub.Bytes(),
+			}}
+			client := &http.Client{Transport: rt}
+			c := newMavenChecker(client, nil)
+			c.pgp = pgpverify.NewVerifier(client, "https://keys.test")
+
+			got := c.CheckWithSource(context.Background(), "androidx.activity:activity", "1.9.0", GoogleMavenBase)
+			if got.Status != StatusVerified {
+				t.Fatalf("Status = %q, want verified; asked %v; result %+v", got.Status, rt.asked, got)
+			}
+			for _, u := range rt.asked {
+				if strings.HasSuffix(u, ".sigstore.json") {
+					t.Errorf("probed a sigstore bundle on Google Maven: %s", u)
+				}
+				if !strings.HasPrefix(u, "dl.google.com/dl/android/maven2/") && !strings.HasPrefix(u, "keys.test/") {
+					t.Errorf("asked a host other than Google Maven: %s", u)
+				}
 			}
 		})
 	}

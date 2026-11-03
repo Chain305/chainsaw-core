@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 
 	"github.com/chain305/chainsaw-core/httpclient"
 )
@@ -39,16 +41,32 @@ type SignerUID struct {
 	Name        string
 	Email       string
 	Fingerprint string // hex-encoded 20-byte fingerprint
+	Keyserver   string // the keyserver the verifying key came from
+	// SignedAt is the signature's creation time, the instant the key is
+	// judged at; KeyExpired reports that the key has expired since.
+	SignedAt   time.Time
+	KeyExpired bool
 }
 
 // DefaultKeyserver is queried by LookupKey when no keyserver is specified.
 const DefaultKeyserver = "https://keys.openpgp.org"
+
+// FallbackKeyserver is asked only when the primary keyserver returns a key
+// with every user ID stripped. keys.openpgp.org publishes a UID only after
+// its owner verifies the address, and go-crypto refuses a key with no UID at
+// all ("v4 entity without any identities"), so such a key could never verify
+// anything: the signing key of every androidx artifact on Google Maven
+// (A5F483CD733A4EBAEA378B2AE88979FB9B30ACF2) is served that way, while the
+// Ubuntu keyserver serves the same key with its UID (verified 2026-11-03).
+const FallbackKeyserver = "https://keyserver.ubuntu.com"
 
 // Verifier verifies armored detached signatures. A zero-value Verifier is
 // NOT usable; build via NewVerifier.
 type Verifier struct {
 	client    *http.Client
 	keyserver string
+	// fallback is FallbackKeyserver; empty disables it (tests).
+	fallback string
 
 	mu    sync.Mutex
 	cache map[string]*list.Element // keyID → element holding cacheEntry
@@ -58,6 +76,8 @@ type Verifier struct {
 type cacheEntry struct {
 	keyID    string
 	entities openpgp.EntityList
+	// fromFallback marks a key fetched from the fallback keyserver.
+	fromFallback bool
 }
 
 // NewVerifier returns a Verifier with the given HTTP client (8 s default
@@ -85,6 +105,7 @@ func NewVerifier(client *http.Client, keyserver string) *Verifier {
 	return &Verifier{
 		client:    client,
 		keyserver: keyserver,
+		fallback:  FallbackKeyserver,
 		cache:     map[string]*list.Element{},
 		lru:       list.New(),
 	}
@@ -111,10 +132,16 @@ func (v *Verifier) Verify(ctx context.Context, artifact io.Reader, armoredSig []
 
 	// Fetch all candidate keys.
 	var keyring openpgp.EntityList
+	fallbackKeys := map[string]bool{}
 	for _, kid := range keyIDs {
-		entities, err := v.LookupKey(ctx, kid)
+		entities, fromFallback, err := v.lookup(ctx, kid)
 		if err != nil {
 			continue // try the next key ID
+		}
+		if fromFallback {
+			for _, e := range entities {
+				fallbackKeys[fmt.Sprintf("%X", e.PrimaryKey.Fingerprint)] = true
+			}
 		}
 		keyring = append(keyring, entities...)
 	}
@@ -122,15 +149,48 @@ func (v *Verifier) Verify(ctx context.Context, artifact io.Reader, armoredSig []
 		return nil, fmt.Errorf("no candidate public keys found on keyserver for %v", keyIDs)
 	}
 
+	// The key is judged as it stood when the signature was made, which is
+	// what gpg does ("Good signature" plus an expired-key note). Judged at
+	// today's date, every artifact signed before its key expired fails as
+	// if tampered with: the androidx signing subkey has expired, and
+	// activity-1.9.0.aar read "key expired" (2026-11-03).
+	sig, err := firstSignature(armoredSig)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature: %w", err)
+	}
+	now := time.Now()
+	at := sig.CreationTime
 	signer, err := openpgp.CheckArmoredDetachedSignature(
-		keyring, artifact, bytes.NewReader(armoredSig), nil,
+		keyring, artifact, bytes.NewReader(armoredSig), &packet.Config{Time: func() time.Time { return at }},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("pgp verify: %w", err)
 	}
+	// The signer chooses the creation time, so what must hold TODAY is still
+	// checked today: a revocation issued after that date (go-crypto treats a
+	// revocation newer than its clock as not yet in force), and the message
+	// signature's own expiry, which also refuses a signature dated in the
+	// future.
+	if keyRevoked(signer, sig, now) {
+		return nil, fmt.Errorf("pgp verify: %w", pgperrors.ErrKeyRevoked)
+	}
+	if sig.SigExpired(now) {
+		return nil, fmt.Errorf("pgp verify: %w", pgperrors.ErrSignatureExpired)
+	}
 
 	uid := &SignerUID{
 		Fingerprint: fmt.Sprintf("%X", signer.PrimaryKey.Fingerprint),
+		Keyserver:   v.keyserver,
+		SignedAt:    sig.CreationTime,
+		KeyExpired:  keyExpired(signer, sig, now),
+	}
+	if fallbackKeys[uid.Fingerprint] {
+		// The fallback keyserver does not verify user IDs: anyone can
+		// attach any name to a key there. The key itself is bound by the
+		// fingerprint the signature names, so it still verifies; its UID
+		// is a claim, and is not reported as the signer.
+		uid.Keyserver = v.fallback
+		return uid, nil
 	}
 	for _, id := range signer.Identities {
 		uid.Name = id.UserId.Name
@@ -140,18 +200,58 @@ func (v *Verifier) Verify(ctx context.Context, artifact io.Reader, armoredSig []
 	return uid, nil
 }
 
+// keyRevoked reports whether, at now, the signer's primary key, its primary
+// identity or the subkey that made sig carries a revocation.
+func keyRevoked(signer *openpgp.Entity, sig *packet.Signature, now time.Time) bool {
+	if signer.Revoked(now) {
+		return true
+	}
+	if _, id := signer.PrimarySelfSignature(); id != nil && id.Revoked(now) {
+		return true
+	}
+	for i := range signer.Subkeys {
+		sk := &signer.Subkeys[i]
+		if sig.IssuerKeyId != nil && sk.PublicKey.KeyId == *sig.IssuerKeyId && sk.Revoked(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// keyExpired reports whether the primary key, or the subkey that made sig,
+// has expired by now.
+func keyExpired(signer *openpgp.Entity, sig *packet.Signature, now time.Time) bool {
+	if self, _ := signer.PrimarySelfSignature(); self != nil && signer.PrimaryKey.KeyExpired(self, now) {
+		return true
+	}
+	for i := range signer.Subkeys {
+		sk := &signer.Subkeys[i]
+		if sig.IssuerKeyId != nil && sk.PublicKey.KeyId == *sig.IssuerKeyId && sk.Sig != nil && sk.PublicKey.KeyExpired(sk.Sig, now) {
+			return true
+		}
+	}
+	return false
+}
+
 // LookupKey fetches a public key from the configured keyserver by key ID or
 // fingerprint (hex, with optional "0x" prefix). Results are cached
 // in-process.
 func (v *Verifier) LookupKey(ctx context.Context, keyID string) (openpgp.EntityList, error) {
+	entities, _, err := v.lookup(ctx, keyID)
+	return entities, err
+}
+
+// lookup is LookupKey that also reports whether the key came from the
+// fallback keyserver.
+func (v *Verifier) lookup(ctx context.Context, keyID string) (openpgp.EntityList, bool, error) {
 	keyID = strings.TrimPrefix(strings.ToUpper(keyID), "0X")
 
 	v.mu.Lock()
 	if elem, ok := v.cache[keyID]; ok {
 		v.lru.MoveToFront(elem)
-		entities := elem.Value.(*cacheEntry).entities
+		entry := elem.Value.(*cacheEntry)
 		v.mu.Unlock()
-		return entities, nil
+		return entry.entities, entry.fromFallback, nil
 	}
 	v.mu.Unlock()
 
@@ -167,29 +267,18 @@ func (v *Verifier) LookupKey(ctx context.Context, keyID string) (openpgp.EntityL
 	case 16:
 		endpoint = "by-keyid"
 	default:
-		return nil, fmt.Errorf("unsupported pgp key identifier length %d (want 16 or 40 hex chars)", len(keyID))
+		return nil, false, fmt.Errorf("unsupported pgp key identifier length %d (want 16 or 40 hex chars)", len(keyID))
 	}
-	url := fmt.Sprintf("%s/vks/v1/%s/%s", strings.TrimRight(v.keyserver, "/"), endpoint, keyID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	entities, err := v.fetchKeyRing(ctx, fmt.Sprintf("%s/vks/v1/%s/%s", strings.TrimRight(v.keyserver, "/"), endpoint, keyID), keyID)
+	fromFallback := false
+	if err != nil && v.fallback != "" && strings.Contains(err.Error(), "without any identities") {
+		fb, ferr := v.fetchKeyRing(ctx, fmt.Sprintf("%s/pks/lookup?op=get&options=mr&search=0x%s", strings.TrimRight(v.fallback, "/"), keyID), keyID)
+		if ferr == nil {
+			entities, err, fromFallback = fb, nil, true
+		}
+	}
 	if err != nil {
-		return nil, err
-	}
-	resp, err := v.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("keyserver returned HTTP %d for %s", resp.StatusCode, keyID)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB
-	if err != nil {
-		return nil, err
-	}
-	entities, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("parse key %s: %w", keyID, err)
+		return nil, false, err
 	}
 
 	v.mu.Lock()
@@ -199,7 +288,7 @@ func (v *Verifier) LookupKey(ctx context.Context, keyID string) (openpgp.EntityL
 		v.lru.MoveToFront(elem)
 		entities = elem.Value.(*cacheEntry).entities
 	} else {
-		elem := v.lru.PushFront(&cacheEntry{keyID: keyID, entities: entities})
+		elem := v.lru.PushFront(&cacheEntry{keyID: keyID, entities: entities, fromFallback: fromFallback})
 		v.cache[keyID] = elem
 		// Evict LRU entries beyond the cap. We do this in a loop in case
 		// MaxCachedKeys is ever lowered at runtime (currently it isn't).
@@ -213,6 +302,31 @@ func (v *Verifier) LookupKey(ctx context.Context, keyID string) (openpgp.EntityL
 		}
 	}
 	v.mu.Unlock()
+	return entities, fromFallback, nil
+}
+
+// fetchKeyRing GETs an armored key from url and parses it.
+func (v *Verifier) fetchKeyRing(ctx context.Context, url, keyID string) (openpgp.EntityList, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := v.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keyserver returned HTTP %d for %s", resp.StatusCode, keyID)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB
+	if err != nil {
+		return nil, err
+	}
+	entities, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("parse key %s: %w", keyID, err)
+	}
 	return entities, nil
 }
 

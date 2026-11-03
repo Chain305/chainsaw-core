@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/chain305/chainsaw-core/provenance/pgpverify"
@@ -89,8 +90,24 @@ func (c *mavenChecker) CheckWithSource(ctx context.Context, packageName, version
 	if base == "" {
 		base = c.baseURL
 	}
-	jarURL := fmt.Sprintf("%s/%s/%s/%s/%s-%s.jar",
-		base, groupPath, artifact, version, artifact, version)
+	fileURL := func(ext string) string {
+		return fmt.Sprintf("%s/%s/%s/%s/%s-%s.%s",
+			base, groupPath, artifact, version, artifact, version, ext)
+	}
+	if isGoogleMavenBase(base) {
+		// Google Maven publishes no sigstore bundles, and most of what it
+		// hosts is an .aar: every androidx row probed `.jar.asc`, got a 404
+		// and read as unsigned (232 rows on 2026-11-03), while
+		// activity-1.9.0.aar.asc is there. Some of it is a .jar
+		// (annotation-jvm, the Android Gradle plugin), so both are tried.
+		for _, ext := range []string{"aar", "jar"} {
+			if res := c.tryPGP(ctx, fileURL(ext)); res.Status != StatusMissing {
+				return res
+			}
+		}
+		return Result{Status: StatusMissing, Ecosystem: c.ecosystem}
+	}
+	jarURL := fileURL("jar")
 
 	// Try Sigstore sidecar first — when present it's the richer signal.
 	if res := c.trySigstore(ctx, jarURL); res.Status != StatusMissing {
@@ -98,6 +115,20 @@ func (c *mavenChecker) CheckWithSource(ctx context.Context, packageName, version
 	}
 	// Fall back to PGP detached signature.
 	return c.tryPGP(ctx, jarURL)
+}
+
+// GoogleMavenBase is Google's Maven repository, where androidx,
+// com.android.*, com.google.android.* and Firebase are published instead of
+// Central. maven.google.com 301s every file to this host.
+const GoogleMavenBase = "https://dl.google.com/dl/android/maven2"
+
+func isGoogleMavenBase(base string) bool {
+	u, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	return h == "dl.google.com" || h == "maven.google.com"
 }
 
 // mavenRepoBase reduces a source URL to the repository root. Callers pass
@@ -292,15 +323,20 @@ func (c *mavenChecker) pgpResult(ctx context.Context, ascURL string, artifact io
 	if builderID == "" {
 		builderID = uid.Fingerprint
 	}
+	warnings := []string{
+		"pgp key fetched from " + keyserverOf(uid, c.pgp) + "; trust not validated (no web-of-trust, no key registry)",
+	}
+	if uid.KeyExpired {
+		warnings = append(warnings, "pgp signing key has expired since; the signature was made "+
+			uid.SignedAt.UTC().Format("2006-01-02")+", while it was valid")
+	}
 	return Result{
 		Status:          StatusVerified,
 		Ecosystem:       c.ecosystem,
 		AttestationType: "pgp-detached",
 		BundleFormat:    "gpg-detached",
 		BuilderID:       builderID,
-		Warnings: []string{
-			"pgp key fetched from " + c.pgp.Keyserver() + "; trust not validated (no web-of-trust, no key registry)",
-		},
+		Warnings:        warnings,
 	}
 }
 
@@ -533,4 +569,11 @@ func WithArtifactBytes(ctx context.Context, b []byte) context.Context {
 func artifactBytesFrom(ctx context.Context) []byte {
 	b, _ := ctx.Value(artifactBytesKey{}).([]byte)
 	return b
+}
+
+func keyserverOf(uid *pgpverify.SignerUID, v *pgpverify.Verifier) string {
+	if uid.Keyserver != "" {
+		return uid.Keyserver
+	}
+	return v.Keyserver()
 }

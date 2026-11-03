@@ -2588,6 +2588,45 @@ func mavenProjectVersion(pom *mavenPOM, requestedVersion string) string {
 	return strings.TrimSpace(requestedVersion)
 }
 
+// mavenProjectGroup is the value `${project.groupId}` resolves to: the POM's
+// own <groupId>, else the parent's (what Maven inherits), else the group of
+// the coordinate whose .pom was fetched.
+func mavenProjectGroup(pom *mavenPOM, requestedGroup string) string {
+	if pom != nil {
+		if g := strings.TrimSpace(pom.GroupID); g != "" && !strings.Contains(g, unresolvedPropertyMarker) {
+			return g
+		}
+		if g := strings.TrimSpace(pom.Parent.GroupID); g != "" && !strings.Contains(g, unresolvedPropertyMarker) {
+			return g
+		}
+	}
+	return strings.TrimSpace(requestedGroup)
+}
+
+// resolveMavenGroupID interpolates `${…}` in a dependency <groupId> the way
+// resolveMavenVersion does for versions. Netty declares every sibling module
+// as <groupId>${project.groupId}</groupId>, and taking it literally put 82
+// `${project.groupId}:netty-*` rows in production (2026-11-03), each one
+// refreshed against Central and failing. An unresolvable placeholder is kept
+// literally, as for versions; cache warm refuses to create a row for it.
+func resolveMavenGroupID(raw string, props map[string]string, projectGroup, parentGroup string) string {
+	g := strings.TrimSpace(raw)
+	if !strings.Contains(g, unresolvedPropertyMarker) {
+		return g
+	}
+	withModel := make(map[string]string, len(props)+4)
+	for k, v := range props {
+		withModel[k] = v
+	}
+	// Model references, not user properties: Maven answers them from the
+	// project model, so they win over a <properties> entry of the same name.
+	for _, alias := range []string{"project.groupId", "pom.groupId", "groupId"} {
+		withModel[alias] = projectGroup
+	}
+	withModel["project.parent.groupId"] = parentGroup
+	return resolveMavenVersion(g, withModel, "")
+}
+
 // maxMavenParentDepth bounds the `<parent>` chain walk.
 //
 // Five is chosen from the shape of real chains, not from caution: the two
@@ -2943,12 +2982,13 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 	// document keeps its literal placeholder — see resolveMavenVersion.
 	props := mavenPOMProperties(&pom)
 	projectVersion := mavenProjectVersion(&pom, ver)
+	projectGroup := mavenProjectGroup(&pom, group)
 	for _, dep := range pom.Dependencies.Dependency {
 		if dep.GroupID == "" || dep.ArtifactID == "" {
 			continue
 		}
 		ref := DependencyRef{
-			Name:       dep.GroupID + ":" + dep.ArtifactID,
+			Name:       resolveMavenGroupID(dep.GroupID, props, projectGroup, strings.TrimSpace(pom.Parent.GroupID)) + ":" + dep.ArtifactID,
 			Constraint: resolveMavenVersion(dep.Version, props, projectVersion),
 		}
 		switch {

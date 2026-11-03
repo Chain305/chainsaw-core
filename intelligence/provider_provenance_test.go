@@ -225,3 +225,36 @@ func TestProvenanceProvider_PassesHeldArtifactToTheChecker(t *testing.T) {
 		t.Errorf("jar downloaded %d times with the artifact already held, want 0", rt.jars)
 	}
 }
+
+// With no upstream hint, a Google-namespace coordinate must be checked on
+// Google Maven. Central and the Gradle plugin portal do not host androidx,
+// so every such row read as unsigned.
+func TestProvenanceProvider_GoogleGroupsAreCheckedOnGoogleMaven(t *testing.T) {
+	for _, eco := range []string{"maven", "gradle"} {
+		t.Run(eco, func(t *testing.T) {
+			rt := &hostRecorderRT{}
+			p := newProvenanceProvider(provenance.NewChecker(discardProvenanceLogger(),
+				provenance.WithHTTPClient(&http.Client{Transport: rt})))
+			if _, err := p.Run(context.Background(), Request{
+				Key: Key{Ecosystem: eco, Package: "androidx.activity:activity", Version: "1.9.0"},
+			}, nil); err != nil {
+				t.Fatalf("Run err: %v", err)
+			}
+			if len(rt.hosts) == 0 {
+				t.Fatal("no request made")
+			}
+			for _, h := range rt.hosts {
+				if h != "dl.google.com" {
+					t.Errorf("asked %s for an androidx signature, want dl.google.com", h)
+				}
+			}
+		})
+	}
+}
+
+type hostRecorderRT struct{ hosts []string }
+
+func (rt *hostRecorderRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	rt.hosts = append(rt.hosts, r.URL.Hostname())
+	return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: r}, nil
+}

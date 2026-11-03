@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveMavenVersion(t *testing.T) {
@@ -391,6 +392,61 @@ func TestRegistryMetadataProvider_MavenResolvesPropertyVersions(t *testing.T) {
 		if pinned == "" {
 			t.Errorf("%s: pinnedVersion(%q) = \"\" — a resolved property must be warmable, "+
 				"that is the coverage this change recovers", name, ver)
+		}
+	}
+}
+
+// Netty's module POMs carry no <groupId> of their own (it is inherited from
+// the parent) and declare every sibling as <groupId>${project.groupId}</groupId>.
+// Taken literally that put 82 `${project.groupId}:netty-*` rows in production
+// (2026-11-03). The group must resolve through the parent; a group nothing in
+// the document answers stays literal and is never warmed.
+func TestRegistryMetadataProvider_MavenResolvesPropertyGroupIDs(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/io/netty/netty-handler/4.1.133.Final/netty-handler-4.1.133.Final.pom", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0"?><project>
+			<parent><groupId>io.netty</groupId><artifactId>netty-parent</artifactId><version>4.1.133.Final</version></parent>
+			<artifactId>netty-handler</artifactId>
+			<dependencies>
+				<dependency><groupId>${project.groupId}</groupId><artifactId>netty-buffer</artifactId><version>${project.version}</version></dependency>
+				<dependency><groupId>${project.parent.groupId}</groupId><artifactId>netty-codec</artifactId><version>${project.version}</version></dependency>
+				<dependency><groupId>${elsewhere.group}</groupId><artifactId>mystery</artifactId><version>1.0</version></dependency>
+			</dependencies>
+		</project>`))
+	})
+
+	p, _ := newStubProvider(t, mux)
+	pr, err := p.Run(context.Background(),
+		Request{Key: Key{Ecosystem: "maven", Package: "io.netty:netty-handler", Version: "4.1.133.Final"}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if pr.Dependencies == nil {
+		t.Fatal("no Dependencies section")
+	}
+	got := map[string]string{}
+	for _, d := range pr.Dependencies.Direct {
+		got[d.Name] = d.Constraint
+	}
+	for _, name := range []string{"io.netty:netty-buffer", "io.netty:netty-codec", "${elsewhere.group}:mystery"} {
+		if _, ok := got[name]; !ok {
+			t.Errorf("dependency %s missing; got %v", name, got)
+		}
+	}
+
+	prov := &warmTrackingProvider{}
+	svc := New(Config{Providers: []Provider{prov}})
+	defer svc.Close()
+	WarmDirectDeps(context.Background(), &Report{
+		Identity:     IdentitySection{Ecosystem: "maven", Package: "io.netty:netty-handler", Version: "4.1.133.Final"},
+		Dependencies: *pr.Dependencies,
+	}, svc)
+	waitForSeen(t, prov, 2, 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+	for _, k := range prov.keys() {
+		if strings.Contains(k.Package, "${") {
+			t.Errorf("warmed a coordinate with an unresolved group: %s@%s", k.Package, k.Version)
 		}
 	}
 }

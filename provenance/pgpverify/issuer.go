@@ -51,3 +51,25 @@ func parseIssuerKeyIDs(armoredSig []byte) ([]string, error) {
 	}
 	return ids, nil
 }
+
+// firstSignature returns the first signature packet of an ASCII-armored
+// detached signature.
+func firstSignature(armoredSig []byte) (*packet.Signature, error) {
+	block, err := armor.Decode(bytes.NewReader(armoredSig))
+	if err != nil {
+		return nil, fmt.Errorf("armor decode: %w", err)
+	}
+	reader := packet.NewReader(block.Body)
+	for {
+		pkt, err := reader.Next()
+		if err == io.EOF {
+			return nil, fmt.Errorf("no signature packet")
+		}
+		if err != nil {
+			return nil, err
+		}
+		if sig, ok := pkt.(*packet.Signature); ok {
+			return sig, nil
+		}
+	}
+}

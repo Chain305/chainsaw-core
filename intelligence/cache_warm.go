@@ -193,7 +193,10 @@ func warmDirectDepsAtDepth(ctx context.Context, parent *Report, svc *DefaultServ
 			eco = parentEco
 		}
 		name := strings.TrimSpace(dep.Name)
-		if name == "" {
+		// An unresolved `${…}` in the NAME is the same blind spot
+		// pinnedVersion refuses in the version: a coordinate no registry
+		// has, which would sit in the inventory and be refreshed forever.
+		if name == "" || strings.Contains(name, unresolvedPropertyMarker) {
 			continue
 		}
 		version := pinnedVersion(dep.Constraint)
