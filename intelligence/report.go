@@ -1731,6 +1731,14 @@ func (r *Report) Provisional() bool {
 		if w.Provider == "artifact" && w.Code == WarnArtifactFetchDeferred {
 			return true
 		}
+		// A provenance check refused for rate means the scan ran while Maven
+		// Central was refusing us, and every other Central fact (licence,
+		// timeline, artifact) went with it. On 2026-11-03 cache warm, the
+		// scheduled walk and coverage recompute wrote 40 such rows in one
+		// stand-off, each served as settled for 24h.
+		if w.Provider == "provenance" && w.Code == WarnProvenanceRateLimited {
+			return true
+		}
 		if unknown && w.Provider == "registrymetadata" && w.Code == WarnRegistryCancelled {
 			return true
 		}

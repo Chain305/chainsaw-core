@@ -137,3 +137,24 @@ func TestProvisionalStreakIsCarriedFromThePriorRow(t *testing.T) {
 		}
 	}
 }
+
+// A provenance check refused for rate means the scan ran inside a Maven
+// Central stand-off, so the row's Central facts are missing and must be
+// rechecked on the backoff, whichever writer produced it (cache warm, the
+// scheduled walk and coverage recompute each wrote such rows as settled for
+// 24h on 2026-11-03).
+func TestProvenanceRateLimitedIsProvisional(t *testing.T) {
+	r := &Report{}
+	r.Observation.Warnings = []Warning{{Provider: newProvenanceProvider(nil).Name(), Code: WarnProvenanceRateLimited}}
+	if !r.Provisional() {
+		t.Fatal("a rate-limited provenance check is provisional")
+	}
+	if got := r.freshFor(DefaultMaxStaleness); got != provisionalBackoff[0] {
+		t.Fatalf("freshFor = %v, want %v", got, provisionalBackoff[0])
+	}
+	other := &Report{}
+	other.Observation.Warnings = []Warning{{Provider: "provenance", Code: WarnParseFailed}}
+	if other.Provisional() {
+		t.Fatal("a provenance failure that is not a rate limit is not provisional")
+	}
+}
