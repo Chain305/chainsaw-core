@@ -2723,11 +2723,7 @@ func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, art
 	// legitimately differs between the two hosts, so flipping its order
 	// could move `recentlyPublished` for any coordinate present on both.
 	// That needs a verdict-flip count, not a reorder.
-	googleGroup := groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != ""
-	primary, fallback := p.endpoints.maven, p.endpoints.mavenGoogle
-	if googleGroup {
-		primary, fallback = p.endpoints.mavenGoogle, p.endpoints.maven
-	}
+	primary, fallback, googleGroup := p.mavenPOMHosts(groupPath)
 	pom, warn, err := p.fetchMavenPOMFrom(ctx, primary, groupPath, artifact, version)
 	if err == nil && warn == nil {
 		storeMavenPOM(base, group, artifact, version, pom)
@@ -2745,6 +2741,20 @@ func (p *registryMetadataProvider) fetchMavenPOM(ctx context.Context, group, art
 		warn = &Warning{Provider: "registrymetadata", Code: "transport", Message: fmt.Sprint(err), At: p.now()}
 	}
 	return nil, warn
+}
+
+// mavenPOMHosts orders the two repositories for one group's POM: the host
+// that publishes the namespace first, the other as the fallback a DEFINITE
+// absence falls through to. fetchMavenPOM and runMaven share it so the
+// coordinate's own POM and its parents are asked of the same host — before,
+// runMaven asked repo1 only, and every androidx coordinate came back
+// not_found with no licence, people or publish date.
+func (p *registryMetadataProvider) mavenPOMHosts(groupPath string) (primary, fallback string, googleGroup bool) {
+	googleGroup = groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != ""
+	if googleGroup {
+		return p.endpoints.mavenGoogle, p.endpoints.maven, true
+	}
+	return p.endpoints.maven, p.endpoints.mavenGoogle, false
 }
 
 func (p *registryMetadataProvider) fetchMavenPOMFrom(ctx context.Context, base, groupPath, artifact, version string) (*mavenPOM, *Warning, error) {
@@ -2823,7 +2833,14 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 		return PartialReport{}, nil
 	}
 	groupPath := strings.ReplaceAll(group, ".", "/")
-	pomURL := fmt.Sprintf("%s/%s/%s/%s/%s-%s.pom", p.endpoints.maven, groupPath, artifact, ver, artifact, ver)
+	// The same host order as the parent walk (fetchMavenPOM): the namespace's
+	// publisher first, the other on a definite absence. host is whichever one
+	// answered, so the artifact URL below points where the POM was found.
+	host, fallback, googleGroup := p.mavenPOMHosts(groupPath)
+	pomURLOn := func(base string) string {
+		return fmt.Sprintf("%s/%s/%s/%s/%s-%s.pom", base, groupPath, artifact, ver, artifact, ver)
+	}
+	pomURL := pomURLOn(host)
 
 	var pom mavenPOM
 	// The POM response's Last-Modified is this version's deploy time — the
@@ -2832,6 +2849,15 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 	warn, err := p.fetchXML(withHeaderCapture(ctx, &pomHeader), pomURL, &pom)
 	if err != nil {
 		return PartialReport{}, err
+	}
+	if isDefiniteAbsence(warn) && googleGroup {
+		var alt mavenPOM
+		var altHeader http.Header
+		altURL := pomURLOn(fallback)
+		w, e := p.fetchXML(withHeaderCapture(ctx, &altHeader), altURL, &alt)
+		if e == nil && w == nil {
+			pom, pomHeader, pomURL, host, warn = alt, altHeader, altURL, fallback, nil
+		}
 	}
 	pr := PartialReport{}
 	if warn != nil {
@@ -2890,7 +2916,7 @@ func (p *registryMetadataProvider) runMaven(ctx context.Context, pkg, ver string
 	}
 	urls := &URLSection{
 		MetadataURL:   pomURL,
-		ArtifactURL:   fmt.Sprintf("%s/%s/%s/%s/%s.jar", p.endpoints.maven, groupPath, artifact, ver, jarBase),
+		ArtifactURL:   fmt.Sprintf("%s/%s/%s/%s/%s.jar", host, groupPath, artifact, ver, jarBase),
 		HomepageURL:   strings.TrimSpace(pom.URL),
 		SourceRepoURL: extractMavenSourceRepo(pom.SCM),
 		IssuesURL:     strings.TrimSpace(pom.IssueManagement.URL),

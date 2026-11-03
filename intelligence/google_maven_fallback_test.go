@@ -357,3 +357,83 @@ func TestRegistryMetadataClientFollowsRedirects(t *testing.T) {
 			resp.StatusCode, destHits)
 	}
 }
+
+// -- runMaven: the coordinate's OWN POM --------------------------------
+//
+// fetchMavenPOM (the parent walk) asked Google first, but runMaven built its
+// own repo1-only URL for the coordinate's POM. Every androidx / com.android
+// row therefore came back not_found with no licence, people or publish date:
+// 1,031 gradle rows in prod on 2026-11-03, and 0 of 2,115 such rows carried
+// a release date. This pins that the coordinate's POM follows the same host
+// order, and that the Last-Modified it reads comes from the host that served.
+func TestRunMavenReadsGoogleNamespacePOMFromGoogle(t *testing.T) {
+	resetMavenPOMCacheForTest()
+	t.Cleanup(resetMavenPOMCacheForTest)
+	repo1POMHits := 0
+	repo1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".pom") {
+			repo1POMHits++
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(repo1.Close)
+	gsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/androidx/work/work-runtime/2.11.2/work-runtime-2.11.2.pom" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		w.Header().Set("Last-Modified", "Tue, 07 Oct 2025 18:00:00 GMT")
+		_, _ = w.Write([]byte(androidxWorkPOM))
+	}))
+	t.Cleanup(gsrv.Close)
+
+	p := newRegistryMetadataProvider()
+	p.endpoints = defaultRegistryEndpoints()
+	p.endpoints.maven = repo1.URL
+	p.endpoints.mavenGoogle = gsrv.URL
+
+	pr, err := p.runMaven(context.Background(), "androidx.work:work-runtime", "2.11.2")
+	if err != nil {
+		t.Fatalf("runMaven: %v", err)
+	}
+	for _, w := range pr.Warnings {
+		if isDefiniteAbsence(&w) {
+			t.Fatalf("androidx coordinate reported absent: %+v", w)
+		}
+	}
+	if pr.URLs == nil || !strings.HasPrefix(pr.URLs.MetadataURL, gsrv.URL) {
+		t.Fatalf("POM was not read from maven.google.com: urls=%+v", pr.URLs)
+	}
+	if !strings.HasPrefix(pr.URLs.ArtifactURL, gsrv.URL) {
+		t.Errorf("artifact URL %q does not point at the host that served the POM", pr.URLs.ArtifactURL)
+	}
+	if pr.Release == nil || pr.Release.VersionDate == nil {
+		t.Error("the POM's Last-Modified (the version's publish date) was not read")
+	}
+	if repo1POMHits != 0 {
+		t.Errorf("repo1 was asked %d time(s) for an androidx POM it does not host", repo1POMHits)
+	}
+}
+
+// The other direction: a non-Google group's POM is still repo1 only.
+func TestRunMavenNonGoogleGroupNeverAsksGoogle(t *testing.T) {
+	p, repo1Hits, googleHits := pomOrderProvider(t, http.StatusNotFound, http.StatusOK)
+	pr, err := p.runMaven(context.Background(), "org.slf4j:slf4j-api", "2.0.16")
+	if err != nil {
+		t.Fatalf("runMaven: %v", err)
+	}
+	if *googleHits != 0 {
+		t.Errorf("org.slf4j reached maven.google.com %d time(s)", *googleHits)
+	}
+	if *repo1Hits == 0 {
+		t.Error("repo1 was never asked for a non-Google group")
+	}
+	absent := false
+	for _, w := range pr.Warnings {
+		absent = absent || isDefiniteAbsence(&w)
+	}
+	if !absent {
+		t.Error("a repo1 miss for a non-Google group was not reported absent")
+	}
+}
