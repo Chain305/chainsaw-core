@@ -114,6 +114,12 @@ func TestGradleCheckerFollowsTheArtifactCDN(t *testing.T) {
 		t.Errorf("the gradle checker refuses a hop to plugins-artifacts.gradle.org (%v); "+
 			"every /m2 artifact 303s there, so provenance stays broken for the whole ecosystem", err)
 	}
+	// Non-plugin artifacts (okhttp, netty, kotlin, androidx) 303 to Central.
+	central, _ := http.NewRequest(http.MethodGet, "https://repo.maven.apache.org/maven2/x.pom.asc", nil)
+	if err := c.client.CheckRedirect(central, nil); err != nil {
+		t.Errorf("the gradle checker refuses a hop to repo.maven.apache.org (%v); "+
+			"every non-plugin artifact on plugins.gradle.org 303s there", err)
+	}
 	other, _ := http.NewRequest(http.MethodGet, "https://example.com/x", nil)
 	if err := c.client.CheckRedirect(other, nil); err != http.ErrUseLastResponse {
 		t.Errorf("the gradle checker followed a hop to an unlisted host (err=%v)", err)

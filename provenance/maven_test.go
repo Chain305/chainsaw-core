@@ -295,3 +295,45 @@ func TestMavenCheckerPGPKeyMissingIsUnavailable(t *testing.T) {
 		t.Errorf("AttestationType = %q, want pgp-detached", got.AttestationType)
 	}
 }
+
+// The provenance provider passes the upstream URL of the file the proxy served
+// as sourceURL, and for a POM that is the full file path. Appending the
+// coordinate to it asked for ".../x-1.0.pom/org/example/x/1.0/x-1.0.jar.asc"
+// on every such row. Every request must land on the coordinate's own path.
+func TestMavenCheckerTrimsFileSourceURLToRepoBase(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newMavenChecker(&http.Client{}, nil)
+	source := srv.URL + "/maven2/org/example/foo/1.0.0/foo-1.0.0.pom"
+	got := c.CheckWithSource(context.Background(), "org.example:foo", "1.0.0", source)
+	if got.Status != StatusMissing {
+		t.Errorf("want StatusMissing, got %+v", got)
+	}
+	if len(paths) == 0 {
+		t.Fatal("checker made no requests")
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "/maven2/org/example/foo/1.0.0/foo-1.0.0.jar") {
+			t.Errorf("request %q is not under the repo base; the source URL was not trimmed", p)
+		}
+	}
+}
+
+func TestMavenRepoBase(t *testing.T) {
+	cases := []struct{ source, group, want string }{
+		{"https://repo1.maven.org/maven2", "org/example", "https://repo1.maven.org/maven2"},
+		{"https://repo1.maven.org/maven2/", "org/example", "https://repo1.maven.org/maven2"},
+		{"https://repo1.maven.org/maven2/org/example/foo/1.0/foo-1.0.pom", "org/example", "https://repo1.maven.org/maven2"},
+		{"", "org/example", ""},
+	}
+	for _, c := range cases {
+		if got := mavenRepoBase(c.source, c.group); got != c.want {
+			t.Errorf("mavenRepoBase(%q, %q) = %q, want %q", c.source, c.group, got, c.want)
+		}
+	}
+}

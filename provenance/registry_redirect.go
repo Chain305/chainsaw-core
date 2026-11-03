@@ -45,6 +45,11 @@ import (
 var registryRedirectHosts = map[string]struct{}{
 	// plugins.gradle.org/m2/... -> 303 (verified 2026-09-23)
 	"plugins-artifacts.gradle.org": {},
+	// plugins.gradle.org/m2/... -> 303 for every artifact that is NOT a Gradle
+	// plugin: okhttp, netty, kotlin libraries and androidx all go to Maven
+	// Central (verified 2026-11-03). The entry above covered plugins only, so
+	// 2,707 gradle rows still recorded "HTTP 303" as a verification failure.
+	"repo.maven.apache.org": {},
 	// huggingface.co -> huggingface.co, a SAME-HOST repo rename (verified
 	// 2026-09-24). HF moved its canonical legacy models under organisations
 	// and 307s the old paths: /api/models/gpt2 ->

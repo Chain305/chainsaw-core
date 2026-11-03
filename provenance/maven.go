@@ -81,12 +81,13 @@ func (c *mavenChecker) CheckWithSource(ctx context.Context, packageName, version
 			Error:     fmt.Sprintf("invalid maven coordinate %q (want groupId:artifactId)", packageName),
 		}
 	}
-	base := strings.TrimRight(sourceURL, "/")
+	groupPath := strings.ReplaceAll(group, ".", "/")
+	base := mavenRepoBase(sourceURL, groupPath)
 	if base == "" {
 		base = c.baseURL
 	}
 	jarURL := fmt.Sprintf("%s/%s/%s/%s/%s-%s.jar",
-		base, strings.ReplaceAll(group, ".", "/"), artifact, version, artifact, version)
+		base, groupPath, artifact, version, artifact, version)
 
 	// Try Sigstore sidecar first — when present it's the richer signal.
 	if res := c.trySigstore(ctx, jarURL); res.Status != StatusMissing {
@@ -94,6 +95,20 @@ func (c *mavenChecker) CheckWithSource(ctx context.Context, packageName, version
 	}
 	// Fall back to PGP detached signature.
 	return c.tryPGP(ctx, jarURL)
+}
+
+// mavenRepoBase reduces a source URL to the repository root. Callers pass
+// either a base (".../maven2") or the upstream URL of the file the proxy
+// served (".../maven2/io/netty/netty-buffer/4.1.93.Final/netty-buffer-4.1.93.Final.pom"),
+// and appending the coordinate to the second produced
+// ".../netty-buffer-4.1.93.Final.pom/io/netty/..." on every such row. The root
+// is everything before the coordinate's group path.
+func mavenRepoBase(sourceURL, groupPath string) string {
+	base := strings.TrimRight(sourceURL, "/")
+	if i := strings.Index(base, "/"+groupPath+"/"); i > 0 {
+		base = base[:i]
+	}
+	return base
 }
 
 // trySigstore fetches `.sigstore.json` and verifies the bundle.
