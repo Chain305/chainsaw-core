@@ -73,6 +73,16 @@ type StaleReportScope struct {
 	// no separate worker, no separate budget and no separate backlog gauge.
 	StaleAnalyzer        string
 	StaleAnalyzerVersion int
+
+	// ProvisionalDue, when set, makes the scope a different population: only
+	// provisional reports (Report.Provisional) whose backoff ended before it,
+	// collected after OlderThan so the plain half does not pick them twice.
+	// Scan stores a provisional report's fresh_until as the end of its
+	// backoff, so the backoff is the one column comparison here. A settled
+	// report's window is the full DefaultMaxStaleness, which the second
+	// comparison excludes. Before this, the sweep selected on collected_at
+	// alone and a provisional row nobody read waited out the whole 24h.
+	ProvisionalDue time.Time
 }
 
 // declaredCoordinateAntiJoin excludes every coordinate that a LIVE monitored
@@ -210,6 +220,11 @@ const reportArtifactSHAExpr = `COALESCE(
 // With one tail there is nothing left to forget, and adding a fourth half
 // cannot reintroduce it.
 func (sc StaleReportScope) where() (string, []any) {
+	if !sc.ProvisionalDue.IsZero() {
+		return fmt.Sprintf(`fresh_until < $1 AND collected_at >= $2
+		AND fresh_until < collected_at + interval '%d seconds'`, int(DefaultMaxStaleness.Seconds())) +
+			" AND " + declaredCoordinateAntiJoin, []any{sc.ProvisionalDue, sc.OlderThan}
+	}
 	args := []any{sc.OlderThan}
 	halves := []string{"collected_at < $1"}
 

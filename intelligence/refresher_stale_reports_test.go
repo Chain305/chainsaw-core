@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,11 +21,13 @@ import (
 )
 
 type fakeStaleSource struct {
-	rows      []StaleReportRow
-	countCall atomic.Int32
-	iterCalls atomic.Int32
-	olderThan atomic.Value // time.Time, as the sweep passed it
-	scope     atomic.Value // StaleReportScope, as the sweep passed it
+	rows []StaleReportRow
+	// provisional is what a ProvisionalDue scope selects.
+	provisional []StaleReportRow
+	countCall   atomic.Int32
+	iterCalls   atomic.Int32
+	olderThan   atomic.Value // time.Time, as the sweep passed it
+	scope       atomic.Value // StaleReportScope, as the sweep passed it
 }
 
 func (f *fakeStaleSource) CountStaleReports(_ context.Context, scope StaleReportScope) (int, error) {
@@ -34,11 +37,15 @@ func (f *fakeStaleSource) CountStaleReports(_ context.Context, scope StaleReport
 	return len(f.rows), nil
 }
 
-func (f *fakeStaleSource) IterateStaleReports(_ context.Context, _ StaleReportScope, after StaleReportCursor, limit int) ([]StaleReportRow, StaleReportCursor, error) {
+func (f *fakeStaleSource) IterateStaleReports(_ context.Context, scope StaleReportScope, after StaleReportCursor, limit int) ([]StaleReportRow, StaleReportCursor, error) {
 	f.iterCalls.Add(1)
+	all := f.rows
+	if !scope.ProvisionalDue.IsZero() {
+		all = f.provisional
+	}
 	start := 0
 	if !after.IsZero() {
-		for i, r := range f.rows {
+		for i, r := range all {
 			if r.Ecosystem == after.Ecosystem && r.Package == after.Package && r.Version == after.Version {
 				start = i + 1
 				break
@@ -46,10 +53,10 @@ func (f *fakeStaleSource) IterateStaleReports(_ context.Context, _ StaleReportSc
 		}
 	}
 	end := start + limit
-	if end > len(f.rows) {
-		end = len(f.rows)
+	if end > len(all) {
+		end = len(all)
 	}
-	page := f.rows[start:end]
+	page := all[start:end]
 	if len(page) < limit {
 		return page, StaleReportCursor{}, nil
 	}
@@ -577,9 +584,13 @@ func TestStaleReportSweepDefersCentralRowsDuringStandoff(t *testing.T) {
 	for i, eco := range map[int]string{0: "maven", 1: "gradle", 3: "maven", 6: "gradle", 7: "maven"} {
 		rows[i].Ecosystem = eco
 	}
+	// Google-namespace rows refresh from Google, so the stand-off does not
+	// hold them back.
+	rows[3].Package = "androidx.core:core"
+	rows[6].Package = "com.google.firebase:firebase-common"
 	central := 0
 	for _, r := range rows {
-		if r.Ecosystem == "maven" || r.Ecosystem == "gradle" {
+		if (r.Ecosystem == "maven" || r.Ecosystem == "gradle") && !strings.Contains(r.Package, "google") && !strings.HasPrefix(r.Package, "androidx.") {
 			central++
 		}
 	}
@@ -606,5 +617,64 @@ func TestStaleReportSweepDefersCentralRowsDuringStandoff(t *testing.T) {
 	if summary2.StaleReports.Deferred != 0 || len(svc2.seen) != len(rows) {
 		t.Errorf("after the stand-off: deferred=%d scans=%d, want 0/%d",
 			summary2.StaleReports.Deferred, len(svc2.seen), len(rows))
+	}
+}
+
+// A provisional row whose backoff ran out is refreshed on the sweep's next
+// tick, ahead of the oldest-first plain half, which is truncated on most
+// ticks and would never reach a row collected minutes ago. It takes at most
+// half the budget, so a stand-off's worth of provisional rows cannot stop
+// the plain half.
+func TestStaleReportSweepTakesDueProvisionalRowsFirst(t *testing.T) {
+	resetStaleReportMetrics()
+	t.Cleanup(resetStaleReportMetrics)
+
+	provisional := staleRows(10)
+	for i := range provisional {
+		provisional[i].Package = fmt.Sprintf("example.com/provisional%02d", i)
+	}
+	src := &fakeStaleSource{rows: staleRows(50), provisional: provisional}
+	ref, svc := staleSweepRefresher(t, src, true, 8)
+	summary := ref.RunOnce(context.Background())
+
+	got := 0
+	for _, req := range svc.seen {
+		if strings.Contains(req.Key.Package, "provisional") {
+			got++
+		}
+	}
+	if got != 4 || summary.StaleReports.Provisional != 4 {
+		t.Errorf("provisional rows refreshed = %d (summary %d), want 4: half the budget of 8",
+			got, summary.StaleReports.Provisional)
+	}
+	if len(svc.seen) != 8 {
+		t.Errorf("scans = %d, want the whole budget of 8", len(svc.seen))
+	}
+
+	// With few provisional rows the plain half gets the rest of the budget.
+	src2 := &fakeStaleSource{rows: staleRows(50), provisional: provisional[:1]}
+	ref2, svc2 := staleSweepRefresher(t, src2, true, 8)
+	if s2 := ref2.RunOnce(context.Background()); s2.StaleReports.Provisional != 1 || len(svc2.seen) != 8 {
+		t.Errorf("provisional=%d scans=%d, want 1 and 8", s2.StaleReports.Provisional, len(svc2.seen))
+	}
+}
+
+// The provisional scope is its own population: provisional rows past their
+// backoff, and only those collected after OlderThan so the plain half cannot
+// pick the same row twice in one tick.
+func TestStaleReportScopeProvisionalDuePredicate(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	sc := StaleReportScope{OlderThan: now.Add(-24 * time.Hour), ProvisionalDue: now}
+	pred, args := sc.where()
+	for _, want := range []string{"fresh_until < $1", "collected_at >= $2", "fresh_until < collected_at + interval '86400 seconds'", "NOT IN"} {
+		if !strings.Contains(pred, want) {
+			t.Errorf("predicate %q lacks %q", pred, want)
+		}
+	}
+	if len(args) != 2 || args[0] != now || args[1] != sc.OlderThan {
+		t.Errorf("args = %v", args)
+	}
+	if plain, _ := (StaleReportScope{OlderThan: sc.OlderThan}).where(); strings.Contains(plain, "fresh_until") {
+		t.Errorf("the plain scope selects on fresh_until: %q", plain)
 	}
 }

@@ -56,11 +56,16 @@ func TestGoogleMavenFallbackAnswersAndroidX(t *testing.T) {
 			w.Header().Set("Content-Type", "text/xml")
 			_, _ = w.Write([]byte(androidxWorkMetadata))
 		})
-	p, _ := googleMavenProvider(t, mux)
+	p, repo1Hits := googleMavenProvider(t, mux)
 
 	doc := p.fetchMavenTimelineDoc(context.Background(), "androidx/work", "work-runtime")
 	if warn := doc.probeWarning(); warn != nil {
 		t.Fatalf("androidx.work:work-runtime was not answered: %+v", warn)
+	}
+	if *repo1Hits != 0 {
+		t.Errorf("repo1 was asked %d time(s) for an androidx timeline Google answered: that is a "+
+			"guaranteed 404 on the host that 429s us, and inside its stand-off it left the row "+
+			"with no timeline", *repo1Hits)
 	}
 	versions := timelineVersions(doc.timeline)
 	if len(versions) != 2 || versions[len(versions)-1] != "2.11.2" {
@@ -103,19 +108,19 @@ func TestGoogleMavenFallbackIsNamespaceScoped(t *testing.T) {
 	}
 }
 
-// An OUTAGE at repo1 must not trigger the fallback either: absence of
-// evidence is not evidence of absence, and a 5xx is not a 404.
+// An OUTAGE at the first host must not trigger the fallback either: absence
+// of evidence is not evidence of absence, and a 5xx is not a 404.
 func TestGoogleMavenFallbackSkippedOnOutage(t *testing.T) {
-	googleHits := 0
-	gsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		googleHits++
+	repo1Hits := 0
+	repo1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		repo1Hits++
 		http.NotFound(w, nil)
 	}))
-	t.Cleanup(gsrv.Close)
-	repo1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	t.Cleanup(repo1.Close)
+	gsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusBadGateway)
 	}))
-	t.Cleanup(repo1.Close)
+	t.Cleanup(gsrv.Close)
 
 	p := newRegistryMetadataProvider()
 	p.endpoints = defaultRegistryEndpoints()
@@ -123,8 +128,30 @@ func TestGoogleMavenFallbackSkippedOnOutage(t *testing.T) {
 	p.endpoints.mavenGoogle = gsrv.URL
 
 	p.fetchMavenTimelineDoc(context.Background(), "androidx/work", "work-runtime")
-	if googleHits != 0 {
-		t.Errorf("a repo1 outage triggered %d Google request(s) — a 5xx is not an absence", googleHits)
+	if repo1Hits != 0 {
+		t.Errorf("a Google outage triggered %d repo1 request(s) — a 5xx is not an absence", repo1Hits)
+	}
+}
+
+// The few Google-namespace artifacts only repo1 carries (old com.google.android
+// ones) must still be found: Google's 404 falls through to repo1.
+func TestGoogleMavenTimelineFallsBackToRepo1(t *testing.T) {
+	repo1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = w.Write([]byte(androidxWorkMetadata))
+	}))
+	t.Cleanup(repo1.Close)
+	gsrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(gsrv.Close)
+
+	p := newRegistryMetadataProvider()
+	p.endpoints = defaultRegistryEndpoints()
+	p.endpoints.maven = repo1.URL
+	p.endpoints.mavenGoogle = gsrv.URL
+
+	doc := p.fetchMavenTimelineDoc(context.Background(), "com/google/android", "android")
+	if warn := doc.probeWarning(); warn != nil {
+		t.Fatalf("a Google-namespace artifact only repo1 carries was not found: %+v", warn)
 	}
 }
 
@@ -177,10 +204,8 @@ func TestVendorMavenCoordinateIsNotScored(t *testing.T) {
 // fetchMavenPOM asks the host that publishes the namespace first. Asking
 // repo1 first for androidx is a guaranteed 404 against the upstream already
 // refusing most of our requests — 1,405 of 1,699 production `not_found` rows
-// were real androidx coordinates. The order is reversed only for POMs, which
-// are immutable per GAV; fetchMavenTimelineDoc keeps repo1 first because a
-// version LIST legitimately differs between the two hosts (its own tests
-// above pin that).
+// were real androidx coordinates. fetchMavenTimelineDoc uses the same order
+// (mavenPOMHosts) since 2026-11-04: repo1 404s the androidx timelines too.
 
 const androidxWorkPOM = `<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">

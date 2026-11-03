@@ -237,7 +237,7 @@ func (p *registryMetadataProvider) Prepare(ctx context.Context, req Request) con
 	if registryMetadataUpstream == nil || p.client != registryMetadataClient {
 		return ctx
 	}
-	base, n := p.fixedRequests(req.Key.Ecosystem)
+	base, n := p.fixedRequestsFor(req.Key)
 	u, err := url.Parse(base)
 	if n == 0 || err != nil || u.Hostname() == "" {
 		return ctx
@@ -261,6 +261,19 @@ func prepayWait(ctx context.Context) time.Duration {
 		return prepayBackgroundWait
 	}
 	return prepayForegroundWait
+}
+
+// fixedRequestsFor is fixedRequests for one coordinate. A Google-namespace
+// Maven coordinate's POM and timeline are both asked of Google first
+// (mavenPOMHosts), so its tokens belong to that bucket, not to Central's.
+func (p *registryMetadataProvider) fixedRequestsFor(key Key) (string, int) {
+	base, n := p.fixedRequests(key.Ecosystem)
+	if base == p.endpoints.maven {
+		if group, _, _ := splitMavenCoordinate(key.Package); group != "" {
+			base, _, _ = p.mavenPOMHosts(strings.ReplaceAll(group, ".", "/"))
+		}
+	}
+	return base, n
 }
 
 // fixedRequests is the primary host and the number of requests every
@@ -3275,21 +3288,30 @@ func groupUsesGoogleMaven(groupPath string) bool {
 
 // fetchMavenTimelineDoc reads a coordinate's published version timeline.
 //
-// It asks repo1 first and, for the namespaces Google hosts, falls back to
-// maven.google.com when repo1 does not have the artifact. That fallback is
+// It asks the host that publishes the namespace first (mavenPOMHosts, the
+// order the POM read uses) and, for the namespaces Google hosts, falls back to
+// the other host when the first does not have the artifact. That fallback is
 // what makes the federated-absence verdict honest rather than noisy: with
 // it, a Maven coordinate that still comes back not-found has been missed by
 // BOTH of the repositories that actually serve this ecosystem, and calling
 // that "not evaluated" is a statement about the coordinate. Without it, the
 // same verdict would land on every androidx dependency in the fleet.
 //
-// The fallback fires only on a definite miss, never on an outage, so a
-// repo1 5xx does not produce a second outbound request. Ecosystems and
-// namespaces outside the Google set are untouched.
+// Google first for those namespaces, not repo1: repo1 answers 404 for them
+// (androidx.core, androidx.annotation, firebase-common and material, checked
+// 2026-11-04), so asking it first spent one request per row on the host that
+// 429s us, and while its stand-off held the refusal left every androidx row
+// with no timeline at all. The few Google-namespace artifacts repo1 does
+// carry (old com.google.android ones) 404 on Google and are still found.
+//
+// The fallback fires only on a definite miss, never on an outage, so a 5xx
+// does not produce a second outbound request. Namespaces outside the Google
+// set ask repo1 only.
 func (p *registryMetadataProvider) fetchMavenTimelineDoc(ctx context.Context, groupPath, artifact string) timelineDoc {
-	doc := p.fetchMavenTimelineDocFrom(ctx, p.endpoints.maven, groupPath, artifact)
-	if isDefiniteAbsence(doc.probeWarning()) && groupUsesGoogleMaven(groupPath) && p.endpoints.mavenGoogle != "" {
-		if alt := p.fetchMavenTimelineDocFrom(ctx, p.endpoints.mavenGoogle, groupPath, artifact); alt.probeWarning() == nil {
+	primary, fallback, googleGroup := p.mavenPOMHosts(groupPath)
+	doc := p.fetchMavenTimelineDocFrom(ctx, primary, groupPath, artifact)
+	if googleGroup && isDefiniteAbsence(doc.probeWarning()) {
+		if alt := p.fetchMavenTimelineDocFrom(ctx, fallback, groupPath, artifact); alt.probeWarning() == nil {
 			return alt
 		}
 	}

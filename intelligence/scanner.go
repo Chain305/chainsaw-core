@@ -1027,6 +1027,11 @@ func (s *DefaultService) runFanout(ctx context.Context, req Request) *Report {
 		}
 	}
 	report.Observation.ProvisionalStreak = nextProvisionalStreak(report, priorProvisionalStreak)
+	if report.Provisional() && !report.osvCorpusArrived() {
+		// Stored as fresh_until, which is how the stale sweep finds a
+		// provisional row whose backoff has run out (ProvisionalDue).
+		report.Observation.FreshUntil = report.Observation.CollectedAt.Add(report.freshFor(DefaultMaxStaleness))
+	}
 	return report
 }
 

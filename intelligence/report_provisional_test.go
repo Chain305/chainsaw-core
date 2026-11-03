@@ -1,6 +1,7 @@
 package intelligence
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -64,7 +65,7 @@ func TestReportProvisionalRegistryCancelled(t *testing.T) {
 // reads the source; it catches a deleted call, not a disabled one.
 func TestProvisionalFreshnessIsReadAtBothGates(t *testing.T) {
 	for file, want := range map[string]string{
-		"scanner.go":   "age < cached.freshFor(maxStale)",
+		"scanner.go": "age < cached.freshFor(maxStale)",
 		// The refresher reads it against the row's tier window
 		// (refresher_tiers.go), which is MaxStaleness for every report a
 		// provisional verdict could be (a verdict other than allow is hot).
@@ -156,5 +157,34 @@ func TestProvenanceRateLimitedIsProvisional(t *testing.T) {
 	other.Observation.Warnings = []Warning{{Provider: "provenance", Code: WarnParseFailed}}
 	if other.Provisional() {
 		t.Fatal("a provenance failure that is not a rate limit is not provisional")
+	}
+}
+
+// Scan stores a provisional report's fresh_until as the end of its backoff:
+// that column is how the stale sweep finds an orphan provisional row whose
+// backoff ran out (StaleReportScope.ProvisionalDue). A settled report keeps
+// the full window.
+func TestScanStoresProvisionalBackoffAsFreshUntil(t *testing.T) {
+	queued := &fakeProvider{name: "weekly_downloads", partial: PartialReport{
+		Warnings: []Warning{{Provider: "weekly_downloads", Code: WarnDownloadsQueued}},
+	}}
+	key := Key{Ecosystem: "npm", Package: "left-pad", Version: "1.3.0"}
+	r, err := New(Config{Providers: []Provider{queued}}).Scan(context.Background(), Request{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Provisional() {
+		t.Fatal("test setup: the report is not provisional")
+	}
+	if got := r.Observation.FreshUntil.Sub(r.Observation.CollectedAt); got != provisionalBackoff[0] {
+		t.Errorf("provisional fresh_until = collected + %v, want + %v", got, provisionalBackoff[0])
+	}
+
+	settled, err := New(Config{Providers: []Provider{&fakeProvider{name: "plain"}}}).Scan(context.Background(), Request{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := settled.Observation.FreshUntil.Sub(settled.Observation.CollectedAt); got != DefaultMaxStaleness {
+		t.Errorf("settled fresh_until = collected + %v, want + %v", got, DefaultMaxStaleness)
 	}
 }

@@ -98,3 +98,51 @@ func TestStaleReportScopeSelectsNeverScannedReports(t *testing.T) {
 		}
 	}
 }
+
+// TestStaleReportScopeSelectsDueProvisionalReports pins the ProvisionalDue
+// predicate against Postgres: each row isolates one clause.
+func TestStaleReportScopeSelectsDueProvisionalReports(t *testing.T) {
+	db := openStaleDisclosureDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	eco := "prov-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+	t.Cleanup(func() {
+		_, _ = db.DB().Exec(`DELETE FROM intelligence_reports WHERE ecosystem = $1`, eco)
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	insert := func(pkg string, age, window time.Duration) {
+		t.Helper()
+		at := now.Add(-age)
+		if _, err := db.DB().ExecContext(ctx, `
+			INSERT INTO intelligence_reports
+			  (ecosystem, package_name, version, report, collected_at, fresh_until)
+			VALUES ($1, $2, '1.0.0', '{}'::jsonb, $3, $4)
+		`, eco, pkg, at, at.Add(window)); err != nil {
+			t.Fatalf("insert %s: %v", pkg, err)
+		}
+	}
+	insert("due", 20*time.Minute, 15*time.Minute)
+	insert("still-backing-off", 10*time.Minute, 15*time.Minute)
+	insert("settled", 25*time.Hour, DefaultMaxStaleness) // the plain half's row
+	insert("past-older-than", 30*time.Hour, 4*time.Hour) // the plain half picks it
+
+	scope := StaleReportScope{OlderThan: now.Add(-24 * time.Hour), ProvisionalDue: now}
+	rows, _, err := store.IterateStaleReports(ctx, scope, StaleReportCursor{}, 1000)
+	if err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	var got []string
+	for _, r := range rows {
+		if r.Ecosystem == eco {
+			got = append(got, r.Package)
+		}
+	}
+	if strings.Join(got, ",") != "due" {
+		t.Errorf("selected %v, want [due]", got)
+	}
+	if n, err := store.CountStaleReports(ctx, scope); err != nil || n < 1 {
+		t.Errorf("count = %d, %v", n, err)
+	}
+}

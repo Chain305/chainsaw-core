@@ -121,6 +121,9 @@ type StaleReportSummary struct {
 	Failed int
 	// Truncated is true when the budget stopped the walk short.
 	Truncated bool
+	// Provisional counts the rows refreshed because their provisional
+	// backoff ran out (StaleReportScope.ProvisionalDue). Included in Examined.
+	Provisional int
 	// Deferred counts Maven Central rows left stale because Central's
 	// stand-off held when the sweep reached them. Not counted in Examined.
 	Deferred int
@@ -138,8 +141,17 @@ var sonatypeEcosystems = map[string]bool{"maven": true, "gradle": true}
 // in the minute after a 429 (and logged failed=0), 185 of them as settled
 // allow/warn verdicts that nothing rechecks for 24h. Left stale, the row is
 // simply first in line on the next tick.
+//
+// Google-namespace rows (androidx, firebase, ...) are not deferred: every
+// request their refresh makes goes to Google first — POM, timeline,
+// artifact and PGP signature — and reaches Central only on a Google 404.
+// Deferring them held every one of those rows through each stand-off.
 func deferForSonatype(row StaleReportRow) bool {
-	return sonatypeEcosystems[row.Ecosystem] && httpclient.SonatypeStandoff() > 0
+	if !sonatypeEcosystems[row.Ecosystem] || httpclient.SonatypeStandoff() <= 0 {
+		return false
+	}
+	group, _, _ := splitMavenCoordinate(row.Package)
+	return !GroupUsesGoogleMaven(group)
 }
 
 // StaleReportSource is the narrowed read surface the sweep needs, declared as
@@ -191,58 +203,69 @@ func (r *Refresher) refreshStaleReportsOnce(ctx context.Context) StaleReportSumm
 	sem := make(chan struct{}, r.cfg.Concurrency)
 	var wg sync.WaitGroup
 
-	var cursor StaleReportCursor
-	seen := 0
-walk:
-	for seen < budget {
-		if ctx.Err() != nil {
-			break
-		}
-		page := r.cfg.PageSize
-		if remaining := budget - seen; page > remaining {
-			page = remaining
-		}
-		rows, next, err := src.IterateStaleReports(ctx, scope, cursor, page)
-		if err != nil {
-			r.cfg.Logger.Warn("intelligence stale-report pagination failed", "error", err)
-			break
-		}
-		if len(rows) == 0 {
-			break
-		}
-		for _, row := range rows {
+	sweep := func(scope StaleReportScope, limit int) (seen int) {
+		var cursor StaleReportCursor
+	walk:
+		for seen < limit {
 			if ctx.Err() != nil {
-				break walk
+				break
 			}
-			if deferForSonatype(row) {
-				summary.Deferred++
-				continue
+			page := r.cfg.PageSize
+			if remaining := limit - seen; page > remaining {
+				page = remaining
 			}
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				break walk
+			rows, next, err := src.IterateStaleReports(ctx, scope, cursor, page)
+			if err != nil {
+				r.cfg.Logger.Warn("intelligence stale-report pagination failed", "error", err)
+				break
 			}
-			seen++
-			wg.Add(1)
-			go func(row StaleReportRow) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				examined.Add(1)
-				staleReportSweptTotal.Add(1)
-				if r.refreshStaleReportRow(ctx, row) {
-					refreshed.Add(1)
-					staleReportRefreshedTot.Add(1)
-				} else {
-					failed.Add(1)
+			if len(rows) == 0 {
+				break
+			}
+			for _, row := range rows {
+				if ctx.Err() != nil {
+					break walk
 				}
-			}(row)
+				if deferForSonatype(row) {
+					summary.Deferred++
+					continue
+				}
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					break walk
+				}
+				seen++
+				wg.Add(1)
+				go func(row StaleReportRow) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					examined.Add(1)
+					staleReportSweptTotal.Add(1)
+					if r.refreshStaleReportRow(ctx, row) {
+						refreshed.Add(1)
+						staleReportRefreshedTot.Add(1)
+					} else {
+						failed.Add(1)
+					}
+				}(row)
+			}
+			if next.IsZero() {
+				break
+			}
+			cursor = next
 		}
-		if next.IsZero() {
-			break
-		}
-		cursor = next
+		return seen
 	}
+
+	// Provisional rows past their backoff go first, on up to half the
+	// budget. The plain half is oldest-first and truncated on most ticks
+	// (prod 2026-11-03: backlog 8,154, budget 340), so a provisional row,
+	// collected minutes or hours ago, would never be reached in it.
+	provisional := scope
+	provisional.ProvisionalDue = r.now()
+	summary.Provisional = sweep(provisional, budget/2)
+	seen := summary.Provisional + sweep(scope, budget-summary.Provisional)
 	wg.Wait()
 
 	summary.Examined = int(examined.Load())
@@ -256,6 +279,7 @@ walk:
 			"examined", summary.Examined,
 			"refreshed", summary.Refreshed,
 			"failed", summary.Failed,
+			"provisional", summary.Provisional,
 			"deferred_sonatype", summary.Deferred,
 			"truncated", summary.Truncated)
 	}

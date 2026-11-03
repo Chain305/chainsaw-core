@@ -98,3 +98,19 @@ func TestPrepayWaitCaps(t *testing.T) {
 		}
 	}
 }
+
+// A Google-namespace coordinate prepays Google's bucket: its POM and timeline
+// never reach Central unless Google 404s, so Central tokens would be spent for
+// nothing on the host that 429s us.
+func TestRegistryMetadataFixedRequestsRouteGoogleGroups(t *testing.T) {
+	p := newRegistryMetadataProvider()
+	if base, n := p.fixedRequestsFor(Key{Ecosystem: "maven", Package: "androidx.core:core"}); base != p.endpoints.mavenGoogle || n != 2 {
+		t.Errorf("androidx: %s x%d, want %s x2", base, n, p.endpoints.mavenGoogle)
+	}
+	if base, _ := p.fixedRequestsFor(Key{Ecosystem: "gradle", Package: "org.slf4j:slf4j-api"}); base != p.endpoints.maven {
+		t.Errorf("slf4j: %s, want %s", base, p.endpoints.maven)
+	}
+	if base, _ := p.fixedRequestsFor(Key{Ecosystem: "npm", Package: "androidx.core:core"}); base != p.endpoints.npm {
+		t.Errorf("npm: %s, want %s", base, p.endpoints.npm)
+	}
+}
