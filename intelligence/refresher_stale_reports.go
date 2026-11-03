@@ -121,6 +121,25 @@ type StaleReportSummary struct {
 	Failed int
 	// Truncated is true when the budget stopped the walk short.
 	Truncated bool
+	// Deferred counts Maven Central rows left stale because Central's
+	// stand-off held when the sweep reached them. Not counted in Examined.
+	Deferred int
+}
+
+// sonatypeEcosystems are the ecosystems whose refresh reaches Maven Central:
+// maven directly, gradle through plugins.gradle.org's 303 to Central.
+var sonatypeEcosystems = map[string]bool{"maven": true, "gradle": true}
+
+// deferForSonatype reports whether the sweep should leave row stale for a
+// later tick. While Central's stand-off holds, every Central request fails
+// locally at once, so refreshing a maven or gradle row only writes a report
+// with no provenance, licence or artifact data, stamped fresh for the whole
+// staleness window. Measured 2026-11-03: one sweep "refreshed" 230 such rows
+// in the minute after a 429 (and logged failed=0), 185 of them as settled
+// allow/warn verdicts that nothing rechecks for 24h. Left stale, the row is
+// simply first in line on the next tick.
+func deferForSonatype(row StaleReportRow) bool {
+	return sonatypeEcosystems[row.Ecosystem] && httpclient.SonatypeStandoff() > 0
 }
 
 // StaleReportSource is the narrowed read surface the sweep needs, declared as
@@ -195,6 +214,10 @@ walk:
 			if ctx.Err() != nil {
 				break walk
 			}
+			if deferForSonatype(row) {
+				summary.Deferred++
+				continue
+			}
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
@@ -233,6 +256,7 @@ walk:
 			"examined", summary.Examined,
 			"refreshed", summary.Refreshed,
 			"failed", summary.Failed,
+			"deferred_sonatype", summary.Deferred,
 			"truncated", summary.Truncated)
 	}
 	return summary

@@ -10,10 +10,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/chain305/chainsaw-core/httpclient"
 )
 
 type fakeStaleSource struct {
@@ -557,5 +560,51 @@ func TestStaleReportSweepBudgetAdaptsToTheBacklog(t *testing.T) {
 					tc.backlog, summary.StaleReports.Examined, len(svc.seen), tc.want)
 			}
 		})
+	}
+}
+
+// While Central's stand-off holds, refreshing a maven or gradle row writes a
+// report with no provenance, licence or artifact data, fresh for 24h. The
+// sweep must leave those rows stale (first in line next tick) and still do
+// the rest of its work.
+func TestStaleReportSweepDefersCentralRowsDuringStandoff(t *testing.T) {
+	resetStaleReportMetrics()
+	t.Cleanup(resetStaleReportMetrics)
+	httpclient.ResetSonatypeStandoff()
+	t.Cleanup(httpclient.ResetSonatypeStandoff)
+
+	rows := staleRows(8)
+	for i, eco := range map[int]string{0: "maven", 1: "gradle", 3: "maven", 6: "gradle", 7: "maven"} {
+		rows[i].Ecosystem = eco
+	}
+	central := 0
+	for _, r := range rows {
+		if r.Ecosystem == "maven" || r.Ecosystem == "gradle" {
+			central++
+		}
+	}
+	src := &fakeStaleSource{rows: rows}
+
+	h := http.Header{}
+	h.Set("Retry-After", "600")
+	if !httpclient.ObserveSonatypeResponse("repo1.maven.org", &http.Response{StatusCode: http.StatusTooManyRequests, Header: h}) {
+		t.Fatal("test setup: the 429 did not start a stand-off")
+	}
+
+	ref, svc := staleSweepRefresher(t, src, true, 200)
+	summary := ref.RunOnce(context.Background())
+	if got, want := summary.StaleReports.Deferred, central; got != want {
+		t.Errorf("deferred = %d, want %d", got, want)
+	}
+	if got, want := len(svc.seen), len(rows)-central; got != want {
+		t.Errorf("Scan called %d times during the stand-off, want %d (non-Central rows only)", got, want)
+	}
+
+	httpclient.ResetSonatypeStandoff()
+	ref2, svc2 := staleSweepRefresher(t, src, true, 200)
+	summary2 := ref2.RunOnce(context.Background())
+	if summary2.StaleReports.Deferred != 0 || len(svc2.seen) != len(rows) {
+		t.Errorf("after the stand-off: deferred=%d scans=%d, want 0/%d",
+			summary2.StaleReports.Deferred, len(svc2.seen), len(rows))
 	}
 }
