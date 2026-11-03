@@ -1,12 +1,16 @@
 package intelligence
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/ProtonMail/go-crypto/openpgp"
 
 	"github.com/chain305/chainsaw-core/coverage"
 	"github.com/chain305/chainsaw-core/provenance"
@@ -171,5 +175,53 @@ func TestProvenanceProvider_RateLimitedIsUnavailableAndSaysWhy(t *testing.T) {
 	if got := coverage.StatusForWarnCode(WarnProvenanceRateLimited); got == coverage.StatusUnavailable {
 		t.Errorf("coverage reads %q as %q; that newly blocks closed-mode orgs on a provenance rate limit",
 			WarnProvenanceRateLimited, got)
+	}
+}
+
+// sidecarRT serves a maven .asc and counts .jar downloads; everything else,
+// the keyserver included, is a 404.
+type sidecarRT struct {
+	sig  []byte
+	jars int
+}
+
+func (rt *sidecarRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp := &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: r}
+	switch {
+	case strings.HasSuffix(r.URL.Path, ".jar.asc"):
+		resp.StatusCode, resp.Body = http.StatusOK, io.NopCloser(bytes.NewReader(rt.sig))
+	case strings.HasSuffix(r.URL.Path, ".jar"):
+		rt.jars++
+		resp.StatusCode, resp.Body = http.StatusOK, io.NopCloser(strings.NewReader("jar"))
+	}
+	return resp, nil
+}
+
+// The provider hands the scanner's artifact bytes to the checker, so the
+// maven PGP path does not download the jar a second time. Measured
+// 2026-11-03: that jar was the heaviest Central request per gradle row.
+func TestProvenanceProvider_PassesHeldArtifactToTheChecker(t *testing.T) {
+	signer, err := openpgp.NewEntity("Maven Signer", "", "maven@example.com", nil)
+	if err != nil {
+		t.Fatalf("NewEntity: %v", err)
+	}
+	var sig bytes.Buffer
+	if err := openpgp.ArmoredDetachSign(&sig, signer, strings.NewReader("jar"), nil); err != nil {
+		t.Fatalf("ArmoredDetachSign: %v", err)
+	}
+	rt := &sidecarRT{sig: sig.Bytes()}
+	p := newProvenanceProvider(provenance.NewChecker(discardProvenanceLogger(),
+		provenance.WithHTTPClient(&http.Client{Transport: rt})))
+
+	// The keyserver 404s, so the result is decided by the key lookup alone
+	// and must not need the jar when bytes are held.
+	if _, err := p.Run(context.Background(), Request{
+		Key:      Key{Ecosystem: "maven", Package: "io.netty:netty-buffer", Version: "4.2.17.Final"},
+		Artifact: &ArtifactHandle{Bytes: []byte("jar")},
+	}, nil); err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+	if rt.jars != 0 {
+		t.Errorf("jar downloaded %d times with the artifact already held, want 0", rt.jars)
 	}
 }

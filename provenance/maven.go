@@ -1,6 +1,7 @@
 package provenance
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -226,6 +227,19 @@ func (c *mavenChecker) tryPGP(ctx context.Context, jarURL string) Result {
 		return Result{Status: StatusFailed, Ecosystem: c.ecosystem, Error: err.Error()}
 	}
 
+	// The scanner usually holds this artifact already, and the jar was the
+	// heaviest Central request per gradle row (2026-11-03 trace). A signature
+	// that verifies over the held bytes proves they are the jar; a signing
+	// key that cannot be found is the same answer for any bytes. Any other
+	// failure may only mean the held file is the .aar or .pom, so it falls
+	// through to the jar itself.
+	if held := artifactBytesFrom(ctx); len(held) > 0 {
+		res := c.pgpResult(ctx, ascURL, bytes.NewReader(held), sigBytes)
+		if res.Status == StatusVerified || res.Status == StatusUnavailable {
+			return res
+		}
+	}
+
 	jarStream, closeJar, err := fetchStream(ctx, c.client, jarURL)
 	if err != nil {
 		if res, ok := c.rateLimited("fetch jar", err); ok {
@@ -237,7 +251,13 @@ func (c *mavenChecker) tryPGP(ctx context.Context, jarURL string) Result {
 
 	// Cap the body read at 256 MiB — larger than real Maven JARs but
 	// bounded enough to fail fast on a pathological response.
-	uid, err := c.pgp.Verify(ctx, io.LimitReader(jarStream, 256<<20), sigBytes)
+	return c.pgpResult(ctx, ascURL, io.LimitReader(jarStream, 256<<20), sigBytes)
+}
+
+// pgpResult verifies sigBytes over artifact and maps the outcome. Only a
+// missing signing key reads as StatusUnavailable.
+func (c *mavenChecker) pgpResult(ctx context.Context, ascURL string, artifact io.Reader, sigBytes []byte) Result {
+	uid, err := c.pgp.Verify(ctx, artifact, sigBytes)
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Debug(c.ecosystem+" pgp verification failed",
@@ -492,4 +512,25 @@ func fetchSHA256(ctx context.Context, client *http.Client, url string) ([32]byte
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out, nil
+}
+
+type artifactBytesKey struct{}
+
+// WithArtifactBytes attaches the artifact bytes the caller already holds for
+// the coordinate being checked, so a checker can verify a detached signature
+// without downloading the artifact again. The bytes are a hint, not a claim:
+// the caller may hold a different file of the same coordinate (an .aar or a
+// .pom where the checker wants the .jar), so a checker must still verify
+// against them and fall back when they do not match. Only the Maven/Gradle
+// PGP path reads them today.
+func WithArtifactBytes(ctx context.Context, b []byte) context.Context {
+	if len(b) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, artifactBytesKey{}, b)
+}
+
+func artifactBytesFrom(ctx context.Context) []byte {
+	b, _ := ctx.Value(artifactBytesKey{}).([]byte)
+	return b
 }

@@ -406,3 +406,80 @@ func TestMavenCheckerRateLimitedIsUnavailableNotFailed(t *testing.T) {
 		}
 	})
 }
+
+// The provenance provider hands the checker the bytes the scanner already
+// fetched. A signature that verifies over them must not cost a second jar
+// download; held bytes that are some other file of the coordinate (the .pom
+// the proxy served, an .aar) must still reach the jar rather than read as a
+// tampered artifact; and a missing signing key is decided without the jar.
+func TestMavenCheckerPGPVerifiesHeldBytesWithoutRefetchingJar(t *testing.T) {
+	signer, err := openpgp.NewEntity("Maven Signer", "", "maven@example.com", nil)
+	if err != nil {
+		t.Fatalf("NewEntity: %v", err)
+	}
+	jarBytes := []byte("PK\x03\x04 held jar contents")
+	var sigBuf bytes.Buffer
+	if err := openpgp.ArmoredDetachSign(&sigBuf, signer, bytes.NewReader(jarBytes), nil); err != nil {
+		t.Fatalf("ArmoredDetachSign: %v", err)
+	}
+	var pubBuf bytes.Buffer
+	w, err := armor.Encode(&pubBuf, openpgp.PublicKeyType, nil)
+	if err != nil {
+		t.Fatalf("armor.Encode: %v", err)
+	}
+	if err := signer.Serialize(w); err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	_ = w.Close()
+
+	cases := []struct {
+		name         string
+		held         []byte
+		keyKnown     bool
+		wantStatus   Status
+		wantJarFetch int
+	}{
+		{"held bytes are the jar", jarBytes, true, StatusVerified, 0},
+		{"held bytes are the pom", []byte("<project/>"), true, StatusVerified, 1},
+		{"no held bytes", nil, true, StatusVerified, 1},
+		{"signing key missing", []byte("<project/>"), false, StatusUnavailable, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.keyKnown && strings.Contains(r.URL.Path, "/vks/v1/") {
+					_, _ = w.Write(pubBuf.Bytes())
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer ks.Close()
+			jarFetches := 0
+			repo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, ".jar.asc"):
+					_, _ = w.Write(sigBuf.Bytes())
+				case strings.HasSuffix(r.URL.Path, ".jar"):
+					jarFetches++
+					_, _ = w.Write(jarBytes)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer repo.Close()
+
+			c := newMavenChecker(&http.Client{}, nil)
+			c.baseURL = repo.URL
+			c.pgp = pgpverify.NewVerifier(ks.Client(), ks.URL)
+
+			ctx := WithArtifactBytes(context.Background(), tc.held)
+			got := c.Check(ctx, "org.example:foo", "1.0.0")
+			if got.Status != tc.wantStatus {
+				t.Fatalf("Status = %q, want %q; result=%+v", got.Status, tc.wantStatus, got)
+			}
+			if jarFetches != tc.wantJarFetch {
+				t.Errorf("jar fetched %d times, want %d", jarFetches, tc.wantJarFetch)
+			}
+		})
+	}
+}
