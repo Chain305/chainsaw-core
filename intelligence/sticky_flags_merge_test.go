@@ -111,3 +111,37 @@ func TestVersionAnomalyWithoutFlagsIsNotRevived(t *testing.T) {
 			"claim an anomaly the evaluation could not see")
 	}
 }
+
+// A pre-v0.22.148 rubygems true rested on gemspec author prose diffed
+// against owner handles. Metadiff no longer emits that shape, so a silent
+// rescan must not revive it — otherwise the stale flag outlives the fix.
+func TestOwnerListProseEvidenceIsNotRevived(t *testing.T) {
+	prose := func(eco string) *Report {
+		return &Report{
+			Identity: IdentitySection{Ecosystem: eco},
+			SupplyChain: SupplyChainSection{
+				PublisherChanged: boolp(true),
+				PublisherAdded:   []string{"hsbt"},
+				PublisherRemoved: []string{"jim weirich", "eric hodel"},
+			},
+		}
+	}
+	got := mergeSticky(t, prose("rubygems"), &Report{})
+	if pc := got.SupplyChain.PublisherChanged; pc != nil && *pc {
+		t.Errorf("rubygems true revived on author-prose evidence %v", got.SupplyChain.PublisherRemoved)
+	}
+
+	// npm compares publishing accounts, not owner lists: rule unchanged.
+	got = mergeSticky(t, prose("npm"), &Report{})
+	if pc := got.SupplyChain.PublisherChanged; pc == nil || !*pc {
+		t.Error("npm true with evidence was not revived")
+	}
+
+	// An owner-list true whose removed set names an account still revives.
+	acct := prose("rubygems")
+	acct.SupplyChain.PublisherRemoved = []string{"jimweirich"}
+	got = mergeSticky(t, acct, &Report{})
+	if pc := got.SupplyChain.PublisherChanged; pc == nil || !*pc {
+		t.Error("rubygems true with an account in removed was not revived")
+	}
+}

@@ -1,5 +1,7 @@
 package intelligence
 
+import "strings"
+
 // Sticky-on-silence supply-chain facts — ONE definition, TWO call sites.
 //
 // # What "sticky on silence" means
@@ -115,6 +117,15 @@ func applyStickySupplyChain(next *Report, prior *Report) {
 	if sc.PublisherChanged == nil && ps.PublisherChanged != nil {
 		v := *ps.PublisherChanged
 		hasEvidence := len(ps.PublisherAdded) > 0 || len(ps.PublisherRemoved) > 0
+		// On an owner-list ecosystem the evidence must name an account.
+		// Before v0.22.148 metadiff diffed gemspec author prose against
+		// owner handles ("jim weirich" vs "jimweirich") and flagged every
+		// gem; that evidence is a shape the provider no longer emits, so a
+		// true resting on it is not revived. Mirrors ownerListDiff in
+		// internal/intelligence/premium/provider_metadiff.go.
+		if v && ownerListEcosystem(prior.Identity.Ecosystem) && !anyAccountIdentity(ps.PublisherRemoved) {
+			hasEvidence = false
+		}
 		// A TRUE is only revived together with the names that justify it.
 		// A FALSE carries freely: it is an observation of absence and has
 		// no evidence to lose. Reviving a bare true is what produced the
@@ -221,4 +232,26 @@ func applyStickyScan(next *Report, prior *Report) {
 		next.Scan = prior.Scan
 		overlayMetadataFacts(&next.Scan, fresh)
 	}
+}
+
+// ownerListEcosystem reports whether the ecosystem's publisher identity is a
+// package-level owner list. Same set as ownerListEcosystems in
+// internal/intelligence/premium/provider_metadiff.go.
+func ownerListEcosystem(eco string) bool {
+	switch eco {
+	case "rubygems", "cargo", "nuget", "pub":
+		return true
+	}
+	return false
+}
+
+// anyAccountIdentity reports whether any id could be a registry account:
+// handles, logins, emails and domains contain no whitespace; author names do.
+func anyAccountIdentity(ids []string) bool {
+	for _, id := range ids {
+		if id != "" && !strings.ContainsAny(id, " \t") {
+			return true
+		}
+	}
+	return false
 }
