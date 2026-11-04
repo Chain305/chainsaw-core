@@ -191,6 +191,17 @@ func (s *Store) migrateSchema() error {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (org_id, name)
 		)`,
+		// seed_repository_offers records which seed repository names an org
+		// has been given, so a seed repository added in a later release
+		// reaches existing orgs once (config.OfferNewSeedRepositoriesForOrg)
+		// and one an org deleted is never re-created. No FK, like
+		// repositories.
+		`CREATE TABLE IF NOT EXISTS seed_repository_offers (
+			org_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			offered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (org_id, name)
+		)`,
 		`CREATE TABLE IF NOT EXISTS index_entries (
 			org_id TEXT NOT NULL,
 			repository TEXT NOT NULL,

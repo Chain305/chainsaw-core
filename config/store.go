@@ -835,7 +835,9 @@ func ReplaceRepositoriesForOrgTx(tx *sql.Tx, orgID string, repos []RepositoryCon
 			return err
 		}
 	}
-	return nil
+	// Seeding an org offers it every repository written here, so a later
+	// OfferNewSeedRepositoriesForOrg adds only names introduced after now.
+	return recordSeedOffersTx(tx, orgID, repos)
 }
 
 // ErrRepositoryExists reports that the org already has a repository under the
