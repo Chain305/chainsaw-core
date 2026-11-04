@@ -1,6 +1,12 @@
 package intelligence
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/chain305/chainsaw-core/homebrew"
+)
+
+func init() { homebrew.UserAgent = UserAgent("homebrew") }
 
 // UserAgent builds the User-Agent every intelligence-path HTTP request
 // sends to an upstream registry.

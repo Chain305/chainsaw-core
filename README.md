@@ -113,7 +113,7 @@ wherever its inputs exist.
 | Rego policy evaluation against a local bundle | ✅ | ✅ |
 | CVE / CVSS / EPSS / KEV vulnerability data | — | ✅ |
 | Licence, maintenance, provenance, capability signals | — | ✅ |
-| Registry pull-through proxy (16 ecosystems) | — | ✅ |
+| Registry pull-through proxy (17 ecosystems) | — | ✅ |
 | Org policy, exceptions, audit trail, findings triage | — | ✅ |
 | SBOM / VEX export, provenance attestation chains | — | ✅ |
 | Kubernetes admission control, publish-time gating | — | ✅ |
@@ -133,12 +133,14 @@ to mis-state what Chainsaw covers, so they are listed apart.
 
 | Surface | Reach |
 |---|---|
-| Offline install guard | **5 package managers** — npm, pip, Go, Cargo, RubyGems |
+| Offline install guard | **5 package managers** — npm, pip, Go, Cargo, RubyGems (plus `brew`, checked online against formulae.brew.sh) |
 | Local lockfile parsing (`pr-scan`) | **12 manifest formats** across those 5 |
-| Registry proxy + risk engine | **16 ecosystems** |
+| Registry proxy + risk engine | **17 ecosystems** |
 
-The sixteen: npm, PyPI, Maven, Cargo, Composer, RubyGems, NuGet, Go, Hugging
-Face, CocoaPods, Swift, Pub (Dart), Docker/OCI, APT, Yum, DNF.
+The seventeen: npm, PyPI, Maven, Cargo, Composer, RubyGems, NuGet, Go, Hugging
+Face, CocoaPods, Swift, Pub (Dart), Docker/OCI, APT, Yum, DNF, Homebrew. For
+Homebrew the proxy enforces only the bottle download; source builds, casks and
+taps are covered on the device (see [ecosystems.md](docs/ecosystems.md)).
 
 Coverage across them is **not uniform** — of 54 policy conditions, npm supports
 44 fully and APT supports 12, because an upstream that publishes no maintainer

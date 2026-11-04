@@ -442,6 +442,20 @@ func parseCases() map[string]parseCase {
 			seed:      "GOFLAGS=-mod=vendor\nGOPRIVATE=github.com/acme/*\n",
 			preserved: []string{"GOPRIVATE=github.com/acme/*"},
 		},
+		"brew": {
+			seed:      "HOMEBREW_NO_ANALYTICS=1\nHOMEBREW_CASK_OPTS=--require-sha\n",
+			preserved: []string{"HOMEBREW_NO_ANALYTICS=1", "HOMEBREW_CASK_OPTS=--require-sha"},
+			validate: func(t *testing.T, data []byte) {
+				// brew loads only HOMEBREW_* lines, literally; anything else
+				// must be a comment or blank or brew ignores what we meant.
+				for i, line := range strings.Split(string(data), "\n") {
+					l := strings.TrimSpace(line)
+					if l != "" && !strings.HasPrefix(l, "#") && !strings.HasPrefix(l, "HOMEBREW_") {
+						t.Fatalf("brew.env line %d is neither a comment nor HOMEBREW_*: %q", i+1, line)
+					}
+				}
+			},
+		},
 		"docker": {
 			seed:          "{\n  \"log-level\": \"warn\"\n}\n",
 			preserved:     []string{"log-level"},

@@ -61,6 +61,7 @@ import (
 	pep440 "github.com/aquasecurity/go-pep440-version"
 	mvn "github.com/masahiro331/go-mvn-version"
 
+	"github.com/chain305/chainsaw-core/homebrew"
 	"github.com/chain305/chainsaw-core/typosquat"
 )
 
@@ -398,6 +399,9 @@ func canonicalKey(ecosystem, pkg string) string {
 		name = typosquat.NormalizePyPI(name)
 	case "nuget", "packagist":
 		name = strings.ToLower(name)
+	case "homebrew":
+		// "homebrew/core/jq" is "jq"; the feed keys the bare name.
+		name = homebrew.NormalizeName(name)
 	case "swift":
 		name = swiftKey(name)
 	}
@@ -426,12 +430,20 @@ func swiftKey(name string) string {
 // AbsenceIsNegative reports whether a package missing from a covered
 // ecosystem's index is a real "no advisories" (provider_osv's clean
 // stamp) rather than a name the corpus could never have keyed. Every
-// ecosystem but Swift: yes. Swift: only an `owner.repo` identity. A bare
+// ecosystem but Swift and Homebrew: yes. Homebrew: not for a third-party
+// tap formula. Swift: only an `owner.repo` identity. A bare
 // SwiftPM identity ("alamofire", a pin from a non-GitHub host) or a
 // non-GitHub URL cannot match the GitHub-keyed SwiftURL corpus, so its
 // absence proves nothing and must not grade clean.
 func AbsenceIsNegative(ecosystem, pkg string) bool {
-	if CanonicalEcosystem(ecosystem) != "swift" {
+	switch CanonicalEcosystem(ecosystem) {
+	case "swift":
+		// handled below
+	case "homebrew":
+		// Homebrew's advisory database covers homebrew/core only; a
+		// third-party tap formula is outside it, so absence is no evidence.
+		return !homebrew.IsThirdPartyTapName(pkg)
+	default:
 		return true
 	}
 	k := swiftKey(strings.TrimSpace(pkg))
@@ -481,6 +493,10 @@ func CanonicalEcosystem(ecosystem string) string {
 		// URL. The proxy, the Package.resolved parser and the malware
 		// index call it "swift"; canonicalKey folds the names (swiftKey).
 		return "swift"
+	case "homebrew", "brew":
+		// OSV: "Homebrew" — Homebrew's own feed (homebrew.go), not a GCS
+		// bucket. Formula names are lowercase; canonicalKey folds case.
+		return "homebrew"
 	default:
 		return ""
 	}
@@ -763,6 +779,8 @@ func compareVersions(ecosystem, a, b string) (int, error) {
 			return 0, err
 		}
 		return va.Compare(vb), nil
+	case "homebrew":
+		return compareHomebrew(a, b)
 	case "maven", "packagist":
 		// mvn.NewVersion accepts ANY string: a leading non-numeric run
 		// is read as a qualifier and sorts below numeric versions, so

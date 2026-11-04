@@ -624,7 +624,6 @@ func chatter(cmd *cobra.Command, format string, args ...any) {
 // Only the long form is matched — there is no short alias for --no-color,
 // and claiming one from a wrapped tool's short bundle would be wrong.
 func noColorFlagInArgs(argv []string) bool {
-	guardSubcmds := map[string]bool{"npm": true, "pip": true, "go": true, "cargo": true, "gem": true}
 	for i := 1; i < len(argv); i++ {
 		tok := argv[i]
 		if tok == "--" || guardSubcmds[tok] {

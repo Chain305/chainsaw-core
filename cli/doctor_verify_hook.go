@@ -122,7 +122,7 @@ func verifyDriverFor(name string) (verifyDriver, error) {
 	// "unknown manager" string. Helps users distinguish a typo from a
 	// known gap.
 	if _, err := hook.ByName(name); err == nil {
-		return nil, fmt.Errorf("verify not yet supported for %q (known managers without verify coverage: swift, yarn, maven, gradle, sbt, nuget, go); file a follow-up if you need it", name)
+		return nil, fmt.Errorf("verify not yet supported for %q (known managers without verify coverage: swift, yarn, maven, gradle, sbt, nuget, go, brew); file a follow-up if you need it", name)
 	}
 	supported := make([]string, 0, len(verifyDrivers()))
 	for k := range verifyDrivers() {

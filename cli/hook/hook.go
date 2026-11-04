@@ -124,6 +124,7 @@ func All() []Manager {
 		nugetManager{},
 		goModManager{},
 		dockerManager{},
+		brewManager{},
 	}
 }
 

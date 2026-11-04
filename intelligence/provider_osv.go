@@ -202,6 +202,9 @@ var supportedOSVEcosystems = map[string]struct{}{
 	"go": {}, "gomod": {},
 	"pub":   {},
 	"swift": {},
+	// homebrew: formulae.brew.sh/api/advisories.json, read by the
+	// refresher directly (osv/homebrew.go) — not an osv.dev bucket.
+	"homebrew": {},
 }
 
 // Supports reports whether the OSV feed covers the given ecosystem.

@@ -37,7 +37,13 @@ func newInstallHookCmd() *cobra.Command {
 		Short:   "Wire chainsaw into a package manager",
 		Long: `Insert the chainsaw-managed configuration block into a supported package
 manager's user config file. Supported clients: npm, yarn, bun, pip, cargo,
-maven, gradle, sbt, nuget, go, docker.
+maven, gradle, sbt, nuget, go, docker, brew.
+
+brew writes HOMEBREW_API_DOMAIN, HOMEBREW_ARTIFACT_DOMAIN and
+HOMEBREW_ARTIFACT_DOMAIN_NO_FALLBACK=1 (plus the credential as
+HOMEBREW_DOCKER_REGISTRY_BASIC_AUTH_TOKEN) to ~/.homebrew/brew.env. That
+routes bottles only; source builds, casks and taps go direct, so pair it with
+` + "`chainsaw guard init`" + ` (the brew shim) and ` + "`chainsaw brew env`" + `.
 
 The Chainsaw server URL baked into the block comes from the standard config
 chain: the root --server flag, the CHAINSAW_SERVER environment variable, or

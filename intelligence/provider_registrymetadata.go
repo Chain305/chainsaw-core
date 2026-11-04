@@ -48,6 +48,7 @@ import (
 	"golang.org/x/net/html/charset"
 
 	"github.com/chain305/chainsaw-core/coverage"
+	"github.com/chain305/chainsaw-core/homebrew"
 	"github.com/chain305/chainsaw-core/httpclient"
 	"github.com/chain305/chainsaw-core/provenance"
 	"github.com/chain305/chainsaw-core/risk"
@@ -102,6 +103,11 @@ type registryEndpoints struct {
 	gitlab       string
 	bitbucket    string
 	codeberg     string
+
+	// homebrew is the Homebrew JSON API root; homebrewBottles the OCI
+	// registry its bottles (and their manifests) are served from.
+	homebrew        string
+	homebrewBottles string
 }
 
 func defaultRegistryEndpoints() registryEndpoints {
@@ -121,6 +127,8 @@ func defaultRegistryEndpoints() registryEndpoints {
 		cocoapods:           "https://trunk.cocoapods.org",
 		cocoapodsCDN:        "https://cdn.cocoapods.org",
 		pub:                 "https://pub.dev",
+		homebrew:            homebrew.ConfiguredAPIBase(),
+		homebrewBottles:     homebrew.DefaultBottleRegistry,
 		huggingface:         "https://huggingface.co",
 		docker:              "https://hub.docker.com",
 		depsdev:             "https://api.deps.dev",
@@ -318,6 +326,7 @@ var registryTimeouts = map[string]time.Duration{
 	"cocoapods":   12 * time.Second,
 	"swift":       12 * time.Second,
 	"pub":         12 * time.Second,
+	"homebrew":    12 * time.Second,
 	"huggingface": 15 * time.Second,
 	"docker":      15 * time.Second,
 }
@@ -427,6 +436,7 @@ var supportedRegistryEcosystems = map[string]struct{}{
 	"go":          {},
 	"cocoapods":   {},
 	"pub":         {},
+	"homebrew":    {},
 	"huggingface": {},
 	"docker":      {},
 }
@@ -484,6 +494,8 @@ func (p *registryMetadataProvider) runEcosystem(ctx context.Context, eco, pkg, v
 		return p.runCocoapods(ctx, pkg, ver)
 	case "pub":
 		return p.runPub(ctx, pkg, ver)
+	case "homebrew":
+		return p.runHomebrew(ctx, pkg, ver)
 	case "huggingface":
 		return p.runHuggingFace(ctx, pkg, ver)
 	case "docker":

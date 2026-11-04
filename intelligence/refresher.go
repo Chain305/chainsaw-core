@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"context"
+	"errors"
 	"github.com/chain305/chainsaw-core/httpclient"
 	"log/slog"
 	"os"
@@ -855,6 +856,10 @@ func (r *Refresher) refreshRow(ctx context.Context, row metadata.PackageMetadata
 		handle, err := r.cfg.ArtifactFetcher(fetchCtx, row)
 		cancel()
 		if err != nil {
+			// Recorded on the report, as the stale-report sweep does: an
+			// over-cap bottle (gcc, llvm) must read too-large, not clean.
+			req.ArtifactTooLarge = errors.Is(err, ErrArtifactTooLarge)
+			req.ArtifactFetchErr = err
 			r.cfg.Logger.Debug("scheduled artifact fetch failed",
 				"ecosystem", ecosystem, "package", row.Package, "version", row.Version,
 				"error", err)

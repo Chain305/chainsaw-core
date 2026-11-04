@@ -249,6 +249,8 @@ func ecosystemForLang(l ftypes.LangType) string {
 		format = "swift"
 	case ftypes.Pub:
 		format = "pub"
+	case ftypes.Homebrew:
+		format = "homebrew"
 	default:
 		return ""
 	}
@@ -1437,8 +1439,9 @@ func collectFromManifests(dir string) ([]scanPkg, error) {
 	seen := make(map[string]bool, len(regPkgs))
 	for _, p := range regPkgs {
 		// A git/path/URL dependency often has no version; with its Origin it
-		// is still listed (not assessed), never dropped without a word.
-		if p.Name == "" || (p.Version == "" && p.Origin == "") {
+		// is still listed (not assessed), never dropped without a word. So is
+		// a Brewfile formula (names only — see currentRecipe).
+		if p.Name == "" || (p.Version == "" && p.Origin == "" && p.Lang != ftypes.Homebrew) {
 			continue
 		}
 		eco := ecosystemForLang(p.Lang)
@@ -1593,7 +1596,7 @@ func collectFromPath(path string, isDir bool) ([]scanPkg, error) {
 	}
 	out := make([]scanPkg, 0, len(regPkgs))
 	for _, p := range regPkgs {
-		if p.Name == "" || (p.Version == "" && p.Origin == "") {
+		if p.Name == "" || (p.Version == "" && p.Origin == "" && p.Lang != ftypes.Homebrew) {
 			continue
 		}
 		out = append(out, scanPkg{Name: p.Name, Version: p.Version, Ecosystem: ecosystemForLang(p.Lang), Origin: p.Origin})

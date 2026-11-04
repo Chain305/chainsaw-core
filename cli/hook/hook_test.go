@@ -4,7 +4,7 @@ import "testing"
 
 func TestAllReturnsExpectedSetDistinct(t *testing.T) {
 	got := All()
-	expected := []string{"npm", "yarn", "bun", "pip", "cargo", "maven", "gradle", "sbt", "nuget", "go", "docker"}
+	expected := []string{"npm", "yarn", "bun", "pip", "cargo", "maven", "gradle", "sbt", "nuget", "go", "docker", "brew"}
 	if len(got) != len(expected) {
 		t.Fatalf("All() returned %d managers, want %d", len(got), len(expected))
 	}
@@ -23,7 +23,7 @@ func TestAllReturnsExpectedSetDistinct(t *testing.T) {
 }
 
 func TestByName(t *testing.T) {
-	for _, name := range []string{"npm", "pip", "cargo", "maven", "gradle", "sbt", "nuget", "go", "docker", "yarn", "bun"} {
+	for _, name := range []string{"npm", "pip", "cargo", "maven", "gradle", "sbt", "nuget", "go", "docker", "yarn", "bun", "brew"} {
 		m, err := ByName(name)
 		if err != nil {
 			t.Errorf("ByName(%q) returned error: %v", name, err)

@@ -326,6 +326,7 @@ var powerShellForm = regexp.MustCompile(
 // unexercised — recorded then because the standing decision is easy to lose.)
 var windowsExemptGuides = map[string]string{
 	"cocoapods-trunk": "CocoaPods requires Xcode; macOS-only by construction",
+	"homebrew":        "Homebrew runs on macOS and Linux only; there is no Windows brew",
 }
 
 func TestSeedGuidesWithPosixExportAlsoCoverWindows(t *testing.T) {

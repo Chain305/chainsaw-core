@@ -694,10 +694,13 @@ func EcosystemsWithTyposquatRisk() []string {
 }
 
 // IsLowRiskEcosystem returns true for ecosystems with curated repositories
-// where typosquatting is unlikely (APT, DNF/Yum).
+// where typosquatting is unlikely (APT, DNF/Yum, and homebrew/core, whose
+// formulae land only through maintainer-reviewed PRs; the live Homebrew
+// squat surface is third-party taps and fake brew.sh sites, neither a
+// package path).
 func IsLowRiskEcosystem(ecosystem string) bool {
 	switch strings.ToLower(ecosystem) {
-	case "apt", "dnf", "yum":
+	case "apt", "dnf", "yum", "homebrew", "brew":
 		return true
 	default:
 		return false

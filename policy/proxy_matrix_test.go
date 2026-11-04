@@ -47,6 +47,7 @@ func TestSupportMatrixMatchesMarkdown(t *testing.T) {
 		"apt":         EcoAPT,
 		"yum":         EcoYum,
 		"dnf":         EcoDNF,
+		"homebrew":    EcoHomebrew,
 	}
 
 	// Column header labels (normalised) → matrix ConditionType.
@@ -419,7 +420,7 @@ func TestEcosystemsDocMatchesSupportMatrix(t *testing.T) {
 		"composer": EcoComposer, "rubygems": EcoRubyGems, "nuget": EcoNuGet,
 		"go": EcoGo, "hugging face": EcoHuggingFace, "cocoapods": EcoCocoaPods,
 		"swift": EcoSwift, "pub (dart)": EcoPub, "docker / oci": EcoDocker,
-		"apt": EcoAPT, "yum": EcoYum, "dnf": EcoDNF,
+		"apt": EcoAPT, "yum": EcoYum, "dnf": EcoDNF, "homebrew": EcoHomebrew,
 	}
 
 	seen := make(map[Ecosystem]struct{})

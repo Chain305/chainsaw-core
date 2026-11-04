@@ -751,6 +751,9 @@ var builtinMetadataTTLSeconds = map[string]int{
 	"apt":      600,
 	"yum":      600,
 	"dnf":      600,
+	// homebrew: formulae.brew.sh serves the API with cache-control
+	// max-age=600, and ghcr bottle manifests are tag-addressed.
+	"homebrew": 600,
 }
 
 // RemoteDefaults defines fallback remote URLs per format.
@@ -1291,6 +1294,12 @@ var builtinRemoteDefaults = map[string]RemoteDefaults{
 	},
 	"huggingface": {
 		URL:            "https://huggingface.co",
+		TimeoutSeconds: 120,
+	},
+	// homebrew: the bottle registry. The API host (formulae.brew.sh) is not a
+	// remote; internal/formats/homebrew routes api/... there itself.
+	"homebrew": {
+		URL:            "https://ghcr.io",
 		TimeoutSeconds: 120,
 	},
 	"yum": {

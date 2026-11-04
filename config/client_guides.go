@@ -209,6 +209,10 @@ func inferGuideFormat(guide string) string {
 			title := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
 			lower := strings.ToLower(title)
 			switch {
+			// First: "homebrew" must not fall through to a later
+			// substring match.
+			case strings.Contains(lower, "homebrew"):
+				return "homebrew"
 			case strings.Contains(lower, "npm"):
 				return "npm"
 			case strings.Contains(lower, "yarn"):
@@ -274,6 +278,8 @@ func cacheAdviceForFormat(format string) string {
 		return cacheAdviceHeading + "\nClear the Gradle dependency cache before switching repositories:\n\n```bash\nrm -rf ~/.gradle/caches\n```\n"
 	case "cocoapods":
 		return cacheAdviceHeading + "\nClear the CocoaPods cache before switching sources:\n\n```bash\npod cache clean --all\n```\n"
+	case "homebrew":
+		return cacheAdviceHeading + "\nRemove bottles brew already downloaded from the public registry before switching:\n\n```bash\nbrew cleanup --prune=all\n```\n"
 	case "swift":
 		return cacheAdviceHeading + "\nRemove SPM's package resolution state before switching registries:\n\n```bash\nrm -rf .build ~/Library/Caches/org.swift.swiftpm\n```\n"
 	default:

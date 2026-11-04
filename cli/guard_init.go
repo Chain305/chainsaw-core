@@ -99,6 +99,7 @@ var guardedTools = []struct{ fn, tool string }{
 	{"go", "go"},
 	{"cargo", "cargo"},
 	{"gem", "gem"},
+	{"brew", "brew"},
 }
 
 func runGuardInit(cmd *cobra.Command, args []string) error {

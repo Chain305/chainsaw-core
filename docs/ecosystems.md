@@ -9,6 +9,12 @@ the easiest way to over- or under-state what it does, so they are listed apart.
 intercepts, blocking at the install path with no account and no network. See
 [the guard section of the README](../README.md#how-the-guard-works).
 
+The shim also wraps `brew`. That wrapper is not offline: it reads
+formulae.brew.sh to refuse disabled formulae and casks and unreviewed
+third-party taps, and to warn on deprecated ones and on casks that skip their
+checksum or run an installer. With `CHAINSAW_OFFLINE=1` it checks nothing and
+says so.
+
 ## 2. Local manifest and lockfile parsing — `pr-scan`
 
 Runs locally, no server:
@@ -28,7 +34,7 @@ reach further — Maven `pom.xml`, Gradle (`build.gradle`, `build.gradle.kts`,
 Hex, Julia, SBT and C dependency formats. Those feed SBOM generation and
 server-side scanning rather than the local `pr-scan` path.
 
-## 3. The registry proxy and risk engine — 16 ecosystems
+## 3. The registry proxy and risk engine — 17 ecosystems
 
 Coverage is **not uniform**, and pretending otherwise would be the dishonest
 way to present this. Of the **54 policy conditions**, each ecosystem
@@ -53,10 +59,23 @@ cannot produce a maintainer signal.
 | APT | 12 | 2 | 40 |
 | Yum | 13 | 2 | 39 |
 | DNF | 13 | 2 | 39 |
+| Homebrew | 14 | 5 | 35 |
 
 **Partial** means the condition is wired but the underlying signal is
 incomplete in practice — Swift licence-to-SPDX mapping, for example, or
 OS-package provenance where the hash-chain walk is deferred.
+
+**Homebrew is narrower than its row suggests.** The proxy sees only bottle
+downloads from ghcr.io: `HOMEBREW_ARTIFACT_DOMAIN` rewrites no other URL, so
+source builds, casks and third-party taps go straight to their upstream hosts.
+The Homebrew API is JWS-signed and passed through unchanged. Those other paths
+are covered on the device instead, by a `brew.env` deny-list compiled from org
+policy, the `brew` guard shim and an installed-inventory upload. Formula
+signals come from Homebrew's own OSV advisory feed (CVE, CVSS, EPSS, KEV),
+the formula's SPDX licence, deprecated/disabled state, the signed bottle
+digest, bottle attestations and install analytics. There is no malware feed,
+no per-package publisher (so no maintainer or takeover signal), no typosquat
+surface in curated homebrew-core, and no CVE source for casks.
 
 This table is compiled into the binary
 ([`policy/proxy_matrix.go`](../policy/proxy_matrix.go)) rather than kept as

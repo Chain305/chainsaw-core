@@ -230,6 +230,7 @@ func TestNoColorFlagInArgs(t *testing.T) {
 		// tool, not to chainsaw. Claiming it would change npm's behaviour.
 		{"npm's own flag is not chainsaw's", []string{"chainsaw", "npm", "install", "--no-color"}, false},
 		{"stops at end-of-flags marker", []string{"chainsaw", "--", "--no-color"}, false},
+		{"brew's own flag is not chainsaw's", []string{"chainsaw", "brew", "install", "--no-color"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

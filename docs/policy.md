@@ -82,7 +82,7 @@ covers every client, including CI runners and machines you do not administer,
 and it cannot be routed around by invoking the real package-manager binary
 directly.
 
-It speaks the 16 ecosystems in [ecosystems.md](ecosystems.md), and it runs in
+It speaks the 17 ecosystems in [ecosystems.md](ecosystems.md), and it runs in
 your own network. `proxy/`, `policy/` and `policyengine/` in this repository are
 its open core.
 

@@ -211,30 +211,67 @@ func parseAPIError(status int, body []byte) *apiError {
 }
 
 func (c *APIClient) do(method, path string, body, out any) error {
+	var payload []byte
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encode request: %w", err)
+		}
+		payload = b
+	}
+	respBody, err := c.roundTrip(method, path, payload, "application/json")
+	if err != nil {
+		return err
+	}
+	if out != nil && len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+	}
+	// Opportunistic passenger: this is the moment we know we have a working
+	// authenticated connection to this server, which is exactly what the
+	// coverage break-glass spool has been waiting for. It returns nothing,
+	// cannot error, cannot panic out, and re-enters this function at most
+	// once (see breakGlassFlushAttempted) — it must never be able to change
+	// what this call returns. Keep it AFTER every branch that can fail.
+	maybeFlushBreakGlassSpool(c.baseURL, c.token)
+	return nil
+}
+
+// GetText is Get for a non-JSON (text/plain) response; the body is returned
+// raw. Error handling is do()'s.
+func (c *APIClient) GetText(path string) ([]byte, error) {
+	b, err := c.roundTrip(http.MethodGet, path, nil, "text/plain")
+	if err != nil {
+		return nil, err
+	}
+	maybeFlushBreakGlassSpool(c.baseURL, c.token)
+	return b, nil
+}
+
+// roundTrip sends one request (a JSON body when payload is non-nil) and
+// returns the 2xx response body, or the classified error.
+func (c *APIClient) roundTrip(method, path string, payload []byte, accept string) ([]byte, error) {
 	// X4 preflight: refuse before the network call rather than after a 401.
 	// Only clients built by newClient() opt into this (see requireToken).
 	// A2: when the token is missing because --token / CHAINSAW_TOKEN was
 	// passed EMPTY, say so — the stored credential exists and was skipped on
 	// purpose, so "run auth login" would send the operator the wrong way.
 	if c.requireToken && c.token == "" {
-		return notAuthenticatedError(nil)
+		return nil, notAuthenticatedError(nil)
 	}
 	var bodyReader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("encode request: %w", err)
-		}
-		bodyReader = bytes.NewReader(b)
+	if payload != nil {
+		bodyReader = bytes.NewReader(payload)
 	}
 	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
-	if body != nil {
+	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	req.Header.Set("User-Agent", userAgent)
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -248,13 +285,13 @@ func (c *APIClient) do(method, path string, body, out any) error {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("request to %s failed: %w", c.baseURL+path, err)
+		return nil, fmt.Errorf("request to %s failed: %w", c.baseURL+path, err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		return nil, fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
@@ -265,7 +302,7 @@ func (c *APIClient) do(method, path string, body, out any) error {
 		// has nothing to do with Chainsaw. Dumping that body verbatim is
 		// unhelpful — surface a hint that they probably misconfigured the URL.
 		if hint := serverURLMisconfigError(c.baseURL, resp.StatusCode, resp.Header.Get("Content-Type"), respBody); hint != nil {
-			return hint
+			return nil, hint
 		}
 		apiErr := parseAPIError(resp.StatusCode, respBody)
 		// B1: no 401 suffix here. renderError's classifier already prints
@@ -283,22 +320,9 @@ func (c *APIClient) do(method, path string, body, out any) error {
 				apiErr.Message = apiErr.Message + " — rate limited; please wait before retrying"
 			}
 		}
-		return apiErr
+		return nil, apiErr
 	}
-
-	if out != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-	}
-	// Opportunistic passenger: this is the moment we know we have a working
-	// authenticated connection to this server, which is exactly what the
-	// coverage break-glass spool has been waiting for. It returns nothing,
-	// cannot error, cannot panic out, and re-enters this function at most
-	// once (see breakGlassFlushAttempted) — it must never be able to change
-	// what this call returns. Keep it AFTER every branch that can fail.
-	maybeFlushBreakGlassSpool(c.baseURL, c.token)
-	return nil
+	return respBody, nil
 }
 
 func (c *APIClient) Get(path string, out any) error {

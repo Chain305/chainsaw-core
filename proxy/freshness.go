@@ -157,6 +157,25 @@ func isMutableDocument(format, logicalPath string) bool {
 		}
 		return segments[n-2] == "tags" && segments[n-1] == "list"
 
+	case "homebrew":
+		// One homebrew repo fronts two upstreams (internal/formats/homebrew):
+		// api/... is formulae.brew.sh's JSON API, regenerated on every
+		// homebrew-core merge (cache-control max-age=600), and v2/... is
+		// ghcr.io, where a bottle manifest tag ("1.8.2-1") moves on a
+		// rebuild and blobs are digest-addressed.
+		if lower == "api" || strings.HasPrefix(lower, "api/") {
+			return true
+		}
+		segments := strings.Split(lower, "/")
+		if len(segments) < 4 || segments[0] != "v2" {
+			return false
+		}
+		n := len(segments)
+		if segments[n-2] == "manifests" {
+			return !strings.Contains(segments[n-1], ":")
+		}
+		return segments[n-2] == "tags" && segments[n-1] == "list"
+
 	case "maven", "gradle":
 		// maven-metadata.xml (and its .sha1/.md5/... sidecars) lists the
 		// versions and moves <latest>/<release>; everything else under a

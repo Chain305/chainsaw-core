@@ -41,6 +41,7 @@ var allProxyFormatStrings = []string{
 	"huggingface", "cocoapods", "swift", "pub",
 	"docker", "oci",
 	"apt", "yum", "dnf",
+	"homebrew",
 }
 
 // conditionProducer binds one matrix column to the whitelist that decides

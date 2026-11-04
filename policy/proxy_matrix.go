@@ -331,6 +331,7 @@ const (
 	EcoAPT         Ecosystem = "apt"
 	EcoYum         Ecosystem = "yum"
 	EcoDNF         Ecosystem = "dnf"
+	EcoHomebrew    Ecosystem = "homebrew"
 )
 
 // NOTE: gradle is intentionally NOT a distinct ecosystem here. Gradle
@@ -362,6 +363,7 @@ func AllEcosystems() []Ecosystem {
 		EcoAPT,
 		EcoYum,
 		EcoDNF,
+		EcoHomebrew,
 	}
 }
 
@@ -692,6 +694,79 @@ var SupportMatrix = map[Ecosystem]map[ConditionType]SupportLevel{
 		ConditionSuspiciousRepoStars:   SupportPartial,
 		ConditionMaintainerAccountAge:  SupportNone,
 		// AI artifacts (Wave 6).
+		ConditionDangerousPickle:              SupportNone,
+		ConditionUnsafeSerializationFormat:    SupportNone,
+		ConditionModelCardInjection:           SupportNone,
+		ConditionAgentToolDangerousCapability: SupportNone,
+		ConditionMCPServerDeclared:            SupportNone,
+		ConditionPromptTemplateInjection:      SupportNone,
+	},
+	// EcoHomebrew (formulae + bottles; internal/formats/homebrew). The proxy
+	// enforces only the ghcr.io bottle hop — HOMEBREW_ARTIFACT_DOMAIN rewrites
+	// nothing else — and resolves a bottle digest to formula@pkg_version from
+	// the formula index (core/homebrew), refusing a digest no formula
+	// declares. Version release date is the bottle manifest's
+	// org.opencontainers.image.created (a rebuild re-stamps it, which errs
+	// young — towards holding). Vulnerabilities come from Homebrew's own OSV feed
+	// (formulae.brew.sh/api/advisories.json, ecosystem "Homebrew"); EPSS/CVSS
+	// key on the CVE aliases it carries. No public malware corpus publishes
+	// for Homebrew: the malware cell is Partial (org overrides and the live
+	// index only) and the coverage ledger declines rather than vouching. No per-package publisher → every
+	// maintainer/takeover cell None. Bottles are compiled binaries, so the
+	// source-text scanners are None; Native Binary Present fires on every
+	// bottle (Partial: true but uninformative). homebrew/core is curated like
+	// apt, so typosquat is the low-risk None. Provenance: GitHub artifact
+	// attestations from Homebrew/homebrew-core's bottle workflow.
+	// docs/PLANS_INTELLIGENCE.md#plan-homebrew-ecosystem has the evidence.
+	EcoHomebrew: {
+		ConditionScorecard:                    SupportNone,
+		ConditionMalwareIndex:                 SupportPartial, // no public feed; org overrides + live index only (like apt)
+		ConditionEPSS:                         SupportFull,    // CVE aliases from the Homebrew OSV feed
+		ConditionCVE:                          SupportFull,    // formulae.brew.sh/api/advisories.json
+		ConditionPackageAge:                   SupportPartial, // N1: no creation-date source — see the PackageAge note in proxy_matrix.go
+		ConditionCooldown:                     SupportFull,    // bottle manifest org.opencontainers.image.created
+		ConditionLicense:                      SupportFull,    // SPDX license on the formula
+		ConditionHasProvenance:                SupportFull,    // homebrew-core bottle attestations
+		ConditionTyposquat:                    SupportNone,    // curated core namespace (low-risk, like apt)
+		ConditionCVSS:                         SupportFull,
+		ConditionReservedNamespaces:           SupportFull,
+		ConditionHasInstallScript:             SupportNone,
+		ConditionInstallScriptFetchesRemote:   SupportNone,
+		ConditionImportTimeExecution:          SupportNone,
+		ConditionMaliciousIOC:                 SupportPartial, // scripts inside bottles only
+		ConditionBuildRsExecutes:              SupportNone,
+		ConditionPublisherChanged:             SupportNone, // no per-package publisher
+		ConditionVersionAnomaly:               SupportNone, // non-semver versions
+		ConditionHasHiddenUnicode:             SupportNone, // compiled bottles
+		ConditionPublishVelocityAnomaly:       SupportNone,
+		ConditionLicenseCopyleft:              SupportFull,
+		ConditionLicenseNonPermissive:         SupportFull,
+		ConditionLicenseExceptionPresent:      SupportFull,
+		ConditionLicenseAmbiguousClassifier:   SupportFull,
+		ConditionLicenseUnidentified:          SupportFull,
+		ConditionDeprecatedByMaintainer:       SupportFull, // deprecated/disabled + reason
+		ConditionShrinkwrapPresent:            SupportNone,
+		ConditionManifestConfusion:            SupportNone,
+		ConditionGitDependency:                SupportNone,
+		ConditionHTTPTarballDependency:        SupportNone,
+		ConditionWildcardDependencyRange:      SupportNone,
+		ConditionBadDependencySemver:          SupportNone,
+		ConditionNonRegistrySource:            SupportNone,
+		ConditionUsesEval:                     SupportNone,
+		ConditionNetworkAccess:                SupportNone,
+		ConditionShellAccess:                  SupportNone,
+		ConditionFilesystemAccess:             SupportNone,
+		ConditionEnvVarAccess:                 SupportNone,
+		ConditionNativeBinaryPresent:          SupportPartial, // every bottle is native code
+		ConditionHighEntropyStrings:           SupportNone,
+		ConditionURLStrings:                   SupportNone,
+		ConditionMinifiedCode:                 SupportNone,
+		ConditionTrivialPackage:               SupportNone,
+		ConditionTooManyFiles:                 SupportFull, // archive entry count
+		ConditionNonExistentAuthor:            SupportNone,
+		ConditionFirstTimeCollaborator:        SupportNone,
+		ConditionSuspiciousRepoStars:          SupportPartial, // repo from homepage/source URL
+		ConditionMaintainerAccountAge:         SupportNone,
 		ConditionDangerousPickle:              SupportNone,
 		ConditionUnsafeSerializationFormat:    SupportNone,
 		ConditionModelCardInjection:           SupportNone,
@@ -1544,6 +1619,8 @@ func EcosystemForFormat(format string) Ecosystem {
 		return EcoYum
 	case "dnf":
 		return EcoDNF
+	case "homebrew", "brew":
+		return EcoHomebrew
 	default:
 		return ""
 	}

@@ -69,7 +69,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chain305/chainsaw-core/homebrew"
 	"github.com/chain305/chainsaw-core/httpclient"
+	"github.com/chain305/chainsaw-core/upstreamhttp"
 )
 
 // Env vars consulted by the refresher. Kept as exported constants so
@@ -142,6 +144,10 @@ type RefresherConfig struct {
 	// defaultUpstreamBase wins.
 	BaseURL string
 
+	// HomebrewAPIBase overrides where the HomebrewFeed entry of Ecosystems
+	// is read from. Empty → homebrew.ConfiguredAPIBase().
+	HomebrewAPIBase string
+
 	// now is overridable for tests. nil → time.Now.
 	now func() time.Time
 }
@@ -156,6 +162,12 @@ type Refresher struct {
 	client  *http.Client
 	logger  *slog.Logger
 	baseURL string
+
+	// homebrewClient / homebrewBase serve the HomebrewFeed entry, which
+	// is not a GCS bucket. Nil / empty fall back to client and
+	// homebrew.ConfiguredAPIBase().
+	homebrewClient *http.Client
+	homebrewBase   string
 
 	mu      sync.Mutex
 	running bool
@@ -264,7 +276,10 @@ func NewRefresher(cfg RefresherConfig) *Refresher {
 
 	cfg.Interval = interval
 	if len(cfg.Ecosystems) == 0 {
-		cfg.Ecosystems = DefaultEcosystems
+		// Homebrew's feed is read straight from formulae.brew.sh, so it
+		// rides beside the GCS buckets rather than in DefaultEcosystems
+		// (which mirrors build.sh's GCS download list).
+		cfg.Ecosystems = append(DefaultEcosystems[:len(DefaultEcosystems):len(DefaultEcosystems)], HomebrewFeed)
 	}
 	if cfg.now == nil {
 		cfg.now = time.Now
@@ -274,18 +289,31 @@ func NewRefresher(cfg RefresherConfig) *Refresher {
 		baseURL = defaultUpstreamBase
 	}
 	client := cfg.HTTPClient
+	homebrewClient := cfg.HTTPClient
 	if client == nil {
 		// Each all.zip is 20-80 MB across slow links; bound the per-tick
 		// HTTP call generously. The outer context is the real cancellation
 		// signal.
 		client = httpclient.New(httpclient.WithTimeout(10 * time.Minute))
+		// formulae.brew.sh is a registry host other Chainsaw surfaces
+		// also call, so its 75 MB feed is charged to the shared budget.
+		homebrewClient = upstreamhttp.New(upstreamhttp.FromEnv(),
+			upstreamhttp.WithBaseClient(httpclient.New(httpclient.WithTimeout(10*time.Minute), httpclient.WithSSRFGuard())),
+			upstreamhttp.WithLimiter(upstreamhttp.SharedLimiter()),
+		).HTTPClient()
+	}
+	homebrewBase := strings.TrimRight(cfg.HomebrewAPIBase, "/")
+	if homebrewBase == "" {
+		homebrewBase = homebrew.ConfiguredAPIBase()
 	}
 
 	return &Refresher{
-		cfg:     cfg,
-		client:  client,
-		logger:  logger,
-		baseURL: baseURL,
+		cfg:            cfg,
+		client:         client,
+		logger:         logger,
+		baseURL:        baseURL,
+		homebrewClient: homebrewClient,
+		homebrewBase:   homebrewBase,
 	}
 }
 
@@ -486,6 +514,9 @@ func (r *Refresher) keepPriorFor(failed []string) []Advisory {
 // floor we ship with. If that changes, swap the buffer for a temp file
 // and `zip.OpenReader`.
 func (r *Refresher) fetchEcosystem(ctx context.Context, ecosystem string) ([]Advisory, error) {
+	if ecosystem == HomebrewFeed {
+		return r.fetchHomebrew(ctx)
+	}
 	url := fmt.Sprintf("%s/%s/all.zip", r.baseURL, ecosystem)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

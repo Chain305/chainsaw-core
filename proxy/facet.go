@@ -57,7 +57,7 @@ func SetUpstreamErrorRecorder(rec func(ecosystem string)) {
 // label values: known enum + "other" (cardinality bound = N+1).
 var knownEcosystemLabels = map[string]struct{}{
 	"apt": {}, "bun": {}, "cargo": {}, "cocoapods": {}, "composer": {},
-	"dnf": {}, "docker": {}, "go": {}, "gradle": {}, "huggingface": {},
+	"dnf": {}, "docker": {}, "go": {}, "gradle": {}, "homebrew": {}, "huggingface": {},
 	"maven": {}, "npm": {}, "nuget": {}, "pip": {}, "pub": {}, "raw": {},
 	"rubygems": {}, "swift": {}, "yarn": {}, "yum": {},
 }

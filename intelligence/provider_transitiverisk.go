@@ -701,6 +701,7 @@ var singleVersionEcosystems = map[string]bool{
 	"hex":       true,
 	"cocoapods": true,
 	"swift":     true,
+	"homebrew":  true, // one keg per formula; a second line is a new name (openssl@3)
 }
 
 // resolvesSingleVersion reports whether the ecosystem's installer picks

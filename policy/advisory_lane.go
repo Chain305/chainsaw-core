@@ -128,6 +128,8 @@ var ecosystemsWithAdvisorySource = map[Ecosystem]struct{}{
 	EcoPub:      {},
 	EcoSwift:    {},
 	EcoDocker:   {},
+	// Homebrew's own OSV feed (formulae.brew.sh/api/advisories.json).
+	EcoHomebrew: {},
 }
 
 // EcosystemHasAdvisorySource reports whether any lane in this build can

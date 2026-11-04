@@ -54,7 +54,9 @@ const (
 // this path has no public digest to compare with).
 func splitNonRegistry(pkgs []scanPkg) (registry, nonRegistry []scanPkg) {
 	for _, p := range pkgs {
-		if p.Origin == "" || (p.Version != "" && knownMirror(p.Ecosystem, p.Origin)) {
+		if currentRecipe(p) {
+			nonRegistry = append(nonRegistry, p)
+		} else if p.Origin == "" || (p.Version != "" && knownMirror(p.Ecosystem, p.Origin)) {
 			registry = append(registry, p)
 		} else {
 			nonRegistry = append(nonRegistry, p)
@@ -106,6 +108,12 @@ func nonRegistryResults(pkgs []scanPkg, malicious map[string]bool) []scanResultI
 	out := make([]scanResultItem, 0, len(pkgs))
 	for _, p := range pkgs {
 		r := scanResultItem{Name: p.Name, Version: p.Version, Ecosystem: p.Ecosystem, Origin: p.Origin}
+		if currentRecipe(p) {
+			r.Status = statusNotAssessed
+			r.OriginReason = "Brewfile names no version (current recipe): not assessed; `chainsaw brew inventory` uploads the installed versions"
+			out = append(out, r)
+			continue
+		}
 		label := " (" + origin.Label(p.Origin) + ")"
 		if malicious[scanPkgKey(p.Ecosystem, p.Name, p.Version, "")] || malicious[scanPkgKey("", p.Name, p.Version, "")] {
 			r.Status, r.Severity, r.MalwareStatus = statusMalicious, "critical", "malicious"
@@ -126,6 +134,13 @@ func nonRegistryResults(pkgs []scanPkg, malicious map[string]bool) []scanResultI
 		out = append(out, r)
 	}
 	return out
+}
+
+// currentRecipe: a Brewfile formula from homebrew/core. A Brewfile names
+// packages, never versions, so there is no coordinate to send the server;
+// the row is listed as not assessed rather than dropped.
+func currentRecipe(p scanPkg) bool {
+	return p.Ecosystem == "homebrew" && p.Version == "" && p.Origin == ""
 }
 
 func notAssessedReason(ecosystem string) string {

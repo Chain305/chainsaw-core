@@ -3,6 +3,7 @@ package intelligence
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -718,5 +719,39 @@ func TestRefresherScansOnBackgroundContext(t *testing.T) {
 	}
 	if !svc.background.Load() {
 		t.Fatal("the refresher's Scan ran on a context not marked background")
+	}
+}
+
+// An over-cap artifact (a gcc or llvm bottle past the fetch cap) must reach
+// Scan as ArtifactTooLarge, as the stale-report sweep records it; dropping
+// the error left the byte providers silent with nothing saying why.
+func TestRefresher_ArtifactTooLargeReachesScan(t *testing.T) {
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	src := &fakeMetadataSource{
+		rows: []metadata.PackageMetadataRow{{
+			OrgID: "org1",
+			PackageMetadata: metadata.PackageMetadata{
+				Repository: "homebrew", Package: "gcc", Version: "15.2.0",
+				UpdatedAt: now.Add(-48 * time.Hour),
+			},
+		}},
+	}
+	svc := &fakeService{}
+	ref := NewRefresher(RefresherConfig{
+		Service: svc, Metadata: src, MaxStaleness: 24 * time.Hour,
+		Concurrency: 1, PageSize: 10, ArtifactEnabled: true,
+		ArtifactFetcher: func(context.Context, metadata.PackageMetadataRow) (*ArtifactHandle, error) {
+			return nil, fmt.Errorf("bottle: %w", ErrArtifactTooLarge)
+		},
+		EcosystemResolver: func(string) string { return "homebrew" },
+	})
+	ref.now = func() time.Time { return now }
+	ref.RunOnce(context.Background())
+
+	if len(svc.seen) != 1 {
+		t.Fatalf("expected one scan, got %d", len(svc.seen))
+	}
+	if req := svc.seen[0]; !req.ArtifactTooLarge || req.ArtifactFetchErr == nil || req.Artifact != nil {
+		t.Fatalf("over-cap fetch not recorded: tooLarge=%v fetchErr=%v", req.ArtifactTooLarge, req.ArtifactFetchErr)
 	}
 }

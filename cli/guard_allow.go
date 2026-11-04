@@ -467,6 +467,7 @@ var guardAllowlistEcosystems = map[string]bool{
 	"go":       true,
 	"cargo":    true,
 	"rubygems": true,
+	"homebrew": true,
 }
 
 // guardEcosystemAliases maps the spellings people actually type (registry
@@ -488,6 +489,7 @@ var guardEcosystemAliases = map[string]string{
 	"gem":       "rubygems",
 	"gems":      "rubygems",
 	"ruby":      "rubygems",
+	"brew":      "homebrew",
 }
 
 func guardCanonicalEcosystem(ecosystem string) string {

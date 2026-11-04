@@ -322,6 +322,11 @@ type packageSpec struct {
 	// as PyPI's (that candidate is real) and evaluateAll adds a
 	// dependency-confusion warning naming this index.
 	ExtraIndex string
+
+	// HomebrewKind is "formula" or "cask" for a brew spec the user (or a
+	// Brewfile) typed explicitly as one, "" when brew decides (formula
+	// first, then cask). Empty for every other ecosystem.
+	HomebrewKind string
 }
 
 func (s packageSpec) String() string {

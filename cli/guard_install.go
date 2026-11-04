@@ -548,8 +548,11 @@ func stripLeadingChainsawGlobals(args []string) []string {
 // so a wrapped tool's own -q (`chainsaw npm -q install …`) is NOT treated as
 // chainsaw's quiet. Recognizes the long form, the bare short `-q`, and stacked
 // short bundles like `-qv`.
+// guardSubcmds are the guarded tool commands (DisableFlagParsing): scanning
+// for chainsaw's own globals stops at the first one.
+var guardSubcmds = map[string]bool{"npm": true, "pip": true, "go": true, "cargo": true, "gem": true, "brew": true}
+
 func quietFlagInArgs(argv []string) bool {
-	guardSubcmds := map[string]bool{"npm": true, "pip": true, "go": true, "cargo": true, "gem": true}
 	for i := 1; i < len(argv); i++ {
 		tok := argv[i]
 		if tok == "--" || guardSubcmds[tok] {
@@ -657,7 +660,24 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	}
 
 	ctx := context.Background()
+	// Homebrew metadata lanes (disabled / deprecated / third-party tap / cask
+	// risk flags). Runs BEFORE evaluateAll because it also fills each formula's
+	// current pkg_version, which the server preflight below needs.
+	var brewVerdicts []guardVerdict
+	if bin == "brew" {
+		var brewNotices []string
+		specs, brewVerdicts, brewNotices = runBrewPreflight(ctx, specs)
+		if !isQuiet {
+			for _, n := range brewNotices {
+				fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, n))
+			}
+		}
+	}
 	verdicts, blocked := guard.evaluateAll(ctx, specs)
+	if len(brewVerdicts) > 0 {
+		verdicts = append(brewVerdicts, verdicts...)
+		blocked = blocked || anyBlocking(brewVerdicts)
+	}
 	// Byte-scan coverage is reported HERE, after evaluation, and not with the
 	// notices above — because before evaluation nobody knows whether it ran.
 	// The notice this replaced was derived from two env vars read at guard
@@ -714,6 +734,12 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 // args; the real tool needs those (with its flags intact), the parsers do not.
 func guardSpecsFor(bin string, args []string, parse specParser) (specs []packageSpec, recognized, fromLockfile bool) {
 	parseArgs := stripLeadingFlagsForParse(args)
+	if bin == "brew" {
+		// brew's command is its first bareword (its pre-command options are
+		// all boolean), and the shared verb-seeker would anchor
+		// `brew bundle install` on "install", dropping the Brewfile.
+		parseArgs = brewCommandArgs(args)
+	}
 	specs, recognized = parse(parseArgs)
 	if !recognized {
 		return specs, false, false
@@ -1311,8 +1337,11 @@ func npmProjectRC() []argFlag {
 
 // ecosystemFor maps a guarded binary to its spec ecosystem.
 func ecosystemFor(bin string) string {
-	if bin == "gem" {
+	switch bin {
+	case "gem":
 		return "rubygems"
+	case "brew":
+		return "homebrew"
 	}
 	return bin
 }
@@ -1329,7 +1358,7 @@ func serverInstallPreflight(ctx context.Context, specs []packageSpec) ([]guardVe
 	for _, spec := range specs {
 		// Origin: not from the public registry, so never sent as a
 		// registry coordinate (see packageSpec.Origin).
-		if spec.Ecosystem != "npm" || spec.Name == "" || spec.Version == "" || spec.Origin != "" || spec.Local {
+		if !serverPreflightable(spec) || spec.Name == "" || spec.Version == "" || spec.Origin != "" || spec.Local {
 			continue
 		}
 		key := spec.Name + "\x00" + spec.Version
@@ -1337,9 +1366,10 @@ func serverInstallPreflight(ctx context.Context, specs []packageSpec) ([]guardVe
 			continue
 		}
 		seen[key] = true
-		// The loop above already narrowed to spec.Ecosystem == "npm", so
-		// the coordinate is unambiguous — say so on the wire rather than
-		// letting the server fall back to a cross-registry lookup.
+		// The loop above already narrowed to one ecosystem per run (npm, or
+		// homebrew formulae), so the coordinate is unambiguous — say so on
+		// the wire rather than letting the server fall back to a
+		// cross-registry lookup.
 		candidates = append(candidates, scanPkg{Name: spec.Name, Version: spec.Version, Ecosystem: spec.Ecosystem})
 	}
 	if len(candidates) == 0 {
@@ -1386,13 +1416,26 @@ func serverInstallPreflight(ctx context.Context, specs []packageSpec) ([]guardVe
 			blocked = true
 		}
 		verdicts = append(verdicts, guardVerdict{
-			Spec:     packageSpec{Ecosystem: "npm", Name: r.Name, Version: r.Version},
+			Spec:     packageSpec{Ecosystem: firstNonEmpty(r.Ecosystem, candidates[0].Ecosystem), Name: r.Name, Version: r.Version},
 			Block:    block,
 			Severity: serverSeverityPrefix + severity,
 			Reason:   serverPreflightReason(r),
 		})
 	}
 	return verdicts, blocked, ""
+}
+
+// serverPreflightable: the coordinates the signed-in preflight sends. npm,
+// and homebrew FORMULAE from homebrew/core (the advisory feed covers no
+// casks, and a third-party tap formula is not its core namesake).
+func serverPreflightable(spec packageSpec) bool {
+	switch spec.Ecosystem {
+	case "npm":
+		return true
+	case "homebrew":
+		return spec.HomebrewKind == "formula" && !homebrewThirdPartyTap(spec.Name)
+	}
+	return false
 }
 
 // serverSeverityPrefix marks a verdict as coming from the server preflight

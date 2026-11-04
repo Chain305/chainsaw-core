@@ -56,6 +56,14 @@ const (
 	UnpopularComposerMonthThreshold = 50    // Packagist downloads/month
 	UnpopularRubyGemsTotalThreshold = 12000 // RubyGems all-time downloads
 	UnpopularNuGetTotalThreshold    = 75000 // NuGet all-time downloads
+	// UnpopularHomebrew90DayThreshold is Homebrew's 90-day `install`
+	// analytics (every install, dependency installs included). Set
+	// 2026-11-04 against all 8,702 homebrew/core formulae: < 50 fires on
+	// 3,564 (41%), the crates.io line of < 100 on 4,693 (54%). homebrew/core
+	// is a curated namespace and brew analytics are opt-out (CI usually sets
+	// HOMEBREW_NO_ANALYTICS), so the lower line keeps the signal to under
+	// half of it, the same ceiling the npm rule set.
+	UnpopularHomebrew90DayThreshold = 50
 )
 
 // unpopularThreshold returns the threshold and registry label for a count
@@ -74,6 +82,8 @@ func unpopularThreshold(eco, window string) (threshold int, registry string, ok 
 		return UnpopularRubyGemsTotalThreshold, "RubyGems", true
 	case eco == "nuget" && window == "total":
 		return UnpopularNuGetTotalThreshold, "NuGet", true
+	case eco == "homebrew" && window == "90d":
+		return UnpopularHomebrew90DayThreshold, "Homebrew", true
 	}
 	return 0, "", false
 }
@@ -311,7 +321,7 @@ func init() {
 		Weight:   0,
 		Title:    "Very low download count",
 		Description: "The package has very few downloads (npm <100/wk, PyPI <50/wk, crates.io <100 in 90 days, " +
-			"Packagist <50/month, RubyGems <12,000 and NuGet <75,000 in total), suggesting minimal community adoption. " +
+			"Packagist <50/month, Homebrew <50 installs in 90 days, RubyGems <12,000 and NuGet <75,000 in total), suggesting minimal community adoption. " +
 			"When download data is unavailable the signal fires with severity 'unknown'.",
 		Fires: func(in Input) (bool, string, map[string]any) {
 			// Downloads carries its window; WeeklyDownloads is the

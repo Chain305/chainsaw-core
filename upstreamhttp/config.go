@@ -117,6 +117,14 @@ var defaultHostLimits = map[string]float64{
 	// naming this exact category.
 	"repo.maven.apache.org": 5,
 
+	// formulae.brew.sh is Homebrew's donated GitHub Pages host. The proxy
+	// fetches the full formula.json once per 10 minutes (conditional) and a
+	// per-formula document only for a known formula whose bottle digest the
+	// loaded index does not declare, so steady state is far below this; 5/s
+	// caps a burst (a cold cache, a refresh walk) well under the 30/s
+	// default for a host nobody pays for.
+	"formulae.brew.sh": 5,
+
 	// pypistats.org answered one request in five with a bare 429 (no
 	// Retry-After) at ~10/s sequential on 2026-09-30, and 7 of 350 corpus
 	// packages came back -1 from it at the 30/s default. api.npmjs.org is

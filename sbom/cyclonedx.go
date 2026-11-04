@@ -484,6 +484,10 @@ func buildPURL(ecosystem, name, version string) string {
 		purlType = "rpm"
 	case "huggingface":
 		purlType = "huggingface"
+	case "homebrew", "brew":
+		// pkg:brew/<formula>@<pkg_version>, the purl Homebrew's own
+		// advisory feed uses.
+		purlType = "brew"
 	default:
 		purlType = "generic"
 	}

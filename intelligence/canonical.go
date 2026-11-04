@@ -54,8 +54,10 @@ var canonicalPEP503Ecosystems = []string{"pypi", "pip"}
 
 // canonicalLowercaseEcosystems fold on case alone. These are exactly the
 // non-pypi ecosystems osv/bundle.go lowercases, plus composer's registry
-// (Packagist) under the name this product uses for it.
-var canonicalLowercaseEcosystems = []string{"nuget", "composer", "packagist"}
+// (Packagist) under the name this product uses for it, plus homebrew: brew
+// resolves formula names case-insensitively and the proxy writes them
+// lowercased (core/homebrew.NormalizeName).
+var canonicalLowercaseEcosystems = []string{"nuget", "composer", "packagist", "homebrew"}
 
 // canonicalEcosystemAliases maps an ALIAS spelling of a registry onto the
 // spelling the PROXY writes for it. This is the ecosystem half of
@@ -105,6 +107,8 @@ var canonicalEcosystemAliases = map[string]string{
 	"golang": "go",
 	// Swift: OSV publishes the ecosystem as "SwiftURL" (malware/osv.go:106).
 	"swifturl": "swift",
+	// Homebrew: the purl type is `brew` (pkg:brew/jq@1.8.2); proxy `homebrew`.
+	"brew": "homebrew",
 }
 
 // CanonicalNameRuleSpec is this package's fold, exported so the SQL side of

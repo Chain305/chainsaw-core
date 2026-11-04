@@ -56,6 +56,7 @@ var registryEcosystemRule = []struct {
 	{"go", false, "the module path is the identity; proxy.golang.org is a cache of public VCS, and GOPRIVATE/direct are first-class"},
 	{"docker", false, "a coordinate names its own registry; Docker Hub is one of many"},
 	{"huggingface", false, "a revision 404 cannot be told apart from an unfetched commit SHA"},
+	{"homebrew", false, "formulae.brew.sh lists homebrew/core only; the same bare name may live in any tap"},
 }
 
 func TestSingleCanonicalRegistryRuleCoversEveryDispatchedEcosystem(t *testing.T) {

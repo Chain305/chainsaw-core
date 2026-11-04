@@ -352,6 +352,9 @@ func NewChecker(logger *slog.Logger, opts ...CheckerOption) *Checker {
 	c.register(newCargoChecker(c.client, logger), "cargo")
 	c.register(newComposerChecker(c.client, logger), "composer")
 	c.register(newCocoaPodsChecker(c.client, logger), "cocoapods")
+	c.register(newHomebrewChecker(c.client, logger,
+		func() *sigstoreverify.BundleCache { return c.sigstoreCache },
+	), "homebrew", "brew")
 	// Swift checker reads the registry URL and verifier lazily via
 	// closures so WithSwiftRegistryURL / WithSwiftFullVerify can mutate
 	// them after construction.
@@ -489,7 +492,7 @@ func SupportsProvenance(ecosystem string) bool {
 	switch strings.ToLower(ecosystem) {
 	case "npm", "pip", "pypi", "maven", "gradle", "rubygems", "gem",
 		"go", "gomod", "docker", "oci", "nuget", "huggingface", "swift",
-		"apt", "yum", "dnf":
+		"apt", "yum", "dnf", "homebrew", "brew":
 		return true
 	default:
 		return false

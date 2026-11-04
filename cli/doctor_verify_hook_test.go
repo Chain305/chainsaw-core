@@ -39,6 +39,7 @@ func TestVerifyHookKnowsAllInstallHookManagers(t *testing.T) {
 		"sbt":    "sbt resolvers drive pending",
 		"nuget":  "nuget.config drive pending",
 		"go":     "GOPROXY drive pending — well-tested elsewhere",
+		"brew":   "needs a real brew install against a bottle repo; doctor reports routing (ARTIFACT_DOMAIN + NO_FALLBACK)",
 	}
 
 	drivers := verifyDrivers()

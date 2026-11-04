@@ -34,6 +34,12 @@ type Identity struct {
 	// Issuer is the OIDC issuer URL that minted the Fulcio cert
 	// (e.g. "https://token.actions.githubusercontent.com").
 	Issuer string
+	// SignedAt is the earliest timestamp the verify pipeline checked
+	// (transparency-log integrated time or RFC 3161), i.e. a proven upper
+	// bound on when the bundle was signed. Zero when nothing was verified —
+	// always zero from InspectBundleIdentity, and on cache entries written
+	// before the field existed.
+	SignedAt time.Time
 }
 
 // Verifier wraps a sigstore-go Verifier with the live Sigstore trust root.
@@ -182,7 +188,15 @@ func InspectBundleIdentity(bundleJSON []byte) (*Identity, error) {
 // Identity struct. Fields are best-effort — empty is acceptable.
 func extractIdentity(r *verify.VerificationResult) *Identity {
 	id := &Identity{}
-	if r == nil || r.Signature == nil || r.Signature.Certificate == nil {
+	if r == nil {
+		return id
+	}
+	for _, ts := range r.VerifiedTimestamps {
+		if !ts.Timestamp.IsZero() && (id.SignedAt.IsZero() || ts.Timestamp.Before(id.SignedAt)) {
+			id.SignedAt = ts.Timestamp.UTC()
+		}
+	}
+	if r.Signature == nil || r.Signature.Certificate == nil {
 		return id
 	}
 	cert := r.Signature.Certificate

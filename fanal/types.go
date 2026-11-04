@@ -81,6 +81,7 @@ const (
 	Hex         LangType = "hex"
 	Bitnami     LangType = "bitnami"
 	Julia       LangType = "julia"
+	Homebrew    LangType = "homebrew" // Brewfile: names only, Version "" = current recipe
 	K8sUpstream LangType = "kubernetes"
 
 	// OS package managers — used by the OCI layer extractors
