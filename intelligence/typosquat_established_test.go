@@ -357,7 +357,7 @@ func dormantReport(downloads *int, versions int, prior, pub time.Time) *Report {
 // clear — 38 of 46 orgs run the seeded isSuspectedTyposquat block rule, so
 // re-flagging would block — and carry a warn-level fact instead
 // (sc.dormant_lookalike_release). See
-// docs/PLANS_INTELLIGENCE.md#plan-server-established-version-gate.
+// docs/ARCHIVE.md#plan-server-established-version-gate.
 func TestServerClearFlagsDormantLookalikeRelease(t *testing.T) {
 	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
 	yesterday := now.AddDate(0, 0, -1)

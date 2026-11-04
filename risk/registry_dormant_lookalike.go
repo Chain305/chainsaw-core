@@ -12,7 +12,7 @@ import "fmt"
 //
 // Warn, not a re-flag: 38 of 46 production orgs run the seeded
 // isSuspectedTyposquat block rule, so leaving the hit suspected would block
-// (owner decision 2026-10-22, docs/PLANS_INTELLIGENCE.md#plan-server-established-version-gate).
+// (owner decision 2026-10-22, docs/ARCHIVE.md#plan-server-established-version-gate).
 // The ceiling is maxImpactWarnTop so it can warn and never quarantine on its
 // own. Not DampEstablished: it only ever fires on established packages, so
 // the damper would erase it everywhere.

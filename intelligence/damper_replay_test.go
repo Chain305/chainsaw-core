@@ -15,7 +15,7 @@ import (
 )
 
 // TestEstablishedDamperReplay is the acceptance gate for the
-// established-package damper (docs/PLANS_INTELLIGENCE.md#plan-established-damper).
+// established-package damper (docs/ARCHIVE.md#plan-established-damper).
 // It scores every exported production report twice through the same code,
 // damper off and on, and reports each verdict the damper moved.
 //

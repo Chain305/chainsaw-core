@@ -79,7 +79,7 @@ type Options struct {
 	SignalWeightOverrides map[string]int
 	// NoEstablishedDamper turns the established-package damper off. It
 	// exists for measurement: the replay in
-	// docs/PLANS_INTELLIGENCE.md#plan-established-damper scores every row
+	// docs/ARCHIVE.md#plan-established-damper scores every row
 	// twice through the same code and counts the verdicts the damper moved.
 	NoEstablishedDamper bool
 }

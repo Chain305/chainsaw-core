@@ -21,7 +21,7 @@ import (
 // Damping is suspended for the whole evaluation when any signal marked
 // TakeoverIndicator fires: an established package showing a takeover tell
 // gets every hygiene signal in full. Design and measurement:
-// docs/PLANS_INTELLIGENCE.md#plan-established-damper.
+// docs/ARCHIVE.md#plan-established-damper.
 
 // The establishment lines. A squat's traffic is the typo traffic it steals
 // from its target, a small fraction of the target's.
