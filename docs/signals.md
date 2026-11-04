@@ -62,7 +62,7 @@ a configured server.
 | `cap.shell` | info | 0.00 | Package can execute shell commands |
 | `cap.telemetry` | info | 0.00 | Package contains telemetry |
 | `cap.url_strings` | info | 0.00 | Package source contains URLs |
-| `sc.builder_ref_version_mismatch` | info | 0.00 | Built from a tag that does not name this version |
+| `sc.builder_ref_version_mismatch` | low | -5.00 | Built from a tag that does not name this version |
 | `sc.deprecated_by_maintainer` | medium | -15.00 | Deprecated by maintainer |
 | `sc.git_url_dependency` | low | -8.00 | Git URL dependency |
 | `sc.app_credential_exfil` | high | -25.00 | Code sends another application's credentials |

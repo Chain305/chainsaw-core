@@ -55,7 +55,7 @@ func TestAllEcosystemSmoke(t *testing.T) {
 		ftypes.Conan:     {{"zlib", "1.2.13"}, {"openssl", "3.1.2"}},
 		ftypes.Hex:       {{"jason", "1.4.1"}, {"plug", "1.14.2"}},
 		ftypes.Pub:       {{"http", "1.1.0"}, {"meta", "1.9.1"}},
-		ftypes.Swift:     {{"alamofire", "5.8.0"}, {"swift-log", "1.5.3"}},
+		ftypes.Swift:     {{"alamofire.alamofire", "5.8.0"}, {"apple.swift-log", "1.5.3"}}, // github locations re-keyed to owner.repo
 		ftypes.Cocoapods: {{"Alamofire", "5.6.0"}, {"SwiftyJSON", "5.0.0"}},
 		ftypes.Julia:     {{"JSON", "0.21.4"}, {"HTTP", "1.10.0"}},
 		ftypes.CondaEnv:  {{"python", "3.10"}, {"numpy", "1.26.0"}, {"requests", "2.31.0"}},

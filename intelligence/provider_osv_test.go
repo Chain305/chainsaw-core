@@ -393,7 +393,7 @@ func TestOSVProviderIsTheUniversalVulnBaseline(t *testing.T) {
 
 	// Ecosystem asymmetry: coordinates the CVE provider covers but OSV does
 	// not would lose the stamp unconditionally under an OSV-only baseline.
-	for _, eco := range []string{"huggingface", "docker", "cocoapods", "swift", "apt"} {
+	for _, eco := range []string{"huggingface", "docker", "cocoapods", "apt"} {
 		if _, cve := supportedCVEEcosystems[eco]; !cve {
 			t.Fatalf("test premise stale: cveProvider no longer covers %q", eco)
 		}

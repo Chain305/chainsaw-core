@@ -741,24 +741,40 @@ func init() {
 			if !in.HasProvenance || in.ProvenanceStatus != "verified" {
 				return false, "", nil
 			}
+			// An attestation built from a tag that names no version of the
+			// package proves the workflow ran, not that this release came
+			// from the project's release process: the keyv/cacheable shape.
+			// It earns no reward (S-3, 2026-11-04).
+			if _, _, mismatch := builderRefVersionMismatch(in.BuilderID, in.Version); mismatch {
+				return false, "", nil
+			}
 			return true, "Verified provenance attestation present.", nil
 		},
 	})
 
-	// S-3, OBSERVED AT WEIGHT 0 — see docs/PLANS_INTELLIGENCE.md#plan-signal-repair.
+	// S-3 — see docs/PLANS_INTELLIGENCE.md#plan-signal-repair.
 	// The 2026-08-04 keyv/cacheable releases attested
 	// `release.yml@refs/tags/setup-files-v1`: built from a tag that names
 	// no version of the package at all. A legitimate tag build names the
 	// version it publishes (`v2.5.1`, `@scope/x@2.5.1`, `sub/v1.2.3`).
-	// Measured in prod 2026-09-24: fires on 0 of 398 clean packages (0 of
-	// 422 tag-built reports). Recall is unmeasured — no malicious row in the
-	// corpus carries a builderId — so it scores nothing until it is priced.
 	// Branch builds (refs/heads) and non-GitHub builders never fire.
+	//
+	// PRICED 2026-11-04 as a Low corroborator (Socket's Low tier: small,
+	// uncapped). Benign rate: 0 of 398 clean prod packages, and 1 of 346
+	// tag-built versions across npm's 455 most-downloaded provenance
+	// publishers (0.29%, 95% upper bound 1.6%; the one, zip-stream@7.0.4
+	// from tag 7.0.5, is retag churn). Recall: 1 of ~6 provenance-carrying
+	// compromises since 2024 (the rest published from branches), and naming
+	// the tag v<version> evades it for free. So no ceiling, no damping
+	// exemption, no takeover flag: it is a visible reason that alone moves
+	// a verdict nowhere. Its real effect is upstream: a mismatched
+	// attestation no longer earns sc.provenance_verified's +15
+	// or sc.slsa_level_bonus.
 	register(Signal{
 		ID:          SignalSCBuilderRefVersionMismatch,
 		Category:    CategorySupplyChain,
-		Severity:    SevInfo,
-		Weight:      0,
+		Severity:    SevLow,
+		Weight:      -5,
 		Title:       "Built from a tag that does not name this version",
 		Description: "The provenance builder ref is a git tag that does not contain this package version — the shape of the 2026-08-04 keyv/cacheable attestations.",
 		Fires: func(in Input) (bool, string, map[string]any) {
@@ -819,6 +835,11 @@ func init() {
 				return false, "", nil
 			}
 			if in.SLSALevel < 2 {
+				return false, "", nil
+			}
+			// Same attestation, same reason as sc.provenance_verified: a
+			// build from a tag naming no version earns no level reward.
+			if _, _, mismatch := builderRefVersionMismatch(in.BuilderID, in.Version); mismatch {
 				return false, "", nil
 			}
 			return true, "Verified attestation claims a higher SLSA level.",

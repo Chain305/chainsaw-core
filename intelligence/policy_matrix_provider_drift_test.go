@@ -304,13 +304,13 @@ func TestPolicyAdvisoryLaneMatchesIntelligenceCoverage(t *testing.T) {
 	}
 }
 
-// TestPolicyAdvisoryLaneDarkSetIsTheExpectedSix is a second, blunter rail
+// TestPolicyAdvisoryLaneDarkSetIsTheExpectedFive is a second, blunter rail
 // on the same table: it names today's dark set literally, so a change to
 // EITHER module that happens to keep the two sides agreeing still has to
 // be acknowledged here. The union test above catches drift BETWEEN the
 // modules; this one catches a coordinated change nobody reviewed.
-func TestPolicyAdvisoryLaneDarkSetIsTheExpectedSix(t *testing.T) {
-	want := []string{"apt", "cocoapods", "dnf", "huggingface", "swift", "yum"}
+func TestPolicyAdvisoryLaneDarkSetIsTheExpectedFive(t *testing.T) {
+	want := []string{"apt", "cocoapods", "dnf", "huggingface", "yum"}
 	var got []string
 	for _, eco := range policy.EcosystemsWithoutAdvisorySource() {
 		got = append(got, string(eco))

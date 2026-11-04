@@ -94,6 +94,10 @@ var DefaultEcosystems = []string{
 	// fetched, so those packages got no advisory matching at all. The
 	// bucket name is case-sensitive — "Dart" and "pub" both 404.
 	"Pub",
+	// "SwiftURL" is GHSA's Swift ecosystem (~64 advisories), keyed by
+	// repository URL; canonicalKey folds it onto the `owner.repo`
+	// identity Swift coordinates carry. Added 2026-11-04.
+	"SwiftURL",
 }
 
 // SwapFunc receives a freshly-loaded Index. The provider in

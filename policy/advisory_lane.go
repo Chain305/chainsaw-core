@@ -103,8 +103,10 @@ var vulnerabilityLaneConditions = []ConditionType{
 //     and looks each up against buckets upstream trivy-db genuinely
 //     ships).
 //
-// Everything NOT in here is dark: huggingface, cocoapods, swift, apt,
-// yum, dnf. cocoapods is in the dark set even though selectTrivialTarget
+// Everything NOT in here is dark: huggingface, cocoapods, apt, yum, dnf.
+// swift has the OSV SwiftURL bucket since v0.22.146 (GitHub-hosted
+// `owner.repo` identities; a bare SwiftPM name is still graded a coverage
+// gap per coordinate, core/intelligence markNoAdvisoryCoverage). cocoapods is in the dark set even though selectTrivialTarget
 // DOES route it, because the bundle's cocoapods bucket is unverified —
 // routed-but-unverified is the state that produced 61 false
 // `ALLOW 97-100` rows in production and is exactly the state
@@ -124,6 +126,7 @@ var ecosystemsWithAdvisorySource = map[Ecosystem]struct{}{
 	EcoComposer: {},
 	EcoGo:       {},
 	EcoPub:      {},
+	EcoSwift:    {},
 	EcoDocker:   {},
 }
 

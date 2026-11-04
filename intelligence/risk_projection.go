@@ -296,7 +296,7 @@ func ProjectToRiskInput(r *Report) risk.Input {
 		ProvenanceStatus: r.Provenance.Status,
 		// SLSALevel feeds the per-level supply-chain bonus signal.
 		SLSALevel: r.Provenance.SLSALevel,
-		// Observed at weight 0 (sc.builder_ref_version_mismatch) — see
+		// Read by sc.builder_ref_version_mismatch (SevLow, -5) — see
 		// the note on risk.Input.BuilderID. The campaign discriminator was
 		// stored and unreadable; this is the line that makes it readable.
 		BuilderID: r.Provenance.BuilderID,

@@ -146,7 +146,11 @@ package intelligence
 // table is the place that claim gets recorded, which is the point of
 // having it.
 
-import "time"
+import (
+	"time"
+
+	"github.com/chain305/chainsaw-core/intelligence/osv"
+)
 
 // advisoryCoverageWarningProvider is the Warning.Provider value for the
 // no-advisory-source stamp. It is not a real provider — the finding is
@@ -384,7 +388,10 @@ func markNoAdvisoryCoverage(r *Report, at time.Time) bool {
 	if r == nil {
 		return false
 	}
-	if ecosystemHasAdvisorySource(r.Identity.Ecosystem) {
+	// Per coordinate, not per ecosystem: Swift's OSV corpus is keyed by
+	// GitHub repository, so a bare SwiftPM identity in a covered ecosystem
+	// is as dark as an uncovered one (osv.AbsenceIsNegative).
+	if ecosystemHasAdvisorySource(r.Identity.Ecosystem) && osv.AbsenceIsNegative(r.Identity.Ecosystem, r.Identity.Package) {
 		return false
 	}
 	// A vulnerability lane DID answer for this coordinate, AND the answer

@@ -398,8 +398,45 @@ func canonicalKey(ecosystem, pkg string) string {
 		name = typosquat.NormalizePyPI(name)
 	case "nuget", "packagist":
 		name = strings.ToLower(name)
+	case "swift":
+		name = swiftKey(name)
 	}
 	return eco + "\x00" + name
+}
+
+// swiftKey folds a Swift package name onto the SE-0292 `owner.repo`
+// identity, lowercased: OSV's SwiftURL records name the repository
+// ("github.com/Alamofire/Alamofire"), Chainsaw's coordinates carry the
+// identity the proxy and Package.resolved parser emit
+// ("alamofire.alamofire"). Both halves fold here, so they meet. A
+// repository on another host keeps its lowercased URL form, which no
+// Chainsaw coordinate carries: it is indexed, never matched.
+func swiftKey(name string) string {
+	n := strings.ToLower(name)
+	n = strings.TrimPrefix(strings.TrimPrefix(n, "https://"), "http://")
+	n = strings.TrimSuffix(strings.TrimSuffix(n, "/"), ".git")
+	if rest, ok := strings.CutPrefix(n, "github.com/"); ok {
+		if owner, repo, ok := strings.Cut(rest, "/"); ok && owner != "" && repo != "" && !strings.Contains(repo, "/") {
+			return owner + "." + repo
+		}
+	}
+	return n
+}
+
+// AbsenceIsNegative reports whether a package missing from a covered
+// ecosystem's index is a real "no advisories" (provider_osv's clean
+// stamp) rather than a name the corpus could never have keyed. Every
+// ecosystem but Swift: yes. Swift: only an `owner.repo` identity. A bare
+// SwiftPM identity ("alamofire", a pin from a non-GitHub host) or a
+// non-GitHub URL cannot match the GitHub-keyed SwiftURL corpus, so its
+// absence proves nothing and must not grade clean.
+func AbsenceIsNegative(ecosystem, pkg string) bool {
+	if CanonicalEcosystem(ecosystem) != "swift" {
+		return true
+	}
+	k := swiftKey(strings.TrimSpace(pkg))
+	owner, repo, ok := strings.Cut(k, ".")
+	return ok && owner != "" && repo != "" && !strings.ContainsAny(k, "/:")
 }
 
 // CanonicalEcosystem maps caller-facing ecosystem names (proxy resolver
@@ -439,6 +476,11 @@ func CanonicalEcosystem(ecosystem string) string {
 		// case-sensitive (per the OSV schema spec) so canonicalKey
 		// deliberately does NOT add Go to the lower-casing branch.
 		return "go"
+	case "swift", "swifturl":
+		// OSV: "SwiftURL" — GHSA's Swift ecosystem, keyed by repository
+		// URL. The proxy, the Package.resolved parser and the malware
+		// index call it "swift"; canonicalKey folds the names (swiftKey).
+		return "swift"
 	default:
 		return ""
 	}

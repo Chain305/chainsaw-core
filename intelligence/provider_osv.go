@@ -200,7 +200,8 @@ var supportedOSVEcosystems = map[string]struct{}{
 	"nuget":    {},
 	"composer": {}, "packagist": {},
 	"go": {}, "gomod": {},
-	"pub": {},
+	"pub":   {},
+	"swift": {},
 }
 
 // Supports reports whether the OSV feed covers the given ecosystem.
@@ -284,6 +285,16 @@ func (p *osvProvider) Run(ctx context.Context, req Request, prior *Report) (Part
 		return PartialReport{}, nil
 	}
 
+	if !idx.HasPackage(eco, pkg) && !osv.AbsenceIsNegative(eco, pkg) {
+		// A name the ecosystem's corpus could never key (a bare SwiftPM
+		// identity against the GitHub-keyed SwiftURL corpus): absence is
+		// no evidence, so this is shape 2, not 2′.
+		return PartialReport{Warnings: []Warning{{
+			Provider: "osv",
+			Code:     warnOSVBundleDormant,
+			Message:  "osv advisory corpus for this ecosystem is keyed by repository and this name carries none; no vulnerability data",
+		}}}, nil
+	}
 	if !idx.HasPackage(eco, pkg) {
 		// Shape 2′: we hold this ecosystem's corpus and this package
 		// matched none of it. That is positive evidence of absence —

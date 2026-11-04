@@ -61,9 +61,10 @@ func TestBuilderIDEmptyIsUnknownNotBuiltByNobody(t *testing.T) {
 // unmeasured — no malicious corpus row carries a builderId — so it is
 // OBSERVED at weight 0: visible in the evaluation, moving nothing.
 //
-// So two inputs differing ONLY in BuilderID must still score identically,
-// and the tagged one must carry the observation.
-func TestBuilderIDIsObservedNotScored(t *testing.T) {
+// Priced 2026-11-04 as a Low corroborator (-5, and a mismatched
+// attestation no longer earns sc.provenance_verified's +15). So two inputs
+// differing ONLY in BuilderID score differently, but never by a verdict.
+func TestBuilderIDMovesScoreNotVerdict(t *testing.T) {
 	// Both statuses: a verified attestation's +15 reward saturates the
 	// supply-chain category and would hide a small weight, and "failed"
 	// is realistic — 1,802 npm reports carry a parsed builder ID on a
@@ -84,11 +85,9 @@ func TestBuilderIDIsObservedNotScored(t *testing.T) {
 		clean := risk.EvaluatePackage(base("https://github.com/acme/app/.github/workflows/release.yml@refs/heads/main"), risk.Options{})
 		tagged := risk.EvaluatePackage(base("https://github.com/acme/app/.github/workflows/release.yml@refs/tags/setup-files-v1"), risk.Options{})
 
-		if clean.DirectScore.Overall != tagged.DirectScore.Overall {
-			t.Errorf("%s: BuilderID moved the score (%d vs %d). sc.builder_ref_version_mismatch is "+
-				"observed at weight 0 until its recall is measured; a weight here needs that "+
-				"measurement first.",
-				status, clean.DirectScore.Overall, tagged.DirectScore.Overall)
+		if tagged.DirectScore.Overall >= clean.DirectScore.Overall {
+			t.Errorf("%s: the mismatched tag build scored %d, clean %d; it must cost something",
+				status, tagged.DirectScore.Overall, clean.DirectScore.Overall)
 		}
 		if clean.Verdict != tagged.Verdict {
 			t.Errorf("%s: BuilderID moved the verdict (%s vs %s)", status, clean.Verdict, tagged.Verdict)

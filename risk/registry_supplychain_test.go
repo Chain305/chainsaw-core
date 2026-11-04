@@ -640,15 +640,35 @@ func TestBuilderRefVersionMismatch(t *testing.T) {
 	}
 }
 
-// TestBuilderRefMismatchIsNeverScored: recall is unmeasured (no malicious
-// corpus row carries a builderId), so the signal is an observation only.
-// Giving it a weight, a ceiling or a severity is a decision that needs
-// that measurement first.
-func TestBuilderRefMismatchIsNeverScored(t *testing.T) {
+// TestBuilderRefMismatchIsALowCorroborator pins the 2026-11-04 pricing:
+// 0.29% benign on tag-built npm releases, ~1 in 6 recall, free evasion.
+// A ceiling, a damping exemption or a takeover flag needs measured recall
+// first (registry_supplychain.go, the S-3 note).
+func TestBuilderRefMismatchIsALowCorroborator(t *testing.T) {
 	sig := Registry[SignalSCBuilderRefVersionMismatch]
-	if sig.Weight != 0 || sig.MaxImpact != 0 || sig.Severity != SevInfo {
-		t.Errorf("%s: Weight=%v MaxImpact=%d Severity=%q, want 0/0/info",
-			sig.ID, sig.Weight, sig.MaxImpact, sig.Severity)
+	if sig.Weight != -5 || sig.MaxImpact != 0 || sig.Severity != SevLow || sig.TakeoverIndicator || sig.DampEstablished {
+		t.Errorf("%s: Weight=%v MaxImpact=%d Severity=%q Takeover=%v Damp=%v, want -5/0/low/false/false",
+			sig.ID, sig.Weight, sig.MaxImpact, sig.Severity, sig.TakeoverIndicator, sig.DampEstablished)
+	}
+	// A verified attestation from a tag naming no version earns no reward.
+	verified := Registry[SignalSCProvenanceVerified]
+	wf := "https://github.com/jaredwray/cacheable/.github/workflows/release.yml"
+	in := Input{HasProvenance: true, ProvenanceStatus: "verified", Version: "2.5.1"}
+	in.BuilderID = wf + "@refs/tags/setup-files-v1"
+	if fired, _, _ := verified.Fires(in); fired {
+		t.Error("sc.provenance_verified paid +15 on a mismatched tag build")
+	}
+	slsa := Registry[SignalSCSLSALevelBonus]
+	in.SLSALevel = 3
+	if fired, _, _ := slsa.Fires(in); fired {
+		t.Error("sc.slsa_level_bonus paid on a mismatched tag build")
+	}
+	in.BuilderID = wf + "@refs/tags/v2.5.1"
+	if fired, _, _ := verified.Fires(in); !fired {
+		t.Error("sc.provenance_verified withheld on a matching tag build")
+	}
+	if fired, _, _ := slsa.Fires(in); !fired {
+		t.Error("sc.slsa_level_bonus withheld on a matching tag build")
 	}
 }
 

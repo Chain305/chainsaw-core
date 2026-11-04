@@ -256,7 +256,7 @@ var socketConceptMap = map[string]conceptMapping{
 	"sc.maintainer_account_somewhat_young": {Socket: nil, Grade: gradeNone, Cadence: cadFrozen},
 	"sc.provenance_verified":               {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal; Socket's model is negative-only", Cadence: cadR24},
 	"sc.signature_verified":                {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24},
-	"sc.builder_ref_version_mismatch":      {Socket: nil, Grade: gradeNone, Note: "weight-0 observation (S-3)", Cadence: cadR24},
+	"sc.builder_ref_version_mismatch":      {Socket: nil, Grade: gradeNone, Note: "Low corroborator, -5; withholds provenance +15 (S-3)", Cadence: cadR24},
 	"sc.slsa_level_bonus":                  {Socket: nil, Grade: gradeNoneSt, Note: "POSITIVE signal", Cadence: cadR24},
 	"sc.transitive_critical_vuln":          {Socket: nil, Grade: gradeNoneSt, Note: "our dependency-tree rollup; Socket surfaces transitive risk elsewhere", Cadence: cadR24OSV},
 	"sc.transitive_high_vuln":              {Socket: nil, Grade: gradeNoneSt, Cadence: cadR24OSV},

@@ -30,7 +30,8 @@ func TestCanonicalEcosystemCoversExactlyTheSupportedAliases(t *testing.T) {
 		"nuget":    "nuget",
 		"composer": "packagist", "packagist": "packagist",
 		"go": "go", "gomod": "go",
-		"pub": "pub",
+		"pub":   "pub",
+		"swift": "swift", "swifturl": "swift",
 	}
 	for alias, canonical := range want {
 		if got := CanonicalEcosystem(alias); got != canonical {

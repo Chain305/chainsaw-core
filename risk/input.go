@@ -210,7 +210,8 @@ type Input struct {
 	// workflow reference, e.g.
 	// "https://github.com/acme/app/.github/workflows/release.yml@refs/heads/main".
 	//
-	// OBSERVED AT WEIGHT 0. sc.builder_ref_version_mismatch reads it:
+	// sc.builder_ref_version_mismatch reads it (SevLow, -5, and it withholds
+	// sc.provenance_verified's +15; priced 2026-11-04):
 	// the 2026-08-04 cacheable/keyv campaign's malicious releases attested
 	// `release.yml@refs/tags/setup-files-v1` — a tag naming no version —
 	// while the clean ones attested `release.yml@refs/heads/main`.
@@ -219,9 +220,9 @@ type Input struct {
 	// was measured and REJECTED (docs/PLANS_INTELLIGENCE.md#plan-signal-repair
 	// S-3): a refs/tags vs refs/heads flip fires on 10.2% of clean
 	// packages. The tag-does-not-name-the-version rule fires on 0 of 398
-	// clean packages, but recall is unmeasured, so it carries no weight.
-	// Two inputs differing only in BuilderID must still score identically
-	// (TestBuilderIDIsObservedNotScored) until it is priced.
+	// clean prod packages and 0.29% of tag-built npm releases, with low
+	// recall, so it is priced as a Low corroborator that alone moves no
+	// verdict (TestBuilderIDMovesScoreNotVerdict).
 	//
 	// Empty when provenance is absent, unverified, or the format
 	// carries no builder identity (presence-only formats like APT/YUM
