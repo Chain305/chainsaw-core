@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
+	"github.com/chain305/chainsaw-core/cache"
 	"github.com/chain305/chainsaw-core/provenance/pgpverify"
 	"github.com/chain305/chainsaw-core/provenance/sigstoreverify"
 	"github.com/chain305/chainsaw-core/upstreamhttp"
@@ -35,7 +37,19 @@ type mavenChecker struct {
 	baseURL   string // fallback upstream, e.g. https://repo1.maven.org/maven2
 	ecosystem string // "maven" or "gradle"
 	pgp       *pgpverify.Verifier
+	// sigMissing remembers `.sigstore.json` URLs that answered 404. See
+	// sigstoreMissingTTL.
+	sigMissing *cache.NegativeCache
 }
+
+// sigstoreMissingTTL is how long a 404 on a `.sigstore.json` sidecar is
+// trusted before the probe is repeated. A released Maven version is
+// immutable on Central (a deployment publishes all its files at once and
+// cannot be amended), so a sidecar that is absent now stays absent; the TTL
+// only bounds the one case that is not permanent, a probe that lands while a
+// fresh release is still syncing. A miss there costs a week of PGP instead
+// of Sigstore, not a lost signal. In-process only, so a restart re-probes.
+const sigstoreMissingTTL = 7 * 24 * time.Hour
 
 func newMavenChecker(client *http.Client, logger *slog.Logger) *mavenChecker {
 	return &mavenChecker{
@@ -44,6 +58,8 @@ func newMavenChecker(client *http.Client, logger *slog.Logger) *mavenChecker {
 		baseURL:   "https://repo1.maven.org/maven2",
 		ecosystem: "maven",
 		pgp:       pgpverify.NewVerifier(client, ""),
+
+		sigMissing: cache.NewNegativeCache(sigstoreMissingTTL),
 	}
 }
 
@@ -61,6 +77,8 @@ func newGradleChecker(client *http.Client, logger *slog.Logger) *mavenChecker {
 		baseURL:   "https://plugins.gradle.org/m2",
 		ecosystem: "gradle",
 		pgp:       pgpverify.NewVerifier(client, ""),
+
+		sigMissing: cache.NewNegativeCache(sigstoreMissingTTL),
 	}
 }
 
@@ -163,14 +181,19 @@ func mavenRepoBase(sourceURL, groupPath string) string {
 // The cost is also no longer what the sweep measured. The refresh amplifier
 // fixed in v0.22.8 meant every Maven row was rescanned hourly; it is now once
 // per staleness window, so this is ~1 request per coordinate per 24h rather
-// than per hour. If it needs reducing further, the answer is negative caching
-// on the provenance client (it uses `c.client` directly and so has none),
-// NOT dropping the probe.
+// than per hour, and a 404 is now remembered for sigstoreMissingTTL, so an
+// unsigned coordinate is asked roughly once a week.
 func (c *mavenChecker) trySigstore(ctx context.Context, jarURL string) Result {
 	sigURL := jarURL + ".sigstore.json"
+	if c.sigMissing != nil && c.sigMissing.Hit(sigURL) {
+		return Result{Status: StatusMissing, Ecosystem: c.ecosystem}
+	}
 	sigBytes, status, err := fetchBytes(ctx, c.client, sigURL, 1<<20)
 	if err != nil {
 		if isNotFound(status) {
+			if c.sigMissing != nil {
+				c.sigMissing.Remember(sigURL)
+			}
 			return Result{Status: StatusMissing, Ecosystem: c.ecosystem}
 		}
 		if res, ok := c.rateLimited("fetch sidecar", err); ok {
