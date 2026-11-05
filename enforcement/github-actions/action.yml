@@ -94,7 +94,7 @@ inputs:
       verifies a checksum manifest served by the same host as the binary,
       and the step warns about it.
     required: false
-    default: "v0.22.152"
+    default: "v0.22.153"
   comment-on-pr:
     description: >
       Post a summary comment on the pull request with findings and a
@@ -217,7 +217,7 @@ runs:
       env:
         CHAINSAW_VERSION: ${{ inputs.version }}
         CHAINSAW_REQUIRE_SIGNATURE: "0"
-        CHAINSAW_PINNED_VERSION: v0.22.152
+        CHAINSAW_PINNED_VERSION: v0.22.153
         CHAINSAW_PINNED_SHA256_LINUX_AMD64: c5358d9dfe987cd7a97d7072a470576e633463c828f3c6eb85e9aff942e9949d
         CHAINSAW_PINNED_SHA256_LINUX_ARM64: 15f48a86760b78f96ee8e218540423156907c1690a94f259ffb2123ce4e40d8f
         CHAINSAW_PINNED_SHA256_DARWIN_AMD64: 6c638c775e77ce3399c5756af69fd014ea3ceec41e3ff1d0f82ef6d809330418
