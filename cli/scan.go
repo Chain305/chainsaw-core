@@ -1398,7 +1398,7 @@ func inferEcosystemForBareRef(name, version string) string {
 // the aliases the rest of the tree carries (pypi → pip, yarn/bun → npm,
 // gradle → maven, gomod → go, oci → docker), so a user who types an alias is
 // accepted silently rather than being told a true value is wrong.
-const scanEcosystemFlagValues = "npm|pip|maven|cargo|rubygems|composer|nuget|go|cocoapods|swift|pub|docker"
+const scanEcosystemFlagValues = "npm|pip|maven|cargo|rubygems|composer|nuget|go|cocoapods|swift|pub|docker|homebrew"
 
 // collectFromManifests walks dir recursively and returns every pinned
 // (name, version) pair produced by chainsaw's dependency-parser
