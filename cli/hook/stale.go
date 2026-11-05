@@ -116,6 +116,14 @@ func extractBlockBody(data []byte, classify markerClassifier) (string, bool) {
 	return strings.Join(kept, "\n"), true
 }
 
+// BlockContains reports whether s appears inside the chainsaw block of a
+// hash-commented config (npm, pip, cargo, go). False when there is no block,
+// so a redirect pasted by hand or left by an older chainsaw reads as foreign.
+func BlockContains(data []byte, s string) bool {
+	body, ok := extractBlockBody(data, hashMarker)
+	return ok && s != "" && strings.Contains(body, s)
+}
+
 // normalizeBody makes the comparison insensitive to line-ending convention
 // and to leading/trailing blank lines, which the splice path may add.
 func normalizeBody(s string) string {

@@ -224,6 +224,10 @@ type doctorReport struct {
 	// local-guard case needs no slug). A WRONG_SLUG outcome here means the
 	// guard would NOT fire — the command exits non-zero.
 	OrgSlug *orgSlugResult `json:"org_slug,omitempty"`
+	// Upstreams is where each manager's config actually sends installs,
+	// whoever wrote it, with an unauthenticated reachability probe. The
+	// WIRED column only sees chainsaw's own blocks; this sees everything.
+	Upstreams []bypassFinding `json:"upstreams,omitempty"`
 }
 
 // doctorOnboardingState is the /api/onboarding/progress response
@@ -280,6 +284,9 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		report.Onboarding = ob
 	}
 
+	probe := !envTruthy(os.Getenv("CHAINSAW_OFFLINE"))
+	report.Upstreams = upstreamFindings(strings.TrimSpace(cfgServerURL()), probe)
+
 	// Tally + emit BEFORE the --json early return. runDoctor used to emit
 	// cli.doctor.run only on the human path, so every scripted and CI
 	// invocation — the population whose blockers the event exists to
@@ -327,6 +334,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 				"       file also points at chainsaw (survives outside your shell, e.g. CI).\n",
 			shimSource)
 	}
+	printUpstreams(cmd.OutOrStdout(), report.Upstreams, probe)
 
 	// Remediation footer: a fresh user sees "wired: no" in the table with no
 	// idea how to fix it. Name the installed-but-unwired-and-unshimmed managers

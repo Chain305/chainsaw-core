@@ -538,6 +538,11 @@ func runUninstallHook(cmd *cobra.Command, args []string) error {
 				fmt.Fprintln(cmd.ErrOrStderr(), "  if docker was wired by an older chainsaw, remove the entry explicitly:")
 				fmt.Fprintln(cmd.ErrOrStderr(), "    chainsaw uninstall-hook docker --mirror <the registry-mirrors entry>")
 			}
+			if f, ok := foreignUpstream(r.Manager); ok {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  but %s still sends %s installs to %s, outside any chainsaw block\n", f.ConfigPath, r.Manager, f.Configured)
+				fmt.Fprintln(cmd.ErrOrStderr(), "  (pasted by hand or by an older chainsaw); uninstall-hook only removes blocks it wrote.")
+				fmt.Fprintf(cmd.ErrOrStderr(), "  to stop routing there: %s\n", foreignUpstreamFix(f))
+			}
 		case r.Reason != "":
 			fmt.Fprintf(cmd.ErrOrStderr(), "error: unwire %s: %s\n", r.Manager, r.Reason)
 		}

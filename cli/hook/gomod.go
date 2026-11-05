@@ -44,20 +44,22 @@ func (goModManager) ConfigPathForScope(scope Scope) (string, error) {
 		}
 		return "/etc/go/env", nil
 	}
+	return GoEnvFile()
+}
+
+// GoEnvFile is the file `go env -w` writes and the go command reads: $GOENV,
+// else os.UserConfigDir()/go/env — the same rule as cmd/go. On macOS that is
+// ~/Library/Application Support/go/env; a hand-built ~/.config path there is
+// a file go never reads, so a block written to it routed nothing.
+func GoEnvFile() (string, error) {
 	if p := strings.TrimSpace(os.Getenv("GOENV")); p != "" {
 		return p, nil
 	}
-	if p := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); p != "" {
-		return filepath.Join(p, "go", "env"), nil
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config dir: %w", err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(home, "AppData", "Roaming", "go", "env"), nil
-	}
-	return filepath.Join(home, ".config", "go", "env"), nil
+	return filepath.Join(dir, "go", "env"), nil
 }
 
 func (m goModManager) Wire(opts WireOpts) error {
