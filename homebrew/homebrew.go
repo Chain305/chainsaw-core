@@ -14,6 +14,7 @@
 package homebrew
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 )
@@ -77,9 +78,14 @@ type Formula struct {
 	DisableReason          string   `json:"disable_reason"`
 	DisableReplacement     string   `json:"disable_replacement_formula"`
 	PostInstallDefined     bool     `json:"post_install_defined"`
-	TapGitHead             string   `json:"tap_git_head"`
-	RubySourcePath         string   `json:"ruby_source_path"`
-	RubySourceChecksum     struct {
+	// PostInstallSteps is the API's description of the formula's
+	// post_install (kept raw: only its presence matters here). The API
+	// now reports post_install_defined false for every formula, python
+	// and node included; this is the field that says whether one exists.
+	PostInstallSteps   json.RawMessage `json:"post_install_steps"`
+	TapGitHead         string          `json:"tap_git_head"`
+	RubySourcePath     string          `json:"ruby_source_path"`
+	RubySourceChecksum struct {
 		SHA256 string `json:"sha256"`
 	} `json:"ruby_source_checksum"`
 }
@@ -107,6 +113,16 @@ func (f *Formula) PkgVersion() string {
 		return v + "_" + strconv.Itoa(f.Revision)
 	}
 	return v
+}
+
+// HasPostInstall reports whether the formula runs a post_install step, so
+// files in its keg that its bottle lacks have an explanation.
+func (f *Formula) HasPostInstall() bool {
+	if f == nil {
+		return false
+	}
+	steps := strings.TrimSpace(string(f.PostInstallSteps))
+	return f.PostInstallDefined || (steps != "" && steps != "null" && steps != "[]" && steps != "{}")
 }
 
 // IsCoreTap reports whether the formula is from the official homebrew/core

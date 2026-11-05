@@ -140,6 +140,13 @@ func CheckLinks(prefix string, baseline map[string]string) (LinkReport, error) {
 				if formula := kegFormula(cellar, filepath.Join(prefix, rel)); formula != "" && statOK(filepath.Join(prefix, rel)) {
 					r.Checked++
 					r.Baseline[rel] = formula
+				} else if sys := shadowedSystemCommand(prefix, e.Name()); sys != "" && !entryRootOwned(filepath.Join(prefix, rel)) {
+					// The prefix is ahead of /usr/bin on PATH, so a user-owned
+					// `sudo` or `ssh` here runs instead of the system one and
+					// reads every password typed into it. No formula ships one
+					// outside the Cellar, and a pkg installer's would be root's.
+					r.Checked++
+					r.Findings = append(r.Findings, Finding{SeverityTamper, rel, "not brew's, and shadows " + sys})
 				} else {
 					r.Unmanaged = append(r.Unmanaged, rel)
 				}
@@ -199,6 +206,14 @@ func CheckLinks(prefix string, baseline map[string]string) (LinkReport, error) {
 		}
 		if fi, err := os.Stat(dest); err != nil || !fi.IsDir() {
 			r.Findings = append(r.Findings, Finding{SeverityWarn, rel, "dangling: " + target})
+			continue
+		}
+		// opt/ is how kegs load each other (dylibs, helpers), and brew's
+		// alias links (opt/python3, opt/gpg) point at another formula's
+		// keg. Record which formula each one points at; the keg check
+		// reports one moved onto a keg no bottle vouches for.
+		if parts := strings.Split(strings.TrimPrefix(dest, cellar+string(filepath.Separator)), string(filepath.Separator)); len(parts) == 2 {
+			r.Baseline[rel] = parts[0]
 		}
 	}
 
@@ -247,7 +262,93 @@ func checkBaselineLink(prefix, cellar, rel, prior string) (Finding, bool) {
 	return Finding{}, false
 }
 
+// SystemCommandDirs are the macOS system command directories the prefix
+// precedes on PATH, and PathHelperDirs the others path_helper puts there
+// from /etc/paths and /etc/paths.d (/usr/local/bin, where pkg installers
+// put aws, docker, op, ...). Vars so tests can point them at fixtures.
+var (
+	SystemCommandDirs = []string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+	PathHelperDirs    = pathHelperDirs()
+)
+
+func pathHelperDirs() []string {
+	var dirs []string
+	files, _ := filepath.Glob("/etc/paths.d/*")
+	for _, f := range append([]string{"/etc/paths"}, files...) {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, l := range strings.Split(string(b), "\n") {
+			if l = strings.TrimSpace(l); filepath.IsAbs(l) {
+				dirs = append(dirs, filepath.Clean(l))
+			}
+		}
+	}
+	return dirs
+}
+
+// ShadowedCommand names the command a prefix bin/sbin entry called name
+// shadows ("" if none), and whether it is in a system directory (/usr/bin,
+// /bin, /usr/sbin, /sbin) rather than another path_helper directory.
+func ShadowedCommand(prefix, name string) (string, bool) {
+	sys := shadowedSystemCommand(prefix, name)
+	if sys == "" {
+		return "", false
+	}
+	for _, d := range SystemCommandDirs {
+		if filepath.Dir(sys) == filepath.Clean(d) {
+			return sys, true
+		}
+	}
+	return sys, false
+}
+
+// shadowedSystemCommand names the command the prefix entry shadows, or "".
+// No exemption for cask `binary` links: the Caskroom is the user's to
+// write, so a link into it vouches for nothing. A cask binary named like a
+// /usr/local/bin command is reported; unlink one of them.
+func shadowedSystemCommand(prefix, name string) string {
+	dirs := append(append([]string{}, SystemCommandDirs...), PathHelperDirs...)
+	for _, d := range dirs {
+		if insideDir(filepath.Clean(d), filepath.Clean(prefix)) {
+			continue
+		}
+		if p := filepath.Join(d, name); statOK(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 func statOK(p string) bool { _, err := os.Stat(p); return err == nil }
+
+// LinkKeg returns the keg ("<f>/<v>") the prefix entry rel links into,
+// or "".
+func LinkKeg(prefix, rel string) string {
+	p := filepath.Join(prefix, filepath.FromSlash(rel))
+	cellar := filepath.Join(prefix, "Cellar")
+	if strings.HasPrefix(rel, "opt/") {
+		t, err := os.Readlink(p)
+		if err != nil {
+			return ""
+		}
+		dest := ResolveLink(filepath.Dir(p), t)
+		parts := strings.Split(strings.TrimPrefix(dest, cellar+string(filepath.Separator)), string(filepath.Separator))
+		if !insideDir(dest, cellar) || len(parts) != 2 {
+			return ""
+		}
+		return parts[0] + "/" + parts[1]
+	}
+	f := kegFormula(cellar, p)
+	if f == "" {
+		return ""
+	}
+	t, _ := os.Readlink(p)
+	dest := ResolveLink(filepath.Dir(p), t)
+	parts := strings.Split(strings.TrimPrefix(dest, cellar+string(filepath.Separator)), string(filepath.Separator))
+	return f + "/" + parts[1]
+}
 
 // kegFormula returns <f> when the link at p resolves (one hop, lexically)
 // to cellar/<f>/<v>/<bin|sbin>/<basename of p>, else "".

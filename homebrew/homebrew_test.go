@@ -284,3 +284,28 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+// The live API reports post_install_defined false for every formula;
+// post_install_steps is what says one exists (python@3.13, node and
+// shared-mime-info have them, jq does not; checked 2026-11-06).
+func TestFormulaHasPostInstall(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"post_install_defined":false,"post_install_steps":[{"type":"mkdir"}]}`: true,
+		`{"post_install_defined":false,"post_install_steps":{"x":1}}`:            true,
+		`{"post_install_defined":true}`:                                          true,
+		`{"post_install_defined":false,"post_install_steps":null}`:               false,
+		`{"post_install_defined":false,"post_install_steps":[]}`:                 false,
+		`{"post_install_defined":false}`:                                         false,
+	} {
+		var f Formula
+		if err := json.Unmarshal([]byte(body), &f); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.HasPostInstall(); got != want {
+			t.Errorf("%s: %v", body, got)
+		}
+	}
+	if (*Formula)(nil).HasPostInstall() {
+		t.Error("nil formula")
+	}
+}

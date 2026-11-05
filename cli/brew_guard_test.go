@@ -616,3 +616,43 @@ func TestBrewPreflightResolvesViaLocalBrew(t *testing.T) {
 		t.Errorf("verdicts=%+v notices=%q", verdicts, notices)
 	}
 }
+
+// A source build fetches no bottle, so the proxy's bottle check never sees it:
+// the guard must say so, without refusing (brew has no knob to forbid it).
+func TestBrewSourceBuildWarns(t *testing.T) {
+	stubBrewOutput(t, func(args ...string) ([]byte, error) {
+		return []byte(`{"formulae":[{"name":"jq"}],"casks":[]}`), nil
+	})
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"install", "--HEAD", "jq"}, "--HEAD"},
+		{[]string{"install", "-s", "jq"}, "-s"},
+		{[]string{"reinstall", "--build-from-source", "jq"}, "--build-from-source"},
+		{[]string{"install", "-i", "jq"}, "-i"},
+		{[]string{"upgrade", "--build-bottle"}, "--build-bottle"},
+		{[]string{"install", "jq"}, ""},
+		{[]string{"install", "--force-bottle", "jq"}, ""},
+	} {
+		got, _ := parseBrewInstall(c.args)
+		if len(got) != 1 || got[0].HomebrewSource != c.want {
+			t.Errorf("%v: got %+v, want source %q", c.args, got, c.want)
+		}
+	}
+
+	withIsolatedConfigHome(t)
+	api := fakeBrewAPI(t)
+	src := func(name, kind string) packageSpec {
+		return packageSpec{Ecosystem: "homebrew", Name: name, HomebrewKind: kind, HomebrewSource: "--HEAD"}
+	}
+	_, verdicts, _ := brewPreflight(context.Background(), http.DefaultClient, api,
+		[]packageSpec{src("jq", ""), src("plain", "cask"), {Ecosystem: "homebrew", Name: "jq"}})
+	if len(verdicts) != 1 {
+		t.Fatalf("want one warning (jq --HEAD; never the cask or the bottle install), got %+v", verdicts)
+	}
+	v := verdicts[0]
+	if v.Block || v.Severity != guardSeverityHomebrewSource || v.Spec.Name != "jq" || !strings.Contains(v.Reason, "--HEAD builds from source") {
+		t.Fatalf("got %+v", v)
+	}
+}

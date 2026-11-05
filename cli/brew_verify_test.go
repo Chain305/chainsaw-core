@@ -157,6 +157,11 @@ func stubVerify(t *testing.T, tree treeAnswer, envBody string, envErr error, loc
 	t.Cleanup(func() { brewVerifyGeteuid, brewLinksBaselineDir = oldEuid, oldBase })
 	brewVerifyGeteuid = func() int { return 501 }
 	brewLinksBaselineDir = filepath.Join(t.TempDir(), "db")
+	// The shadow rule reads the host's /usr/bin, and macOS 15 ships jq there:
+	// fixtures must not depend on the machine running them.
+	oldSys, oldPH := homebrew.SystemCommandDirs, homebrew.PathHelperDirs
+	t.Cleanup(func() { homebrew.SystemCommandDirs, homebrew.PathHelperDirs = oldSys, oldPH })
+	homebrew.SystemCommandDirs, homebrew.PathHelperDirs = []string{t.TempDir()}, nil
 	brewVerifyFetchTree = func(_ string, out any) error {
 		if tree.err != nil {
 			return tree.err
@@ -439,7 +444,8 @@ func TestVerifyRubyVendor(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(p string)
-		gem    any // overrides the json manifest
+		gem    any  // overrides the json manifest
+		linux  bool // run as a brew that may use system Ruby
 		check  func(t *testing.T, res *brewVerifyResult)
 	}{
 		{name: "clean", check: func(t *testing.T, res *brewVerifyResult) {
@@ -513,13 +519,18 @@ func TestVerifyRubyVendor(t *testing.T) {
 			os.Remove(c)
 			os.Symlink("/opt/evil", c)
 		}, check: wantTamper("portable-ruby/current")},
-		{name: "no portable ruby (system ruby)", mutate: func(p string) {
+		{name: "no portable ruby (system ruby, Linux)", linux: true, mutate: func(p string) {
 			os.Remove(filepath.Join(vendor(p), "portable-ruby/current"))
 		}, check: func(t *testing.T, res *brewVerifyResult) {
 			if len(res.Tamper) != 0 || len(res.NotAssessed) != 1 || !strings.Contains(res.NotAssessed[0], "does not run portable Ruby") {
 				t.Fatalf("%+v", res)
 			}
 		}},
+		// macOS brew only skips portable Ruby for a `ruby` on PATH under the
+		// developer switch: an attacker's script runs every brew command.
+		{name: "no portable ruby on macOS", mutate: func(p string) {
+			os.Remove(filepath.Join(vendor(p), "portable-ruby/current"))
+		}, check: wantTamper("portable-ruby/current")},
 		{name: "no gem dirs where expected", mutate: func(p string) {
 			os.RemoveAll(filepath.Join(vendor(p), "bundle/ruby/4.0.0"))
 		}, check: func(t *testing.T, res *brewVerifyResult) {
@@ -565,6 +576,9 @@ func TestVerifyRubyVendor(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			old := brewNeedsPortableRuby
+			brewNeedsPortableRuby = !c.linux
+			t.Cleanup(func() { brewNeedsPortableRuby = old })
 			p := verifyPrefix(t)
 			os.MkdirAll(filepath.Join(gemDir(p), "lib/json/ext"), 0o755)
 			if c.mutate != nil {
@@ -610,5 +624,146 @@ func TestRubyVendorSkippedWhenCodeTampered(t *testing.T) {
 	res := verifyBrew(p, "homebrew", true, true, false)
 	if res.Ruby != nil || len(*q) != 0 {
 		t.Fatalf("ruby compared against pins from a tampered checkout: %+v %v", res.Ruby, *q)
+	}
+}
+
+// The Binance step end to end: a root run records the kegs; the formula's
+// own file replaced afterwards is TAMPER on every later run, user or root,
+// until root resets; a keg poured after the baseline is checked against its
+// bottle and is not assessed when it does not match.
+func TestVerifyKegBaselineCatchesSwap(t *testing.T) {
+	p := verifyPrefix(t)
+	stubVerify(t, treeAnswer{upstream: "ancestor"}, policyEnv, nil, ptr(policyEnv))
+	os.WriteFile(filepath.Join(p, "Cellar/jq/1.8.2/INSTALL_RECEIPT.json"), []byte(`{"poured_from_bottle":true,"source":{"tap":"homebrew/core"}}`), 0o644)
+	brewVerifyGeteuid = func() int { return 0 }
+	if res := verifyBrew(p, "", true, false, false); res.Verdict != brewVerdictClean || res.KegBaseline == nil || res.KegBaseline.Kegs != 1 {
+		t.Fatalf("baseline run: %s %v %+v", res.Verdict, res.Errors, res.KegBaseline)
+	}
+	os.WriteFile(filepath.Join(p, "Cellar/jq/1.8.2/bin/jq"), []byte("y"), 0o755)
+	brewVerifyGeteuid = func() int { return 501 }
+	res := verifyBrew(p, "", true, false, false)
+	if res.Verdict != brewVerdictTamper || !strings.Contains(strings.Join(res.Tamper, "\n"), "Cellar/jq/1.8.2/bin/jq: changed since it was poured") {
+		t.Fatalf("swap: %s %v", res.Verdict, res.Tamper)
+	}
+	brewVerifyGeteuid = func() int { return 0 }
+	verifyBrew(p, "", true, false, false)
+	if res := verifyBrew(p, "", true, false, false); res.Verdict != brewVerdictTamper {
+		t.Fatalf("a root run after the swap must not bless it: %s", res.Verdict)
+	}
+	if res := verifyBrew(p, "", true, false, true); res.Verdict != brewVerdictClean {
+		t.Fatalf("reset: %s %v", res.Verdict, res.Tamper)
+	}
+
+	// A new keg after the baseline: fresh, so compared with its bottle.
+	os.MkdirAll(filepath.Join(p, "Cellar/jq/1.8.3/bin"), 0o755)
+	os.WriteFile(filepath.Join(p, "Cellar/jq/1.8.3/bin/jq"), []byte("z"), 0o755)
+	oldSup, oldMajor := brewKegsSupported, brewMacOSMajor
+	t.Cleanup(func() { brewKegsSupported, brewMacOSMajor = oldSup, oldMajor })
+	brewKegsSupported = false // the fixture prefix is not /opt/homebrew either way
+	res = verifyBrew(p, "", true, false, false)
+	if res.Verdict != brewVerdictIncomplete || !strings.Contains(strings.Join(res.NotAssessed, "\n"), "keg jq/1.8.3: new since the last root run") {
+		t.Fatalf("fresh keg: %s %v", res.Verdict, res.NotAssessed)
+	}
+}
+
+// A user can keep the brew-code comparison from running (a fresh
+// index.lock, or HEAD rewound to a commit too old to compare). Root's
+// record of the last comparison turns that into TAMPER instead of an
+// endless "not assessed".
+func TestBrewCodeCheckCannotBeStalled(t *testing.T) {
+	p := verifyPrefix(t)
+	stubVerify(t, treeAnswer{upstream: "ancestor"}, policyEnv, nil, ptr(policyEnv))
+	brewVerifyFileSecure = func(string) error { return nil }
+	brewVerifyGeteuid = func() int { return 0 }
+	t0 := time.Now()
+	brewVerifyNow = func() time.Time { return t0 }
+	if res := verifyBrew(p, "", false, true, false); res.Verdict != brewVerdictClean {
+		t.Fatalf("baseline: %s %v %v", res.Verdict, res.Tamper, res.NotAssessed)
+	}
+
+	lock := filepath.Join(p, ".git", "index.lock")
+	at := func(d time.Duration) {
+		now := t0.Add(d)
+		brewVerifyNow = func() time.Time { return now }
+		os.WriteFile(lock, nil, 0o644)
+		os.Chtimes(lock, now, now)
+	}
+	at(2 * time.Hour)
+	if res := verifyBrew(p, "", false, true, false); res.Verdict != brewVerdictIncomplete {
+		t.Fatalf("lock within a day: %s %v", res.Verdict, res.Tamper)
+	}
+	at(25 * time.Hour)
+	if res := verifyBrew(p, "", false, true, false); res.Verdict != brewVerdictTamper ||
+		!strings.Contains(strings.Join(res.Tamper, "\n"), "not compared with upstream since") {
+		t.Fatalf("lock held a day: %s %v", res.Verdict, res.Tamper)
+	}
+	os.Remove(lock)
+
+	// HEAD rewound to an old upstream commit.
+	db := brewLinksBaselineDir
+	stubVerify(t, treeAnswer{upstream: "too_old"}, policyEnv, nil, ptr(policyEnv))
+	brewLinksBaselineDir = db
+	brewVerifyFileSecure = func(string) error { return nil }
+	brewVerifyNow = func() time.Time { return t0 }
+	if res := verifyBrew(p, "", false, true, false); res.Verdict != brewVerdictIncomplete {
+		t.Fatalf("stale brew, HEAD unchanged: %s %v", res.Verdict, res.Tamper)
+	}
+	os.WriteFile(filepath.Join(p, ".git/HEAD"), []byte(strings.Repeat("b", 40)+"\n"), 0o644)
+	if res := verifyBrew(p, "", false, true, false); res.Verdict != brewVerdictTamper ||
+		!strings.Contains(strings.Join(res.Tamper, "\n"), "HEAD moved from aaaaaaaaaaaa") {
+		t.Fatalf("rewound: %s %v", res.Verdict, res.Tamper)
+	}
+}
+
+// N8: an unreadable HEAD and a brew left too old to compare cannot hold the
+// verdict at "not assessed" forever either.
+func TestBrewCodeCheckOtherStalls(t *testing.T) {
+	p := verifyPrefix(t)
+	stubVerify(t, treeAnswer{upstream: "ancestor"}, policyEnv, nil, ptr(policyEnv))
+	brewVerifyFileSecure = func(string) error { return nil }
+	brewVerifyGeteuid = func() int { return 0 }
+	t0 := time.Now()
+	brewVerifyNow = func() time.Time { return t0 }
+	verifyBrew(p, "", false, true, false)
+	later := t0.Add(25 * time.Hour)
+	brewVerifyNow = func() time.Time { return later }
+
+	head := filepath.Join(p, ".git/HEAD")
+	good, _ := os.ReadFile(head)
+	os.WriteFile(head, []byte("ref: refs/heads/nope\n"), 0o644)
+	if res := verifyBrew(p, "", false, true, false); res.Verdict != brewVerdictTamper ||
+		!strings.Contains(strings.Join(res.Tamper, "\n"), "HEAD unreadable") {
+		t.Fatalf("unreadable HEAD: %s %v %v", res.Verdict, res.Tamper, res.Errors)
+	}
+	os.WriteFile(head, good, 0o644)
+
+	db := brewLinksBaselineDir
+	stubVerify(t, treeAnswer{upstream: "too_old"}, policyEnv, nil, ptr(policyEnv))
+	brewLinksBaselineDir = db
+	brewVerifyFileSecure = func(string) error { return nil }
+	brewVerifyNow = func() time.Time { return later }
+	if res := verifyBrew(p, "", false, true, false); res.Verdict != brewVerdictDrift ||
+		!strings.Contains(strings.Join(res.Drift, "\n"), "run `brew update`") {
+		t.Fatalf("stale brew a day on: %s %v %v", res.Verdict, res.Drift, res.NotAssessed)
+	}
+}
+
+// N7: a keg check a user keeps from finishing is tamper after a day.
+func TestKegCheckDeadlineEscalates(t *testing.T) {
+	prefix, bottles, run := kegBaseFixture(t)
+	bottles["jq/1.8.2"] = map[string]string{"bin/jq": "x"}
+	writeKeg(t, prefix, "jq/1.8.2", map[string]string{"bin/jq": "x", "INSTALL_RECEIPT.json": pouredCore})
+	run()
+	old := homebrew.KegCheckBudget
+	t.Cleanup(func() { homebrew.KegCheckBudget = old })
+	homebrew.KegCheckBudget = -time.Second
+	oldNow := brewVerifyNow
+	t.Cleanup(func() { brewVerifyNow = oldNow })
+	if res := run(); res.Verdict != brewVerdictError {
+		t.Fatalf("within a day: %s %v", res.Verdict, res.Tamper)
+	}
+	brewVerifyNow = func() time.Time { return time.Now().Add(25 * time.Hour) }
+	if res := run(); res.Verdict != brewVerdictTamper || !strings.Contains(strings.Join(res.Tamper, "\n"), "no keg check has completed since") {
+		t.Fatalf("a day on: %s %v", res.Verdict, res.Tamper)
 	}
 }

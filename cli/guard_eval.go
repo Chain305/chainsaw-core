@@ -327,6 +327,11 @@ type packageSpec struct {
 	// Brewfile) typed explicitly as one, "" when brew decides (formula
 	// first, then cask). Empty for every other ecosystem.
 	HomebrewKind string
+
+	// HomebrewSource is the brew option that makes this install a source
+	// build (--build-from-source, -s, --HEAD, --interactive, -i,
+	// --build-bottle), "" for a bottle install.
+	HomebrewSource string
 }
 
 func (s packageSpec) String() string {

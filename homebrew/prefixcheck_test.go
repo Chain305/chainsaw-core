@@ -179,7 +179,10 @@ func baselineOf(t *testing.T, p string) map[string]string {
 func TestCheckLinksBaseline(t *testing.T) {
 	p := healthyPrefix(t)
 	base := baselineOf(t, p)
-	want := map[string]string{"bin/pyenv": "pyenv", "bin/jq": "jq", "bin/2to3-3.12": "python@3.12", "bin/shared": "dupb", "sbin/daemon": "dupa"}
+	want := map[string]string{"bin/pyenv": "pyenv", "bin/jq": "jq", "bin/2to3-3.12": "python@3.12", "bin/shared": "dupb", "sbin/daemon": "dupa",
+		// opt/ links record the formula they point at; opt/python3 is an alias.
+		"opt/dupa": "dupa", "opt/dupb": "dupb", "opt/jq": "jq", "opt/openssl@3": "openssl@3", "opt/pyenv": "pyenv",
+		"opt/python3": "python@3.12", "opt/python@3.12": "python@3.12"}
 	if len(base) != len(want) {
 		t.Fatalf("baseline %v, want %v", base, want)
 	}
@@ -282,5 +285,73 @@ func TestResolveLinkAbsolute(t *testing.T) {
 	}
 	if got := ResolveLink("/usr/local/bin", "../Homebrew/bin/brew"); got != "/usr/local/Homebrew/bin/brew" {
 		t.Fatalf("relative: %s", got)
+	}
+}
+
+// A user-owned `sudo` in the prefix runs instead of /usr/bin/sudo and reads
+// the password typed into it. Not brew's, so it used to be listed as
+// unmanaged clutter and never flagged.
+func TestCheckLinksSystemShadow(t *testing.T) {
+	sys := t.TempDir()
+	for _, n := range []string{"sudo", "ssh"} {
+		if err := os.WriteFile(filepath.Join(sys, n), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old, oldPH := SystemCommandDirs, PathHelperDirs
+	SystemCommandDirs, PathHelperDirs = []string{sys}, nil
+	t.Cleanup(func() { SystemCommandDirs, PathHelperDirs = old, oldPH })
+
+	p := healthyPrefix(t)
+	if r, err := CheckLinks(p, nil); err != nil || len(r.Findings) != 0 {
+		t.Fatalf("healthy prefix: %+v %v", r.Findings, err)
+	}
+	os.WriteFile(filepath.Join(p, "bin/sudo"), []byte("#!/bin/sh\nevil\n"), 0o755)
+	os.Symlink("/tmp/fake-ssh", filepath.Join(p, "bin/ssh"))
+	r, err := CheckLinks(p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range r.Findings {
+		if f.Severity == SeverityTamper {
+			got[f.Path] = true
+		}
+	}
+	if !got["bin/sudo"] || !got["bin/ssh"] || len(r.Findings) != 2 {
+		t.Fatalf("want TAMPER on bin/sudo and bin/ssh, got %+v", r.Findings)
+	}
+	for _, u := range r.Unmanaged {
+		if u == "bin/sudo" || u == "bin/ssh" {
+			t.Fatalf("%s still listed as unmanaged", u)
+		}
+	}
+}
+
+// /usr/local/bin and the rest of path_helper's list count too, and a link
+// into the (user-writable) Caskroom is no exemption.
+func TestCheckLinksPathHelperShadow(t *testing.T) {
+	sysDir, local := t.TempDir(), t.TempDir()
+	for _, n := range []string{"aws", "docker"} {
+		os.WriteFile(filepath.Join(local, n), []byte("x"), 0o755)
+	}
+	old, oldPH := SystemCommandDirs, PathHelperDirs
+	SystemCommandDirs, PathHelperDirs = []string{sysDir}, []string{local}
+	t.Cleanup(func() { SystemCommandDirs, PathHelperDirs = old, oldPH })
+
+	p := healthyPrefix(t)
+	os.WriteFile(filepath.Join(p, "bin/aws"), []byte("#!/bin/sh\nsteal\n"), 0o755)
+	os.MkdirAll(filepath.Join(p, "Caskroom/x/1/Docker.app/Contents"), 0o755)
+	os.Symlink("../Caskroom/x/1/Docker.app/Contents/docker", filepath.Join(p, "bin/docker"))
+	r, err := CheckLinks(p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range r.Findings {
+		got[f.Path] = f.Severity == SeverityTamper
+	}
+	if !got["bin/aws"] || !got["bin/docker"] || len(r.Findings) != 2 {
+		t.Fatalf("want TAMPER on bin/aws and bin/docker, got %+v (unmanaged %v)", r.Findings, r.Unmanaged)
 	}
 }

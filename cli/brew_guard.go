@@ -134,21 +134,27 @@ func parseBrewInstall(args []string) ([]packageSpec, bool) {
 		return nil, false
 	}
 	pos, flags := splitFlags(args[1:], brewInstallFlags)
-	kind := ""
+	kind, source := "", ""
 	for _, f := range flags {
 		switch f.name {
 		case "--cask", "--casks":
 			kind = brewKindCask
 		case "--formula", "--formulae":
 			kind = brewKindFormula
+		case "--build-from-source", "-s", "--HEAD", "--interactive", "-i", "--build-bottle":
+			source = f.name
 		}
 	}
+	var specs []packageSpec
 	if len(pos) == 0 && args[0] == "upgrade" {
-		return brewOutdatedSpecs(kind), true
+		specs = brewOutdatedSpecs(kind)
+	} else {
+		for _, a := range pos {
+			specs = append(specs, brewSpec(a, kind))
+		}
 	}
-	specs := make([]packageSpec, 0, len(pos))
-	for _, a := range pos {
-		specs = append(specs, brewSpec(a, kind))
+	for i := range specs {
+		specs[i].HomebrewSource = source
 	}
 	return specs, true
 }
@@ -314,6 +320,7 @@ const (
 	guardSeverityHomebrewDeprecated = "homebrew-deprecated"
 	guardSeverityHomebrewTap        = "homebrew-third-party-tap"
 	guardSeverityHomebrewCask       = "homebrew-cask"
+	guardSeverityHomebrewSource     = "homebrew-source-build"
 )
 
 // brewAPIClient is the Homebrew API client (SSRF-guarded, shared upstream
@@ -372,11 +379,25 @@ func brewPreflight(ctx context.Context, client homebrew.Doer, apiBase string, sp
 			verdicts[i].Spec = out[i]
 			vs = append(vs, *verdicts[i])
 		}
+		if v := brewSourceVerdict(out[i]); v != nil {
+			vs = append(vs, *v)
+		}
 		if notices[i] != "" {
 			ns = append(ns, notices[i])
 		}
 	}
 	return out, vs, ns
+}
+
+// brewSourceVerdict warns on a formula built from source. No bottle is
+// fetched, so neither the proxy's bottle check nor brew verify's keg check
+// covers what gets installed, and brew has no setting that forbids it.
+func brewSourceVerdict(s packageSpec) *guardVerdict {
+	if s.HomebrewSource == "" || s.HomebrewKind == brewKindCask || s.Ecosystem != homebrew.Ecosystem {
+		return nil
+	}
+	return &guardVerdict{Spec: s, Severity: guardSeverityHomebrewSource,
+		Reason: s.HomebrewSource + " builds from source: no bottle is fetched, so the Chainsaw proxy's bottle check does not cover what gets installed"}
 }
 
 // brewTapVerdict refuses a third-party tap unless the local allowlist names

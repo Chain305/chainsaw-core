@@ -82,6 +82,10 @@ func readRegular(path string, max int64) ([]byte, error) {
 // root, so between the Lstat and the open the user can swap in a symlink
 // (to /dev/zero, or a root-only file) or a FIFO, which would block forever.
 // Callers read at most fi.Size()+1 bytes.
+// afterLstat runs between the Lstat and the open; tests use it to swap the
+// file in exactly the window a racing attacker would.
+var afterLstat = func(string) {}
+
 func openRegular(path string) (*os.File, fs.FileInfo, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -90,6 +94,7 @@ func openRegular(path string) (*os.File, fs.FileInfo, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fi, fmt.Errorf("%s is not a regular file", filepath.Base(path))
 	}
+	afterLstat(path)
 	f, err := os.OpenFile(path, os.O_RDONLY|openRegularFlags, 0)
 	if err != nil {
 		return nil, fi, fmt.Errorf("%s changed while being opened", filepath.Base(path))
