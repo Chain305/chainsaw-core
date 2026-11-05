@@ -309,6 +309,14 @@ func (s *Store) ensureComplianceAttestationsSchema() error {
 	if _, err := s.migExec(`CREATE INDEX IF NOT EXISTS idx_compliance_attestations_egress ON compliance_attestations(org_id, direct_registry_egress)`); err != nil {
 		return fmt.Errorf("create compliance_attestations egress index: %w", err)
 	}
+	// Root-only entries (homebrew-integrity), written by
+	// POST /api/attestations/root and never by the user-run attest.
+	if _, err := s.migExec(`ALTER TABLE compliance_attestations ADD COLUMN IF NOT EXISTS root_ecosystems TEXT`); err != nil {
+		return fmt.Errorf("add compliance_attestations.root_ecosystems: %w", err)
+	}
+	if _, err := s.migExec(`ALTER TABLE compliance_attestations ADD COLUMN IF NOT EXISTS root_reported_at TIMESTAMPTZ`); err != nil {
+		return fmt.Errorf("add compliance_attestations.root_reported_at: %w", err)
+	}
 	return nil
 }
 

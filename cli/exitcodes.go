@@ -225,9 +225,9 @@ var exitCodeAllocations = []exitCodeAllocation{
 	{
 		Code:   policyScanIncompleteExitCode,
 		Consts: []string{"policyScanIncompleteExitCode"},
-		Owner:  "policy lint`, `policy preflight",
+		Owner:  "policy lint`, `policy preflight`, `brew verify",
 		Kind:   "command",
-		Desc:   "`policy lint` or `policy preflight` could not cover the whole policy set, so the result is not provably clean. For `preflight` that also covers version skew: a condition your rules use that is absent from the proxy's support matrix means this CLI knows a condition that proxy does not, and those rules cannot fire there. Both walk the same tree with the same collector, so they share one number with one meaning. Outranks warnings-only — exit 1 reads as \"warnings, carry on\", which is the green light a half-read tree must not get. A genuine policy error still outranks it.",
+		Desc:   "`policy lint` or `policy preflight` could not cover the whole policy set, so the result is not provably clean. For `preflight` that also covers version skew: a condition your rules use that is absent from the proxy's support matrix means this CLI knows a condition that proxy does not, and those rules cannot fire there. Both walk the same tree with the same collector, so they share one number with one meaning. Outranks warnings-only — exit 1 reads as \"warnings, carry on\", which is the green light a half-read tree must not get. A genuine policy error still outranks it. `brew verify` uses it with the same meaning: the checks ran but something in scope could not be assessed (e.g. a brew update in progress), so the result is not provably clean.",
 	},
 	{
 		Code:   prScanExitBlocking,

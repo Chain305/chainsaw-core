@@ -295,6 +295,13 @@ func buildStrictReport(ctx context.Context, cmd *cobra.Command) (doctorStrictRep
 		}
 	}
 
+	if st, ok := evaluateBrewIntegrity(); ok {
+		report.Ecosystems[brewIntegrityName] = st
+		if st.Status != "compliant" && exit < doctorExitDrift {
+			exit = doctorExitDrift
+		}
+	}
+
 	report.LockfileHits = scanLockfilesForPublicSources()
 	if len(report.LockfileHits) > 0 && exit < doctorExitDrift {
 		exit = doctorExitDrift

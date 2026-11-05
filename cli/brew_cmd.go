@@ -48,9 +48,13 @@ refused too. brew applies the file on its next run.`,
 var brewInventoryCmd = &cobra.Command{
 	Use:   "inventory",
 	Short: "Upload installed homebrew/core formulae to Chainsaw",
-	Long: `Run ` + "`brew info --json=v2 --installed`" + ` and upload it as a declared target, so
-installed formulae get CVE alerts. Declared inventory is never presented as
-observed install traffic.
+	Long: `Run ` + "`brew info --json=v2 --installed`" + ` and upload it as a declared target.
+Chainsaw rescans the installed formulae on a schedule and alerts when a
+verdict gets worse: malware, typosquat, publisher change, install script or
+a degraded verdict. CVE alerts are off by default; turn them on with
+--triggers (for example --triggers cve,verdict_degraded). A later upload
+without --triggers keeps what is set. Declared inventory is never presented
+as observed install traffic.
 
 --file uploads a JSON document saved earlier from the same command (e.g. on a
 machine without network access). --dry-run reads and counts it and sends
@@ -73,6 +77,7 @@ func init() {
 	brewInventoryCmd.Flags().String("target", "", "Target name to record the inventory under (default: this host's name)")
 	brewInventoryCmd.Flags().Bool("dry-run", false, "Read and count the inventory; upload nothing")
 	brewInventoryCmd.Flags().String("file", "", "Upload this saved `brew info --json=v2 --installed` output instead of running brew")
+	brewInventoryCmd.Flags().String("triggers", "", "Comma-separated alert triggers to set (malware_appeared, typosquat_appeared, publisher_changed, install_script_appeared, verdict_degraded, cve); default keeps the current set")
 	brewGuardCmd.AddCommand(brewEnvCmd, brewInventoryCmd)
 }
 
@@ -180,10 +185,19 @@ type brewInventoryResponse struct {
 	} `json:"skipped"`
 }
 
+func brewInventoryQuery(target, triggers string) string {
+	q := url.Values{"target": {target}}
+	if strings.TrimSpace(triggers) != "" {
+		q.Set("triggers", triggers)
+	}
+	return q.Encode()
+}
+
 func runBrewInventory(cmd *cobra.Command, _ []string) error {
 	target, _ := cmd.Flags().GetString("target")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	file, _ := cmd.Flags().GetString("file")
+	triggers, _ := cmd.Flags().GetString("triggers")
 	if target == "" {
 		h, err := os.Hostname()
 		if err != nil || h == "" {
@@ -221,7 +235,7 @@ func runBrewInventory(cmd *cobra.Command, _ []string) error {
 	}
 
 	var resp brewInventoryResponse
-	if err := newClientWithTimeout(2*time.Minute).Post("/api/homebrew/inventory?target="+url.QueryEscape(target), json.RawMessage(data), &resp); err != nil {
+	if err := newClientWithTimeout(2*time.Minute).Post("/api/homebrew/inventory?"+brewInventoryQuery(target, triggers), json.RawMessage(data), &resp); err != nil {
 		return err
 	}
 	if useJSON(cmd) {

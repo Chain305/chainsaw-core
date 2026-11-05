@@ -413,6 +413,7 @@ func newBrewInventoryTestCmd(flags map[string]string) *cobra.Command {
 	c.Flags().String("target", "", "")
 	c.Flags().Bool("dry-run", false, "")
 	c.Flags().String("file", "", "")
+	c.Flags().String("triggers", "", "")
 	for k, v := range flags {
 		_ = c.Flags().Set(k, v)
 	}
@@ -423,9 +424,11 @@ func newBrewInventoryTestCmd(flags map[string]string) *cobra.Command {
 func TestBrewInventoryCommand(t *testing.T) {
 	const inv = `{"formulae":[{"name":"jq","installed":[{"version":"1.7.1"}]}],"casks":[{"token":"firefox"}]}`
 	var gotTarget, gotBody string
+	gotTriggers := []string{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/homebrew/inventory", func(w http.ResponseWriter, r *http.Request) {
 		gotTarget = r.URL.Query().Get("target")
+		gotTriggers = r.URL.Query()["triggers"]
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		_, _ = io.WriteString(w, `{"target":"mac-1","formulae":1,"casks":1,"accepted":1,"skipped":[{"name":"firefox","reason":"casks have no advisories"}]}`)
@@ -449,6 +452,16 @@ func TestBrewInventoryCommand(t *testing.T) {
 		!strings.Contains(out, "1 accepted, 1 skipped") || !strings.Contains(out, "skipped firefox: casks have no advisories") {
 		t.Fatalf("target=%q body=%q out=%q", gotTarget, gotBody, out)
 	}
+
+	// No --triggers sends none, so the server keeps the stored set.
+	if gotTriggers != nil {
+		t.Fatalf("sent triggers %v without --triggers", gotTriggers)
+	}
+	if err := runBrewInventory(newBrewInventoryTestCmd(map[string]string{"target": "mac-1", "triggers": "cve,verdict_degraded"}), nil); err != nil ||
+		len(gotTriggers) != 1 || gotTriggers[0] != "cve,verdict_degraded" {
+		t.Fatalf("--triggers: %v sent %v", err, gotTriggers)
+	}
+	calls--
 
 	// --dry-run sends nothing.
 	gotTarget = ""

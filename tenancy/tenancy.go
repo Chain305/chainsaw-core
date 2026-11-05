@@ -87,6 +87,11 @@ const (
 	// to API keys with the agent / client-setup preset and inherited by
 	// any user role that can already read compliance.
 	PermComplianceWrite = "compliance:write"
+	// PermComplianceRootAttest gates POST /api/attestations/root: entries
+	// only root may report (homebrew-integrity), from the MDM-installed
+	// root daemon. Only the admin roles hold it, so they can mint the
+	// daemon's key; a member's or manager's own token cannot forge them.
+	PermComplianceRootAttest = "compliance:root-attest"
 	// PermFindingsRead gates GET /api/findings (list + detail). Granted
 	// to every role from member up — findings are the main triage
 	// surface so developers need to see their own team's queue. See
@@ -162,6 +167,7 @@ var rolePermissions = map[string][]string{
 		PermAPIKeysManage,
 		PermComplianceRead,
 		PermComplianceWrite,
+		PermComplianceRootAttest,
 		PermFindingsRead,
 		PermFindingsManage,
 		PermFindingsSuppress,
@@ -199,6 +205,7 @@ var rolePermissions = map[string][]string{
 		PermAPIKeysManage,
 		PermComplianceRead,
 		PermComplianceWrite,
+		PermComplianceRootAttest,
 		PermFindingsRead,
 		PermFindingsManage,
 		PermFindingsSuppress,
@@ -236,6 +243,7 @@ var rolePermissions = map[string][]string{
 		PermAPIKeysManage,
 		PermComplianceRead,
 		PermComplianceWrite,
+		PermComplianceRootAttest,
 		PermFindingsRead,
 		PermFindingsManage,
 		PermFindingsSuppress,
