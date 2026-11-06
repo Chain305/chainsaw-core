@@ -17,6 +17,12 @@ func guardWrapperCmds() map[string]*cobra.Command {
 		"pip":   pipGuardCmd,
 		"cargo": cargoGuardCmd,
 		"gem":   gemGuardCmd,
+		// Translated wrappers (guard_translate.go).
+		"yarn":   yarnGuardCmd,
+		"pnpm":   pnpmGuardCmd,
+		"uv":     uvGuardCmd,
+		"poetry": poetryGuardCmd,
+		"pipx":   pipxGuardCmd,
 	}
 }
 

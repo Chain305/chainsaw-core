@@ -37,7 +37,7 @@ const supportedShellsHint = "bash, zsh, sh, fish, powershell, pwsh, cmd"
 
 var guardInitCmd = &cobra.Command{
 	Use:   "init [bash|zsh|fish|powershell|pwsh|cmd]",
-	Short: "Print shell functions that route npm, pip, go, cargo and gem through the guard",
+	Short: "Print shell functions that route npm, pip, go, cargo, gem, yarn, pnpm, uv, poetry and pipx through the guard",
 	Long: `Print shell functions that route your package managers through the Chainsaw
 install guard, so installs are checked automatically without typing "chainsaw"
 each time.
@@ -56,8 +56,8 @@ Add to your shell config and reload:
   # cmd.exe — current console session only, see below
   chainsaw guard init cmd
 
-The functions delegate to the real npm, pip, pip3, go, cargo and gem after the
-check.
+The functions delegate to the real npm, pip, pip3, go, cargo, gem, brew, yarn,
+pnpm, uv, poetry and pipx after the check.
 
 The default path is offline. Two opt-in paths do reach the network, and
 neither runs unless you ask for it: "chainsaw guard update" downloads the
@@ -100,6 +100,12 @@ var guardedTools = []struct{ fn, tool string }{
 	{"cargo", "cargo"},
 	{"gem", "gem"},
 	{"brew", "brew"},
+	// Checked through the npm and pip paths (guard_translate.go).
+	{"yarn", "yarn"},
+	{"pnpm", "pnpm"},
+	{"uv", "uv"},
+	{"poetry", "poetry"},
+	{"pipx", "pipx"},
 }
 
 func runGuardInit(cmd *cobra.Command, args []string) error {

@@ -550,7 +550,10 @@ func stripLeadingChainsawGlobals(args []string) []string {
 // short bundles like `-qv`.
 // guardSubcmds are the guarded tool commands (DisableFlagParsing): scanning
 // for chainsaw's own globals stops at the first one.
-var guardSubcmds = map[string]bool{"npm": true, "pip": true, "go": true, "cargo": true, "gem": true, "brew": true}
+var guardSubcmds = map[string]bool{
+	"npm": true, "pip": true, "go": true, "cargo": true, "gem": true, "brew": true,
+	"yarn": true, "pnpm": true, "uv": true, "poetry": true, "pipx": true,
+}
 
 func quietFlagInArgs(argv []string) bool {
 	for i := 1; i < len(argv); i++ {
@@ -615,7 +618,7 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	// otherwise swallows unparsed.
 	isQuiet := viper.GetBool("quiet") || envTruthy(os.Getenv("CHAINSAW_QUIET")) || quietFlagInArgs(os.Args)
 
-	specs, recognized, fromLockfile := guardSpecsFor(bin, args, parse)
+	specs, recognized, fromLockfile := guardSpecsForBin(bin, args, parse)
 	if fromLockfile && !isQuiet {
 		fmt.Fprintf(os.Stderr, "%s  scanning %d packages from lockfile\n", tag, len(specs))
 	}
@@ -732,7 +735,7 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 // leading tool flag silently disabled the entire lockfile scan while
 // `npm -q install evil@1.0.0` still blocked. Never hand this the passthrough
 // args; the real tool needs those (with its flags intact), the parsers do not.
-func guardSpecsFor(bin string, args []string, parse specParser) (specs []packageSpec, recognized, fromLockfile bool) {
+func guardSpecsFor(bin string, args []string, parse specParser, preferLock ...string) (specs []packageSpec, recognized, fromLockfile bool) {
 	parseArgs := stripLeadingFlagsForParse(args)
 	if bin == "brew" {
 		// brew's command is its first bareword (its pre-command options are
@@ -761,9 +764,9 @@ func guardSpecsFor(bin string, args []string, parse specParser) (specs []package
 	if onlyLocalPaths(specs) {
 		var expanded []packageSpec
 		if bin == "pip" {
-			expanded = expandPythonLockfiles()
+			expanded = expandPythonLockfiles(preferLock...)
 		} else {
-			expanded = expandLockfile(bin, parseArgs)
+			expanded = expandLockfile(bin, parseArgs, preferLock...)
 		}
 		if len(expanded) > 0 {
 			specs, fromLockfile = append(specs, expanded...), true
@@ -1857,7 +1860,11 @@ func parseGemSpec(arg string) packageSpec {
 //   - npm install | npm ci  → package-lock.json / npm-shrinkwrap.json / pnpm-lock.yaml / yarn.lock
 //   - pip install -r FILE    → the requirements file(s)
 //   - go get | go mod download → go.sum
-func expandLockfile(bin string, args []string) []packageSpec {
+//
+// preferLock moves the named lockfile(s) to the front of the search, for the
+// tool that owns them: `yarn install` reads yarn.lock even beside a stale
+// package-lock.json, `uv sync` reads uv.lock even beside a poetry.lock.
+func expandLockfile(bin string, args []string, preferLock ...string) []packageSpec {
 	switch bin {
 	case "npm":
 		if len(args) == 0 || !npmInstallActions[args[0]] {
@@ -1877,41 +1884,29 @@ func expandLockfile(bin string, args []string) []packageSpec {
 		// nothing and forced every nested entry into the fallback cache scan.
 		// See lockNameMode in pr_scan.go for why the two modes exist.
 		// npm-shrinkwrap.json first: npm installs from it when both exist.
-		for _, f := range []string{"npm-shrinkwrap.json", "package-lock.json"} {
-			if data, err := os.ReadFile(f); err == nil {
-				// Coordinates, NOT the name->version map. A real npm tree
-				// installs the same name at several versions (40 such names
-				// in a measured ui_new lockfile), and the map form both drops
-				// ~5% of installed coordinates and picks a different survivor
-				// each run, because Go randomises map iteration. For a byte
-				// scan that means non-reproducible coverage. See
-				// parsePackageLockCoordinates.
-				//
-				// Git, tarball and undeclared-registry packages come back as
-				// Origin-carrying specs (not assessed, malware lane kept);
-				// workspace members and file: directories as Local, like
-				// Cargo's sourceless crates.
-				// A file that only partly parses keeps every package that
-				// did — each still gets the malware lane — beside the
-				// unparsed marker: one bad entry must not hide the tree.
-				deps, nonReg, perr := parsePackageLockCoordinates(data)
-				if perr != nil {
-					return append(npmLockSpecs(deps, nonReg), unparsedLockSpec("npm", f))
-				}
-				if len(deps)+len(nonReg) > 0 {
-					return npmLockSpecs(deps, nonReg)
-				}
-			}
+		//
+		// package-lock / shrinkwrap: coordinates, NOT the name->version map. A
+		// real npm tree installs the same name at several versions (40 such
+		// names in a measured ui_new lockfile), and the map form both drops
+		// ~5% of installed coordinates and picks a different survivor each
+		// run, because Go randomises map iteration. For a byte scan that
+		// means non-reproducible coverage. See parsePackageLockCoordinates.
+		//
+		// pnpm / yarn, through the server's parsers: every version of a name,
+		// aliases keyed by their target.
+		//
+		// For every format: git, tarball and undeclared-registry packages come
+		// back as Origin-carrying specs (not assessed, malware lane kept, never
+		// checked as their namesakes); workspace members and file: directories
+		// as Local. A file that only partly parses keeps every package that
+		// did beside the unparsed marker: one bad entry must not hide the tree.
+		locks := []npmLockFile{
+			{"npm-shrinkwrap.json", parsePackageLockCoordinates},
+			{"package-lock.json", parsePackageLockCoordinates},
+			{"pnpm-lock.yaml", parsePNPMLock},
+			{"yarn.lock", parseYarnLock},
 		}
-		// pnpm / yarn, through the server's parsers: every version of a
-		// name, aliases keyed by their target, git / tarball / undeclared-
-		// registry packages as Origin specs (not assessed, never checked as
-		// their namesakes), workspace packages Local. A file that does not
-		// parse is reported (unparsedLockSpec), never skipped.
-		for _, lock := range []struct {
-			file  string
-			parse func([]byte) ([]lockCoordinate, []nonRegistryDep, error)
-		}{{"pnpm-lock.yaml", parsePNPMLock}, {"yarn.lock", parseYarnLock}} {
+		for _, lock := range preferFirst(locks, func(l npmLockFile) string { return l.file }, preferLock) {
 			if data, err := os.ReadFile(lock.file); err == nil {
 				reg, nonReg, perr := lock.parse(data)
 				if perr != nil {
@@ -1977,14 +1972,43 @@ func expandLockfile(bin string, args []string) []packageSpec {
 			// Pipfile tree instead of the file that was asked for.
 			return specs
 		}
-		return expandPythonLockfiles()
+		return expandPythonLockfiles(preferLock...)
 	}
 	return nil
 }
 
+// npmLockFile is one npm-family lockfile and the parser that reads it.
+type npmLockFile struct {
+	file  string
+	parse func([]byte) ([]lockCoordinate, []nonRegistryDep, error)
+}
+
+// preferFirst returns items with those whose key is in prefer moved to the
+// front, in prefer's order; the rest keep their order. With no prefer it
+// returns items unchanged, so the default precedence is untouched.
+func preferFirst[T any](items []T, key func(T) string, prefer []string) []T {
+	if len(prefer) == 0 {
+		return items
+	}
+	out := make([]T, 0, len(items))
+	for _, p := range prefer {
+		for _, it := range items {
+			if key(it) == p {
+				out = append(out, it)
+			}
+		}
+	}
+	for _, it := range items {
+		if !slices.Contains(prefer, key(it)) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
 // expandPythonLockfiles is the pip sweep for an install that names no
 // package and no -r.
-func expandPythonLockfiles() []packageSpec {
+func expandPythonLockfiles(preferLock ...string) []packageSpec {
 	// T3 tail — no named package and no -r. Sweep the resolved tree, the
 	// same way `npm install` sweeps package-lock and `cargo build` sweeps
 	// Cargo.lock. Without this a developer in a Poetry or Pipenv project
@@ -2003,7 +2027,7 @@ func expandPythonLockfiles() []packageSpec {
 	// kept), local code is Local, and a package from PyPI or a vouched-for
 	// index is a registry spec. One name at several versions (uv forks by
 	// marker) stays several specs.
-	for _, file := range []string{"Pipfile.lock", "poetry.lock", "uv.lock"} {
+	for _, file := range preferFirst([]string{"Pipfile.lock", "poetry.lock", "uv.lock"}, func(f string) string { return f }, preferLock) {
 		data, err := os.ReadFile(file)
 		if err != nil {
 			continue
