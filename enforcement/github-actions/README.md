@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 
 > Consume it pinned to a commit SHA:
-> `uses: Chain305/chainsaw-core/enforcement/github-actions@336553e7baec56ca1cbbd8b3d919e5aaadebee14 # v0.22.155`.
+> `uses: Chain305/chainsaw-core/enforcement/github-actions@5b50e4f9ae6d892c2bea81c39684bccea7e0ed0a # v0.22.156`.
 > Since v0.22.116 pr-scan blocks every action referenced by tag or branch, this
 > one included, so `@action-v1` fails the check it installs. The SHA above is
 > the open-core commit `action-v1.0.14` points at, whose action installs CLI
@@ -55,7 +55,7 @@ jobs:
           # shallow clone does not contain. Without this the pr-scan leg
           # silently scans nothing.
           fetch-depth: 0
-      - uses: Chain305/chainsaw-core/enforcement/github-actions@336553e7baec56ca1cbbd8b3d919e5aaadebee14 # v0.22.155
+      - uses: Chain305/chainsaw-core/enforcement/github-actions@5b50e4f9ae6d892c2bea81c39684bccea7e0ed0a # v0.22.156
         with:
           mode: warn   # warn | block
 ```
@@ -89,7 +89,7 @@ Example — fail only when blocking policies hit, but always upload the report:
 
 ```yaml
 - id: guard
-  uses: Chain305/chainsaw-core/enforcement/github-actions@336553e7baec56ca1cbbd8b3d919e5aaadebee14 # v0.22.155
+  uses: Chain305/chainsaw-core/enforcement/github-actions@5b50e4f9ae6d892c2bea81c39684bccea7e0ed0a # v0.22.156
   with:
     mode: warn
 
