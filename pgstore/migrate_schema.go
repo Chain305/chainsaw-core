@@ -317,6 +317,11 @@ func (s *Store) ensureComplianceAttestationsSchema() error {
 	if _, err := s.migExec(`ALTER TABLE compliance_attestations ADD COLUMN IF NOT EXISTS root_reported_at TIMESTAMPTZ`); err != nil {
 		return fmt.Errorf("add compliance_attestations.root_reported_at: %w", err)
 	}
+	// Per-login bypass baselines (internal/server/compliance_bypass.go):
+	// JSON {client_id: {cli, managers}}, written only by device-login reports.
+	if _, err := s.migExec(`ALTER TABLE compliance_attestations ADD COLUMN IF NOT EXISTS bypass_baseline TEXT`); err != nil {
+		return fmt.Errorf("add compliance_attestations.bypass_baseline: %w", err)
+	}
 	return nil
 }
 

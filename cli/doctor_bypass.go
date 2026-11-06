@@ -56,10 +56,7 @@ type bypassReport struct {
 }
 
 func runDoctorBypassCheck(cmd *cobra.Command, _ []string) error {
-	expected := strings.TrimSpace(cfgServerURL())
-	if expected == "" {
-		expected = strings.TrimSpace(os.Getenv("CHAINSAW_SERVER"))
-	}
+	expected := doctorServerURL()
 
 	rep := bypassReport{ChainsawURL: expected}
 
@@ -207,16 +204,15 @@ func checkNpmrc(expected string) bypassFinding {
 		f.Note = err.Error()
 		return f
 	}
+	// npm applies the LAST registry= line. Taking the first let a file that
+	// ends with a public registry pass the check while npm bypassed Chainsaw.
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") || line == "" {
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "registry") {
-			if i := strings.Index(line, "="); i >= 0 {
-				f.Configured = strings.TrimSpace(line[i+1:])
-				break
-			}
+		if i := strings.Index(line, "="); i >= 0 && strings.TrimSpace(line[:i]) == "registry" {
+			f.Configured = strings.TrimSpace(line[i+1:])
 		}
 	}
 	f.InBlock = hook.BlockContains(data, f.Configured)

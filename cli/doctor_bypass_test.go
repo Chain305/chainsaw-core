@@ -186,3 +186,17 @@ func TestCheckNpmrcOK(t *testing.T) {
 		t.Fatalf("expected ok, got %q (configured=%q)", got.Status, got.Configured)
 	}
 }
+
+// npm applies the LAST registry= line. A file that names Chainsaw first and
+// the public registry last bypasses Chainsaw and must report drift.
+func TestCheckNpmrcLastRegistryWins(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	body := "registry=https://chainsaw.example.com/repository/npm/\n; comment\n@acme:registry=https://chainsaw.example.com/repository/npm/\nregistry=https://registry.npmjs.org/\n"
+	if err := os.WriteFile(filepath.Join(dir, ".npmrc"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write .npmrc: %v", err)
+	}
+	if got := checkNpmrc("https://chainsaw.example.com"); got.Status != "drift" {
+		t.Fatalf("a trailing public registry= must drift, got %q (configured=%q)", got.Status, got.Configured)
+	}
+}

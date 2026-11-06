@@ -36,6 +36,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -368,11 +369,19 @@ func evaluateManager(m hook.Manager, envOut, envRaw map[string]string) ecosystem
 		state.Reason = err.Error()
 		return state
 	}
-	if !st.Wired {
+	switch {
+	case st.Wired:
+		state.Status = "compliant"
+	case userConfigRoutesThroughServer(m.Name(), st.ConfigPath, doctorServerURL()):
+		// `npm login`, `npm config set`, `pip config set` and
+		// `yarn config set` rewrite the user config without comments, so
+		// the marker block vanishes while the registry still points at
+		// Chainsaw. Judge the setting, not the comment. Reason stays empty
+		// so the config hash matches the marked-block state exactly.
+		state.Status = "compliant"
+	default:
 		state.Status = "drifted"
 		state.Reason = "no chainsaw-managed block in " + st.ConfigPath
-	} else {
-		state.Status = "compliant"
 	}
 
 	if projPath, perr := m.ConfigPathForScope(hook.ScopeProject); perr == nil {
@@ -440,6 +449,161 @@ func envDriftReason(w envWatch, val string) string {
 		// Reported, never graded. See envKind.
 		return ""
 	}
+}
+
+// doctorServerURL is the Chainsaw server doctor compares configs against:
+// the configured server_url, else $CHAINSAW_SERVER. Empty means unknown.
+func doctorServerURL() string {
+	if s := strings.TrimSpace(cfgServerURL()); s != "" {
+		return s
+	}
+	return strings.TrimSpace(os.Getenv("CHAINSAW_SERVER"))
+}
+
+// proxyRepoFor is the repository name install-hook writes for each manager
+// whose user config a package-manager command can rewrite without our
+// marker. Managers absent here keep the marker-only verdict.
+var proxyRepoFor = map[string]string{
+	"npm":  "npmjs",
+	"bun":  "npmjs", // bun is wired through the same ~/.npmrc shape
+	"yarn": "yarnpkg",
+	"pip":  "pypi",
+}
+
+// userConfigRoutesThroughServer reports whether the user config at path
+// still routes every install through the configured Chainsaw server even
+// though the marker block is gone. It is all-or-nothing: the effective
+// default registry/index must be set and point at Chainsaw, and so must
+// every other registry-bearing key the file sets (npm/yarn scoped
+// registries, pip extra-index-url). Unknown server, unreadable file, or
+// any value pointing elsewhere keeps today's "drifted" verdict.
+func userConfigRoutesThroughServer(manager, path, server string) bool {
+	repo, ok := proxyRepoFor[manager]
+	if !ok || server == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	urls := configRegistryURLs(manager, string(data))
+	if len(urls) == 0 {
+		return false
+	}
+	for _, u := range urls {
+		if !registryPointsAtServer(u, server, repo) {
+			return false
+		}
+	}
+	return true
+}
+
+// configRegistryURLs returns the registry values a user config sets. The
+// first element is the effective default registry; nil when it is unset.
+func configRegistryURLs(manager, body string) []string {
+	var primary string
+	var others []string
+	switch manager {
+	case "npm", "bun":
+		// .npmrc is ini; npm's loader is last-key-wins.
+		for _, line := range strings.Split(body, "\n") {
+			k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if !ok || strings.HasPrefix(k, "#") || strings.HasPrefix(k, ";") {
+				continue
+			}
+			k, v = strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"'`)
+			switch {
+			case k == "registry":
+				primary = v
+			case strings.HasSuffix(k, ":registry"): // @scope:registry
+				others = append(others, v)
+			}
+		}
+	case "yarn":
+		// .yarnrc.yml: the unindented key is the default; indented ones
+		// live under npmScopes.
+		for _, line := range strings.Split(body, "\n") {
+			trim := strings.TrimSpace(line)
+			v, ok := strings.CutPrefix(trim, "npmRegistryServer:")
+			if !ok {
+				continue
+			}
+			v = strings.Trim(strings.TrimSpace(v), `"'`)
+			if !isIndented(line) {
+				primary = v
+			} else {
+				others = append(others, v)
+			}
+		}
+	case "pip":
+		// pip.conf is configparser ini: `=` or `:` separators, `-`/`_`
+		// spellings, and multi-line values on indented continuation lines.
+		// Every index-url in any section counts (pip reads [install] and
+		// [download] too); every extra-index-url must also be Chainsaw.
+		cur := ""
+		for _, line := range strings.Split(body, "\n") {
+			trim := strings.TrimSpace(line)
+			if trim == "" || strings.HasPrefix(trim, "#") || strings.HasPrefix(trim, ";") {
+				continue
+			}
+			if isIndented(line) && cur != "" {
+				others = append(others, strings.Fields(trim)...)
+				continue
+			}
+			cur = ""
+			i := strings.IndexAny(trim, "=:")
+			if strings.HasPrefix(trim, "[") || i < 0 {
+				continue
+			}
+			k := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(trim[:i])), "_", "-")
+			vals := strings.Fields(trim[i+1:])
+			switch k {
+			case "index-url":
+				if len(vals) > 0 {
+					primary = vals[0]
+				}
+				others = append(others, vals...)
+			case "extra-index-url":
+				others = append(others, vals...)
+			default:
+				continue
+			}
+			cur = k
+		}
+	}
+	if primary == "" {
+		return nil
+	}
+	return append([]string{primary}, others...)
+}
+
+func isIndented(line string) bool {
+	return strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
+}
+
+// registryPointsAtServer reports whether raw names the proxy repository
+// install-hook writes: same scheme and host as server (parseCompareTarget,
+// the rule driftCompare uses) and a path of
+// <server base path>/repository/@<org>/<repo>/... The org slug is not
+// known offline, so any non-empty slug segment is accepted.
+func registryPointsAtServer(raw, server, repo string) bool {
+	rs, rh, ok := parseCompareTarget(raw)
+	ss, sh, ok2 := parseCompareTarget(server)
+	if !ok || !ok2 || rs != ss || rh != sh {
+		return false
+	}
+	ru, err := url.Parse(strings.TrimSpace(raw))
+	su, err2 := url.Parse(strings.TrimSpace(server))
+	if err != nil || err2 != nil {
+		return false
+	}
+	rest, found := strings.CutPrefix(ru.Path, strings.TrimRight(su.Path, "/")+"/repository/@")
+	if !found {
+		return false
+	}
+	slug, after, _ := strings.Cut(rest, "/")
+	r, _, _ := strings.Cut(after, "/")
+	return slug != "" && r == repo
 }
 
 // hasChainsawSentinel inlines a dependency-light sentinel check so
