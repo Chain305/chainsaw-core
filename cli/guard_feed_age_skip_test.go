@@ -469,15 +469,18 @@ func TestInstallGuardInitSkip(t *testing.T) {
 		t.Fatalf("installer re-run must be a no-op naming the skip list: out=%q err=%v", out, err)
 	}
 
-	// An explicitly different list must refuse, name the replacement, and
-	// leave rc alone.
-	_, err = install([]string{"npm", "brew"}, true)
-	if err == nil || !strings.Contains(err.Error(), "CHAINSAW_GUARD_SKIP=npm,brew") {
-		t.Fatalf("different skip list must refuse with the replacement line, got %v", err)
-	}
 	after, _ := os.ReadFile(rc)
 	if !bytes.Equal(before, after) {
-		t.Fatal("refused or no-op install must not modify the rc file")
+		t.Fatal("no-op install must not modify the rc file")
+	}
+
+	// An explicitly different list rewrites the line --install wrote
+	// (TestInstallSkipRewritesOwnLine covers the hand-edited refusal).
+	if _, err := install([]string{"npm", "brew"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(rc); !strings.Contains(string(data), "CHAINSAW_GUARD_SKIP=npm,brew chainsaw") || strings.Count(string(data), "guard init") != 1 {
+		t.Fatalf("want the one line rewritten:\n%s", data)
 	}
 }
 

@@ -1389,7 +1389,16 @@ func noteShellGuardStillRoutes(w io.Writer, managers ...string) {
 		}
 	}
 	fmt.Fprintf(w, "note: %s installs are still checked by the shell guard (`chainsaw guard init` in %s).\n", strings.Join(routed, ", "), rc)
-	fmt.Fprintf(w, "  to stop that too, change that line to:\n      %s\n  and open a new shell\n", shellSourceLine(shell, keep))
+	// When the line is the one --install wrote, give a command that edits it:
+	// the bare rc line used to be printed here, users ran it in the shell,
+	// and that changed neither the rc nor (before guard init removed skipped
+	// wrappers) the functions already defined.
+	if want, err := shellRCPath(sh.Shell); err == nil && want == rc && guardLineIsOurs(sh.Shell, lines) {
+		fmt.Fprintf(w, "  to stop that too, run:\n      chainsaw guard init %s --install --skip %s\n", sh.Shell, strings.Join(keep, ","))
+		fmt.Fprintf(w, "  then open a new shell (this shell only: %s)\n", unset)
+		return
+	}
+	fmt.Fprintf(w, "  to stop that too, edit that line in %s (do not run it) to read:\n      %s\n  and open a new shell\n", rc, shellSourceLine(shell, keep))
 	if len(lines) > 1 {
 		fmt.Fprintf(w, "  (%d activation lines are active across your shell config files; each defines its own functions, so change all of them)\n", len(lines))
 	}

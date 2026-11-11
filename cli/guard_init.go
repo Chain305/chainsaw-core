@@ -197,16 +197,27 @@ func runGuardInit(cmd *cobra.Command, args []string) error {
 			strings.Join(unknown, ", "), guardInitSkipNames())
 	}
 	tools := make([]struct{ fn, tool string }, 0, len(guardedTools))
+	var skipped []struct{ fn, tool string }
 	for _, t := range guardedTools {
 		if !skip[t.fn] {
 			tools = append(tools, t)
+		} else {
+			skipped = append(skipped, t)
 		}
 	}
 
+	// A skipped manager's wrapper may already be defined in this shell (the
+	// rc was sourced before the skip list changed, or the user evaluated the
+	// new line by hand). Defining fewer functions does not remove that one,
+	// so the skip silently did nothing until a new shell. Remove it, but only
+	// when its body is ours: nvm and friends define their own `npm` function.
 	out := cmd.OutOrStdout()
 	switch shell {
 	case "fish":
 		fmt.Fprintln(out, "# chainsaw install guard — https://chain305.com")
+		for _, t := range skipped {
+			fmt.Fprintf(out, "if functions -q %s; and functions %s | string match -q '*command chainsaw %s *'; functions -e %s; end\n", t.fn, t.fn, t.tool, t.fn)
+		}
 		for _, t := range tools {
 			fmt.Fprintf(out, "function %s; command chainsaw %s $argv; end\n", t.fn, t.tool)
 		}
@@ -216,6 +227,9 @@ func runGuardInit(cmd *cobra.Command, args []string) error {
 		// this is recursion-safe exactly like the POSIX branch. @args forwards
 		// every argument (including switches) verbatim.
 		fmt.Fprintln(out, "# chainsaw install guard — https://chain305.com")
+		for _, t := range skipped {
+			fmt.Fprintf(out, "if ((Get-Item Function:%s -ErrorAction SilentlyContinue).Definition -like '*chainsaw %s @args*') { Remove-Item Function:%s }\n", t.fn, t.tool, t.fn)
+		}
 		for _, t := range tools {
 			fmt.Fprintf(out, "function %s { chainsaw %s @args }\n", t.fn, t.tool)
 		}
@@ -230,6 +244,11 @@ func runGuardInit(cmd *cobra.Command, args []string) error {
 		}
 	case "bash", "zsh", "sh", "":
 		fmt.Fprintln(out, "# chainsaw install guard — https://chain305.com")
+		// typeset -f prints the body in bash, zsh and ksh; in dash it fails
+		// and the case matches nothing.
+		for _, t := range skipped {
+			fmt.Fprintf(out, "case \"$(typeset -f %s 2>/dev/null)\" in *'command chainsaw %s \"$@\"'*) unset -f %s;; esac\n", t.fn, t.tool, t.fn)
+		}
 		for _, t := range tools {
 			fmt.Fprintf(out, "%s() { command chainsaw %s \"$@\"; }\n", t.fn, t.tool)
 		}
@@ -390,11 +409,28 @@ func installGuardInit(cmd *cobra.Command, shell string, skip []string, explicitS
 	if found {
 		line = lines[0]
 	}
+	dry, _ := cmd.Flags().GetBool("dry-run")
+	if found && explicitSkip && !sameSkipSet(guardShimSkips(lines...), skip) && guardLineIsOurs(shell, lines) {
+		// The one line there is byte-for-byte what --install writes, so
+		// changing its skip list is editing our own line, not the user's.
+		want := shellSourceLine(shell, skip)
+		if dry {
+			fmt.Fprintf(out, "chainsaw: --install would change this line in %s:\n    %s\nto:\n    %s\n", rc, line, want)
+			return nil
+		}
+		if err := replaceRCLine(rc, line, want); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "chainsaw: updated the install guard in %s (leaving unwrapped: %s).\n", rc, guardShimSkipNames(guardShimSkips(want)))
+		fmt.Fprintf(out, "chainsaw: open a new shell, or run: %s\n", reloadHint(shell, rc))
+		return nil
+	}
 	if found && explicitSkip && !sameSkipSet(guardShimSkips(lines...), skip) {
-		// The line is already there with a different --skip list. Appending a
-		// second one would leave two activations whose last one silently wins,
-		// and rewriting a user's rc in place is not ours to do. Say exactly
-		// what to change, and do not report success.
+		// The line is already there with a different --skip list but was
+		// hand-edited or appears more than once. Appending a second one would
+		// leave two activations whose last one silently wins, and rewriting
+		// a line we did not write is not ours to do. Say exactly what to
+		// change, and do not report success.
 		more := ""
 		if len(lines) > 1 {
 			more = fmt.Sprintf("\n  (%s has %d activation lines; each one defines its own functions, so change or remove all of them)", rc, len(lines))
@@ -403,7 +439,6 @@ func installGuardInit(cmd *cobra.Command, shell string, skip []string, explicitS
 			"  replace this line:\n      %s\n  with:\n      %s\n  then open a new shell%s",
 			rc, line, shellSourceLine(shell, skip), more)
 	}
-	dry, _ := cmd.Flags().GetBool("dry-run")
 	if found {
 		note := ""
 		if names := guardShimSkipNames(guardShimSkips(lines...)); names != "" {
@@ -436,10 +471,50 @@ func installGuardInit(cmd *cobra.Command, shell string, skip []string, explicitS
 	}
 
 	fmt.Fprintf(out, "chainsaw: added the install guard to %s.\n", rc)
+	fmt.Fprintf(out, "chainsaw: restart your shell or run: %s\n", reloadHint(shell, rc))
+	return nil
+}
+
+// reloadHint is the command that re-reads rc in the current shell.
+func reloadHint(shell, rc string) string {
 	if shell == "powershell" || shell == "pwsh" {
-		fmt.Fprintf(out, "chainsaw: restart PowerShell or run: . %s\n", rc)
-	} else {
-		fmt.Fprintf(out, "chainsaw: restart your shell or run: source %s\n", rc)
+		return ". " + rc
+	}
+	return "source " + rc
+}
+
+// guardLineIsOurs reports whether the rc holds exactly one activation line and
+// it is exactly what --install writes for its own skip list, so rewriting it
+// cannot clobber anything the user typed.
+func guardLineIsOurs(shell string, lines []string) bool {
+	if len(lines) != 1 {
+		return false
+	}
+	values, _ := guardShimSkipValues(lines[0])
+	return lines[0] == shellSourceLine(shell, values)
+}
+
+// replaceRCLine swaps the one non-comment line equal to old for want. It
+// writes through the path, so a symlinked rc (dotfile managers) stays a
+// symlink and keeps its permissions.
+func replaceRCLine(rc, old, want string) error {
+	data, err := os.ReadFile(rc)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", rc, err)
+	}
+	rows := strings.Split(string(data), "\n")
+	n := 0
+	for i, r := range rows {
+		if strings.TrimSpace(r) == old {
+			rows[i] = strings.Replace(r, old, want, 1)
+			n++
+		}
+	}
+	if n != 1 {
+		return fmt.Errorf("%s: expected one guard line, found %d; nothing changed", rc, n)
+	}
+	if err := os.WriteFile(rc, []byte(strings.Join(rows, "\n")), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", rc, err)
 	}
 	return nil
 }
