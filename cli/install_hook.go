@@ -1396,6 +1396,7 @@ func noteShellGuardStillRoutes(w io.Writer, managers ...string) {
 	if want, err := shellRCPath(sh.Shell); err == nil && want == rc && guardLineIsOurs(sh.Shell, lines) {
 		fmt.Fprintf(w, "  to stop that too, run:\n      chainsaw guard init %s --install --skip %s\n", sh.Shell, strings.Join(keep, ","))
 		fmt.Fprintf(w, "  then open a new shell (this shell only: %s)\n", unset)
+		fmt.Fprintln(w, "  (to remove the shell guard for every manager: chainsaw guard uninstall)")
 		return
 	}
 	fmt.Fprintf(w, "  to stop that too, edit that line in %s (do not run it) to read:\n      %s\n  and open a new shell\n", rc, shellSourceLine(shell, keep))
@@ -1403,4 +1404,5 @@ func noteShellGuardStillRoutes(w io.Writer, managers ...string) {
 		fmt.Fprintf(w, "  (%d activation lines are active across your shell config files; each defines its own functions, so change all of them)\n", len(lines))
 	}
 	fmt.Fprintf(w, "  (for this shell only: %s)\n", unset)
+	fmt.Fprintln(w, "  (to remove the shell guard for every manager: chainsaw guard uninstall)")
 }

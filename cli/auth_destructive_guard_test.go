@@ -183,6 +183,7 @@ var destructiveVerbExempt = map[string]string{
 	"chainsaw admission soak clear": "read-only: evaluates the soak gate and prints a kubectl patch; never applies it",
 	"chainsaw telemetry reset":      "resets local telemetry consent; `telemetry on/off` restores it, no server state — and the operator supplies no argument that the reset destroys",
 	"chainsaw uninstall-hook":       "removes the local package-manager hook; `install-hook` restores it, and refusing to let someone turn the guard off is worse than the fat-finger risk",
+	"chainsaw guard uninstall":      "removes the shell guard line from local rc files after backing each up; `guard init --install` restores it, and like uninstall-hook, refusing to let someone turn the guard off is worse than the fat-finger risk",
 	"chainsaw policy disable":       "stops one rule from firing; `policy enable` restores it, nothing stops working, and the operator supplies no argument the disable destroys",
 }
 
