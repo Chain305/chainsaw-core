@@ -250,7 +250,7 @@ func TestShellSourceLine(t *testing.T) {
 		"pwsh":       "chainsaw guard init pwsh | Invoke-Expression",
 	}
 	for shell, want := range cases {
-		if got := shellSourceLine(shell); got != want {
+		if got := shellSourceLine(shell, nil); got != want {
 			t.Errorf("shellSourceLine(%q) = %q, want %q", shell, got, want)
 		}
 	}
@@ -265,7 +265,7 @@ func TestInstallGuardInit_AppendsAndIsIdempotent(t *testing.T) {
 		var buf bytes.Buffer
 		c := &cobra.Command{}
 		c.SetOut(&buf)
-		if err := installGuardInit(c, "zsh"); err != nil {
+		if err := installGuardInit(c, "zsh", nil, false); err != nil {
 			t.Fatalf("installGuardInit: %v", err)
 		}
 		return buf.String()
@@ -308,7 +308,7 @@ func TestInstallGuardInit_DryRunWritesNothing(t *testing.T) {
 	c.Flags().Bool("dry-run", true, "")
 	var buf bytes.Buffer
 	c.SetOut(&buf)
-	if err := installGuardInit(c, "zsh"); err != nil {
+	if err := installGuardInit(c, "zsh", nil, false); err != nil {
 		t.Fatalf("installGuardInit dry-run: %v", err)
 	}
 
@@ -328,7 +328,7 @@ func TestInstallGuardInit_FishUsesConfigPath(t *testing.T) {
 	var buf bytes.Buffer
 	c := &cobra.Command{}
 	c.SetOut(&buf)
-	if err := installGuardInit(c, "fish"); err != nil {
+	if err := installGuardInit(c, "fish", nil, false); err != nil {
 		t.Fatalf("installGuardInit fish: %v", err)
 	}
 	rc := filepath.Join(home, ".config", "fish", "config.fish")
@@ -351,7 +351,7 @@ func TestInstallGuardInit_CmdRefusesLoudly(t *testing.T) {
 	var buf bytes.Buffer
 	c := &cobra.Command{}
 	c.SetOut(&buf)
-	err := installGuardInit(c, "cmd")
+	err := installGuardInit(c, "cmd", nil, false)
 	if err == nil {
 		t.Fatal("--install cmd must return an error, not report success")
 	}
@@ -394,7 +394,7 @@ func TestInstallGuardInit_PowerShellUsesQueriedProfile(t *testing.T) {
 	var buf bytes.Buffer
 	c := &cobra.Command{}
 	c.SetOut(&buf)
-	if err := installGuardInit(c, "pwsh"); err != nil {
+	if err := installGuardInit(c, "pwsh", nil, false); err != nil {
 		t.Fatalf("installGuardInit pwsh: %v", err)
 	}
 	data, err := os.ReadFile(profile)

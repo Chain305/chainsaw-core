@@ -634,15 +634,20 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	// full coordinate set isn't cached, newLocalGuard() surfaces a one-line
 	// nudge to run `chainsaw guard update` on the user's own schedule.
 	guard := newLocalGuard()
-	// Interactive-only: when the full OpenSSF feed is absent (only the embedded
-	// floor is loaded) or the signed bundle is stale, OFFER a one-time network
-	// refresh instead of only nudging. maybeAutoFetchFeed gates on a real TTY and
-	// respects CHAINSAW_OFFLINE, so CI / air-gapped / quiet runs never fetch — the
-	// offline guarantee holds. On a yes we reload so this very install uses the
-	// fresh set. --quiet suppresses the prompt entirely (no blocking on a scripted run).
+	// Interactive-only: when the full OpenSSF feed is ABSENT (only the embedded
+	// floor is loaded), OFFER a one-time download instead of only nudging.
+	// maybeAutoFetchFeed gates on a real TTY and respects CHAINSAW_OFFLINE, so
+	// CI / air-gapped / quiet runs never fetch — the offline guarantee holds. On
+	// a yes we reload so this very install uses the fresh set. --quiet
+	// suppresses the prompt entirely (no blocking on a scripted run).
+	//
+	// A STALE feed is deliberately notice-only (stale is passed as false): a
+	// refresh after a week is almost never a 304, so a prompt here would stall
+	// installs on a ~46 MB download weekly — and `guard update` cannot refresh
+	// a stale signed bundle at all, so offering it for one re-prompted every
+	// install. newLocalGuard prints the stale line; `guard status` shows it.
 	if !isQuiet {
-		stale := guard.bundle != nil && guard.bundle.Stale()
-		fetched, notice, ferr := maybeAutoFetchFeed(guard.fullFeed, stale, prodAutoFetchDeps())
+		fetched, notice, ferr := maybeAutoFetchFeed(guard.fullFeed, false, prodAutoFetchDeps())
 		if ferr != nil {
 			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, "feed refresh failed; continuing with the offline floor ("+ferr.Error()+")"))
 		} else if fetched {
@@ -659,6 +664,17 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	if !isQuiet {
 		for _, n := range guard.notices {
 			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, n))
+		}
+	}
+	// A stale `guard update` cache: ask once whether to keep it updated in the
+	// background, then either start that refresh (never waited on) or say how
+	// old the feed is and how to refresh it. Coloured by age. --quiet hides
+	// the lines and the question, never a refresh the user consented to.
+	if guard.staleNotice != "" {
+		for _, line := range staleFeedLines(guard.staleNotice, isQuiet, prodFeedAutoUpdateDeps()) {
+			if !isQuiet {
+				fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(feedAgeColor(guard.feedAge), line))
+			}
 		}
 	}
 

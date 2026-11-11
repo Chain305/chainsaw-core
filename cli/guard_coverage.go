@@ -525,7 +525,15 @@ func guardLedger(g *localGuard, now time.Time) coverage.Ledger {
 	// The embedded floor alone is partial coverage; an operator who required
 	// `malware` asked for the full OpenSSF set, not the famous-attack subset.
 	if g != nil && g.fullFeed {
-		led[coverage.SourceMalware] = ok()
+		// LastOKAt is the feed's real refresh time, not "now": a cache last
+		// refreshed months ago must not read as current in the audit trail.
+		// A stale feed still counts as available (decided 2026-11-11: failing
+		// the gate on age would refuse installs on fleets with copied feeds).
+		e := ok()
+		if !g.feedCheckedAt.IsZero() {
+			e.LastOKAt = g.feedCheckedAt
+		}
+		led[coverage.SourceMalware] = e
 	} else {
 		led[coverage.SourceMalware] = unavailable("feed_not_downloaded")
 	}

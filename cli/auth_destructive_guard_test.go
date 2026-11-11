@@ -471,7 +471,7 @@ func TestGuardStatus_JSONEmitsJSON(t *testing.T) {
 	if !isSingleJSONValue(got) {
 		t.Fatalf("guard status --json is not one clean JSON value: %q", got)
 	}
-	for _, key := range []string{`"installs_checked"`, `"blocks"`, `"telemetry_consent"`} {
+	for _, key := range []string{`"installs_checked"`, `"blocks"`, `"telemetry_consent"`, `"feed"`} {
 		if !strings.Contains(string(got), key) {
 			t.Errorf("guard status --json is missing %s", key)
 		}

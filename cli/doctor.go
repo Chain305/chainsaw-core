@@ -211,9 +211,13 @@ type doctorManagerEntry struct {
 	// Shimmed is true when this manager is routed through the `chainsaw guard
 	// init` shell-function shim (detected from the user's shell rc files) even
 	// though its config file is not wired. Protected, via a different mechanism.
-	Shimmed    bool   `json:"shimmed,omitempty"`
-	ConfigPath string `json:"config_path"`
-	Error      string `json:"error,omitempty"`
+	Shimmed bool `json:"shimmed,omitempty"`
+	// ShimSkipped is true when the shell guard is active for the current
+	// shell but leaves this manager out (CHAINSAW_GUARD_SKIP / --skip), so its
+	// installs are NOT checked unless the config file is wired.
+	ShimSkipped bool   `json:"shim_skipped,omitempty"`
+	ConfigPath  string `json:"config_path"`
+	Error       string `json:"error,omitempty"`
 }
 
 type doctorReport struct {
@@ -266,12 +270,16 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	// A config file that isn't wired doesn't mean "unprotected": `chainsaw guard
 	// init` shims npm/pip/go at the shell level. Detect that so the table can
 	// tell the truth instead of flatly reporting "no".
-	shimInstalled, shimSource := detectGuardShim(shellRCCandidates())
-	if shimInstalled {
-		guarded := guardedManagerSet()
+	// Only the CURRENT shell's rc files count (guardShimState).
+	shim := guardShimState()
+	if shim.Found {
 		for i := range report.Managers {
-			if guarded[report.Managers[i].Name] {
+			name := report.Managers[i].Name
+			switch {
+			case guardShimRoutes(name, shim.Skip):
 				report.Managers[i].Shimmed = true
+			case len(guardShimFuncs(name)) > 0:
+				report.Managers[i].ShimSkipped = true
 			}
 		}
 	}
@@ -329,10 +337,34 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	}
 	if anyShimOnly {
 		fmt.Fprintf(cmd.OutOrStdout(),
-			"\nshim = routed through the shell guard (`chainsaw guard init` in %s); installs are\n"+
-				"       checked, the manager's own config is left untouched. \"yes\" means the config\n"+
+			"\nshim = routed through the shell guard (`chainsaw guard init` in %s, read by %s); installs\n"+
+				"       are checked, the manager's own config is left untouched. \"yes\" means the config\n"+
 				"       file also points at chainsaw (survives outside your shell, e.g. CI).\n",
-			shimSource)
+			shim.Path, shim.Shell)
+	}
+	anySkipped := false
+	for _, e := range report.Managers {
+		if e.ShimSkipped && !e.Wired {
+			anySkipped = true
+			break
+		}
+	}
+	if anySkipped {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"\nskipped = left out of the shell guard (%s in %s or your environment);\n"+
+				"          installs through it are NOT checked unless its config file is wired.\n",
+			guardSkipEnv, shim.Path)
+	}
+	switch {
+	case !shim.Found && len(shim.OtherFiles) > 0:
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"\nnote: the shell guard is set up in %s, but your current shell is %s, which does not\n"+
+				"      read that file; installs from this shell are not checked by it.\n"+
+				"      Turn it on for %s: chainsaw guard init --install\n",
+			strings.Join(shim.OtherFiles, ", "), shim.Shell, shim.Shell)
+	case shim.Found && len(shim.OtherFiles) > 0:
+		fmt.Fprintf(cmd.OutOrStdout(), "\n(the shell guard is also set up for other shells in %s; the table shows %s)\n",
+			strings.Join(shim.OtherFiles, ", "), shim.Shell)
 	}
 	printUpstreams(cmd.OutOrStdout(), report.Upstreams, probe)
 
@@ -533,13 +565,17 @@ func printDoctorTable(cmd *cobra.Command, out io.Writer, report doctorReport) {
 }
 
 // plainWired is the uncoloured WIRED cell text. "yes" = config-file wired,
-// "shim" = shell-function guard active but config untouched, "no" = neither.
+// "shim" = shell-function guard active but config untouched, "skipped" = the
+// shell guard is active but deliberately leaves this manager out, "no" =
+// neither.
 func plainWired(e doctorManagerEntry) string {
 	switch {
 	case e.Wired:
 		return "yes"
 	case e.Shimmed:
 		return "shim"
+	case e.ShimSkipped:
+		return "skipped"
 	default:
 		return "no"
 	}

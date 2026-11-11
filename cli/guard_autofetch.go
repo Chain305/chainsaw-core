@@ -192,8 +192,11 @@ func roundBackoffForHumans(d time.Duration) string {
 	return fmt.Sprintf("%dd", int(d.Hours())/24)
 }
 
-// prodAutoFetchDeps wires maybeAutoFetchFeed to real behavior: the stdin TTY
-// check, the CHAINSAW_OFFLINE kill switch, the default-Yes confirm prompt, and
+// prodAutoFetchDeps wires maybeAutoFetchFeed to real behavior: the
+// stdin-and-stderr terminal check (the question is asked on stderr, so a
+// redirected stdout such as `npm install --json > out.json` is neither
+// corrupted nor left hanging on an unseen prompt), the CHAINSAW_OFFLINE kill
+// switch, the default-Yes confirm prompt, and
 // the existing `guard update` fetch (conditional ETag, so a stale refresh is a
 // fast 304 when nothing changed).
 //
@@ -202,9 +205,9 @@ func roundBackoffForHumans(d time.Duration) string {
 // without any caller sniffing. See runGuardUpdateExplicit.
 func prodAutoFetchDeps() *autoFetchDeps {
 	return &autoFetchDeps{
-		isTTY:     stdinIsTerminal,
+		isTTY:     guardPromptInteractive,
 		isOffline: func() bool { return envTruthy(os.Getenv("CHAINSAW_OFFLINE")) },
-		confirm:   PromptConfirmDefaultYes,
+		confirm:   func(label string) bool { return promptOnStderr(label, true) },
 		fetch:     func() error { return runGuardUpdate(guardUpdateCmd, nil) },
 		now:       time.Now,
 		loadState: loadGuardState,

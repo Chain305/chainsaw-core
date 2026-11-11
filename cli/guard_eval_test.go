@@ -241,7 +241,7 @@ func TestMalwareFeedPlausibilityFloor(t *testing.T) {
 		t.Setenv(guardDBEnv, writeMalwareEntriesFile(t, 3))
 		idx := malware.NewIndex(guardLogger)
 		var floor, extra int
-		stderr := captureStderr(t, func() { floor, extra = loadMalwareSources(idx, nil) })
+		stderr := captureStderr(t, func() { floor, extra, _ = loadMalwareSources(idx, nil) })
 		if extra != 0 {
 			t.Fatalf("extra = %d, want 0 (3 entries is not the full OpenSSF set)", extra)
 		}
@@ -264,7 +264,7 @@ func TestMalwareFeedPlausibilityFloor(t *testing.T) {
 		t.Setenv(guardDBEnv, writeMalwareEntriesFile(t, guardMalwareFeedFloor))
 		idx := malware.NewIndex(guardLogger)
 		var extra int
-		stderr := captureStderr(t, func() { _, extra = loadMalwareSources(idx, nil) })
+		stderr := captureStderr(t, func() { _, extra, _ = loadMalwareSources(idx, nil) })
 		if extra != guardMalwareFeedFloor {
 			t.Fatalf("extra = %d, want %d", extra, guardMalwareFeedFloor)
 		}
@@ -276,7 +276,7 @@ func TestMalwareFeedPlausibilityFloor(t *testing.T) {
 	t.Run("no cache file at all", func(t *testing.T) {
 		t.Setenv(guardDBEnv, filepath.Join(t.TempDir(), "absent.json"))
 		idx := malware.NewIndex(guardLogger)
-		_, extra := loadMalwareSources(idx, nil)
+		_, extra, _ := loadMalwareSources(idx, nil)
 		if extra != 0 {
 			t.Fatalf("extra = %d, want 0", extra)
 		}
@@ -361,7 +361,7 @@ func TestMalwareBundleMustBeVerifiedToClaimFullFeed(t *testing.T) {
 		t.Fatal("skip-verify bundle should report Verified() == false")
 	}
 	idx := malware.NewIndex(guardLogger)
-	if _, extra := loadMalwareSources(idx, unsigned); extra != 0 {
+	if _, _, extra := loadMalwareSources(idx, unsigned); extra != 0 {
 		t.Fatalf("unsigned bundle extra = %d, want 0 (no coverage claim without a signature)", extra)
 	}
 	if res := idx.Lookup(ctx, "npm", "synthetic-mal-00002", "1.0.0"); !res.IsKnownMalicious {
@@ -373,7 +373,7 @@ func TestMalwareBundleMustBeVerifiedToClaimFullFeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load signed bundle: %v", err)
 	}
-	if _, extra := loadMalwareSources(malware.NewIndex(guardLogger), verified); extra != guardMalwareFeedFloor {
+	if _, _, extra := loadMalwareSources(malware.NewIndex(guardLogger), verified); extra != guardMalwareFeedFloor {
 		t.Fatalf("verified bundle extra = %d, want %d", extra, guardMalwareFeedFloor)
 	}
 }
@@ -436,7 +436,7 @@ func TestGuardNeverWarnsOnLowConfidenceCombosquat(t *testing.T) {
 func TestGuardLoadMalwareSourcesCarriesFloor(t *testing.T) {
 	t.Setenv(guardDBEnv, filepath.Join(t.TempDir(), "absent.json"))
 	idx := malware.NewIndex(nil)
-	floor, extra := loadMalwareSources(idx, nil)
+	floor, extra, _ := loadMalwareSources(idx, nil)
 	if want := len(malware.Floor()); floor != want {
 		t.Fatalf("floor = %d, want %d (len(malware.Floor()))", floor, want)
 	}

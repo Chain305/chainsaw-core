@@ -70,6 +70,14 @@ copy-paste:
 
   chainsaw guard init --install
 
+To leave some managers unwrapped, pass --skip, or set CHAINSAW_GUARD_SKIP.
+--install records the list in the rc line as CHAINSAW_GUARD_SKIP=..., which
+doctor and uninstall-hook read back. An older chainsaw ignores the variable
+and wraps every manager, so a downgrade fails safe:
+
+  chainsaw guard init --install --skip npm,brew
+  eval "$(CHAINSAW_GUARD_SKIP=npm chainsaw guard init zsh)"
+
 --install supports every shell that HAS a startup file: bash, zsh, sh, fish and
 PowerShell. cmd.exe has none — doskey macros live only in the console session
 that defined them — so --install refuses for cmd rather than writing a file no
@@ -84,6 +92,8 @@ func init() {
 		"Append the guard activation line to your shell rc file (idempotent) instead of printing it.")
 	guardInitCmd.Flags().Bool("dry-run", false,
 		"With --install: print the target rc file and the exact line that would be added, without writing anything.")
+	guardInitCmd.Flags().StringSlice("skip", nil,
+		"Package managers to leave unwrapped, comma-separated (e.g. --skip npm,brew). \"pip\" also skips pip3.")
 	guardCmd.AddCommand(guardInitCmd)
 }
 
@@ -108,6 +118,51 @@ var guardedTools = []struct{ fn, tool string }{
 	{"pipx", "pipx"},
 }
 
+// guardSkipEnv carries the skip list in the rc line --install writes. It is an
+// environment variable rather than the --skip flag on purpose: a chainsaw that
+// predates --skip fails the whole `guard init` on an unknown flag, the eval
+// gets empty output and EVERY manager is silently unwrapped; an unknown
+// environment variable is ignored, so an older binary wraps everything.
+const guardSkipEnv = "CHAINSAW_GUARD_SKIP"
+
+// parseGuardSkip resolves --skip values to the set of shell function names to
+// leave out. A value matches a function name (pip3) or the tool it routes to
+// (pip, which covers pip and pip3). Unknown values are returned, never
+// guessed at.
+func parseGuardSkip(values []string) (skip map[string]bool, names, unknown []string) {
+	skip = map[string]bool{}
+	for _, v := range values {
+		for _, name := range strings.Split(v, ",") {
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name == "" {
+				continue
+			}
+			matched := false
+			for _, t := range guardedTools {
+				if t.fn == name || t.tool == name {
+					skip[t.fn] = true
+					matched = true
+				}
+			}
+			if matched {
+				names = append(names, name)
+			} else {
+				unknown = append(unknown, name)
+			}
+		}
+	}
+	return skip, names, unknown
+}
+
+// guardInitSkipNames lists every value --skip accepts, for error messages.
+func guardInitSkipNames() string {
+	names := make([]string, 0, len(guardedTools))
+	for _, t := range guardedTools {
+		names = append(names, t.fn)
+	}
+	return strings.Join(names, ", ")
+}
+
 func runGuardInit(cmd *cobra.Command, args []string) error {
 	shell := ""
 	if len(args) == 1 {
@@ -116,15 +171,43 @@ func runGuardInit(cmd *cobra.Command, args []string) error {
 		shell = detectShell()
 	}
 
+	rawSkip, _ := cmd.Flags().GetStringSlice("skip")
+
 	if install, _ := cmd.Flags().GetBool("install"); install {
-		return installGuardInit(cmd, shell)
+		// --install records only the --skip FLAG. An exported
+		// CHAINSAW_GUARD_SKIP already applies at every eval of the rc line,
+		// so baking it in would duplicate it, and counting it as a request
+		// would make every installer re-run refuse on a machine that
+		// exports it.
+		_, skipNames, unknown := parseGuardSkip(rawSkip)
+		if len(unknown) > 0 {
+			return fmt.Errorf("--skip: unknown package manager %q (valid: %s)", strings.Join(unknown, ", "), guardInitSkipNames())
+		}
+		// The installers re-run a bare `guard init --install` on every
+		// upgrade; that must leave an existing line (and its skip list)
+		// alone, not refuse. Only an explicit --skip can conflict.
+		return installGuardInit(cmd, shell, skipNames, cmd.Flags().Changed("skip"))
+	}
+	skip, _, unknown := parseGuardSkip(append(rawSkip, os.Getenv(guardSkipEnv)))
+	// At shell startup (`eval "$(chainsaw guard init zsh --skip …)"`) an
+	// error would print NO functions and silently unguard every manager over
+	// one typo. Warn and keep wrapping everything not validly skipped.
+	if len(unknown) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "chainsaw: guard init --skip: ignoring unknown package manager %q (valid: %s)\n",
+			strings.Join(unknown, ", "), guardInitSkipNames())
+	}
+	tools := make([]struct{ fn, tool string }, 0, len(guardedTools))
+	for _, t := range guardedTools {
+		if !skip[t.fn] {
+			tools = append(tools, t)
+		}
 	}
 
 	out := cmd.OutOrStdout()
 	switch shell {
 	case "fish":
 		fmt.Fprintln(out, "# chainsaw install guard — https://chain305.com")
-		for _, t := range guardedTools {
+		for _, t := range tools {
 			fmt.Fprintf(out, "function %s; command chainsaw %s $argv; end\n", t.fn, t.tool)
 		}
 	case "powershell", "pwsh":
@@ -133,7 +216,7 @@ func runGuardInit(cmd *cobra.Command, args []string) error {
 		// this is recursion-safe exactly like the POSIX branch. @args forwards
 		// every argument (including switches) verbatim.
 		fmt.Fprintln(out, "# chainsaw install guard — https://chain305.com")
-		for _, t := range guardedTools {
+		for _, t := range tools {
 			fmt.Fprintf(out, "function %s { chainsaw %s @args }\n", t.fn, t.tool)
 		}
 	case "cmd":
@@ -142,12 +225,12 @@ func runGuardInit(cmd *cobra.Command, args []string) error {
 		// has no rc file, so they vanish when the console closes (see
 		// shellRCPath, which refuses --install for cmd for exactly this reason).
 		fmt.Fprintln(out, ":: chainsaw install guard — https://chain305.com")
-		for _, t := range guardedTools {
+		for _, t := range tools {
 			fmt.Fprintf(out, "doskey %s=chainsaw %s $*\n", t.fn, t.tool)
 		}
 	case "bash", "zsh", "sh", "":
 		fmt.Fprintln(out, "# chainsaw install guard — https://chain305.com")
-		for _, t := range guardedTools {
+		for _, t := range tools {
 			fmt.Fprintf(out, "%s() { command chainsaw %s \"$@\"; }\n", t.fn, t.tool)
 		}
 	default:
@@ -248,14 +331,31 @@ var errCmdNotPersistable = errors.New(
 		"  For this cmd session only:\n" +
 		"      chainsaw guard init cmd > \"%TEMP%\\chainsaw-guard.cmd\" && \"%TEMP%\\chainsaw-guard.cmd\"")
 
-// shellSourceLine is the one line a user adds to their rc to activate the guard.
-func shellSourceLine(shell string) string {
+// shellSourceLine is the one line a user adds to their rc to activate the
+// guard. A skip list rides as guardSkipEnv (see its comment for why not the
+// flag); the values are validated guardedTools names, so nothing here needs
+// shell quoting.
+func shellSourceLine(shell string, skip []string) string {
+	list := strings.Join(skip, ",")
 	switch shell {
 	case "fish":
+		if list != "" {
+			return fmt.Sprintf("env %s=%s chainsaw guard init fish | source", guardSkipEnv, list)
+		}
 		return "chainsaw guard init fish | source"
 	case "powershell", "pwsh":
+		if list != "" {
+			// $env: is process-wide in a dot-sourced profile: restore the
+			// previous value, or the list would leak into every child shell
+			// (Git Bash, nested pwsh) and unwrap managers there too.
+			return fmt.Sprintf("$__chainsawSkip = $env:%s; $env:%s = '%s'; chainsaw guard init %s | Invoke-Expression; $env:%s = $__chainsawSkip",
+				guardSkipEnv, guardSkipEnv, list, shell, guardSkipEnv)
+		}
 		return fmt.Sprintf("chainsaw guard init %s | Invoke-Expression", shell)
 	default:
+		if list != "" {
+			return fmt.Sprintf("eval \"$(%s=%s chainsaw guard init %s)\"", guardSkipEnv, list, shell)
+		}
 		return fmt.Sprintf("eval \"$(chainsaw guard init %s)\"", shell)
 	}
 }
@@ -268,7 +368,7 @@ func shellSourceLine(shell string) string {
 // It never reports success without having written a file a shell actually
 // loads: shells with no startup file (cmd.exe) fail loudly with instructions
 // instead.
-func installGuardInit(cmd *cobra.Command, shell string) error {
+func installGuardInit(cmd *cobra.Command, shell string, skip []string, explicitSkip bool) error {
 	if shell == "" {
 		shell = detectShell()
 	}
@@ -281,24 +381,45 @@ func installGuardInit(cmd *cobra.Command, shell string) error {
 	// shells, fish and PowerShell all use it. cmd.exe (which would need '::')
 	// never gets here — shellRCPath refuses it above.
 	out := cmd.OutOrStdout()
-	block := fmt.Sprintf("\n# chainsaw install guard — https://chain305.com\n%s\n", shellSourceLine(shell))
-
-	// --dry-run shows the target file and the exact line without touching the rc
-	// file — a preview before mutating a shell config (especially useful in CI
-	// or when scripting, where --install otherwise writes unconditionally).
-	if dry, _ := cmd.Flags().GetBool("dry-run"); dry {
-		if found, _ := detectGuardShim([]string{rc}); found {
-			fmt.Fprintf(out, "chainsaw: guard already active in %s — --install would be a no-op.\n", rc)
-			return nil
-		}
-		fmt.Fprintf(out, "chainsaw: --install would append to %s:\n%s", rc, block)
-		return nil
-	}
+	block := fmt.Sprintf("\n# chainsaw install guard — https://chain305.com\n%s\n", shellSourceLine(shell, skip))
 
 	// Reuse doctor's line-aware detection so a commented-out invocation doesn't
 	// count as installed (it would re-activate on append, which is what we want).
-	if found, _ := detectGuardShim([]string{rc}); found {
-		fmt.Fprintf(out, "chainsaw: guard already active in %s — nothing to do.\n", rc)
+	found, _, lines := detectGuardShim([]string{rc})
+	line := ""
+	if found {
+		line = lines[0]
+	}
+	if found && explicitSkip && !sameSkipSet(guardShimSkips(lines...), skip) {
+		// The line is already there with a different --skip list. Appending a
+		// second one would leave two activations whose last one silently wins,
+		// and rewriting a user's rc in place is not ours to do. Say exactly
+		// what to change, and do not report success.
+		more := ""
+		if len(lines) > 1 {
+			more = fmt.Sprintf("\n  (%s has %d activation lines; each one defines its own functions, so change or remove all of them)", rc, len(lines))
+		}
+		return fmt.Errorf("guard already active in %s with a different --skip list; nothing changed.\n"+
+			"  replace this line:\n      %s\n  with:\n      %s\n  then open a new shell%s",
+			rc, line, shellSourceLine(shell, skip), more)
+	}
+	dry, _ := cmd.Flags().GetBool("dry-run")
+	if found {
+		note := ""
+		if names := guardShimSkipNames(guardShimSkips(lines...)); names != "" {
+			note = " (leaving unwrapped: " + names + ")"
+		}
+		if dry {
+			fmt.Fprintf(out, "chainsaw: guard already active in %s%s — --install would be a no-op.\n", rc, note)
+		} else {
+			fmt.Fprintf(out, "chainsaw: guard already active in %s%s — nothing to do.\n", rc, note)
+		}
+		return nil
+	}
+	// --dry-run shows the target file and the exact line without touching the
+	// rc file.
+	if dry {
+		fmt.Fprintf(out, "chainsaw: --install would append to %s:\n%s", rc, block)
 		return nil
 	}
 

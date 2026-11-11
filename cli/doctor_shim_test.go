@@ -24,18 +24,18 @@ func TestDetectGuardShim(t *testing.T) {
 	missing := filepath.Join(dir, ".does-not-exist")
 
 	t.Run("active invocation detected", func(t *testing.T) {
-		ok, src := detectGuardShim([]string{clean, active})
+		ok, src, _ := detectGuardShim([]string{clean, active})
 		if !ok || src != active {
 			t.Fatalf("want detected at %s, got ok=%v src=%s", active, ok, src)
 		}
 	})
 	t.Run("commented-out is not active", func(t *testing.T) {
-		if ok, _ := detectGuardShim([]string{commented}); ok {
+		if ok, _, _ := detectGuardShim([]string{commented}); ok {
 			t.Fatal("commented-out invocation must not count as active")
 		}
 	})
 	t.Run("clean and missing files", func(t *testing.T) {
-		if ok, _ := detectGuardShim([]string{clean, missing}); ok {
+		if ok, _, _ := detectGuardShim([]string{clean, missing}); ok {
 			t.Fatal("no marker present, should not detect")
 		}
 	})
@@ -88,7 +88,7 @@ func TestShellRCCandidatesFor(t *testing.T) {
 		if err := os.WriteFile(profile, []byte("# chainsaw install guard\nchainsaw guard init pwsh | Invoke-Expression\n"), 0o644); err != nil {
 			t.Fatalf("write profile: %v", err)
 		}
-		ok, src := detectGuardShim([]string{profile})
+		ok, src, _ := detectGuardShim([]string{profile})
 		if !ok || src != profile {
 			t.Fatalf("want detected at %s, got ok=%v src=%s", profile, ok, src)
 		}
@@ -104,17 +104,17 @@ func containsPath(list []string, want string) bool {
 	return false
 }
 
-func TestGuardedManagerSet(t *testing.T) {
-	set := guardedManagerSet()
+func TestGuardShimRoutesDefault(t *testing.T) {
+	none := map[string]bool{}
 	// cargo and gem are now shell-shimmed too (guardedTools), so the shim
 	// coverage matches what the installer advertises (npm/pip/go/cargo/gem).
 	for _, name := range []string{"npm", "pip", "go", "cargo", "gem"} {
-		if !set[name] {
-			t.Errorf("expected %q in guarded set", name)
+		if !guardShimRoutes(name, none) {
+			t.Errorf("expected %q to be shell-shimmed", name)
 		}
 	}
-	if set["maven"] {
-		t.Error("maven is not shell-shimmed; must not be in guarded set")
+	if guardShimRoutes("maven", none) {
+		t.Error("maven is not shell-shimmed; must not be reported as routed")
 	}
 }
 
@@ -123,6 +123,8 @@ func TestGuardedManagerSet(t *testing.T) {
 // non-guarded ones still report "no", plus the explanatory footnote.
 func TestDoctor_ShimStateShownForGuardedManagers(t *testing.T) {
 	withHookEnv(t) // isolates config files ⇒ nothing is config-wired
+	// Only the current shell's rc files count (guardShimState).
+	t.Setenv("SHELL", "/bin/zsh")
 
 	dir := t.TempDir()
 	rc := filepath.Join(dir, ".zshrc")

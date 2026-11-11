@@ -94,13 +94,18 @@ func guardDBPath() string {
 //  2. the local cache file written by `chainsaw guard update` (opt-in, offline),
 //  3. the active signal bundle's "osv-malware" blob (if present).
 //
-// Returns (floor, extra) counts for the user-facing notice. `extra` is also the
+// Returns the floor count and the full-feed counts for the user-facing notice.
+// The full-feed count ("extra") is also the
 // evidence for the "full feed present" coverage claim, so it is counted more
 // strictly than the entries are loaded: every parseable source is MERGED into
 // the index (more known-malicious coordinates can only add blocks), but only a
 // source that could plausibly BE the full OpenSSF set, from a channel we trust,
 // counts toward `extra`. See guardMalwareFeedFloor.
-func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor, extra int) {
+//
+// `extra` is returned split by source (cacheFull, bundleFull) so newLocalGuard
+// can judge freshness: the `guard update` cache ages by guardFeedStaleAfter, a
+// verified bundle by its own BundleStaleAfter.
+func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor, cacheFull, bundleFull int) {
 	entries := malware.Floor()
 	floor = len(entries)
 
@@ -117,7 +122,7 @@ func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor,
 			entries = append(entries, more...)
 			switch {
 			case len(more) >= guardMalwareFeedFloor:
-				extra += len(more)
+				cacheFull += len(more)
 			case len(more) > 0:
 				// LOUD on purpose, and never suppressed by --quiet: this file is
 				// what an operator's `CHAINSAW_COVERAGE_REQUIRED=malware` gate
@@ -149,13 +154,13 @@ func loadMalwareSources(idx *malware.Index, bundle *intelligence.Bundle) (floor,
 			// coverage claim. Its entries are still merged (they can only block
 			// more), but "the full feed is present" must ride a signature.
 			if bundle.Verified() && len(more) >= guardMalwareFeedFloor {
-				extra += len(more)
+				bundleFull += len(more)
 			}
 		}
 	}
 
 	idx.Load(entries)
-	return floor, extra
+	return floor, cacheFull, bundleFull
 }
 
 // warnGuardCacheUnusable reports a `guard update` cache file that EXISTS but
@@ -484,6 +489,23 @@ type localGuard struct {
 	fullFeed  bool
 	notices   []string
 
+	// feedStale is true when the full feed is present but EVERY source that
+	// carries it is past its freshness window (see newLocalGuard). It drives
+	// the stale notice only: the install path deliberately never prompts on a
+	// stale feed (see the maybeAutoFetchFeed call in guard_install.go).
+	feedStale bool
+	// staleNotice is the age line for a stale `guard update` cache, and
+	// feedAge its colour bucket. Kept out of notices: the install path
+	// colours it by age and pairs it with the auto-update outcome
+	// (staleFeedLines). Empty when the cache is fresh or absent.
+	staleNotice string
+	feedAge     feedAgeSeverity
+	// feedCheckedAt is when the freshest full-feed source was last confirmed
+	// current (the cache's refresh time or the bundle's build time). Zero
+	// when no full feed is loaded. The coverage ledger reports it as the
+	// malware source's LastOKAt, so an audit shows the feed's real age.
+	feedCheckedAt time.Time
+
 	// Behavioral byte-scan accounting for THIS run, written by evaluate() as
 	// each spec reaches the acquisition step and read once by
 	// byteScanNotice() after evaluation.
@@ -519,13 +541,33 @@ func newLocalGuard() *localGuard {
 	// Combine every known-malicious source (embedded floor + local cache + bundle)
 	// into one index.
 	g.bundle = intelligence.ActiveBundle()
-	floor, extra := loadMalwareSources(g.malware, g.bundle)
+	floor, cacheFull, bundleFull := loadMalwareSources(g.malware, g.bundle)
+	extra := cacheFull + bundleFull
 	g.fullFeed = extra > 0
 	if extra > 0 {
 		// Once enriched, the total is a number worth showing — it's the full
 		// OpenSSF set, not the small embedded floor.
 		g.notices = append(g.notices,
 			fmt.Sprintf("offline known-malicious + typosquat active (%d malicious packages indexed)", floor+extra))
+		// The feed is stale only when no source carrying it is fresh: a
+		// fresh signed bundle covers an old cache and vice versa.
+		now := time.Now()
+		var cacheChecked time.Time
+		if cacheFull > 0 {
+			cacheChecked = guardFeedCheckedAt(guardDBPath())
+		}
+		var bundleAge time.Duration
+		if bundleFull > 0 {
+			bundleAge = g.bundle.Age()
+		}
+		g.feedCheckedAt = guardFeedDate(cacheChecked, bundleAge, now)
+		cacheFresh := cacheFull > 0 && !guardFeedIsStale(cacheChecked, now)
+		bundleFresh := bundleFull > 0 && !g.bundle.Stale()
+		g.feedStale = !cacheFresh && !bundleFresh
+		if g.feedStale && cacheFull > 0 {
+			g.staleNotice = guardStaleFeedNotice(cacheChecked, now)
+			g.feedAge = feedAgeLevel(cacheChecked, now)
+		}
 		if g.bundle != nil && g.bundle.Stale() {
 			g.notices = append(g.notices,
 				fmt.Sprintf("signal bundle is %d days old — refresh with `chainsaw guard update`", int(g.bundle.Age().Hours()/24)))
@@ -619,6 +661,37 @@ func guardPluralPackages(n int) string {
 		return "1 package"
 	}
 	return fmt.Sprintf("%d packages", n)
+}
+
+// guardFeedDate is the refresh time of the freshest full-feed source: the
+// cache's check time, or the bundle's build time (now - bundleAge). A bundle
+// with no build_time (Age 0) or a future one (Age < 0) has no honest date and
+// must not stamp the feed as refreshed "now".
+func guardFeedDate(cacheChecked time.Time, bundleAge time.Duration, now time.Time) time.Time {
+	if bundleAge > 0 {
+		if built := now.Add(-bundleAge); cacheChecked.IsZero() || built.After(cacheChecked) {
+			return built
+		}
+	}
+	return cacheChecked
+}
+
+// guardStaleFeedNotice names the stale cache and the remedy that can actually
+// run here: on a CHAINSAW_OFFLINE box `guard update` refuses, so the fix is to
+// refresh the delivered file or the signed bundle instead.
+func guardStaleFeedNotice(checked, now time.Time) string {
+	return fmt.Sprintf("known-malicious feed last refreshed %s — packages published since are not in it; %s",
+		guardFeedAgeLabel(checked, now), guardFeedRefreshHint())
+}
+
+// guardFeedRefreshHint is the refresh remedy shared by the install-path notice
+// and `guard status`.
+func guardFeedRefreshHint() string {
+	if envTruthy(os.Getenv(guardUpdateOfflineEnv)) {
+		return "this box is offline (" + guardUpdateOfflineEnv + "), so refresh the file at " + guardDBEnv +
+			" or the signed bundle (" + intelligence.BundleEnvVar + ")"
+	}
+	return "run `chainsaw guard update`"
 }
 
 func guardUpdateNudge() string {

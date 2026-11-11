@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -507,6 +509,7 @@ func runUninstallHook(cmd *cobra.Command, args []string) error {
 		return writeJSON(cmd, map[string]any{"results": results})
 	}
 
+	var unwiredManagers []string
 	for _, r := range results {
 		if r.RevokedClientID != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "revoked client_credential %s (minted by install-hook %s)\n", r.RevokedClientID, r.Manager)
@@ -546,7 +549,14 @@ func runUninstallHook(cmd *cobra.Command, args []string) error {
 		case r.Reason != "":
 			fmt.Fprintf(cmd.ErrOrStderr(), "error: unwire %s: %s\n", r.Manager, r.Reason)
 		}
+		if r.Reason == "" || r.Skipped {
+			unwiredManagers = append(unwiredManagers, r.Manager)
+		}
 	}
+	// One note for the whole run: with --all, a note per manager would each
+	// suggest a different replacement line, and pasting any one of them
+	// unwraps only that manager.
+	noteShellGuardStillRoutes(cmd.ErrOrStderr(), unwiredManagers...)
 
 	if firstErr != nil {
 		return firstErr
@@ -1337,4 +1347,51 @@ func revokeMintedHookCredential(cmd *cobra.Command, clientID, mintedServer strin
 // path prefix genuinely is a different deployment.
 func canonicalHookServer(s string) string {
 	return strings.TrimRight(strings.TrimSpace(s), "/")
+}
+
+// noteShellGuardStillRoutes tells the user when the shell guard still wraps a
+// manager they just unwired. uninstall-hook only edits the manager's own
+// config; the `chainsaw guard init` line in the shell rc is a separate wiring,
+// and "nothing to do" with no mention of it read as "this manager is not
+// guarded" while every install still went through the guard.
+func noteShellGuardStillRoutes(w io.Writer, managers ...string) {
+	sh := guardShimState()
+	if !sh.Found {
+		return
+	}
+	rc, skip, lines := sh.Path, sh.Skip, sh.Lines
+	var routed, fns []string
+	for _, m := range managers {
+		if guardShimRoutes(m, skip) {
+			routed = append(routed, m)
+			fns = append(fns, guardShimFuncs(m)...)
+		}
+	}
+	if len(routed) == 0 {
+		return
+	}
+	shell, unset := "bash", "unset -f "+strings.Join(fns, " ")
+	switch base := filepath.Base(rc); {
+	case strings.HasSuffix(base, ".fish"):
+		shell, unset = "fish", "functions -e "+strings.Join(fns, " ")
+	case strings.HasSuffix(base, ".ps1"):
+		shell, unset = "pwsh", "Remove-Item Function:"+strings.Join(fns, ", Function:")
+	case strings.Contains(base, "zsh"):
+		shell = "zsh"
+	}
+	// The replacement line carries only what the rc lines themselves skip,
+	// never an exported value (which keeps applying on its own).
+	lineSkip := guardShimSkips(lines...)
+	keep := []string{}
+	for _, t := range guardedTools {
+		if lineSkip[t.fn] || slices.Contains(fns, t.fn) {
+			keep = append(keep, t.fn)
+		}
+	}
+	fmt.Fprintf(w, "note: %s installs are still checked by the shell guard (`chainsaw guard init` in %s).\n", strings.Join(routed, ", "), rc)
+	fmt.Fprintf(w, "  to stop that too, change that line to:\n      %s\n  and open a new shell\n", shellSourceLine(shell, keep))
+	if len(lines) > 1 {
+		fmt.Fprintf(w, "  (%d activation lines are active across your shell config files; each defines its own functions, so change all of them)\n", len(lines))
+	}
+	fmt.Fprintf(w, "  (for this shell only: %s)\n", unset)
 }

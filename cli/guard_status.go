@@ -8,11 +8,17 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"golang.org/x/term"
 
+	"github.com/chain305/chainsaw-core/intelligence"
 	"github.com/chain305/chainsaw-core/telemetry"
 )
 
@@ -110,6 +116,7 @@ func init() {
 
 func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	st := loadGuardState()
+	feed := readGuardFeedStatus(guardDBPath(), time.Now())
 
 	// X8: `guard status --json` printed the human table. This is the
 	// documented local-guard status surface — `telemetry status` right next
@@ -144,6 +151,8 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 			"telemetry_label":    telemetryConsentLabel(st),
 			"install_id":         displayInstallID(),
 			"signed_in":          cfgToken() != "",
+			"feed":               feed,
+			"feed_auto_update":   st.FeedAutoUpdate,
 		})
 	}
 
@@ -170,6 +179,12 @@ func runGuardStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(tw, "  Mode\t%s\n", guardStatusModeLabel(st))
 	fmt.Fprintf(tw, "  First block\t%s\n", firstBlock)
 	fmt.Fprintf(tw, "  First run\t%s\n", firstRun)
+	feedLabel := feed.Label
+	if feed.Present && guardColorEnabledFor(out) {
+		feedLabel = feedAgeColor(feed.level) + feedLabel + ansiReset
+	}
+	fmt.Fprintf(tw, "  Feed cache\t%s\n", feedLabel)
+	fmt.Fprintf(tw, "  Feed auto-update\t%s\n", feedAutoUpdateLabel(st.FeedAutoUpdate))
 	_ = tw.Flush()
 
 	fmt.Fprintln(out)
@@ -235,4 +250,73 @@ func onOff(b bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// guardFeedStatus describes the `guard update` CACHE for `guard status` (the
+// row is labelled "Feed cache" and the JSON key is `feed`). It reads only the
+// small .meta sidecar and a stat, never the ~200 MB cache, so status stays
+// instant. The entry count and dates are shown only while the meta still
+// matches the file (readBoundGuardUpdateMeta). A signed intelligence bundle
+// has its own freshness window and is reported by `chainsaw doctor`; here it
+// is only named when no cache exists.
+type guardFeedStatus struct {
+	Present     bool   `json:"present"`
+	Entries     int    `json:"entries,omitempty"`
+	CheckedUnix int64  `json:"checked_unix,omitempty"`
+	Stale       bool   `json:"stale"`
+	Label       string `json:"-"`
+	level       feedAgeSeverity
+}
+
+func readGuardFeedStatus(cachePath string, now time.Time) guardFeedStatus {
+	if cachePath == "" {
+		return guardFeedStatus{Label: "unknown (no cache directory)"}
+	}
+	m, fi := readBoundGuardUpdateMeta(cachePath)
+	if fi == nil {
+		label := "not downloaded — the embedded floor only; run `chainsaw guard update` for the full OpenSSF set"
+		if p := os.Getenv(intelligence.BundleEnvVar); p != "" {
+			label = "no `guard update` cache; the signed bundle at " + p + " supplies the feed if it carries one"
+		}
+		return guardFeedStatus{Label: label}
+	}
+	checked := guardFeedCheckedAt(cachePath)
+	fs := guardFeedStatus{
+		Present: true,
+		Entries: m.Entries,
+		Stale:   guardFeedIsStale(checked, now),
+		level:   feedAgeLevel(checked, now),
+	}
+	var b strings.Builder
+	switch {
+	case fs.Entries >= guardMalwareFeedFloor:
+		fmt.Fprintf(&b, "%s entries, ", humanCount(fs.Entries))
+	case fs.Entries > 0:
+		// Below the plausibility floor the guard does not count this file as
+		// the full feed (loadMalwareSources); say so here too.
+		fmt.Fprintf(&b, "only %s entries (PARTIAL, not the full OpenSSF set), ", humanCount(fs.Entries))
+	}
+	fs.CheckedUnix = checked.Unix()
+	b.WriteString("refreshed " + guardFeedAgeLabel(checked, now))
+	if fs.Stale {
+		b.WriteString(" — STALE, " + guardFeedRefreshHint())
+		if loadGuardState().FeedAutoUpdate == feedAutoUpdateOn && !envTruthy(os.Getenv(guardUpdateOfflineEnv)) {
+			b.WriteString(" (auto-update is on: the next guarded install refreshes it in the background)")
+		}
+	}
+	fs.Label = b.String()
+	return fs
+}
+
+// guardColorEnabledFor reports whether w is a terminal that may get colour,
+// honouring the same opt-outs as the guard's stderr lines.
+func guardColorEnabledFor(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return false
+	}
+	if _, off := os.LookupEnv("NO_COLOR"); off {
+		return false
+	}
+	return os.Getenv("TERM") != "dumb" && !viper.GetBool("no_color")
 }

@@ -208,7 +208,7 @@ func TestGuardCorruptMalwareCacheKeepsEmbeddedFloor(t *testing.T) {
 			// marker a loader that forgot the floor trips.
 			idx := malware.NewIndex(guardLogger)
 			var floor, extra int
-			captureStderr(t, func() { floor, extra = loadMalwareSources(idx, nil) })
+			captureStderr(t, func() { floor, extra, _ = loadMalwareSources(idx, nil) })
 			if !idx.FloorLoaded() {
 				t.Error("FloorLoaded() = false: a corrupt cache file cost the embedded floor")
 			}
@@ -319,7 +319,7 @@ func TestGuardMalformedRecordDropsWholeArrayNotJustTheRecord(t *testing.T) {
 		})
 		idx := malware.NewIndex(guardLogger)
 		var extra int
-		stderr := captureStderr(t, func() { _, extra = loadMalwareSources(idx, nil) })
+		stderr := captureStderr(t, func() { _, extra, _ = loadMalwareSources(idx, nil) })
 		if extra != 0 {
 			t.Errorf("extra = %d, want 0", extra)
 		}

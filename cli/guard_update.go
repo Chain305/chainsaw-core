@@ -32,9 +32,75 @@ type guardUpdateMeta struct {
 	ETag    string `json:"etag"`
 	Entries int    `json:"entries"`
 	Updated string `json:"updated"`
+	// Checked is when the cache was last CONFIRMED current against upstream:
+	// a fresh download or a 304 Not Modified. Updated only moves on a
+	// download, so reading feed age off Updated alone would call a cache
+	// stale forever on a quiet upstream and re-offer a refresh on every
+	// install. Absent in metas written before this field existed; readers
+	// fall back to Updated, then the file's mtime (guardFeedCheckedAt).
+	Checked string `json:"checked,omitempty"`
+	// Size is the cache file's byte size when this meta was written. It binds
+	// the meta to the file it describes: a cache truncated, replaced, restored
+	// from an older backup or deleted after the meta was written no longer
+	// matches, and its meta (ETag, entry count, dates) is then ignored. Zero in
+	// metas written before this field existed (no binding check possible).
+	Size int64 `json:"size,omitempty"`
 }
 
 func guardUpdateMetaPath(cache string) string { return cache + ".meta" }
+
+// guardFeedStaleAfter is how old the `guard update` cache may get before the
+// guard calls it stale. OpenSSF publishes new malicious-package advisories
+// every day; before this existed the cache was trusted forever, so a machine
+// that ran `guard update` once kept reporting "full OpenSSF set" for months
+// while missing everything published since.
+const guardFeedStaleAfter = 7 * 24 * time.Hour
+
+// guardFeedCheckedAt returns when the `guard update` cache at cachePath was
+// last confirmed current, or the zero time when no non-empty cache exists.
+// Order of evidence: meta Checked, meta Updated (only while the meta still
+// matches the file, see readBoundGuardUpdateMeta), then the file's mtime.
+func guardFeedCheckedAt(cachePath string) time.Time {
+	m, fi := readBoundGuardUpdateMeta(cachePath)
+	if fi == nil {
+		return time.Time{}
+	}
+	for _, v := range []string{m.Checked, m.Updated} {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return t
+		}
+	}
+	return fi.ModTime()
+}
+
+// guardFeedAgeLabel renders a feed timestamp for humans: "on 2026-07-14 (120
+// days ago)", or "today" / "yesterday" for the obvious cases.
+func guardFeedAgeLabel(checked, now time.Time) string {
+	days := int(now.Sub(checked).Hours() / 24)
+	switch {
+	case checked.Sub(now) > 24*time.Hour:
+		return fmt.Sprintf("with a date in the future (%s)", checked.UTC().Format("2006-01-02"))
+	case days <= 0:
+		return "today"
+	case days == 1:
+		return "yesterday"
+	}
+	return fmt.Sprintf("on %s (%d days ago)", checked.UTC().Format("2006-01-02"), days)
+}
+
+// guardFeedIsStale reports whether a cache last confirmed at checked is past
+// guardFeedStaleAfter. An unknown (zero) time is not called stale: there is
+// no cache to refresh, and the absent-feed path already nudges.
+//
+// A time more than a day in the FUTURE is also stale: it comes from clock skew
+// or a copied/extracted file, and trusting it would keep the feed "fresh"
+// until that date arrives.
+func guardFeedIsStale(checked, now time.Time) bool {
+	if checked.IsZero() {
+		return false
+	}
+	return now.Sub(checked) > guardFeedStaleAfter || checked.Sub(now) > 24*time.Hour
+}
 
 func readGuardUpdateMeta(path string) guardUpdateMeta {
 	var m guardUpdateMeta
@@ -44,10 +110,37 @@ func readGuardUpdateMeta(path string) guardUpdateMeta {
 	return m
 }
 
-func writeGuardUpdateMeta(path string, m guardUpdateMeta) {
-	if b, err := json.Marshal(m); err == nil {
-		_ = os.WriteFile(path, b, 0o644)
+func writeGuardUpdateMeta(path string, m guardUpdateMeta) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
 	}
+	return writeFileAtomic(path, b, 0o644)
+}
+
+// warnGuardMetaWrite reports a meta sidecar that could not be written. The
+// meta now carries the feed's freshness, so a silent failure would leave
+// `guard status` reporting STALE right after `guard update` said it was done.
+func warnGuardMetaWrite(path string, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "chainsaw: WARNING — could not record the refresh time in %s (%v); the feed will keep reporting as stale until this file is writable\n", path, err)
+	}
+}
+
+// readBoundGuardUpdateMeta returns the meta for cachePath only when it still
+// describes that file: the cache exists, is non-empty, and (for metas that
+// record it) has the size the meta was written for. Otherwise it returns the
+// zero meta, so no stale ETag, entry count or date outlives its file.
+func readBoundGuardUpdateMeta(cachePath string) (guardUpdateMeta, os.FileInfo) {
+	fi, err := os.Stat(cachePath)
+	if err != nil || fi.Size() == 0 {
+		return guardUpdateMeta{}, nil
+	}
+	m := readGuardUpdateMeta(guardUpdateMetaPath(cachePath))
+	if m.Size != 0 && m.Size != fi.Size() {
+		return guardUpdateMeta{}, fi
+	}
+	return m, fi
 }
 
 // newGuardUpdateProgress builds a malware.ProgressFunc that reports download
@@ -162,7 +255,10 @@ func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 	}
 	force, _ := cmd.Flags().GetBool("force")
 	metaPath := guardUpdateMetaPath(dst)
-	prevMeta := readGuardUpdateMeta(metaPath)
+	// Only a meta that still describes the cache on disk may short-circuit the
+	// download: with the cache deleted, emptied, truncated or swapped, a 304
+	// would report "already up to date" over a file the guard cannot use.
+	prevMeta, _ := readBoundGuardUpdateMeta(dst)
 
 	// No whole-command deadline. There used to be a 5-minute WithTimeout here,
 	// and it was BUG-04 all over again one layer up: it flowed into
@@ -235,6 +331,9 @@ func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 		if stderrTTY && gotByte.Load() {
 			fmt.Fprintln(os.Stderr) // close the in-place progress line
 		}
+		// Upstream confirmed our copy is current: that resets the feed's age.
+		prevMeta.Checked = time.Now().UTC().Format(time.RFC3339)
+		warnGuardMetaWrite(metaPath, writeGuardUpdateMeta(metaPath, prevMeta))
 		fmt.Fprintf(os.Stderr, "chainsaw: already up to date — %s known-malicious entries, unchanged since the last update (skipped the re-download). Use --force to refresh anyway.\n", humanCount(prevMeta.Entries))
 		return nil
 	}
@@ -273,17 +372,22 @@ func runGuardUpdate(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(dst, data, 0o644); err != nil {
+	// Atomic: a guarded install (or a second background refresh) reading the
+	// cache mid-write would otherwise see a truncated file.
+	if err := writeFileAtomic(dst, data, 0o644); err != nil {
 		return err
 	}
-	// Persist the ETag + count so the next run can send If-None-Match and skip
-	// the download when nothing changed. Best-effort: a write failure just means
-	// the next update re-downloads (correct, only slower).
-	writeGuardUpdateMeta(metaPath, guardUpdateMeta{
+	// Persist the ETag, count, size and refresh time. The ETag lets the next
+	// run send If-None-Match; the time is the feed's age (guardFeedCheckedAt),
+	// so a failed write is reported rather than swallowed.
+	now := time.Now().UTC().Format(time.RFC3339)
+	warnGuardMetaWrite(metaPath, writeGuardUpdateMeta(metaPath, guardUpdateMeta{
 		ETag:    syncer.ETag(),
 		Entries: len(entries),
-		Updated: time.Now().UTC().Format(time.RFC3339),
-	})
+		Updated: now,
+		Checked: now,
+		Size:    int64(len(data)),
+	}))
 	fmt.Fprintf(os.Stderr, "chainsaw: wrote %s known-malicious entries to %s\n", humanCount(len(entries)), dst)
 	fmt.Fprintln(os.Stderr, "chainsaw: the guard will now use the full set offline.")
 	// The typosquat popular corpus is deliberately NOT refreshed here:

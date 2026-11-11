@@ -91,6 +91,14 @@ type guardState struct {
 	// chainsaw decodes to exactly today's behaviour.
 	FeedFetchFailures       int   `json:"feed_fetch_failures,omitempty"`
 	FeedFetchRetryAfterUnix int64 `json:"feed_fetch_retry_after_unix,omitempty"`
+	// FeedAutoUpdate is the user's answer to "keep the malicious-package feed
+	// updated automatically?": "" (never asked), "on" or "off". Asked once,
+	// interactively, the first time a guarded install finds a stale cache;
+	// changed with `chainsaw guard auto-update on|off`. See guard_autoupdate.go.
+	FeedAutoUpdate string `json:"feed_auto_update,omitempty"`
+	// FeedAutoUpdateSpawnUnix is when a background refresh was last started,
+	// so a burst of installs starts at most one per feedAutoUpdateEvery.
+	FeedAutoUpdateSpawnUnix int64 `json:"feed_auto_update_spawn_unix,omitempty"`
 	// DeepFetchEgress is a small ring auditing the deep-fetch network calls the
 	// guard made (CHAINSAW_GUARD_DEEP=1). Each fetched package is recorded once,
 	// with the egress host it reached out to, so an operator who opted into the
