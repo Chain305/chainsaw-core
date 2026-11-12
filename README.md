@@ -403,7 +403,7 @@ jobs:
         with:
           fetch-depth: 0        # required: pr-scan needs the base commit to diff against
 
-      - uses: Chain305/chainsaw-core/enforcement/github-actions@dd997609ed1381d1b868d083d8b3fe15a7dc9fff # v0.22.164
+      - uses: Chain305/chainsaw-core/enforcement/github-actions@410cc41dc027d30c4d9ed4254178cf2d670f7814 # v0.22.166
         with:
           mode: warn            # warn | block
           scan-repo: true
