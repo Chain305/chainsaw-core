@@ -337,6 +337,32 @@ type scanAPIResponse struct {
 	Unscanned  int              `json:"unscanned"`
 }
 
+// scanChunkSize bounds the packages in one POST /api/scan. The server
+// evaluates a request's packages one after another (~0.3s each in prod,
+// 2026-11-12), and the edge in front of it drops any response that takes
+// longer than 120s — a 395-crate Cargo.lock came back as HTTP 524 after the
+// server had finished in 125s. 100 keeps a request near 30s, so the time a
+// request takes no longer grows with the size of the lockfile.
+const scanChunkSize = 100
+
+// postScanChunked sends pkgs to /api/scan in chunks of scanChunkSize and
+// merges the answers into out. Any chunk failing fails the whole scan (fail
+// closed): a partial result set would read as a clean lockfile.
+func postScanChunked(client *APIClient, pkgs []scanPkg, out *scanAPIResponse) error {
+	for start := 0; start < len(pkgs); start += scanChunkSize {
+		end := min(start+scanChunkSize, len(pkgs))
+		var part scanAPIResponse
+		if err := client.Post("/api/scan", map[string]any{"packages": pkgs[start:end]}, &part); err != nil {
+			return err
+		}
+		out.Results = append(out.Results, part.Results...)
+		out.Total += part.Total
+		out.Vulnerable += part.Vulnerable
+		out.Unscanned += part.Unscanned
+	}
+	return nil
+}
+
 var scanCmd = &cobra.Command{
 	Use:     "scan [package@version | -]",
 	GroupID: GrpScan,
@@ -686,7 +712,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	lookup, nonRegistry := splitNonRegistry(packages)
 	var resp scanAPIResponse
 	if len(lookup) > 0 {
-		if err := client.Post("/api/scan", map[string]any{"packages": lookup}, &resp); err != nil {
+		if err := postScanChunked(client, lookup, &resp); err != nil {
 			// Return the error so Execute()/classifyCLIError buckets it: 401/403 →
 			// ExitConfigAuth(3), network/IO → ExitOpError(2). A bare os.Exit(2) here
 			// mislabels an auth failure as an operational error (invariant B).
@@ -695,7 +721,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 	if len(nonRegistry) > 0 {
 		var namesakeResp scanAPIResponse
-		if err := client.Post("/api/scan", map[string]any{"packages": namesakes(nonRegistry)}, &namesakeResp); err != nil {
+		if err := postScanChunked(client, namesakes(nonRegistry), &namesakeResp); err != nil {
 			// Fail closed, like the request above: without the answer a
 			// malicious namesake would read as merely "not assessed".
 			return err
