@@ -371,7 +371,15 @@ func evaluateManager(m hook.Manager, envOut, envRaw map[string]string) ecosystem
 	}
 	switch {
 	case st.Wired:
-		state.Status = "compliant"
+		// The marker block alone is not proof: npm reads .npmrc last-key-wins,
+		// so one `registry=` line appended below the block bypasses Chainsaw
+		// while the block is still there.
+		if other := wiredRegistryOverride(m.Name(), st.ConfigPath, doctorServerURL()); other != "" {
+			state.Status = "drifted"
+			state.Reason = "registry set outside the chainsaw-managed block: " + other
+		} else {
+			state.Status = "compliant"
+		}
 	case userConfigRoutesThroughServer(m.Name(), st.ConfigPath, doctorServerURL()):
 		// `npm login`, `npm config set`, `pip config set` and
 		// `yarn config set` rewrite the user config without comments, so
@@ -496,6 +504,46 @@ func userConfigRoutesThroughServer(manager, path, server string) bool {
 		}
 	}
 	return true
+}
+
+// wiredRegistryOverride returns the registry, credentials removed, that a
+// user config carrying the chainsaw-managed block actually installs from when
+// it is not Chainsaw; "" when it is, or when the file cannot be judged
+// (unknown server, unreadable file, manager without a registry judge).
+// Only the effective default registry counts for npm, bun and yarn: a scoped
+// registry (@corp:registry=) serves one scope and is usually a private
+// registry. Every pip index counts, because extra-index-url mixes indexes for
+// every package.
+func wiredRegistryOverride(manager, path, server string) string {
+	repo, ok := proxyRepoFor[manager]
+	if !ok || server == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	urls := configRegistryURLs(manager, string(data))
+	if manager != "pip" && len(urls) > 1 {
+		urls = urls[:1]
+	}
+	for _, u := range urls {
+		if !registryPointsAtServer(u, server, repo) {
+			return registryWithoutCredentials(u)
+		}
+	}
+	return ""
+}
+
+// registryWithoutCredentials strips userinfo and query from a registry URL
+// before it goes into a reason string that is posted to the server.
+func registryWithoutCredentials(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return "an unparseable registry URL"
+	}
+	u.User, u.RawQuery, u.Fragment = nil, "", ""
+	return u.String()
 }
 
 // configRegistryURLs returns the registry values a user config sets. The

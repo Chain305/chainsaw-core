@@ -75,6 +75,17 @@ func TestEvaluateManager_RewrittenUserConfigJudgedBySetting(t *testing.T) {
 		{"pip/index unset", "pip", "[global]\ntimeout = 60\n", "drifted"},
 		// a manager the fallback does not cover keeps the marker-only verdict
 		{"cargo/not covered", "cargo", "[source.crates-io]\nreplace-with = \"chainsaw\"\n", "drifted"},
+		// The marker block is present but a line outside it wins. Found live
+		// on 2026-11-12: `registry=https://registry.npmjs.org/` appended
+		// below the block bypassed Chainsaw and doctor said compliant, so
+		// the bypass alert could never fire.
+		{"npm/marker present, public registry appended", "npm", marked + "registry=" + npmReg + "\n" + endMark + "registry=https://registry.npmjs.org/\n", "drifted"},
+		{"npm/marker present, private scoped registry", "npm", marked + "registry=" + npmReg + "\n" + endMark + "@corp:registry=https://npm.corp.example/\n", "compliant"},
+		{"bun/marker present, public registry appended", "bun", marked + "registry=" + npmReg + "\n" + endMark + "registry=https://registry.npmjs.org/\n", "drifted"},
+		{"yarn/marker present, default registry appended", "yarn", marked + "npmRegistryServer: \"" + yarnReg + "\"\n" + endMark + "npmRegistryServer: \"https://registry.yarnpkg.com\"\n", "drifted"},
+		{"yarn/marker present, private scope", "yarn", marked + "npmRegistryServer: \"" + yarnReg + "\"\n" + endMark + "npmScopes:\n  corp:\n    npmRegistryServer: \"https://npm.corp.example\"\n", "compliant"},
+		{"pip/marker present, public extra index", "pip", marked + "[global]\nindex-url = " + pipIdx + "\n" + endMark + "extra-index-url = https://pypi.org/simple\n", "drifted"},
+		{"pip/marker present, install section overrides", "pip", marked + "[global]\nindex-url = " + pipIdx + "\n" + endMark + "[install]\nindex-url = https://pypi.org/simple\n", "drifted"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -93,6 +104,30 @@ func TestEvaluateManager_RewrittenUserConfigJudgedBySetting(t *testing.T) {
 				t.Fatalf("got %q (reason %q), want %q", state.Status, state.Reason, c.want)
 			}
 		})
+	}
+}
+
+// The drift reason is posted to the server in the attestation, so it must
+// name where installs go without carrying the credentials in that URL.
+func TestEvaluateManager_WiredOverrideReasonHasNoCredentials(t *testing.T) {
+	clearWatchedEnv(t)
+	t.Setenv("CHAINSAW_SERVER", rewriteTestServer)
+	viper.Set("server_url", "")
+
+	path := filepath.Join(t.TempDir(), "pip.conf")
+	body := "# >>> chainsaw-managed >>>\n[global]\nindex-url = https://cli-1:s3cr3t@chain305.example.com/chainproxy/repository/@acme/pypi/simple/\n# <<< chainsaw-managed <<<\n" +
+		"[install]\nindex-url = https://bob:hunter2@pypi.example.net/simple?token=t0k\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := evaluateManager(fileHookManager{fakeHookManager{name: "pip", configPath: path}}, map[string]string{}, map[string]string{})
+	if state.Status != "drifted" || !strings.Contains(state.Reason, "https://pypi.example.net/simple") {
+		t.Fatalf("got %q (reason %q), want drifted naming https://pypi.example.net/simple", state.Status, state.Reason)
+	}
+	for _, secret := range []string{"hunter2", "bob", "t0k", "s3cr3t"} {
+		if strings.Contains(state.Reason, secret) {
+			t.Fatalf("reason leaks %q: %q", secret, state.Reason)
+		}
 	}
 }
 
