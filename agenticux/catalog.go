@@ -230,11 +230,11 @@ func Vocabulary() []VocabularyEntry {
 		},
 		{
 			Term:    "Chainsaw",
-			Meaning: "The product — an install-path firewall. It runs as a local guard on a developer machine and as a registry proxy for an organisation, intercepting package installs and enforcing policy. Paths: /chainproxy/*, /chainproxy/mcp.",
+			Meaning: "The product — a supply chain firewall. It runs as a local guard on a developer machine and as a registry proxy for an organisation, intercepting package installs and enforcing policy. Paths: /chainproxy/*, /chainproxy/mcp.",
 			// The path map is wire detail an agent needs to build
 			// request URLs. A person reading a glossary does not —
 			// their URLs come out of `chainsaw install-hook`.
-			CLIMeaning: "The product, and the name of this CLI. An install-path firewall: your package installs go through it and it enforces policy on them.",
+			CLIMeaning: "The product, and the name of this CLI. A supply chain firewall: your package installs go through it and it enforces policy on them.",
 			Synonyms:   []string{"the proxy", "chain365 (common folder-name typo)"},
 		},
 		{

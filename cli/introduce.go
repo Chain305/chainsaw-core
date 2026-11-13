@@ -92,7 +92,7 @@ func buildIntroduceSections() introduceSections {
 	return introduceSections{
 		ProductName: "Chainsaw",
 		Vendor:      "Chain305",
-		Summary: "Chainsaw is an install-path firewall for npm, PyPI, " +
+		Summary: "Chainsaw is a supply chain firewall for npm, PyPI, " +
 			"Maven, Docker, and other registries. It proxies package installs, " +
 			"evaluates policy on every artifact, and exposes a management API. " +
 			"Chain305 is the company that makes it.",
@@ -122,7 +122,7 @@ func runIntroduce(cmd *cobra.Command, _ []string) error {
 	if showAll {
 		fmt.Fprintln(w, "Chainsaw — how people use it")
 		fmt.Fprintln(w, strings.Repeat("=", 40))
-		fmt.Fprintln(w, "Chainsaw is an install-path firewall. This is a quick")
+		fmt.Fprintln(w, "Chainsaw is a supply chain firewall. This is a quick")
 		fmt.Fprintln(w, "tour of the personas, workflows, glossary, and common examples —")
 		fmt.Fprintln(w, "same framing you'll see in the docs and on the web.")
 		fmt.Fprintln(w)
