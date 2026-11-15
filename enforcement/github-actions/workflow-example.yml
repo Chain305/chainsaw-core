@@ -33,7 +33,7 @@ jobs:
         # A tag can be moved to another commit, and every workflow on it then
         # runs that commit: xygeni-action@v5 and trivy-action, 2026-03.
         # `chainsaw scan-actions --fail-on medium` flags unpinned refs.
-        uses: Chain305/chainsaw-core/enforcement/github-actions@37c69dfa87d0bcdb73abe30ceb0382f4e25a50e3 # v0.22.167
+        uses: Chain305/chainsaw-core/enforcement/github-actions@3728c87b1a04a021e917e053bf04b6f9191a15b1 # v0.22.168
         with:
           mode: warn           # warn | block
           # Uncomment to attest to a control plane:
