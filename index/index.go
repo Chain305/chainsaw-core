@@ -251,6 +251,31 @@ func (idx *Index) VersionInfoContext(ctx context.Context, repo, packageName, ver
 	return info, true, nil
 }
 
+// QuarantinedVersionsContext returns the versions of packageName that carry
+// a quarantine record, under the same "any quarantine column set" rule
+// VersionInfoContext uses. One query for a whole version list: the metadata
+// filters hide these versions so a resolver never picks one.
+func (idx *Index) QuarantinedVersionsContext(ctx context.Context, repo, packageName string) (map[string]bool, error) {
+	orgID := tenancy.NormalizeOrgID(idx.orgID)
+	rows, err := idx.store.DB().QueryContext(ctx, `SELECT version FROM index_entries
+		WHERE org_id=? AND repository=? AND package=? AND (quarantine_reason IS NOT NULL
+		OR quarantine_at IS NOT NULL OR quarantine_removed_artifacts IS NOT NULL OR quarantine_source IS NOT NULL)`,
+		orgID, repo, packageName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return nil, err
+		}
+		out[version] = true
+	}
+	return out, rows.Err()
+}
+
 // MarkQuarantined records quarantine metadata for a package version.
 // info.Source is persisted to the quarantine_source column (W7); empty
 // strings are stored as NULL so legacy quarantine rows that predate the

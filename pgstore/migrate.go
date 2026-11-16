@@ -187,6 +187,8 @@ func (s *Store) migrateSchema() error {
 			-- which meant config.LoadFromStore zeroed them on every boot
 			-- and a hosted-apt repo silently reverted to apt.Default().
 			format_options TEXT,
+			-- uploads_enabled: 0 refuses every publish into the repository.
+			uploads_enabled INTEGER NOT NULL DEFAULT 1,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (org_id, name)

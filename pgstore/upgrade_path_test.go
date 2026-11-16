@@ -222,7 +222,8 @@ func TestMigrate_FromV015Schema(t *testing.T) {
 			"client_configuration_guide_template",
 			"public_base_url",
 			"anonymous_access",
-			"format_options", // apt/yum metadata sub-blocks (JSON)
+			"format_options",  // apt/yum metadata sub-blocks (JSON)
+			"uploads_enabled", // per-repository publish switch
 			"org_id",
 		},
 	}

@@ -142,6 +142,7 @@ var settingsBackedFields = map[string]string{
 	"Repositories[].Type":                     "repositories.type",
 	"Repositories[].Enabled":                  "repositories.enabled",
 	"Repositories[].AnonymousAccess":          "repositories.anonymous_access",
+	"Repositories[].UploadsEnabled":           "repositories.uploads_enabled",
 	"Repositories[].Remote.URL":               "repositories.remote_url",
 	"Repositories[].Remote.ProxyURL":          "repositories.remote_proxy_url",
 	"Repositories[].Remote.SkipTLSVerify":     "repositories.remote_skip_tls",

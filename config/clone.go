@@ -105,6 +105,7 @@ func cloneRepositoryConfigsDeep(src []RepositoryConfig) []RepositoryConfig {
 		cp := repo
 		cp.Enabled = cloneBoolPtr(repo.Enabled)
 		cp.AnonymousAccess = cloneBoolPtr(repo.AnonymousAccess)
+		cp.UploadsEnabled = cloneBoolPtr(repo.UploadsEnabled)
 		cp.Remote = cloneRemoteConfig(repo.Remote)
 		if repo.APT != nil {
 			apt := *repo.APT

@@ -151,6 +151,7 @@ const (
 type RepositoryUpdate struct {
 	Enabled                 *bool
 	AnonymousAccess         *bool
+	UploadsEnabled          *bool
 	RemoteURL               string
 	CacheNegativeTTLSeconds *int
 }
@@ -919,6 +920,10 @@ func UpdateRepositoryForOrg(store *pgstore.Store, orgID, name string, update Rep
 			setParts = append(setParts, "anonymous_access=?")
 			args = append(args, boolInt(*update.AnonymousAccess))
 		}
+		if update.UploadsEnabled != nil {
+			setParts = append(setParts, "uploads_enabled=?")
+			args = append(args, boolInt(*update.UploadsEnabled))
+		}
 		if strings.TrimSpace(update.RemoteURL) != "" {
 			setParts = append(setParts, "remote_url=?")
 			args = append(args, strings.TrimSpace(update.RemoteURL))
@@ -977,7 +982,8 @@ func fetchRepositories(db *sql.DB, orgID string) ([]RepositoryConfig, bool, erro
 		COALESCE(client_configuration_guide_template, '') as client_configuration_guide,
 		COALESCE(anonymous_access, 0) as anonymous_access,
 		COALESCE(public_base_url, '') as public_base_url,
-		COALESCE(format_options, '') as format_options
+		COALESCE(format_options, '') as format_options,
+		COALESCE(uploads_enabled, 1) as uploads_enabled
 		FROM repositories WHERE org_id=? ORDER BY name`, orgID)
 	if err != nil {
 		return nil, false, err
@@ -988,10 +994,10 @@ func fetchRepositories(db *sql.DB, orgID string) ([]RepositoryConfig, bool, erro
 		var (
 			name, format, repoType, remoteURL, remoteProxyURL, headersJSON, configGuide, publicBaseURL string
 			formatOptions                                                                              string
-			enabled, skipTLS, anonymousAccess                                                          int
+			enabled, skipTLS, anonymousAccess, uploadsEnabled                                          int
 			timeout, ttl                                                                               int
 		)
-		if err := rows.Scan(&name, &format, &repoType, &enabled, &remoteURL, &remoteProxyURL, &skipTLS, &timeout, &headersJSON, &ttl, &configGuide, &anonymousAccess, &publicBaseURL, &formatOptions); err != nil {
+		if err := rows.Scan(&name, &format, &repoType, &enabled, &remoteURL, &remoteProxyURL, &skipTLS, &timeout, &headersJSON, &ttl, &configGuide, &anonymousAccess, &publicBaseURL, &formatOptions, &uploadsEnabled); err != nil {
 			return nil, false, err
 		}
 		repo := RepositoryConfig{
@@ -1028,6 +1034,10 @@ func fetchRepositories(db *sql.DB, orgID string) ([]RepositoryConfig, bool, erro
 			value := false
 			repo.AnonymousAccess = &value
 		}
+		if uploadsEnabled == 0 {
+			value := false
+			repo.UploadsEnabled = &value
+		}
 		repos = append(repos, repo)
 	}
 	if err := rows.Err(); err != nil {
@@ -1045,16 +1055,17 @@ func fetchRepository(db *sql.DB, orgID, name string) (RepositoryConfig, error) {
 		COALESCE(client_configuration_guide_template, '') as client_configuration_guide,
 		COALESCE(anonymous_access, 0) as anonymous_access,
 		COALESCE(public_base_url, '') as public_base_url,
-		COALESCE(format_options, '') as format_options
+		COALESCE(format_options, '') as format_options,
+		COALESCE(uploads_enabled, 1) as uploads_enabled
 		FROM repositories WHERE org_id=? AND name=?`, tenancy.NormalizeOrgID(orgID), name)
 	var (
 		format, repoType, remoteURL, remoteProxyURL, headersJSON, configGuide, publicBaseURL string
 		formatOptions                                                                        string
-		enabled, skipTLS, anonymousAccess                                                    int
+		enabled, skipTLS, anonymousAccess, uploadsEnabled                                    int
 		timeout, ttl                                                                         int
 	)
 	cfg := RepositoryConfig{}
-	if err := row.Scan(&cfg.Name, &format, &repoType, &enabled, &remoteURL, &remoteProxyURL, &skipTLS, &timeout, &headersJSON, &ttl, &configGuide, &anonymousAccess, &publicBaseURL, &formatOptions); err != nil {
+	if err := row.Scan(&cfg.Name, &format, &repoType, &enabled, &remoteURL, &remoteProxyURL, &skipTLS, &timeout, &headersJSON, &ttl, &configGuide, &anonymousAccess, &publicBaseURL, &formatOptions, &uploadsEnabled); err != nil {
 		return RepositoryConfig{}, err
 	}
 	decodeRepoFormatOptions(formatOptions, &cfg)
@@ -1083,6 +1094,10 @@ func fetchRepository(db *sql.DB, orgID, name string) (RepositoryConfig, error) {
 	} else {
 		value := false
 		cfg.AnonymousAccess = &value
+	}
+	if uploadsEnabled == 0 {
+		value := false
+		cfg.UploadsEnabled = &value
 	}
 	return cfg, nil
 }
@@ -1574,8 +1589,8 @@ func upsertRepository(tx *sql.Tx, orgID string, repo RepositoryConfig) error {
 	}
 	_, err = tx.Exec(`INSERT INTO repositories(org_id, name, format, type, enabled, anonymous_access, remote_url, remote_proxy_url,
 		remote_skip_tls, remote_timeout_seconds, remote_headers, cache_negative_ttl_seconds, client_configuration_guide_template, public_base_url,
-		format_options)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		format_options, uploads_enabled)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(org_id, name) DO UPDATE SET
 			org_id=excluded.org_id,
 			format=excluded.format,
@@ -1591,10 +1606,11 @@ func upsertRepository(tx *sql.Tx, orgID string, repo RepositoryConfig) error {
 			client_configuration_guide_template=excluded.client_configuration_guide_template,
 			public_base_url=excluded.public_base_url,
 			format_options=excluded.format_options,
+			uploads_enabled=excluded.uploads_enabled,
 			updated_at=current_timestamp`, orgID, strings.TrimSpace(repo.Name), strings.TrimSpace(repo.Format), strings.TrimSpace(repo.Type),
 		enabled, anonymousAccess, strings.TrimSpace(repo.Remote.URL), strings.TrimSpace(repo.Remote.ProxyURL), boolInt(repo.Remote.SkipTLSVerify),
 		repo.Remote.TimeoutSeconds, headersJSON, repo.Cache.NegativeTTLSeconds, strings.TrimSpace(repo.ClientConfigurationGuide),
-		strings.TrimSpace(repo.PublicBaseURL), formatOptions)
+		strings.TrimSpace(repo.PublicBaseURL), formatOptions, boolInt(repo.UploadsEnabledValue()))
 	return err
 }
 

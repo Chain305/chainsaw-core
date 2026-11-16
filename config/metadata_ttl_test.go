@@ -28,7 +28,15 @@ func TestMetadataTTLPerFormatDefaults(t *testing.T) {
 		{"apt", 600 * time.Second},
 		{"yum", 600 * time.Second},
 		{"dnf", 600 * time.Second},
-		{"cargo", 0},
+		// 2026-11-16: these served their first cached index forever.
+		{"go", 600 * time.Second},
+		{"cargo", 600 * time.Second},
+		{"pub", 600 * time.Second},
+		{"swift", 600 * time.Second},
+		{"cocoapods", 600 * time.Second},
+		{"huggingface", 600 * time.Second},
+		{"rubygems", 600 * time.Second},
+		// nuget metadata is passthrough (never cached), so no TTL.
 		{"nuget", 0},
 		{"", 0},
 	} {

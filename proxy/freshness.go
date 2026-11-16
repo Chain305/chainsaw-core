@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"path"
 	"strings"
 	"time"
 
@@ -210,9 +211,95 @@ func isMutableDocument(format, logicalPath string) bool {
 		}
 		return true
 
+	case "go":
+		// GOPROXY: @v/list and @latest move on every release; the
+		// version-addressed .info/.mod/.zip beside them do not.
+		return strings.HasSuffix(lower, "/@v/list") || strings.HasSuffix(lower, "/@latest")
+
+	case "cargo":
+		// Sparse-index files gain a line per publish (and change on yank).
+		// Only the exact shard shapes count, so crates/... downloads and
+		// api/v1/... never match. config.json is static and stays cached.
+		return isCargoIndexPath(lower)
+
+	case "pub":
+		// api/packages/<name> lists the versions; .../versions/<v> is one
+		// published version.
+		segments := strings.Split(lower, "/")
+		if len(segments) < 3 || segments[0] != "api" || segments[1] != "packages" || segments[2] == "" {
+			return false
+		}
+		return len(segments) == 3 || (len(segments) == 4 && segments[3] == "advisories")
+
+	case "swift":
+		// SE-0292: /{scope}/{name} lists releases and /{scope}/{name}/{version}
+		// is release metadata; the .zip and Package.swift are fixed.
+		segments := strings.Split(lower, "/")
+		switch len(segments) {
+		case 2:
+			return segments[0] != "" && segments[1] != ""
+		case 3:
+			// ".zip" and its ".zip.sig" signature are fixed.
+			return !strings.Contains(segments[2], ".zip")
+		}
+		return false
+
+	case "cocoapods":
+		// The CDN's shard listings and version files are rewritten on every
+		// trunk push; Specs/.../<version>/<pod>.podspec.json is fixed.
+		name := baseName(lower)
+		return (strings.HasPrefix(name, "all_pods_versions_") && strings.HasSuffix(name, ".txt")) ||
+			name == "cocoapods-version.yml" || name == "deprecated_podspecs.txt"
+
+	case "huggingface":
+		// api/models|datasets/... is live repo metadata. A resolve/raw URL
+		// at a branch or tag moves with it; at a 40-hex commit it is fixed.
+		if strings.HasPrefix(lower, "api/models/") || strings.HasPrefix(lower, "api/datasets/") {
+			return true
+		}
+		segments := strings.Split(lower, "/")
+		for i := 1; i <= 3 && i+1 < len(segments); i++ {
+			if segments[i] == "resolve" || segments[i] == "raw" {
+				rev := segments[i+1]
+				if len(rev) == 40 && isHexString(rev) {
+					return false
+				}
+				// Weight files at a branch stay cached as before:
+				// revalidating a multi-GB checkpoint every TTL would
+				// re-download it unless the Hub's redirect chain answers
+				// 304. Small config/tokenizer/README files do refresh.
+				return !isHFWeightFile(segments[len(segments)-1])
+			}
+		}
+		return false
+
+	case "rubygems":
+		// The specs indexes and the compact index (versions, names,
+		// info/<gem>) change on every push; gems/ and quick/ are fixed.
+		switch lower {
+		case "specs.4.8.gz", "latest_specs.4.8.gz", "prerelease_specs.4.8.gz", "versions", "names":
+			return true
+		}
+		return strings.HasPrefix(lower, "info/") && !strings.Contains(lower[len("info/"):], "/")
+
 	default:
 		return false
 	}
+}
+
+// isCargoIndexPath reports whether p is a sparse-index file for the crate
+// it names: 1/{n}, 2/{n}, 3/{c}/{n} or {n[0:2]}/{n[2:4]}/{n}.
+func isCargoIndexPath(p string) bool {
+	s := strings.Split(p, "/")
+	switch {
+	case len(s) == 2:
+		return (s[0] == "1" && len(s[1]) == 1) || (s[0] == "2" && len(s[1]) == 2)
+	case len(s) == 3 && s[0] == "3":
+		return len(s[2]) == 3 && len(s[1]) == 1 && s[2][:1] == s[1]
+	case len(s) == 3:
+		return len(s[2]) >= 4 && len(s[0]) == 2 && len(s[1]) == 2 && s[2][:2] == s[0] && s[2][2:4] == s[1]
+	}
+	return false
 }
 
 func baseName(p string) string {
@@ -231,13 +318,26 @@ func isHexString(s string) bool {
 	return s != ""
 }
 
+// isHFWeightFile reports whether a Hugging Face file name is a model
+// weight / checkpoint (large, binary) rather than small metadata.
+func isHFWeightFile(name string) bool {
+	switch path.Ext(name) {
+	case ".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".h5", ".onnx",
+		".msgpack", ".tflite", ".ot", ".npz", ".npy", ".pkl", ".joblib", ".nemo", ".pb", ".zip", ".tar", ".gz":
+		return true
+	}
+	return false
+}
+
 // metadataExpired reports whether a cached entry has outlived the
 // positive metadata TTL and should be revalidated.
 //
 // It does NOT decide whether the entry may be treated as a cache miss —
 // that also requires a reachable upstream. See upstreamReachable.
 func (f *facet) metadataExpired(logicalPath string, meta storage.ContentMetadata) bool {
-	if f == nil || f.metadataTTL <= 0 {
+	// An upload has no upstream copy to revalidate against; "expiring" it
+	// would replace it with the public namesake (see ContentMetadata.Uploaded).
+	if f == nil || f.metadataTTL <= 0 || meta.Uploaded {
 		return false
 	}
 	if !isMutableDocument(f.format, logicalPath) {

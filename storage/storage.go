@@ -56,6 +56,12 @@ type ContentMetadata struct {
 	// mark once verification passes. Without it a request arriving
 	// while the first one was still verifying was served the bytes.
 	Unverified bool `json:"unverified,omitempty"`
+	// Uploaded marks content published INTO the repository (an upload or
+	// a push), not fetched from its upstream. The proxy facet never
+	// expires, revalidates or overwrites it: a hosted repository still has
+	// the format's default upstream, and its public namesake must never
+	// replace an internal document.
+	Uploaded bool `json:"uploaded,omitempty"`
 }
 
 // CachedContent wraps a blob and its metadata.

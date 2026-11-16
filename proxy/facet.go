@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/chain305/chainsaw-core/cache"
@@ -25,9 +26,35 @@ import (
 	"github.com/chain305/chainsaw-core/storage"
 )
 
-const maxTransformBodySize = 50 << 20 // 50 MiB
+// MaxTransformBodySize caps an index/metadata document the facet rewrites
+// (pypi.org/simple/ is ~46 MiB). Above it the document is refused, never
+// served untransformed or cached partial. Detection accuracy wins over
+// bandwidth, so the cap sits well above today's largest index; anything
+// else that buffers the same document (release hold, composer re-point)
+// uses this value so it cannot drop out earlier.
+const MaxTransformBodySize = 256 << 20 // 256 MiB
+
+const maxTransformBodySize = MaxTransformBodySize
 
 var errBodyTooLarge = errors.New("response body exceeds transform size limit")
+
+// transformInitialAlloc caps the up-front buffer: an upstream's
+// Content-Length is a claim, and one org's upstream claiming 256 MiB over a
+// tiny body must not get a 256 MiB buffer in the shared process.
+const transformInitialAlloc = 8 << 20
+
+// transformBudget bounds, in MiB, the bytes every whole-document read in the
+// process (facet transforms, release hold, version gate) holds at once. A
+// read waits for room with its request context, bounded by
+// transformBudgetWait so readers that each hold part of the budget and wait
+// for more cannot stall forever; a read that gets no room is refused.
+// ponytail: counts the read buffer only, not the transformer's output copy.
+var (
+	transformBudget     = semaphore.NewWeighted(1024)
+	transformBudgetWait = 30 * time.Second
+)
+
+var errTransformBudget = errors.New("transform memory budget exhausted")
 
 // upstreamErrorRecorder is a package-level callback the observability
 // wiring installs via SetUpstreamErrorRecorder. It is invoked once per
@@ -103,6 +130,10 @@ type Request struct {
 	LogicalPath string
 	Method      string
 	Header      http.Header
+	// RawQuery is the client's query string. The facet forwards only what
+	// it knows to be safe (docker tags/list pagination); everything else
+	// keys on the path alone.
+	RawQuery string
 }
 
 // Response contains the resolved content plus HTTP metadata.
@@ -227,6 +258,12 @@ func (f *facet) Get(ctx context.Context, req *Request) (*Response, error) {
 	logicalPath := strings.TrimPrefix(req.LogicalPath, "/")
 	if logicalPath == "" {
 		return &Response{StatusCode: http.StatusBadRequest}, nil
+	}
+	// A docker tags/list page is keyed by its query and never stored: the
+	// path-only entry is the unpaginated list, and caching page 2 there
+	// served page 1 for every later page (or the reverse).
+	if query := tagsListPageQuery(f.format, logicalPath, req.RawQuery); query != "" {
+		return f.fetchTagsPage(ctx, req, logicalPath, query)
 	}
 	cacheKey := cache.ScopedKey(OrgIDFromContext(ctx), logicalPath)
 	if negative := f.currentNegative(); negative != nil && negative.Hit(cacheKey) {
@@ -592,6 +629,9 @@ func (f *facet) storeUpstream(fetchCtx context.Context, remote RemoteDefinition,
 		CachedAt:        time.Now().UTC(),
 		ExtraHeaders:    captureExtraHeaders(remoteResp.Header),
 	}
+	if isTagsListPath(f.format, logicalPath) {
+		rewriteTagsListLink(meta.ExtraHeaders)
+	}
 	if coord, ok := f.describe(logicalPath); ok {
 		meta.PackageName = coord.Name
 		meta.PackageVersion = coord.Version
@@ -615,6 +655,14 @@ func (f *facet) storeUpstream(fetchCtx context.Context, remote RemoteDefinition,
 	bodyReader, prepErr := f.prepareBodyReader(fetchCtx, logicalPath, remoteResp)
 	if prepErr != nil {
 		return nil, prepErr
+	}
+
+	// An upload can land while the fill was in flight; the public body
+	// must not replace it. A failed lookup proceeds: tryCacheHit already
+	// saw this path absent, unexpired or not uploaded.
+	if existing, err := f.storage.Get(fetchCtx, logicalPath); err == nil && existing.Metadata.Uploaded {
+		f.applyCoordinateMetadata(logicalPath, existing)
+		return f.respondFromCache(fetchCtx, logicalPath, existing, false)
 	}
 
 	var saved *storage.CachedContent
@@ -809,6 +857,9 @@ func isRetryableStatus(status int) bool {
 
 func (f *facet) fetchFromRemote(ctx context.Context, remote RemoteDefinition, logicalPath string, header http.Header) (*http.Response, error) {
 	remoteURL := f.remoteURL(remote, logicalPath)
+	if q, _ := ctx.Value(upstreamQueryKey{}).(string); q != "" {
+		remoteURL += "?" + q
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteURL, nil)
 	if err != nil {
 		return nil, err
@@ -841,6 +892,11 @@ func (f *facet) fetchFromRemote(ctx context.Context, remote RemoteDefinition, lo
 	}
 	if needsTransform {
 		req.Header.Set("Accept-Encoding", "gzip, zstd, identity")
+	}
+	// One fetch fills the cache for every client, so the variant asked for
+	// must not be whichever client came first.
+	if accept := sharedUpstreamAccept(f.format, logicalPath); accept != "" {
+		req.Header.Set("Accept", accept)
 	}
 	// The proxy fetches as itself: a singleflight fetch serves every
 	// waiting client, so no one client's UA is the right one. A UA the
@@ -911,7 +967,8 @@ func recordedContentEncoding(upstream string) string {
 }
 
 func needsEncodingRepair(meta storage.ContentMetadata) bool {
-	if meta.ContentEncoding != "" {
+	// The repair is an upstream refetch; an upload has no upstream copy.
+	if meta.Uploaded || meta.ContentEncoding != "" {
 		return false
 	}
 	if !strings.HasPrefix(meta.LogicalPath, "simple") {
@@ -943,6 +1000,12 @@ var extraHeaderKeys = []string{
 	"X-Swift-Package-Signature",
 	"X-Swift-Package-Signature-Format",
 	"Link",
+	// Integrity headers clients check against the body: a cached hit used
+	// to drop them. Neither format has a transformer, so they still match.
+	"Docker-Content-Digest",
+	"X-Checksum-Sha1",
+	"X-Checksum-Md5",
+	"X-Checksum-Sha256",
 }
 
 func captureExtraHeaders(upstream http.Header) map[string]string {
@@ -1221,11 +1284,12 @@ func (f *facet) prepareBodyReader(ctx context.Context, logicalPath string, resp 
 		return resp.Body, nil
 	}
 	encoding := strings.ToLower(resp.Header.Get("Content-Encoding"))
-	payload, err := readBodyWithEncoding(resp.Body, encoding)
-	if errors.Is(err, errBodyTooLarge) {
-		f.logger.Debug("skipping transformation: response body too large", "path", logicalPath)
-		return resp.Body, nil
-	}
+	payload, release, err := readBodyWithEncoding(ctx, resp.Body, encoding, resp.ContentLength)
+	defer release()
+	// Too large to transform is refused, not served untransformed: the
+	// first MaxTransformBodySize bytes are already consumed, so "the rest
+	// of resp.Body" was a truncated document that got cached, and an
+	// untransformed index points clients at the upstream around the proxy.
 	if err != nil {
 		return nil, err
 	}
@@ -1274,7 +1338,8 @@ func (f *facet) rewriteCachedContent(ctx context.Context, logicalPath string, co
 	defer reader.Close()
 
 	encoding := strings.ToLower(content.Metadata.ContentEncoding)
-	payload, err := readBodyWithEncoding(reader, encoding)
+	payload, release, err := readBodyWithEncoding(ctx, reader, encoding, content.Metadata.Size)
+	defer release()
 	if errors.Is(err, errBodyTooLarge) {
 		return nil, nil
 	}
@@ -1302,46 +1367,126 @@ func (f *facet) rewriteCachedContent(ctx context.Context, logicalPath string, co
 	return out, nil
 }
 
-func readBodyWithEncoding(body io.Reader, encoding string) ([]byte, error) {
-	limit := int64(maxTransformBodySize + 1)
+func readBodyWithEncoding(ctx context.Context, body io.Reader, encoding string, sizeHint int64) ([]byte, func(), error) {
 	switch encoding {
 	case "gzip":
 		zr, err := gzip.NewReader(body)
 		if err != nil {
-			return nil, fmt.Errorf("decode gzip response: %w", err)
+			return nil, func() {}, fmt.Errorf("decode gzip response: %w", err)
 		}
 		defer zr.Close()
-		payload, err := io.ReadAll(io.LimitReader(zr, limit))
+		payload, release, err := readTransformBody(ctx, zr, 0)
 		if err != nil {
-			return nil, fmt.Errorf("read gzip response: %w", err)
+			return nil, release, fmt.Errorf("read gzip response: %w", err)
 		}
-		if len(payload) > maxTransformBodySize {
-			return nil, errBodyTooLarge
-		}
-		return payload, nil
+		return payload, release, nil
 	case "zstd":
 		zr, err := zstd.NewReader(body)
 		if err != nil {
-			return nil, fmt.Errorf("decode zstd response: %w", err)
+			return nil, func() {}, fmt.Errorf("decode zstd response: %w", err)
 		}
 		defer zr.Close()
-		payload, err := io.ReadAll(io.LimitReader(zr, limit))
+		payload, release, err := readTransformBody(ctx, zr, 0)
 		if err != nil {
-			return nil, fmt.Errorf("read zstd response: %w", err)
+			return nil, release, fmt.Errorf("read zstd response: %w", err)
 		}
-		if len(payload) > maxTransformBodySize {
-			return nil, errBodyTooLarge
-		}
-		return payload, nil
+		return payload, release, nil
 	default:
-		payload, err := io.ReadAll(io.LimitReader(body, limit))
+		payload, release, err := readTransformBody(ctx, body, sizeHint)
 		if err != nil {
-			return nil, fmt.Errorf("read remote response: %w", err)
+			return nil, release, fmt.Errorf("read remote response: %w", err)
 		}
-		if len(payload) > maxTransformBodySize {
-			return nil, errBodyTooLarge
+		return payload, release, nil
+	}
+}
+
+// ReadTransformBody reads a whole document of at most MaxTransformBodySize
+// bytes, charged to the process-wide transform budget. Call release once
+// the bytes are no longer needed; it is never nil and safe to call twice.
+func ReadTransformBody(ctx context.Context, r io.Reader, sizeHint int64) ([]byte, func(), error) {
+	return readTransformBody(ctx, r, sizeHint)
+}
+
+// readTransformBody reads at most maxTransformBodySize bytes, refusing
+// more with errBodyTooLarge. The buffer starts at min(sizeHint,
+// transformInitialAlloc) and grows by doubling; sizeHint is trusted once a
+// quarter of it has arrived, so an honest length is not grown past and a
+// lying one buys at most 4x the bytes really sent.
+func readTransformBody(ctx context.Context, r io.Reader, sizeHint int64) ([]byte, func(), error) {
+	lease := &transformLease{}
+	r = io.LimitReader(r, maxTransformBodySize+1)
+	size := 32 << 10
+	if sizeHint > 0 {
+		size = int(min(sizeHint+1, transformInitialAlloc))
+	}
+	if err := lease.reserve(ctx, size); err != nil {
+		return nil, lease.release, err
+	}
+	buf := make([]byte, 0, size)
+	for {
+		if len(buf) == cap(buf) {
+			if len(buf) > maxTransformBodySize {
+				lease.release()
+				return nil, lease.release, errBodyTooLarge
+			}
+			next := 2 * cap(buf)
+			if sizeHint > int64(cap(buf)) && sizeHint <= 4*int64(len(buf)) {
+				next = int(sizeHint) + 1
+			}
+			next = min(next, maxTransformBodySize+1)
+			if err := lease.reserve(ctx, next); err != nil {
+				lease.release()
+				return nil, lease.release, err
+			}
+			grown := make([]byte, len(buf), next)
+			copy(grown, buf)
+			buf = grown
 		}
-		return payload, nil
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			lease.release()
+			return nil, lease.release, err
+		}
+	}
+	if len(buf) > maxTransformBodySize {
+		lease.release()
+		return nil, lease.release, errBodyTooLarge
+	}
+	return buf, lease.release, nil
+}
+
+// transformLease is one read's share of transformBudget, in MiB.
+type transformLease struct {
+	sem  *semaphore.Weighted
+	held int64
+}
+
+// reserve grows the lease to cover a buffer of n bytes.
+func (l *transformLease) reserve(ctx context.Context, n int) error {
+	if l.sem == nil {
+		l.sem = transformBudget
+	}
+	need := (int64(n) + 1<<20 - 1) >> 20
+	if need <= l.held {
+		return nil
+	}
+	wctx, cancel := context.WithTimeout(ctx, transformBudgetWait)
+	defer cancel()
+	if err := l.sem.Acquire(wctx, need-l.held); err != nil {
+		return fmt.Errorf("%w: %v", errTransformBudget, err)
+	}
+	l.held = need
+	return nil
+}
+
+func (l *transformLease) release() {
+	if l.held > 0 {
+		l.sem.Release(l.held)
+		l.held = 0
 	}
 }
 
@@ -1374,4 +1519,144 @@ func encodeTransformedPayload(data []byte, encoding string) (io.Reader, error) {
 	default:
 		return bytes.NewReader(data), nil
 	}
+}
+
+// upstreamQueryKey carries a sanitised query string to fetchFromRemote.
+type upstreamQueryKey struct{}
+
+// dockerManifestAccept is every manifest media type, schema1 last. A tag
+// fetched with a narrow client's Accept cached a single-platform manifest
+// (or a 404) for every client after it.
+const dockerManifestAccept = "application/vnd.oci.image.index.v1+json, " +
+	"application/vnd.oci.image.manifest.v1+json, " +
+	"application/vnd.docker.distribution.manifest.list.v2+json, " +
+	"application/vnd.docker.distribution.manifest.v2+json, " +
+	"application/vnd.docker.distribution.manifest.v1+prettyjws"
+
+// sharedUpstreamAccept is the Accept the facet sends for a document whose
+// upstream variant depends on it, or "" to forward the client's.
+func sharedUpstreamAccept(format, logicalPath string) string {
+	switch strings.ToLower(format) {
+	case "docker", "homebrew":
+		if s := registryV2Segments(logicalPath); s != nil && s[len(s)-2] == "manifests" {
+			return dockerManifestAccept
+		}
+	case "npm", "yarn", "bun":
+		// The full packument: an abbreviated one cached by the first npm
+		// client lacks fields (time, ...) other clients and policy read.
+		if isMutableDocument(format, logicalPath) {
+			return "application/json"
+		}
+	}
+	return ""
+}
+
+// registryV2Segments returns the lowercased segments of a registry-v2 path
+// ("v2/<name...>/<kind>/<ref>"), or nil.
+func registryV2Segments(logicalPath string) []string {
+	segments := strings.Split(strings.ToLower(strings.TrimPrefix(logicalPath, "/")), "/")
+	if len(segments) < 4 || segments[0] != "v2" {
+		return nil
+	}
+	return segments
+}
+
+func isTagsListPath(format, logicalPath string) bool {
+	switch strings.ToLower(format) {
+	case "docker", "homebrew":
+	default:
+		return false
+	}
+	s := registryV2Segments(logicalPath)
+	return s != nil && s[len(s)-2] == "tags" && s[len(s)-1] == "list"
+}
+
+// tagsListPageQuery returns the pagination query (n and last only,
+// encoded) of a tags/list request, or "" for anything else.
+func tagsListPageQuery(format, logicalPath, rawQuery string) string {
+	if rawQuery == "" || !isTagsListPath(format, logicalPath) {
+		return ""
+	}
+	return paginationQuery(rawQuery)
+}
+
+func paginationQuery(rawQuery string) string {
+	parsed, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return ""
+	}
+	keep := url.Values{}
+	for _, k := range []string{"n", "last"} {
+		if v := parsed.Get(k); v != "" {
+			keep.Set(k, v)
+		}
+	}
+	return keep.Encode()
+}
+
+// rewriteTagsListLink points an upstream tags/list "next" Link back at this
+// proxy path: a relative "?query" reference resolves against whatever URL
+// the client used. A Link it cannot rewrite is dropped, never passed on.
+func rewriteTagsListLink(extra map[string]string) {
+	link, ok := extra["Link"]
+	if !ok {
+		return
+	}
+	delete(extra, "Link")
+	start, end := strings.IndexByte(link, '<'), strings.IndexByte(link, '>')
+	if start < 0 || end < start {
+		return
+	}
+	target, err := url.Parse(link[start+1 : end])
+	if err != nil {
+		return
+	}
+	if q := paginationQuery(target.RawQuery); q != "" {
+		extra["Link"] = "<?" + q + ">" + link[end+1:]
+	}
+}
+
+// fetchTagsPage fetches one tags/list page upstream and serves it from
+// memory without storing it.
+func (f *facet) fetchTagsPage(ctx context.Context, req *Request, logicalPath, query string) (*Response, error) {
+	remote := f.currentRemote()
+	if remote.BaseURL == nil || remote.Client == nil {
+		return &Response{StatusCode: http.StatusNotFound, Headers: make(http.Header)}, nil
+	}
+	if f.circuitBreaker != nil && !f.circuitBreaker.Allow() {
+		return nil, ErrCircuitOpen
+	}
+	header := cloneHeader(req.Header)
+	stripConditionalHeaders(header)
+	header.Del("Range")
+	resp, err := f.fetchWithRetry(context.WithValue(ctx, upstreamQueryKey{}, query), remote, logicalPath, header)
+	if err != nil {
+		if f.circuitBreaker != nil {
+			f.circuitBreaker.RecordNetworkFailure(err)
+		}
+		recordUpstreamError(f.format)
+		return nil, err
+	}
+	defer resp.Body.Close()
+	f.recordCircuitOutcome(resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		return &Response{StatusCode: resp.StatusCode, Headers: cloneHeader(resp.Header)}, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTransformBodySize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read tags page: %w", err)
+	}
+	if len(body) > maxTransformBodySize {
+		return nil, fmt.Errorf("tags page: %w", errBodyTooLarge)
+	}
+	meta := storage.ContentMetadata{
+		LogicalPath:  logicalPath,
+		ContentType:  resp.Header.Get("Content-Type"),
+		ETag:         resp.Header.Get("ETag"),
+		CachedAt:     time.Now().UTC(),
+		ExtraHeaders: captureExtraHeaders(resp.Header),
+	}
+	rewriteTagsListLink(meta.ExtraHeaders)
+	content := storage.NewInMemoryContent(meta, body)
+	return &Response{StatusCode: http.StatusOK, Headers: headersFromMetadata(content.Metadata), Content: content}, nil
 }

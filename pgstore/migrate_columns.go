@@ -361,6 +361,11 @@ func (s *Store) ensureTenancyAndRepoColumns() error {
 	if err := s.addColumnIfMissing("repositories", "format_options", "TEXT"); err != nil {
 		return err
 	}
+	// uploads_enabled: per-repository publish switch. Type and default
+	// must stay identical to the CREATE TABLE in migrate.go.
+	if err := s.addColumnIfMissing("repositories", "uploads_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 	// The five remote/cache columns below landed with the 0.16.0 remote-proxy
 	// work and are part of the repositories CREATE TABLE in migrate.go, but
 	// they had no addColumnIfMissing counterpart — so a database created

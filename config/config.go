@@ -653,6 +653,10 @@ type RepositoryConfig struct {
 	// surfaced by `dnf repolist --verbose`. Optional; nil means
 	// "use rpmrepo.Default()".
 	Yum *YumRepoConfig `yaml:"yum,omitempty"`
+	// UploadsEnabled lets an admin turn publishing off for one repository.
+	// nil (the default) allows uploads on every repository type: Chainsaw
+	// can stand in for an artifact repository by design.
+	UploadsEnabled *bool `yaml:"uploads_enabled,omitempty"`
 }
 
 // APTRepoConfig is the YAML schema for a hosted-apt repository's
@@ -754,6 +758,16 @@ var builtinMetadataTTLSeconds = map[string]int{
 	// homebrew: formulae.brew.sh serves the API with cache-control
 	// max-age=600, and ghcr bottle manifests are tag-addressed.
 	"homebrew": 600,
+	// 2026-11-16: these served their first cached index forever (new
+	// releases and yanks never appeared). core/proxy isMutableDocument now
+	// classifies their index documents; these TTLs switch it on.
+	"go":          600,
+	"cargo":       600,
+	"pub":         600,
+	"swift":       600,
+	"cocoapods":   600,
+	"huggingface": 600,
+	"rubygems":    600,
 }
 
 // RemoteDefaults defines fallback remote URLs per format.
@@ -1043,6 +1057,11 @@ func (r RepositoryConfig) AnonymousAccessValue() bool {
 		return false
 	}
 	return *r.AnonymousAccess
+}
+
+// UploadsEnabledValue returns whether the repository accepts uploads; nil means yes.
+func (r RepositoryConfig) UploadsEnabledValue() bool {
+	return r.UploadsEnabled == nil || *r.UploadsEnabled
 }
 
 // NegativeTTL returns the configured negative cache TTL.

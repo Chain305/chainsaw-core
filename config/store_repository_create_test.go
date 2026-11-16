@@ -45,6 +45,39 @@ func sampleRepo(name string) RepositoryConfig {
 	}
 }
 
+// uploads_enabled defaults to true, and both the create path and the
+// runtime update path persist an admin's "off" across a reload.
+func TestRepositoryUploadsEnabledRoundTrip(t *testing.T) {
+	store, org := createStore(t)
+
+	stored, err := CreateRepositoryForOrg(store, org, sampleRepo("up-default"))
+	if err != nil || !stored.UploadsEnabledValue() {
+		t.Fatalf("default create: uploads=%v err=%v, want uploads allowed", stored.UploadsEnabledValue(), err)
+	}
+	off := false
+	cfg := sampleRepo("up-off")
+	cfg.UploadsEnabled = &off
+	if stored, err = CreateRepositoryForOrg(store, org, cfg); err != nil || stored.UploadsEnabledValue() {
+		t.Fatalf("create with uploads off: uploads=%v err=%v", stored.UploadsEnabledValue(), err)
+	}
+	if _, err := UpdateRepositoryForOrg(store, org, "up-default", RepositoryUpdate{UploadsEnabled: &off}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	repos, _, err := fetchRepositories(store.DB(), org)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	for _, r := range repos {
+		if r.UploadsEnabledValue() {
+			t.Errorf("%s reloaded with uploads allowed, want off", r.Name)
+		}
+	}
+	on := true
+	if stored, err = UpdateRepositoryForOrg(store, org, "up-off", RepositoryUpdate{UploadsEnabled: &on}); err != nil || !stored.UploadsEnabledValue() {
+		t.Fatalf("re-enable: uploads=%v err=%v", stored.UploadsEnabledValue(), err)
+	}
+}
+
 func TestCreateRepositoryForOrgRoundTrip(t *testing.T) {
 	store, org := createStore(t)
 
