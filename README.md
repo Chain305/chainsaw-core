@@ -76,7 +76,8 @@ enforcement](#policy-and-enforcement)
 
 **Use it** — [Quickstart](#quickstart) · [How the guard
 works](#how-the-guard-works) · [What gets checked](#what-gets-checked) ·
-[CI](#ci) · [CLI reference](#cli-reference) · [Configuration](#configuration)
+[Coding agents](#coding-agents) · [CI](#ci) · [CLI reference](#cli-reference) ·
+[Configuration](#configuration)
 
 **Evaluate it** — [Scope and limits](#scope-and-limits) · [Measured
 performance](#measured-performance) · [False
@@ -375,6 +376,33 @@ straight to the real tool, untouched.
 The verb is located defensively: a chainsaw flag can never swallow an install
 verb as its value and silently downgrade the command to an unscanned passthrough
 — that path fails closed and is covered by tests.
+
+---
+
+## Coding agents
+
+The shell guard reaches an agent only when the agent's shell loads your rc
+file, and only for the plain `npm …` spelling. `chainsaw guard agent-hook`
+runs the same checks as a Claude Code PreToolUse hook, on the command text
+before Bash runs it. It also covers the run-a-package forms the shell guard
+passes through: `npx`, `npm exec`, `npm create`/`init`, `pnpm`/`yarn` `dlx` and
+`create`, `bunx`, `uvx`, `uv tool run` and `pipx run`.
+
+Install it as a plugin (needs `chainsaw` on PATH):
+
+```bash
+claude plugin marketplace add Chain305/chainsaw-core
+claude plugin install chainsaw-guard@chainsaw
+```
+
+or in one step from inside Claude Code: `/plugin install chainsaw-guard --marketplace Chain305/chainsaw-core`.
+
+A refused install comes back to the agent as a deny with the reason, and the
+command does not run. A package name only known at run time (`npm i "$PKG"`)
+asks you instead. Nothing else changes: the hook never approves a command, adds
+no telemetry, and follows the same `CHAINSAW_COVERAGE_MODE` and
+`CHAINSAW_GUARD_SKIP` settings as the shell guard. It reads command text, so a
+script file or `node -e` is not checked; it is a second check, not enforcement.
 
 ---
 

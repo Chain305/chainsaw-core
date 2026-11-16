@@ -15,6 +15,7 @@ open-source clients for a closed server, which is why they ship here.
 | `guard update` | Fetch the full known-malicious set for offline use |
 | `guard allow` | Clear a false typosquat block, locally and permanently |
 | `guard status` | Local guard activity, privacy state, account sync |
+| `guard agent-hook` | Claude Code PreToolUse hook: check the installs in an agent's Bash command before it runs |
 | `install-hook` / `uninstall-hook` | Wire chainsaw into a package manager's own config, or remove it |
 | `cargo-credentials` | Cargo credential-provider helper |
 

@@ -368,6 +368,25 @@ func Execute() {
 		return
 	}
 
+	// Fast-path: `chainsaw guard agent-hook` runs before EVERY Bash call a
+	// coding agent makes (guard_agent_hook.go). It must not pay for session
+	// telemetry or config load on commands that install nothing, and it must
+	// never leave through the generic error path below: exit 2 there means
+	// "block this command" to the agent harness. Config loads lazily, only
+	// when a check needs it.
+	if agentHookFastPath(os.Args) {
+		// runAgentHook calls initConfig at most once (with the first check).
+		os.Exit(runAgentHook(os.Stdin, os.Stdout, os.Stderr, os.Args[3:], initConfig))
+	}
+
+	// Detached telemetry sender (telemetry_handoff.go). Routed before cobra
+	// so the child reads no config and emits no session events of its own,
+	// which would otherwise spawn another sender.
+	if len(os.Args) == 2 && os.Args[1] == telemetrySenderArg {
+		runTelemetrySender(os.Stdin)
+		return
+	}
+
 	// BUG-CLI-5: refresh the --version string from the resolved build
 	// info (which falls back to runtime/debug.ReadBuildInfo() for ad-hoc
 	// builds) before cobra renders --version.

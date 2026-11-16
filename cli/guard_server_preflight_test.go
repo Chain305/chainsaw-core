@@ -203,3 +203,45 @@ func TestServerBlockSeverityDefaultsAndRejectsGarbage(t *testing.T) {
 		t.Fatalf("critical = %q", got)
 	}
 }
+
+// CHAINSAW_OFFLINE is the umbrella kill switch (docs/CONFIG_REFERENCE.md):
+// a signed-in box with it set must send no coordinates to /api/scan. The
+// "unset" arm proves the stub is reachable, so a zero is not a dead server.
+func TestServerInstallPreflightHonoursOffline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		offline string
+		want    int
+	}{
+		{"offline", "1", 0},
+		{"offline-false", "0", 1},
+		{"unset", "", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CHAINSAW_OFFLINE", tc.offline)
+			requests := 0
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/scan", func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				_ = json.NewEncoder(w).Encode(scanAPIResponse{})
+			})
+			configureGuardPreflight(t, mux)
+
+			verdicts, blocked, notice := serverInstallPreflight(context.Background(), []packageSpec{
+				{Ecosystem: "npm", Name: "lodash", Version: "4.17.21"},
+			})
+			if requests != tc.want {
+				t.Fatalf("requests = %d, want %d", requests, tc.want)
+			}
+			if blocked || len(verdicts) != 0 {
+				t.Fatalf("blocked=%v verdicts=%+v, want none (offline never blocks)", blocked, verdicts)
+			}
+			if tc.want == 0 && !strings.Contains(notice, "CHAINSAW_OFFLINE") {
+				t.Fatalf("notice = %q, want it to name CHAINSAW_OFFLINE", notice)
+			}
+			if tc.want == 1 && notice != "" {
+				t.Fatalf("notice = %q, want empty", notice)
+			}
+		})
+	}
+}

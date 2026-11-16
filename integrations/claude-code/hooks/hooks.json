@@ -1,0 +1,28 @@
+{
+  "description": "Check package installs with the Chainsaw install guard before Bash runs them. Without the chainsaw CLI on PATH this does nothing, and the session-start check says so. Exit status 2 is remapped to 1 so a crashed check can never block every command.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/check-cli.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v chainsaw >/dev/null 2>&1 || exit 0; chainsaw guard agent-hook; s=$?; [ \"$s\" -eq 2 ] && exit 1; exit \"$s\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

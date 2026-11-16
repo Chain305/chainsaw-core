@@ -15,6 +15,7 @@ package cli
 //   - The OS keyring is never involved (no credential path runs here).
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -109,7 +110,16 @@ func resetTelemetryProcessState(t *testing.T) {
 	pendingSessionStart = nil
 	pendingSessionStartedAt = time.Time{}
 	telemetry.ResetProcessInstall()
+	// The detached sender cannot run under `go test` (os.Executable is the
+	// test binary). Run its child half in-process instead, synchronously, so
+	// these tests still exercise the real payload round-trip and the child's
+	// own consent re-check.
+	startTelemetrySender = func(payload []byte) error {
+		runTelemetrySender(bytes.NewReader(payload))
+		return nil
+	}
 	t.Cleanup(func() {
+		startTelemetrySender = spawnTelemetrySender
 		telemetryOnce = sync.Once{}
 		telemetryCli = nil
 		flushTelemetryOnce = sync.Once{}

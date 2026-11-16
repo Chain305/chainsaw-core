@@ -1,0 +1,13 @@
+{
+  "name": "chainsaw",
+  "owner": {
+    "name": "Chain305"
+  },
+  "plugins": [
+    {
+      "name": "chainsaw-guard",
+      "source": "./integrations/claude-code",
+      "description": "Runs the Chainsaw install guard on package installs in Claude Code's Bash commands, before they run"
+    }
+  ]
+}

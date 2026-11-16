@@ -1,0 +1,12 @@
+{
+  "name": "chainsaw-guard",
+  "version": "0.1.0",
+  "description": "Runs the Chainsaw install guard on package installs in Claude Code's Bash commands (npm, pnpm, yarn, pip, uv, poetry, pipx, go, cargo, gem, brew, npx, uvx and friends) and denies the ones it refuses, with the reason. Needs the chainsaw CLI on PATH.",
+  "author": {
+    "name": "Chain305"
+  },
+  "homepage": "https://chain305.com",
+  "repository": "https://github.com/Chain305/chainsaw-core",
+  "license": "Apache-2.0",
+  "keywords": ["security", "supply-chain", "npm", "pypi", "typosquat", "malware"]
+}

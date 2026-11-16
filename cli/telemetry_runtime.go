@@ -14,7 +14,6 @@ package cli
 //   - emit() never returns an error; telemetry can't break the CLI.
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -107,14 +106,15 @@ func initTelemetry() *telemetry.Client {
 			telemetryCli = telemetry.New(telemetry.Config{Mode: telemetry.ModeDisabled})
 			return
 		}
-		telemetryCli = telemetry.New(telemetry.Config{
+		telemetryCfg = telemetry.Config{
 			Endpoint:        endpoint,
 			Source:          telemetry.SurfaceCLI,
 			ChainsawVersion: Version,
 			APIKey:          cfgToken(),
 			Env:             resolveEnv(),
 			Mode:            mode,
-		})
+		}
+		telemetryCli = telemetry.New(telemetryCfg)
 	})
 	return telemetryCli
 }
@@ -187,7 +187,11 @@ func emitAt(name string, ts time.Time, props map[string]any) {
 // flushTelemetry drains any pending events. Called explicitly from the
 // Execute() wrapper immediately after markSessionEnd (BEFORE os.Exit,
 // which skips defers) and again from a defer as the panic-path backstop.
-// Bounded by the client's HTTP timeout; never hangs the process.
+//
+// It does NOT send. The batch goes to a detached `chainsaw __telemetry-send`
+// child (telemetry_handoff.go), so the command never waits on the network.
+// Sending here synchronously cost ~1s on every consented invocation,
+// including every package-manager call the guard shim wraps.
 //
 // R3: Execute() previously relied SOLELY on `defer flushTelemetry()`,
 // which os.Exit(exitCode) never runs — so every FAILING command dropped
@@ -210,9 +214,7 @@ func flushTelemetry() {
 	if telemetryCli == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	telemetryCli.Flush(ctx)
+	handOffTelemetry(telemetryCli.TakePending())
 	flushTelemetryOnce.Do(func() { telemetryCli.Close() })
 }
 

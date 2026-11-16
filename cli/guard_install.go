@@ -678,44 +678,11 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 		}
 	}
 
-	ctx := context.Background()
-	// Homebrew metadata lanes (disabled / deprecated / third-party tap / cask
-	// risk flags). Runs BEFORE evaluateAll because it also fills each formula's
-	// current pkg_version, which the server preflight below needs.
-	var brewVerdicts []guardVerdict
-	if bin == "brew" {
-		var brewNotices []string
-		specs, brewVerdicts, brewNotices = runBrewPreflight(ctx, specs)
-		if !isQuiet {
-			for _, n := range brewNotices {
-				fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, n))
-			}
-		}
-	}
-	verdicts, blocked := guard.evaluateAll(ctx, specs)
-	if len(brewVerdicts) > 0 {
-		verdicts = append(brewVerdicts, verdicts...)
-		blocked = blocked || anyBlocking(brewVerdicts)
-	}
-	// Byte-scan coverage is reported HERE, after evaluation, and not with the
-	// notices above — because before evaluation nobody knows whether it ran.
-	// The notice this replaced was derived from two env vars read at guard
-	// construction and claimed "behavioral byte scan not run" on every machine
-	// with a warm npm/cargo/pip cache, while the guard was reading those exact
-	// bytes. See localGuard.byteScanNotice. Same --quiet rule as every other
-	// notice: it is context, never a refusal.
+	verdicts, blocked, laneNotices := guardEvaluate(context.Background(), guard, bin, specs)
 	if !isQuiet {
-		if n := guard.byteScanNotice(); n != "" {
+		for _, n := range laneNotices {
 			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, n))
 		}
-	}
-	if onlineVerdicts, onlineBlocked, notice := runServerInstallPreflight(ctx, specs); notice != "" {
-		if !isQuiet {
-			fmt.Fprintf(os.Stderr, "%s  %s\n", tag, c(ansiDim, notice))
-		}
-	} else if len(onlineVerdicts) > 0 {
-		verdicts = append(verdicts, onlineVerdicts...)
-		blocked = blocked || onlineBlocked
 	}
 	printGuardVerdicts(os.Stderr, tag, verdicts, isQuiet)
 
@@ -736,6 +703,44 @@ func runGuardedPassthrough(bin string, args []string, parse specParser) error {
 	}
 
 	return execPassthrough(bin, passArgs)
+}
+
+// guardEvaluate runs every verdict lane over specs, in the order the install
+// path has always run them, and returns the verdicts plus the lanes' context
+// notices in emit order. It prints nothing, so the shell guard
+// (runGuardedPassthrough) and the agent hook (guard_agent_hook.go) cannot
+// drift onto different sets of lanes: a lane added here reaches both.
+//
+//   - Homebrew metadata (disabled / deprecated / third-party tap / cask risk).
+//     Runs BEFORE evaluateAll because it also fills each formula's current
+//     pkg_version, which the server preflight needs.
+//   - The local ladder (evaluateAll).
+//   - The byte-scan coverage notice — after evaluation, because before it
+//     nobody knows whether the scan ran (see localGuard.byteScanNotice).
+//   - The opt-in server preflight: verdicts when it answered, a notice when it
+//     did not.
+func guardEvaluate(ctx context.Context, guard *localGuard, bin string, specs []packageSpec) (verdicts []guardVerdict, blocked bool, notices []string) {
+	var brewVerdicts []guardVerdict
+	if bin == "brew" {
+		var brewNotices []string
+		specs, brewVerdicts, brewNotices = runBrewPreflight(ctx, specs)
+		notices = append(notices, brewNotices...)
+	}
+	verdicts, blocked = guard.evaluateAll(ctx, specs)
+	if len(brewVerdicts) > 0 {
+		verdicts = append(brewVerdicts, verdicts...)
+		blocked = blocked || anyBlocking(brewVerdicts)
+	}
+	if n := guard.byteScanNotice(); n != "" {
+		notices = append(notices, n)
+	}
+	if onlineVerdicts, onlineBlocked, notice := runServerInstallPreflight(ctx, specs); notice != "" {
+		notices = append(notices, notice)
+	} else if len(onlineVerdicts) > 0 {
+		verdicts = append(verdicts, onlineVerdicts...)
+		blocked = blocked || onlineBlocked
+	}
+	return verdicts, blocked, notices
 }
 
 // guardSpecsFor resolves the set of packages one invocation is asking to
@@ -1393,6 +1398,14 @@ func serverInstallPreflight(ctx context.Context, specs []packageSpec) ([]guardVe
 	}
 	if len(candidates) == 0 {
 		return nil, false, ""
+	}
+	// CHAINSAW_OFFLINE is the umbrella kill switch: send no coordinates. A
+	// notice, never a block — an unavailable source does not refuse an install
+	// (plan_optional_fail_closed D5). Checked after the candidate filter so a
+	// pip install on an offline box does not print a notice for a lookup that
+	// would never have run.
+	if envTruthy(os.Getenv("CHAINSAW_OFFLINE")) {
+		return nil, false, "server lookup not run (CHAINSAW_OFFLINE): known-vulnerable versions are unchecked"
 	}
 
 	var resp scanAPIResponse

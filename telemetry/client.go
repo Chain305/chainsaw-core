@@ -233,6 +233,30 @@ func (c *Client) Flush(ctx context.Context) {
 	}
 }
 
+// TakePending removes and returns every buffered event without sending it.
+// The CLI uses it to hand its tail batch to a detached sender process, so a
+// short-lived command never waits on the network (see flushTelemetry in
+// core/cli/telemetry_runtime.go). Nil for a disabled client.
+func (c *Client) TakePending() []Event {
+	if c == nil || c.cfg.Mode != ModeEnabled {
+		return nil
+	}
+	c.mu.Lock()
+	batch := c.buf
+	c.buf = nil
+	c.mu.Unlock()
+	return batch
+}
+
+// Send posts an already-captured batch synchronously. It does not re-enrich
+// or re-scrub: the events passed through CaptureAt when they were recorded.
+func (c *Client) Send(ctx context.Context, batch []Event) error {
+	if c == nil || len(batch) == 0 {
+		return nil
+	}
+	return c.sendBatch(ctx, batch)
+}
+
 // Close stops the background flusher and waits for it to drain. Safe to
 // call multiple times.
 func (c *Client) Close() {
