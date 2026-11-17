@@ -94,7 +94,7 @@ inputs:
       verifies a checksum manifest served by the same host as the binary,
       and the step warns about it.
     required: false
-    default: "v0.22.171"
+    default: "v0.22.175"
   comment-on-pr:
     description: >
       Post a summary comment on the pull request with findings and a
@@ -217,12 +217,12 @@ runs:
       env:
         CHAINSAW_VERSION: ${{ inputs.version }}
         CHAINSAW_REQUIRE_SIGNATURE: "0"
-        CHAINSAW_PINNED_VERSION: v0.22.171
-        CHAINSAW_PINNED_SHA256_LINUX_AMD64: 7aa88beed465a567b25429b0275c6e8a9fbb7173fe3f2637cf3a64f06ee7ef5f
-        CHAINSAW_PINNED_SHA256_LINUX_ARM64: 3b46148ecaa05cd5fddfe800db9f667bc17ddbffa7a338a61fde6b428539f3e8
-        CHAINSAW_PINNED_SHA256_DARWIN_AMD64: bd87fa346f74d6d455561a9bcd991519a69c08f69cd8eecd7826efaddf0dea41
-        CHAINSAW_PINNED_SHA256_DARWIN_ARM64: 7dda97b7dfe4f7106c86563bc4f70066e3a8490956b7c287d1817739a931873f
-        CHAINSAW_PINNED_SHA256_WINDOWS_AMD64: 1828396d1721ac4f2e542ef8b58815564ad5aa7e6024acacfa045dca4fc0de32
+        CHAINSAW_PINNED_VERSION: v0.22.175
+        CHAINSAW_PINNED_SHA256_LINUX_AMD64: cd77cd1410b25cbe6ab0e1a59bc209d1cca408427a8878cf09a169ec226783f3
+        CHAINSAW_PINNED_SHA256_LINUX_ARM64: 9816f25acbd155bafa0f3a904fceb60c6111000bdced8d7c4312d9cb2917307d
+        CHAINSAW_PINNED_SHA256_DARWIN_AMD64: 4a629c818906080035040fb25486ddc296f0e5b05c5aca504659a1dbfcb47879
+        CHAINSAW_PINNED_SHA256_DARWIN_ARM64: 4dd201474be31a84fee31a8fd52faec4a1b870a448e244d60b27534c4736ee25
+        CHAINSAW_PINNED_SHA256_WINDOWS_AMD64: 918239bac8db313137dc1a30070897469e455ad3be8e7f1d9c9e23a95039ed81
       run: |
         set -euo pipefail
         if command -v chainsaw >/dev/null; then
