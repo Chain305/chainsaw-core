@@ -33,7 +33,7 @@ func TestSimulateIdentifierMatch_WildcardName(t *testing.T) {
 		TargetPackageRepo:    "*",
 		TargetPackageVersion: "*",
 	}
-	matched, unevaluated := simulateIdentifierMatch(ident, "", "lodash", "4.17.21")
+	matched, unevaluated := simulateIdentifierMatch(ident, "", "lodash", "4.17.21", false)
 	if !matched {
 		t.Fatal(`identifier {name:"*",repo:"*",version:"*"} must match every package — every seeded policy uses this shape`)
 	}
@@ -51,10 +51,10 @@ func TestSimulateIdentifierMatch_SemverConstraint(t *testing.T) {
 		TargetPackageName:    "log4j-core",
 		TargetPackageVersion: "<2.15.0",
 	}
-	if matched, _ := simulateIdentifierMatch(ident, "", "log4j-core", "2.14.1"); !matched {
+	if matched, _ := simulateIdentifierMatch(ident, "", "log4j-core", "2.14.1", false); !matched {
 		t.Error("constraint <2.15.0 must match 2.14.1 (the log4j shape)")
 	}
-	if matched, _ := simulateIdentifierMatch(ident, "", "log4j-core", "2.17.0"); matched {
+	if matched, _ := simulateIdentifierMatch(ident, "", "log4j-core", "2.17.0", false); matched {
 		t.Error("constraint <2.15.0 must NOT match 2.17.0")
 	}
 	// Range forms an operator would plausibly write.
@@ -68,7 +68,7 @@ func TestSimulateIdentifierMatch_SemverConstraint(t *testing.T) {
 		{">=1 <2", "2.0.1", false},
 	} {
 		id := policy.Identifier{TargetPackageName: "p", TargetPackageVersion: c.constraint}
-		if got, _ := simulateIdentifierMatch(id, "", "p", c.version); got != c.want {
+		if got, _ := simulateIdentifierMatch(id, "", "p", c.version, false); got != c.want {
 			t.Errorf("constraint %q vs %q: got %v want %v", c.constraint, c.version, got, c.want)
 		}
 	}
@@ -84,7 +84,7 @@ func TestSimulateIdentifierMatch_SemverConstraint(t *testing.T) {
 func TestSimulateIdentifierMatch_RepoScopedWithoutFlag(t *testing.T) {
 	ident := policy.Identifier{TargetPackageRepo: "npm-internal"}
 
-	matched, unevaluated := simulateIdentifierMatch(ident, "", "lodash", "1.0.0")
+	matched, unevaluated := simulateIdentifierMatch(ident, "", "lodash", "1.0.0", false)
 	if !matched {
 		t.Fatal("a repo-scoped rule must not be silently DROPPED when --repository is absent")
 	}
@@ -97,11 +97,11 @@ func TestSimulateIdentifierMatch_RepoScopedWithoutFlag(t *testing.T) {
 
 	// With --repository supplied there is nothing unevaluated, and the
 	// rule matches or does not on its merits.
-	matched, unevaluated = simulateIdentifierMatch(ident, "npm-internal", "lodash", "1.0.0")
+	matched, unevaluated = simulateIdentifierMatch(ident, "npm-internal", "lodash", "1.0.0", false)
 	if !matched || len(unevaluated) != 0 {
 		t.Errorf("--repository npm-internal: matched=%v unevaluated=%v; want true / none", matched, unevaluated)
 	}
-	matched, unevaluated = simulateIdentifierMatch(ident, "npm-public", "lodash", "1.0.0")
+	matched, unevaluated = simulateIdentifierMatch(ident, "npm-public", "lodash", "1.0.0", false)
 	if matched || len(unevaluated) != 0 {
 		t.Errorf("--repository npm-public: matched=%v unevaluated=%v; want false / none", matched, unevaluated)
 	}
@@ -112,7 +112,7 @@ func TestSimulateIdentifierMatch_RepoScopedWithoutFlag(t *testing.T) {
 // version, so a version-constrained rule cannot be decided here.
 func TestSimulateIdentifierMatch_VersionScopedWithoutVersion(t *testing.T) {
 	ident := policy.Identifier{TargetPackageName: "log4j-core", TargetPackageVersion: "<2.15.0"}
-	matched, unevaluated := simulateIdentifierMatch(ident, "", "log4j-core", "")
+	matched, unevaluated := simulateIdentifierMatch(ident, "", "log4j-core", "", false)
 	if !matched {
 		t.Fatal("a version-scoped rule must not be silently dropped when no version was supplied")
 	}
@@ -353,5 +353,16 @@ func TestPolicySimulate_RepoScopedReportsConditional(t *testing.T) {
 	_ = json.Unmarshal(buf.Bytes(), &got)
 	if got["outcome"] != "no_match" {
 		t.Errorf("outcome = %v, want no_match", got["outcome"])
+	}
+}
+
+// H5: an exception's version leg is exact in the preview too, as in the proxy.
+func TestSimulateIdentifierMatch_ExceptionVersionIsExact(t *testing.T) {
+	ident := policy.Identifier{TargetPackageName: "lodash", TargetPackageVersion: "4.17"}
+	if matched, _ := simulateIdentifierMatch(ident, "", "lodash", "4.17.21", true); matched {
+		t.Fatal("exception for lodash@4.17 previewed as covering 4.17.21")
+	}
+	if matched, _ := simulateIdentifierMatch(ident, "", "lodash", "4.17.21", false); !matched {
+		t.Fatal("policy version 4.17 stopped matching 4.17.21 as a constraint")
 	}
 }

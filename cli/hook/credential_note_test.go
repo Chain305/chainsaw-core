@@ -131,7 +131,10 @@ func TestEveryCredentialBearingManagerDisclosesTheSecret(t *testing.T) {
 				if !strings.Contains(body, secret) && !strings.Contains(body, encodedTestSecretForms(secret, body)) {
 					continue
 				}
-				if !strings.Contains(body, "chainsaw: this file contains a credential in cleartext") {
+				// Bundler's config reads "a: b" in a comment as a key, so its
+				// note spells the colon as " - " (bundlerSafeComments).
+				if !strings.Contains(body, "chainsaw: this file contains a credential in cleartext") &&
+					!(m.Name() == "bundler" && strings.Contains(body, "chainsaw - this file contains a credential in cleartext")) {
 					t.Errorf("%s embeds the client secret with no disclosure note:\n%s", p, body)
 				}
 			}

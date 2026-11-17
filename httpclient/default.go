@@ -80,10 +80,18 @@ func WithTransport(fn func(*http.Transport) http.RoundTripper) DefaultOption {
 // as the dial half — without it an allowed public host can 302 to
 // 169.254.169.254 and the address check never sees the metadata IP.
 //
-// CHAINSAW_ALLOW_PRIVATE_UPSTREAMS=1 still overrides the dial block for
-// operators proxying an internal registry, exactly as it does on the
-// repository fetch path (see cmd/chainsaw-proxy/main.go's
-// registerRepositoriesFromConfig).
+// Behind a forward proxy (HTTP(S)_PROXY) the dial only ever sees the
+// proxy, so the guard also checks each proxied request's target from the
+// transport's Proxy hook, and exempts exactly the operator's proxy address
+// from the private-range dial check (proxy_ssrf.go). That is why a caller
+// must not swap base.DialContext for its own SafeDialer via WithTransport:
+// it keeps the dial check and loses both of those.
+//
+// CHAINSAW_ALLOW_PRIVATE_UPSTREAMS=1 still overrides the private-range
+// block (on the target, direct or proxied) for operators proxying an
+// internal registry, exactly as it does on the repository fetch path (see
+// cmd/chainsaw-proxy/main.go's registerRepositoriesFromConfig). It is no
+// longer needed for a private forward proxy.
 func WithSSRFGuard() DefaultOption {
 	return func(c *defaultClientConfig) { c.ssrfGuard = true }
 }
@@ -131,11 +139,10 @@ func defaultConfig() defaultClientConfig {
 //
 //   - Factory.NewClient with NewFactory(cfg, WithSafeDialer(true)) — for
 //     repository-remote style clients; or
-//   - New(WithTransport(func(base *http.Transport) http.RoundTripper {
-//     base.DialContext = NewSafeDialer(nil).DialContext; return base }))
-//     — for one-off clients. See internal/webhook/dispatcher.go,
-//     internal/connector/jira/client.go and internal/server/authapi's
-//     ssoSafeHTTPClient for the three in-tree precedents.
+//   - New(WithSSRFGuard()) — for one-off clients (internal/webhook's
+//     dispatcher, internal/server/authapi's ssoSafeHTTPClient). Do NOT
+//     swap base.DialContext for a SafeDialer via WithTransport instead:
+//     that misses the forward-proxy target check (see WithSSRFGuard).
 //
 // Bare New (no safe dialer) is only appropriate for a pinned,
 // compile-time-constant host that no tenant can influence.
@@ -145,7 +152,7 @@ func New(opts ...DefaultOption) *http.Client {
 		o(&cfg)
 	}
 	base := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: envProxy,
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -158,8 +165,14 @@ func New(opts ...DefaultOption) *http.Client {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	if cfg.ssrfGuard {
-		base.DialContext = NewSafeDialer(nil).DialContext
+		d := NewSafeDialer(nil)
+		d.exemptEnvProxy = true
+		base.DialContext = d.DialContext
+		base.Proxy = ssrfCheckedProxy(base.Proxy)
+	} else {
+		base.DialContext = egressChecked(base.DialContext)
 	}
+	base.Proxy = egressCheckedProxy(base.Proxy)
 	var rt http.RoundTripper = base
 	if cfg.transportFn != nil {
 		rt = cfg.transportFn(base)

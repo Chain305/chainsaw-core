@@ -18,6 +18,7 @@ release_policy:
   warn_hold_multiplier: 3
   exempt_scopes: ["@acme", "internal-*"]
   exemptions: ["left-pad@1.3.1"]
+  cve_fix_release: false
 `)
 	if err := SaveToStoreForOrg(store, cfg, org, true); err != nil {
 		t.Fatalf("save: %v", err)
@@ -28,7 +29,8 @@ release_policy:
 	}
 	rp := got.ReleasePolicy
 	if rp.MinAgeDays == nil || *rp.MinAgeDays != 2 || rp.MinAgeHours == nil || *rp.MinAgeHours != 36 || rp.WarnHoldMultiplier != 3 ||
-		!slices.Equal(rp.ExemptScopes, []string{"@acme", "internal-*"}) || !slices.Equal(rp.Exemptions, []string{"left-pad@1.3.1"}) {
+		!slices.Equal(rp.ExemptScopes, []string{"@acme", "internal-*"}) || !slices.Equal(rp.Exemptions, []string{"left-pad@1.3.1"}) ||
+		rp.CVEFixRelease == nil || *rp.CVEFixRelease {
 		t.Fatalf("after YAML import: %+v", rp)
 	}
 	if got.ReleaseHold() != 36*time.Hour {
@@ -44,7 +46,7 @@ release_policy:
 		t.Fatalf("load: %v", err)
 	}
 	rp = got.ReleasePolicy
-	if rp.MinAgeHours != nil || rp.WarnHoldMultiplier != 1 || len(rp.ExemptScopes) != 0 || len(rp.Exemptions) != 0 {
+	if rp.MinAgeHours != nil || rp.WarnHoldMultiplier != 1 || len(rp.ExemptScopes) != 0 || len(rp.Exemptions) != 0 || rp.CVEFixRelease != nil {
 		t.Fatalf("after setter: %+v; cleared fields must stay cleared", rp)
 	}
 	if got.ReleaseHold() != 48*time.Hour {

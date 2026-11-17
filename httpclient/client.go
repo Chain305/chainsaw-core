@@ -93,8 +93,14 @@ func (f *Factory) NewClient(remote config.RemoteConfig) *http.Client {
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}).DialContext
+	proxy := proxyFunc(remote.ProxyURL)
 	if f.safeDialer {
-		dialContext = newSafeDialer().DialContext
+		d := newSafeDialer()
+		d.exemptEnvProxy = true
+		dialContext = d.DialContext
+		proxy = ssrfCheckedProxy(proxy)
+	} else {
+		dialContext = egressChecked(dialContext)
 	}
 
 	// TLS verification skip is only honored when the factory was constructed
@@ -108,7 +114,7 @@ func (f *Factory) NewClient(remote config.RemoteConfig) *http.Client {
 	}
 
 	transport := &http.Transport{
-		Proxy:               proxyFunc(remote.ProxyURL),
+		Proxy:               egressCheckedProxy(proxy),
 		MaxIdleConns:        maxIdle,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
@@ -157,11 +163,11 @@ func remoteHost(remote config.RemoteConfig) string {
 
 func proxyFunc(proxyURL string) func(*http.Request) (*url.URL, error) {
 	if proxyURL == "" {
-		return http.ProxyFromEnvironment
+		return envProxy
 	}
 	u, err := url.Parse(proxyURL)
 	if err != nil {
-		return http.ProxyFromEnvironment
+		return envProxy
 	}
 	return http.ProxyURL(u)
 }

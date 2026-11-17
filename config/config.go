@@ -467,6 +467,10 @@ type ReleasePolicyConfig struct {
 	// Exemptions lists exact "package@version" coordinates released from the
 	// hold early, for an urgent patch the CVE-fix rule does not recognise.
 	Exemptions []string `yaml:"exemptions"`
+	// CVEFixRelease, when explicitly false, turns off the CVE-fix early
+	// release: a young version an advisory names as its fix then waits out
+	// the hold like any other. nil (unset) and true leave it on.
+	CVEFixRelease *bool `yaml:"cve_fix_release"`
 }
 
 // SwiftConfig controls Swift Package Manager (SE-0292) specific knobs.

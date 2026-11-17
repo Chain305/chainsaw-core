@@ -4,7 +4,7 @@ import "testing"
 
 func TestAllReturnsExpectedSetDistinct(t *testing.T) {
 	got := All()
-	expected := []string{"npm", "yarn", "bun", "pip", "cargo", "maven", "gradle", "sbt", "nuget", "go", "docker", "brew"}
+	expected := []string{"npm", "yarn", "bun", "pip", "uv", "cargo", "maven", "gradle", "sbt", "nuget", "go", "docker", "brew", "bundler", "gem", "composer"}
 	if len(got) != len(expected) {
 		t.Fatalf("All() returned %d managers, want %d", len(got), len(expected))
 	}
@@ -23,7 +23,7 @@ func TestAllReturnsExpectedSetDistinct(t *testing.T) {
 }
 
 func TestByName(t *testing.T) {
-	for _, name := range []string{"npm", "pip", "cargo", "maven", "gradle", "sbt", "nuget", "go", "docker", "yarn", "bun", "brew"} {
+	for _, name := range []string{"npm", "pip", "cargo", "maven", "gradle", "sbt", "nuget", "go", "docker", "yarn", "bun", "brew", "uv", "bundler", "gem", "composer"} {
 		m, err := ByName(name)
 		if err != nil {
 			t.Errorf("ByName(%q) returned error: %v", name, err)
@@ -33,8 +33,8 @@ func TestByName(t *testing.T) {
 			t.Errorf("ByName(%q) returned manager named %q", name, m.Name())
 		}
 	}
-	if _, err := ByName("gem"); err == nil {
-		t.Error("ByName(\"gem\") returned nil error, want not-found")
+	if _, err := ByName("gems"); err == nil {
+		t.Error("ByName(\"gems\") returned nil error, want not-found")
 	}
 }
 

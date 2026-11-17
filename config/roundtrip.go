@@ -128,6 +128,7 @@ var settingsBackedFields = map[string]string{
 	"ReleasePolicy.WarnHoldMultiplier": settingReleaseWarnMultiplier,
 	"ReleasePolicy.ExemptScopes":       settingReleaseExemptScopes,
 	"ReleasePolicy.Exemptions":         settingReleaseExemptions,
+	"ReleasePolicy.CVEFixRelease":      settingReleaseCVEFixRelease,
 	"BlockingMode":                     settingBlockingMode,
 	"RepositoryAnonymousAccess":        settingRepositoryAllowAnonymous,
 

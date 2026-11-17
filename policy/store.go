@@ -731,6 +731,9 @@ func (s *Store) Create(policy Policy) (Policy, error) {
 	if err := validatePolicy(policy); err != nil {
 		return Policy{}, err
 	}
+	if IsLegacyExceptionShape(policy) {
+		return Policy{}, ErrLegacyExceptionShape
+	}
 	// A1 — numeric bounds and the name cap are checked here, not in
 	// validatePolicy, because Update must only reject violations an
 	// edit introduces (see policyRangeViolations). Create has no prior
@@ -833,6 +836,17 @@ func (s *Store) Update(id string, policy Policy) (Policy, error) {
 	}
 	if err := validatePolicy(policy); err != nil {
 		return Policy{}, err
+	}
+	// The retired exception shape may be kept by a row that already has it
+	// (a disable or rollback round-trips the stored row), never introduced.
+	if IsLegacyExceptionShape(policy) {
+		prev, err := s.Get(id)
+		if err != nil && errors.Is(err, ErrPolicyNotFound) {
+			return Policy{}, err
+		}
+		if err != nil || !IsLegacyExceptionShape(prev) {
+			return Policy{}, ErrLegacyExceptionShape
+		}
 	}
 	// A1 — introduced-violation-only semantics. Update runs on PATCH
 	// {"status":"disabled"}, promote-to-block, exception approve/deny and

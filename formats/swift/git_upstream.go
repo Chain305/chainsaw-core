@@ -9,13 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/chain305/chainsaw-core/httpclient"
+	"golang.org/x/net/http/httpproxy"
 )
 
 // GitUpstream synthesizes SE-0292 registry responses from git remotes.
@@ -50,6 +55,172 @@ type GitUpstream struct {
 	// otherwise did NOT reach the Swift git fallback: an air-gapped
 	// deployment would still shell out to `git ls-remote https://github.com/…`.
 	Offline func() bool
+	// AllowProtocol is GIT_ALLOW_PROTOCOL for every git run; "" means
+	// "https". Tests that read a local file:// repo set "file".
+	AllowProtocol string
+	// CheckRemote vets a remote URL before any network git operation; nil
+	// means planRemote (https only, CHAINSAW_EGRESS_ALLOW, SafeDialer IP
+	// rules). Tests against a local repo or a shim replace it.
+	CheckRemote func(ctx context.Context, gitURL string) error
+	// lookup resolves and vets a remote host for the default check; nil
+	// means httpclient.ResolveDialHost. Tests replace it to avoid DNS.
+	lookup func(ctx context.Context, host string) ([]net.IP, error)
+}
+
+// gitRoute is how one network git run reaches its remote, decided in Go by
+// planRemote and imposed on git by gitEnv, so git cannot pick a route the
+// check did not see. The zero value (a local operation, or a CheckRemote
+// hook) passes the proxy variables through unchanged.
+type gitRoute struct {
+	set     bool
+	proxy   string // forward proxy git must use (http.proxy); "" = direct
+	resolve string // direct only: host:port:addrs (http.curloptResolve)
+}
+
+// planRemote is the default remote check. git dials on its own, so the
+// SafeDialer never sees its connections; this applies the same rules before
+// git starts: an https:// URL and a host the egress allowlist names (when
+// one is set). Then, using the proxy Go's HTTPS_PROXY / NO_PROXY rules pick
+// for the URL:
+//
+//   - through a forward proxy: the proxy must be http:// or https:// (with
+//     socks5:// curl resolves the target LOCALLY and connects to whatever
+//     it gets, unchecked) and its host must pass the allowlist too. The
+//     target gets httpclient.CheckProxiedTarget, the same check the HTTP
+//     transports run behind a proxy: IP literals and metadata / reserved
+//     names refused, and a best-effort local resolve whose failure passes
+//     (the proxy resolves; networks with no external DNS exist). git is
+//     pinned to nothing here; it is told to use exactly that proxy, with
+//     NO_PROXY and ALL_PROXY withheld, so it cannot go direct instead.
+//   - direct: every address the host resolves to must be outside the
+//     private / loopback / link-local / metadata ranges, and git is pinned
+//     to those addresses with http.curloptResolve, so it does not resolve
+//     the name a second time (closing the DNS rebinding window). Proxy
+//     variables are withheld, so git cannot go through a proxy unchecked.
+func planRemote(ctx context.Context, gitURL string, lookup func(context.Context, string) ([]net.IP, error)) (gitRoute, error) {
+	u, err := url.Parse(gitURL)
+	if err != nil || u.Host == "" {
+		return gitRoute{}, fmt.Errorf("swift git upstream: refusing remote %q: want an https:// URL", gitURL)
+	}
+	if u.Scheme != "https" {
+		return gitRoute{}, fmt.Errorf("swift git upstream: refusing remote scheme %q: only https is allowed", u.Scheme)
+	}
+	host := u.Hostname()
+	refuse := func(err error) (gitRoute, error) {
+		return gitRoute{}, fmt.Errorf("swift git upstream: refusing remote %s: %w", u.Host, err)
+	}
+	if err := httpclient.CheckEgressHost(host); err != nil {
+		return refuse(err)
+	}
+	proxy, err := httpproxy.FromEnvironment().ProxyFunc()(u)
+	if err != nil {
+		return refuse(err)
+	}
+	if proxy != nil {
+		if s := strings.ToLower(proxy.Scheme); s != "http" && s != "https" {
+			return refuse(fmt.Errorf("forward proxy scheme %q: only http and https proxies are supported for git", proxy.Scheme))
+		}
+		if err := httpclient.CheckEgressHost(proxy.Hostname()); err != nil {
+			return refuse(fmt.Errorf("forward proxy: %w", err))
+		}
+		if err := httpclient.CheckProxiedTarget(ctx, host); err != nil {
+			return refuse(err)
+		}
+		return gitRoute{set: true, proxy: proxy.String()}, nil
+	}
+	if lookup == nil {
+		lookup = httpclient.ResolveDialHost
+	}
+	ips, err := lookup(ctx, host)
+	if err != nil {
+		return refuse(err)
+	}
+	r := gitRoute{set: true}
+	if net.ParseIP(host) == nil {
+		port := u.Port()
+		if port == "" {
+			port = "443"
+		}
+		addrs := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			if ip.To4() != nil {
+				addrs = append(addrs, ip.String())
+			} else {
+				addrs = append(addrs, "["+ip.String()+"]")
+			}
+		}
+		r.resolve = host + ":" + port + ":" + strings.Join(addrs, ",")
+	}
+	return r, nil
+}
+
+func (g *GitUpstream) checkRemote(ctx context.Context, gitURL string) (gitRoute, error) {
+	if g.CheckRemote != nil {
+		return gitRoute{}, g.CheckRemote(ctx, gitURL)
+	}
+	return planRemote(ctx, gitURL, g.lookup)
+}
+
+// gitPassthroughEnv are the only parent variables git sees: what it needs to
+// run and to reach the network the way the proxy does. Everything else
+// (database URL, API keys, GIT_* overrides) stays out of the child. The
+// proxy variables pass only when no gitRoute was planned (see gitEnv).
+var gitPassthroughEnv = []string{
+	"PATH", "TMPDIR",
+	"SSL_CERT_FILE", "SSL_CERT_DIR",
+}
+
+var gitProxyEnv = []string{
+	"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+	"NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
+}
+
+// gitEnv is the complete environment for a git run. No system or global
+// config, no credential helper, no askpass or terminal prompt, only
+// AllowProtocol, and no HTTP redirects (a redirect would reach a host
+// checkRemote never saw; a renamed repo now fails until the identifier map
+// names its new URL). A planned route replaces the proxy variables with
+// http.proxy or http.curloptResolve. GIT_CONFIG_COUNT needs git >= 2.31;
+// http.curloptResolve needs git >= 2.37 (the image ships Alpine 3.22's).
+func (g *GitUpstream) gitEnv(route gitRoute) []string {
+	proto := g.AllowProtocol
+	if proto == "" {
+		proto = "https"
+	}
+	home := g.CacheRoot
+	if home == "" {
+		home = os.TempDir()
+	}
+	cfg := [][2]string{{"credential.helper", ""}, {"http.followRedirects", "false"}}
+	if route.proxy != "" {
+		cfg = append(cfg, [2]string{"http.proxy", route.proxy})
+	}
+	if route.resolve != "" {
+		cfg = append(cfg, [2]string{"http.curloptResolve", route.resolve})
+	}
+	env := []string{
+		"HOME=" + home,
+		"GIT_ALLOW_PROTOCOL=" + proto,
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=false",
+		"SSH_ASKPASS=false",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(cfg)),
+	}
+	for i, kv := range cfg {
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, kv[0]), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, kv[1]))
+	}
+	pass := gitPassthroughEnv
+	if !route.set {
+		pass = append(append([]string(nil), pass...), gitProxyEnv...)
+	}
+	for _, k := range pass {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
 }
 
 // errOffline is returned when a network git operation is attempted while
@@ -214,7 +385,7 @@ func (g *GitUpstream) BuildArchive(ctx context.Context, identifier, version stri
 		return nil, "", err
 	}
 	// Ensure the tag ref is present locally.
-	if err := g.fetchTag(ctx, repoDir, version, tagRef); err != nil {
+	if err := g.fetchTag(ctx, repoDir, gitURL, version, tagRef); err != nil {
 		return nil, "", err
 	}
 	zipBytes, err = g.gitArchive(ctx, repoDir, version, prefix)
@@ -246,7 +417,7 @@ func (g *GitUpstream) FetchManifest(ctx context.Context, identifier, version, sw
 	if err != nil {
 		return nil, err
 	}
-	if err := g.fetchTag(ctx, repoDir, version, tagRef); err != nil {
+	if err := g.fetchTag(ctx, repoDir, gitURL, version, tagRef); err != nil {
 		return nil, err
 	}
 	file := "Package.swift"
@@ -290,7 +461,11 @@ func (g *GitUpstream) lsRemoteTags(ctx context.Context, gitURL string) (map[stri
 	if err := validateGitArg(gitURL); err != nil {
 		return nil, err
 	}
-	stdout, err := g.runGit(ctx, "", "ls-remote", "--tags", "--", gitURL)
+	route, err := g.checkRemote(ctx, gitURL)
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := g.runGitVia(ctx, route, "", "ls-remote", "--tags", "--", gitURL)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +513,7 @@ func (g *GitUpstream) tagDate(ctx context.Context, gitURL, version, commit strin
 	if err != nil {
 		return time.Time{}, err
 	}
-	if err := g.fetchTag(ctx, repoDir, version, commit); err != nil {
+	if err := g.fetchTag(ctx, repoDir, gitURL, version, commit); err != nil {
 		return time.Time{}, err
 	}
 	// fetchTag already ran validateGitArg on version and commit.
@@ -395,10 +570,15 @@ func (g *GitUpstream) ensureRepo(ctx context.Context, identifier, gitURL string)
 	return dir, nil
 }
 
-// fetchTag fetches a single tag into the bare repo.
-func (g *GitUpstream) fetchTag(ctx context.Context, repoDir, version, commit string) error {
+// fetchTag fetches a single tag into the bare repo. It fetches from gitURL,
+// not the repo's stored origin, so the URL checkRemote vetted is the one git
+// contacts even when a cached repo was created for an older mapping.
+func (g *GitUpstream) fetchTag(ctx context.Context, repoDir, gitURL, version, commit string) error {
 	if g.offline() {
 		return errOffline
+	}
+	if err := validateGitArg(gitURL); err != nil {
+		return err
 	}
 	if err := validateGitArg(version); err != nil {
 		return err
@@ -406,14 +586,18 @@ func (g *GitUpstream) fetchTag(ctx context.Context, repoDir, version, commit str
 	if err := validateGitArg(commit); err != nil {
 		return err
 	}
+	route, err := g.checkRemote(ctx, gitURL)
+	if err != nil {
+		return err
+	}
 	// Use fully-qualified refspecs so `version` is always positioned
 	// where git expects a ref name rather than a flag. The validateGitArg
 	// check above prevents a `-` prefix from sneaking through.
-	_, err := g.runGit(ctx, repoDir, "fetch", "--depth=1", "origin", "refs/tags/"+version+":refs/tags/"+version)
+	_, err = g.runGitVia(ctx, route, repoDir, "fetch", "--depth=1", gitURL, "refs/tags/"+version+":refs/tags/"+version)
 	if err != nil {
 		// Some repos ship lightweight tags that git fetch won't find by
 		// name — fall back to fetching the commit directly.
-		_, err2 := g.runGit(ctx, repoDir, "fetch", "--depth=1", "origin", commit)
+		_, err2 := g.runGitVia(ctx, route, repoDir, "fetch", "--depth=1", gitURL, commit)
 		return err2
 	}
 	return nil
@@ -444,8 +628,13 @@ func (g *GitUpstream) gitShow(ctx context.Context, repoDir, rev, path string) ([
 
 // runGit executes the git binary with the given args in workDir,
 // returning stdout. Stderr is included in the error when git exits
-// non-zero.
+// non-zero. Network operations use runGitVia with the route checkRemote
+// planned.
 func (g *GitUpstream) runGit(ctx context.Context, workDir string, args ...string) ([]byte, error) {
+	return g.runGitVia(ctx, gitRoute{}, workDir, args...)
+}
+
+func (g *GitUpstream) runGitVia(ctx context.Context, route gitRoute, workDir string, args ...string) ([]byte, error) {
 	bin := g.GitBin
 	if bin == "" {
 		bin = "git"
@@ -461,6 +650,7 @@ func (g *GitUpstream) runGit(ctx context.Context, workDir string, args ...string
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
+	cmd.Env = g.gitEnv(route)
 	// Don't let SSH or credential helpers block on stdin.
 	cmd.Stdin = strings.NewReader("")
 	var stderr bytes.Buffer

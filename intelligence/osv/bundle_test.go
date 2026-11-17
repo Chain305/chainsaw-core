@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // gzippedJSON is a small helper that turns advisory records into the
@@ -896,5 +897,62 @@ func TestLoadAndLookup_PyPISeparatorSpelling(t *testing.T) {
 		if len(hits) != 1 {
 			t.Errorf("LookupEx(pypi, %q, 5.4.0) = %d hits, want 1", spelling, len(hits))
 		}
+	}
+}
+
+// FixedEvents names a fix only through an explicit `fixed` event of a range
+// that contains the version: a last_affected bound, an open range and an
+// exact-version-list hit each say "affected" without naming a fix.
+func TestFixedEventsOnlyFromContainingFixedRanges(t *testing.T) {
+	idx, err := Load(bytes.NewReader(gzippedJSON(t, []Advisory{{
+		Ecosystem: "npm", Package: "x", AdvisoryID: "A",
+		VulnerableVersions: []string{"4.0.0"},
+		VulnerableRanges: []VulnerableRange{
+			{Introduced: "0", Fixed: "1.2.3"},
+			{Introduced: "2.0.0", LastAffected: "2.5.0"},
+			{Introduced: "3.0.0"},
+		},
+	}})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := idx.FixedEvents("npm", "x", "1.0.0"); len(got) != 1 || len(got["A"]) != 1 || got["A"][0] != "1.2.3" {
+		t.Fatalf("1.0.0 sits in [0, 1.2.3): want A fixed in 1.2.3, got %v", got)
+	}
+	for _, v := range []string{"1.2.3", "2.1.0", "3.1.0", "4.0.0"} {
+		if got := idx.FixedEvents("npm", "x", v); got != nil {
+			t.Errorf("%s: no containing range names a fix, got %v", v, got)
+		}
+	}
+	var none *Index
+	if none.FixedEvents("npm", "x", "1.0.0") != nil {
+		t.Error("nil index returns nil")
+	}
+}
+
+// AdvisoryPublished is the earliest `published` across an id's entries, and
+// zero when any of them cannot be dated.
+func TestAdvisoryPublished(t *testing.T) {
+	idx, err := Load(bytes.NewReader(gzippedJSON(t, []Advisory{
+		{Ecosystem: "npm", Package: "x", AdvisoryID: "A", Published: "2026-01-02T00:00:00Z"},
+		{Ecosystem: "npm", Package: "x", AdvisoryID: "A", Published: "2026-01-01T12:00:00.5Z"},
+		{Ecosystem: "npm", Package: "x", AdvisoryID: "B", Published: "2026-01-01T00:00:00Z"},
+		{Ecosystem: "npm", Package: "x", AdvisoryID: "B"},
+		{Ecosystem: "npm", Package: "x", AdvisoryID: "C", Published: "yesterday"},
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := idx.AdvisoryPublished("npm", "x", "A"); !got.Equal(time.Date(2026, 1, 1, 12, 0, 0, 5e8, time.UTC)) {
+		t.Fatalf("A = %v, want the earlier entry", got)
+	}
+	for _, id := range []string{"B", "C", "missing"} {
+		if got := idx.AdvisoryPublished("npm", "x", id); !got.IsZero() {
+			t.Errorf("%s = %v, want zero (an entry cannot be dated)", id, got)
+		}
+	}
+	var none *Index
+	if !none.AdvisoryPublished("npm", "x", "A").IsZero() {
+		t.Error("nil index returns zero")
 	}
 }

@@ -68,6 +68,7 @@ const (
 	settingReleaseWarnMultiplier    = "release.warn_hold_multiplier"
 	settingReleaseExemptScopes      = "release.exempt_scopes"
 	settingReleaseExemptions        = "release.exemptions"
+	settingReleaseCVEFixRelease     = "release.cve_fix_release"
 	settingIndexPath                = "index.path"
 	settingExceptionsPath           = "exceptions.path"
 	settingExceptionAge             = "exception.age"
@@ -341,6 +342,7 @@ func applySettingsOverlay(cfg *Config, settings settingMap) {
 	settings.overlayInt(settingReleaseWarnMultiplier, &cfg.ReleasePolicy.WarnHoldMultiplier)
 	settings.overlayCommaList(settingReleaseExemptScopes, &cfg.ReleasePolicy.ExemptScopes)
 	settings.overlayCommaList(settingReleaseExemptions, &cfg.ReleasePolicy.Exemptions)
+	settings.overlayBoolPtr(settingReleaseCVEFixRelease, &cfg.ReleasePolicy.CVEFixRelease)
 	settings.overlayBoolPtr(settingBlockingMode, &cfg.BlockingMode)
 	settings.overlayBoolPtr(settingRepositoryAllowAnonymous, &cfg.RepositoryAnonymousAccess)
 	settings.overlayRemoteDefaults(settingRemoteDefaults, &cfg.Remotes)
@@ -1167,6 +1169,16 @@ func saveReleaseHold(set settingSetter, del func(string) error, rp ReleasePolicy
 		}
 	case del != nil:
 		if err := del(settingReleaseMinAgeHours); err != nil {
+			return err
+		}
+	}
+	switch {
+	case rp.CVEFixRelease != nil:
+		if err := set(settingReleaseCVEFixRelease, strconv.FormatBool(*rp.CVEFixRelease)); err != nil {
+			return err
+		}
+	case del != nil:
+		if err := del(settingReleaseCVEFixRelease); err != nil {
 			return err
 		}
 	}

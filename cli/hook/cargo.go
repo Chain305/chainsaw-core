@@ -167,7 +167,7 @@ func tomlTableName(line string) (string, bool) {
 }
 
 func cargoConflictError(path string, conflicts []string) error {
-	return fmt.Errorf(`%s already declares [%s] outside the chainsaw-managed block.
+	return refuse(`%s already declares [%s] outside the chainsaw-managed block.
 
 TOML forbids declaring a table twice, so adding chainsaw's block would make
 the file unparseable and cargo would fail to load its config on every

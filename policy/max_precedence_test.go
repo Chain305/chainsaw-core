@@ -79,6 +79,7 @@ func TestMaxPrecedenceIgnoresExceptionSentinels(t *testing.T) {
 		if _, err := orgStore.Create(Policy{
 			Name:       "Exception: " + pkg + "@1.0.0",
 			Precedence: exceptionPrecedence() + i, // +i keeps the unique index happy
+			Kind:       KindException,
 			Mode:       ModeAllow,
 			Status:     StatusEnabled,
 			Identifier: Identifier{
@@ -118,6 +119,7 @@ func TestMaxPrecedenceUsesOrdinaryPoliciesWhenBothPresent(t *testing.T) {
 	if _, err := orgStore.Create(Policy{
 		Name:       "Exception: left-pad@1.0.0",
 		Precedence: exceptionPrecedence(),
+		Kind:       KindException,
 		Mode:       ModeAllow,
 		Status:     StatusEnabled,
 		Identifier: Identifier{TargetPackageName: "left-pad", TargetPackageVersion: "1.0.0"},

@@ -149,7 +149,7 @@ func newestNonChainsawBackup(path string) (string, bool, error) {
 // broke every mvn invocation, and additionally leaked the plaintext client
 // secret into the file.
 func xmlRefuseError(manager, path, fragment string) error {
-	return fmt.Errorf(`%s already exists and chainsaw did not write it.
+	return refuse(`%s already exists and chainsaw did not write it.
 
 chainsaw refuses to edit an XML config it does not own: there is no way to
 splice into %s without reformatting hand-maintained content, and the previous

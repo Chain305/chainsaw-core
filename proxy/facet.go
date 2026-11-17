@@ -235,7 +235,7 @@ func NewFacet(cfg FacetConfig) Facet {
 		repoName:           cfg.RepoName,
 		format:             cfg.Format,
 		storage:            cfg.Storage,
-		remote:             cfg.Remote,
+		remote:             guardRemoteHeaders(cfg.Remote),
 		index:              cfg.Index,
 		resolver:           cfg.Resolver,
 		negative:           cfg.Negative,
@@ -1219,7 +1219,7 @@ func (f *facet) tryStaleCache(ctx context.Context, logicalPath string) *Response
 func (f *facet) UpdateRemote(remote RemoteDefinition) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.remote = sanitizeRemoteDefinition(remote)
+	f.remote = guardRemoteHeaders(sanitizeRemoteDefinition(remote))
 }
 
 func (f *facet) UpdateNegative(cache *cache.NegativeCache) {
@@ -1250,6 +1250,63 @@ func sanitizeRemoteDefinition(remote RemoteDefinition) RemoteDefinition {
 		remote.BaseURL = &copyURL
 	}
 	return remote
+}
+
+// guardRemoteHeaders gives remote a client that drops remote.Headers (the
+// upstream's credentials) from any redirect hop whose scheme or host:port
+// differs from the first request's. Go's client strips only Authorization,
+// Cookie and WWW-Authenticate, and only on a domain change: a custom
+// credential header (X-NuGet-ApiKey, X-JFrog-Art-Api) followed every
+// redirect to any host, plain http included. The client's own redirect
+// policy, or Go's default 10-hop limit, still applies after the strip.
+func guardRemoteHeaders(remote RemoteDefinition) RemoteDefinition {
+	if remote.Client == nil || len(remote.Headers) == 0 {
+		return remote
+	}
+	names := make([]string, 0, len(remote.Headers))
+	for k := range remote.Headers {
+		names = append(names, k)
+	}
+	c := *remote.Client
+	next := c.CheckRedirect
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !SameOrigin(req.URL, via[0].URL) {
+			for _, k := range names {
+				req.Header.Del(k)
+			}
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	remote.Client = &c
+	return remote
+}
+
+// SameOrigin reports whether a and b share scheme and host:port, the port
+// made explicit from the scheme's default: https://feed:443 is
+// https://feed.
+func SameOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || !strings.EqualFold(a.Scheme, b.Scheme) || !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			return "443"
+		case "http":
+			return "80"
+		}
+		return ""
+	}
+	return port(a) == port(b)
 }
 
 func cloneRemoteDefinition(remote RemoteDefinition) RemoteDefinition {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,7 +89,7 @@ func TestGitUpstreamListReleases(t *testing.T) {
 	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{"test.pkg": gitURL},
 	})
-	g := NewGitUpstream(m, t.TempDir())
+	g := newLocalGitUpstream(m, t.TempDir())
 	releases, err := g.ListReleases(context.Background(), "test.pkg", "/repo/swift")
 	if err != nil {
 		t.Fatalf("ListReleases: %v", err)
@@ -119,13 +120,13 @@ func TestGitUpstreamOfflineBlocksNetworkGit(t *testing.T) {
 		Static: map[string]string{"test.pkg": gitURL},
 	})
 
-	online := NewGitUpstream(m, t.TempDir())
+	online := newLocalGitUpstream(m, t.TempDir())
 	if _, err := online.ListReleases(context.Background(), "test.pkg", "/repo/swift"); err != nil {
 		t.Fatalf("baseline (nil Offline predicate) must resolve: %v", err)
 	}
 
 	offlineFlag := true
-	g := NewGitUpstream(m, t.TempDir())
+	g := newLocalGitUpstream(m, t.TempDir())
 	g.Offline = func() bool { return offlineFlag }
 
 	if _, err := g.ListReleases(context.Background(), "test.pkg", "/repo/swift"); !errors.Is(err, errOffline) {
@@ -148,7 +149,7 @@ func TestGitUpstreamBuildArchive(t *testing.T) {
 	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{"test.pkg": gitURL},
 	})
-	g := NewGitUpstream(m, t.TempDir())
+	g := newLocalGitUpstream(m, t.TempDir())
 	body, digest, err := g.BuildArchive(context.Background(), "test.pkg", "1.0.0")
 	if err != nil {
 		t.Fatalf("BuildArchive: %v", err)
@@ -180,7 +181,7 @@ func TestGitUpstreamGetReleaseMetadataPublishedAt(t *testing.T) {
 	m := mustIdentifierMap(t, IdentifierMapConfig{
 		Static: map[string]string{"test.pkg": gitURL},
 	})
-	g := NewGitUpstream(m, t.TempDir())
+	g := newLocalGitUpstream(m, t.TempDir())
 	meta, err := g.GetReleaseMetadata(context.Background(), "test.pkg", "1.0.0", "/repo/swift")
 	if err != nil {
 		t.Fatalf("GetReleaseMetadata: %v", err)
@@ -286,11 +287,154 @@ func TestEnsureRepoRejectsFlagLikeURL(t *testing.T) {
 // version and commit arguments.
 func TestFetchTagRejectsFlagLikeArgs(t *testing.T) {
 	g := &GitUpstream{GitBin: "git", CacheRoot: t.TempDir()}
-	if err := g.fetchTag(context.Background(), t.TempDir(), "--exec=/bin/sh", "deadbeef"); err == nil {
+	if err := g.fetchTag(context.Background(), t.TempDir(), "https://example.com/r.git", "--exec=/bin/sh", "deadbeef"); err == nil {
 		t.Error("expected fetchTag to reject flag-like version")
 	}
-	if err := g.fetchTag(context.Background(), t.TempDir(), "1.0.0", "-u"); err == nil {
+	if err := g.fetchTag(context.Background(), t.TempDir(), "https://example.com/r.git", "1.0.0", "-u"); err == nil {
 		t.Error("expected fetchTag to reject flag-like commit")
+	}
+	if err := g.fetchTag(context.Background(), t.TempDir(), "--upload-pack=/tmp/evil.sh", "1.0.0", "deadbeef"); err == nil {
+		t.Error("expected fetchTag to reject a flag-like URL")
+	}
+}
+
+// newLocalGitUpstream reads the file:// repos makeBareGitRepo builds.
+// Production allows only https and vets every remote (planRemote).
+func newLocalGitUpstream(m *IdentifierMap, dir string) *GitUpstream {
+	g := NewGitUpstream(m, dir)
+	g.AllowProtocol = "file"
+	g.CheckRemote = allowAnyRemote
+	return g
+}
+
+func allowAnyRemote(context.Context, string) error { return nil }
+
+// The default remote check refuses before git runs: a non-https scheme, an
+// address in a blocked range, and a host outside CHAINSAW_EGRESS_ALLOW.
+// GitBin is a path that does not exist, so a check that let the call
+// through would fail with a different (exec) error.
+func TestDefaultCheckRemoteRefusesBeforeGitRuns(t *testing.T) {
+	g := &GitUpstream{GitBin: filepath.Join(t.TempDir(), "no-such-git"), CacheRoot: t.TempDir()}
+	// u -> CHAINSAW_EGRESS_ALLOW, wanted error substring
+	cases := map[string][2]string{
+		"file:///etc":                      {"", "want an https:// URL"},
+		"file://host/etc":                  {"", "only https"},
+		"ssh://git@github.com/a/b.git":     {"", "only https"},
+		"git@github.com:a/b.git":           {"", "want an https:// URL"},
+		"https://169.254.169.254/a.git":    {"", "refusing to dial"},
+		"https://127.0.0.1/a.git":          {"", "refusing to dial"},
+		"https://[::1]/a.git":              {"", "refusing to dial"},
+		"https://registry.npmjs.org/a.git": {"github.com", "egress allowlist"},
+		"https://[::1]:8443/a.git":         {"::1", "refusing to dial"}, // listed, still IP-checked
+	}
+	t.Setenv("CHAINSAW_ALLOW_PRIVATE_UPSTREAMS", "")
+	for u, c := range cases {
+		t.Setenv("CHAINSAW_EGRESS_ALLOW", c[0])
+		want := c[1]
+		_, err := g.lsRemoteTags(context.Background(), u)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("lsRemoteTags(%q): err = %v, want %q", u, err, want)
+		}
+		if err := g.fetchTag(context.Background(), t.TempDir(), u, "1.0.0", "deadbeef"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("fetchTag(%q): err = %v, want %q", u, err, want)
+		}
+	}
+}
+
+// git runs with a closed environment: no inherited secrets, no config,
+// credential helper, prompt or redirect, https only.
+func TestGitEnvIsClosed(t *testing.T) {
+	t.Setenv("CHAINSAW_DATABASE_URL", "postgres://u:secret@db/x")
+	t.Setenv("GIT_SSH_COMMAND", "evil")
+	t.Setenv("HTTPS_PROXY", "http://egress-proxy:3128")
+	g := &GitUpstream{CacheRoot: "/var/cache/swift-git"}
+	env := strings.Join(g.gitEnv(gitRoute{}), "\n") + "\n"
+	for _, want := range []string{
+		"HOME=/var/cache/swift-git\n", "GIT_ALLOW_PROTOCOL=https\n", "GIT_TERMINAL_PROMPT=0\n",
+		"GIT_ASKPASS=false\n", "GIT_CONFIG_NOSYSTEM=1\n", "GIT_CONFIG_GLOBAL=/dev/null\n",
+		"GIT_CONFIG_KEY_0=credential.helper\nGIT_CONFIG_VALUE_0=\n",
+		"GIT_CONFIG_KEY_1=http.followRedirects\nGIT_CONFIG_VALUE_1=false\n",
+		"HTTPS_PROXY=http://egress-proxy:3128\n",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("git env lacks %q:\n%s", want, env)
+		}
+	}
+	for _, leak := range []string{"CHAINSAW_DATABASE_URL", "GIT_SSH_COMMAND"} {
+		if strings.Contains(env, leak) {
+			t.Errorf("git env leaks %s:\n%s", leak, env)
+		}
+	}
+	// And runGit really uses it: a shim prints its environment.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	shim := filepath.Join(t.TempDir(), "git-env.sh")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nenv\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	g.GitBin = shim
+	out, err := g.runGit(context.Background(), "", "version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "secret") || !strings.Contains(string(out), "GIT_ALLOW_PROTOCOL=https") {
+		t.Fatalf("runGit did not use gitEnv:\n%s", out)
+	}
+}
+
+// Low (adversarial review 2026-11-17): behind a forward proxy the remote
+// used to be resolved locally, which fails on networks with no external DNS;
+// and direct runs let git resolve the name a second time. Now the proxy run
+// skips the local lookup but still enforces the allowlist on the target and
+// the proxy, and git is forced onto that proxy; a direct run pins git to the
+// addresses that were checked and withholds the proxy variables.
+func TestPlanRemoteRoutes(t *testing.T) {
+	t.Setenv("CHAINSAW_ALLOW_PRIVATE_UPSTREAMS", "")
+	noDNS := func(context.Context, string) ([]net.IP, error) {
+		t.Fatal("resolved the remote locally")
+		return nil, nil
+	}
+	const remote = "https://github.example/a/b.git"
+
+	t.Setenv("HTTPS_PROXY", "http://egress-proxy.internal:3128")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("ALL_PROXY", "socks5://elsewhere.internal:1080")
+	t.Setenv("CHAINSAW_EGRESS_ALLOW", "github.example,egress-proxy.internal")
+	r, err := planRemote(context.Background(), remote, noDNS)
+	if err != nil || r.proxy != "http://egress-proxy.internal:3128" || r.resolve != "" {
+		t.Fatalf("proxied: route %+v err %v, want the proxy and no local lookup", r, err)
+	}
+	g := &GitUpstream{CacheRoot: "/c"}
+	env := strings.Join(g.gitEnv(r), "\n") + "\n"
+	if !strings.Contains(env, "=http.proxy\nGIT_CONFIG_VALUE_2=http://egress-proxy.internal:3128\n") ||
+		!strings.Contains(env, "GIT_CONFIG_COUNT=3\n") ||
+		strings.Contains(env, "ALL_PROXY") || strings.Contains(env, "NO_PROXY") || strings.Contains(env, "HTTPS_PROXY") {
+		t.Fatalf("proxied env does not force the checked proxy:\n%s", env)
+	}
+	t.Setenv("CHAINSAW_EGRESS_ALLOW", "github.example")
+	if _, err := planRemote(context.Background(), remote, noDNS); err == nil || !strings.Contains(err.Error(), "forward proxy") {
+		t.Fatalf("unlisted proxy: err = %v, want a refusal", err)
+	}
+	t.Setenv("CHAINSAW_EGRESS_ALLOW", "egress-proxy.internal")
+	if _, err := planRemote(context.Background(), remote, noDNS); err == nil || !strings.Contains(err.Error(), "egress allowlist") {
+		t.Fatalf("unlisted target through the proxy: err = %v, want a refusal", err)
+	}
+
+	// Direct: pinned to the checked addresses, proxy variables withheld.
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("CHAINSAW_EGRESS_ALLOW", "")
+	pub := func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("140.82.112.3"), net.ParseIP("2606:50c0::1")}, nil
+	}
+	r, err = planRemote(context.Background(), "https://github.example:8443/a/b.git", pub)
+	if err != nil || r.proxy != "" || r.resolve != "github.example:8443:140.82.112.3,[2606:50c0::1]" {
+		t.Fatalf("direct: route %+v err %v, want a resolve pin", r, err)
+	}
+	env = strings.Join(g.gitEnv(r), "\n") + "\n"
+	if !strings.Contains(env, "=http.curloptResolve\nGIT_CONFIG_VALUE_2=github.example:8443:140.82.112.3,[2606:50c0::1]\n") ||
+		strings.Contains(env, "ALL_PROXY") {
+		t.Fatalf("direct env does not pin git or leaks proxy variables:\n%s", env)
 	}
 }
 
@@ -346,7 +490,7 @@ printf 'deadbeef\trefs/tags/1.0.0\n'
 		t.Fatal(err)
 	}
 
-	g := &GitUpstream{GitBin: shimPath, CacheRoot: tmp}
+	g := &GitUpstream{GitBin: shimPath, CacheRoot: tmp, CheckRemote: allowAnyRemote}
 	_, err := g.lsRemoteTags(context.Background(), "https://example.com/foo/bar.git")
 	if err != nil {
 		t.Fatalf("lsRemoteTags: %v", err)

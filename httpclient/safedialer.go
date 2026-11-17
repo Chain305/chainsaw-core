@@ -385,6 +385,14 @@ type SafeDialer struct {
 	// Timeout and KeepAlive live here. nil is treated as a zero-value
 	// net.Dialer by the embedded resolver / DialContext path.
 	Inner *net.Dialer
+
+	// exemptEnvProxy releases the private-range check (never the metadata
+	// one) for exactly the forward proxy named in HTTP_PROXY / HTTPS_PROXY.
+	// Set only by New(WithSSRFGuard()) and the Factory, whose Proxy hook
+	// checks every proxied target (proxy_ssrf.go). A dialer without that
+	// hook (raw transports, SafeNetDial) must not exempt it: a direct
+	// request to the proxy's address would then reach it unchecked.
+	exemptEnvProxy bool
 }
 
 // newSafeDialer builds a SafeDialer whose Inner dialer mirrors the
@@ -437,6 +445,50 @@ func IsSSRFBlocked(err error) bool {
 	return strings.Contains(err.Error(), "refusing to dial private/link-local/loopback")
 }
 
+// CheckDialHost applies the dial-time rules to a host that something other
+// than this package will connect to (a child process such as git): the
+// egress allowlist on the name, then the IP checks, with the same env
+// overrides, on every address it resolves to. Every address must pass,
+// unlike DialContext, which skips a refused answer and dials an allowed one:
+// the caller cannot choose which address the child connects to. Unless the
+// caller pins the child to the addresses (ResolveDialHost), the child
+// resolves again and a rebinding window of one lookup remains.
+func CheckDialHost(ctx context.Context, host string) error {
+	_, err := ResolveDialHost(ctx, host)
+	return err
+}
+
+// ResolveDialHost is CheckDialHost returning the addresses it checked, so a
+// caller can pin the child to them (git: http.curloptResolve) and close the
+// second lookup.
+func ResolveDialHost(ctx context.Context, host string) ([]net.IP, error) {
+	if err := CheckEgressHost(host); err != nil {
+		return nil, err
+	}
+	private, cgnat := allowPrivateUpstreams(), allowCGNATUpstreams()
+	if ip := net.ParseIP(host); ip != nil {
+		if rule := classifyIP(ip); !rule.allowedGiven(private, cgnat) {
+			return nil, dialRefusal(ip, host, rule)
+		}
+		return []net.IP{ip}, nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("httpclient: no addresses resolved for %s", host)
+	}
+	out := make([]net.IP, 0, len(ips))
+	for _, ia := range ips {
+		if rule := classifyIP(ia.IP); !rule.allowedGiven(private, cgnat) {
+			return nil, dialRefusal(ia.IP, host, rule)
+		}
+		out = append(out, ia.IP)
+	}
+	return out, nil
+}
+
 // DialContext resolves host names via the context-aware resolver,
 // checks every resolved IP against the blocked ranges, and dials the
 // first non-blocked IP directly. Returns the standard net error when
@@ -445,6 +497,12 @@ func IsSSRFBlocked(err error) bool {
 func (d *SafeDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
+		return nil, err
+	}
+	// The optional allowlist is checked on the NAME, before DNS: a refused
+	// host is never resolved. The IP checks below still run on whatever an
+	// allowed name resolves to.
+	if err := CheckEgressHost(host); err != nil {
 		return nil, err
 	}
 
@@ -459,6 +517,11 @@ func (d *SafeDialer) DialContext(ctx context.Context, network, addr string) (net
 
 	private := allowPrivateUpstreams()
 	cgnat := allowCGNATUpstreams()
+	if d.exemptEnvProxy && isEnvProxyAddr(host, port) {
+		// The operator's forward proxy may sit on RFC 1918 (R2-G1); the
+		// targets it fetches are checked by the Proxy hook instead.
+		private, cgnat = true, true
+	}
 
 	// Fast path: if host is already a literal IP, no resolution needed.
 	if ip := net.ParseIP(host); ip != nil {

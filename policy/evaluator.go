@@ -379,6 +379,11 @@ type Evaluator struct {
 	// (B1) can be exercised without a live Postgres — production always
 	// leaves it nil and reads through the store.
 	listOverride func() ([]Policy, error)
+
+	// narrowedWarned remembers which exceptions have already logged
+	// exception.version_narrowed (exception_version.go), so the warning
+	// fires once per exception per process, not once per request.
+	narrowedWarned sync.Map
 }
 
 // NewEvaluator creates a new policy evaluator.
@@ -1194,7 +1199,7 @@ func (e *Evaluator) recordDarkAdvisoryLane(ctx EvaluationContext, p Policy) {
 	if len(dark) == 0 {
 		return
 	}
-	if !matchesIdentifier(ctx, p.Identifier) || !matchesScope(ctx, p.Scope) {
+	if !matchesPolicyIdentifier(ctx, p) || !matchesScope(ctx, p.Scope) {
 		return
 	}
 	e.recordSkipEvents(ctx, p, dark, SkipReasonNoAdvisorySource, true)
@@ -1256,7 +1261,7 @@ func (e *Evaluator) recordDarkPublishDate(ctx EvaluationContext, p Policy) {
 	if len(dark) == 0 {
 		return
 	}
-	if !matchesIdentifier(ctx, p.Identifier) || !matchesScope(ctx, p.Scope) {
+	if !matchesPolicyIdentifier(ctx, p) || !matchesScope(ctx, p.Scope) {
 		return
 	}
 	format := strings.ToLower(strings.TrimSpace(ctx.RepositoryFormat))
@@ -1333,8 +1338,10 @@ func (e *Evaluator) recordSkipEvents(ctx EvaluationContext, p Policy, conditions
 }
 
 func (e *Evaluator) matchesPolicy(ctx EvaluationContext, policy Policy) bool {
-	// Check identifier match
-	if !matchesIdentifier(ctx, policy.Identifier) {
+	// Check identifier match. An exception's version leg is exact
+	// (exception_version.go), a policy's is a constraint.
+	if !matchesPolicyIdentifier(ctx, policy) {
+		e.warnNarrowedException(ctx, policy)
 		return false
 	}
 
@@ -1359,6 +1366,12 @@ func (e *Evaluator) matchesPolicy(ctx EvaluationContext, policy Policy) bool {
 		// that coordinate is later flagged. Fail direction is closed: the
 		// only effect is fewer exception matches.
 		if ExceptionExcludesMalware(policy) && ctx.IsKnownMalicious {
+			return false
+		}
+		// R2-E3: only an exception pinned to one exact package and version
+		// may override a malware verdict. An empty or "*" leg would clear
+		// the feed for every coordinate it covers.
+		if ctx.IsKnownMalicious && !ExceptionPinned(ctx.RepositoryFormat, policy) {
 			return false
 		}
 		return true

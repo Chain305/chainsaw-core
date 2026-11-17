@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -22,6 +23,23 @@ type ContentScanner interface {
 	Enabled() bool
 	CurrentVersion(context.Context) (string, error)
 	Scan(context.Context, string, io.Reader) (ScanResult, error)
+}
+
+// ErrScanSizeLimit is returned when an artifact is larger than the scanner
+// will scan. internal/clamav's ErrSizeLimit is this value, so the existing
+// handling (refuse with 503: an artifact too large to scan is not served)
+// covers both the spool cap below and clamd's own stream cap.
+var ErrScanSizeLimit = errors.New("clamav scan stream exceeds configured limit")
+
+// DefaultMaxScanBytes caps the scan spool when the scanner does not state its
+// own limit. It matches ClamAV's default max_stream_bytes and clamd.conf's
+// StreamMaxLength (512M).
+const DefaultMaxScanBytes int64 = 512 << 20
+
+// ScanSizeLimiter is implemented by a ContentScanner that refuses streams
+// above a size (ClamAV: clamav.max_stream_bytes). Put stops spooling there.
+type ScanSizeLimiter interface {
+	MaxScanBytes() int64
 }
 
 // ScanningStorage applies artifact scanning before delegating writes.
@@ -58,12 +76,26 @@ func (s *ScanningStorage) Put(ctx context.Context, logicalPath string, src io.Re
 	if err != nil {
 		return nil, err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	defer tmp.Close()
+	// The spool's bytes count against the process-wide budget (spool.go)
+	// until the file is removed.
+	spool := NewSpoolWriter(tmp)
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		spool.Release()
+	}()
 
-	if _, err := io.Copy(tmp, src); err != nil {
+	// Spool at most the scanner's limit (+1 byte to detect overflow). Without
+	// the cap every artifact was copied to /tmp in full before clamd refused
+	// it, and /tmp counts toward the pod's ephemeral-storage limit, which
+	// evicts the pod.
+	limit := s.maxScanBytes()
+	n, err := io.Copy(spool, io.LimitReader(src, limit+1))
+	if err != nil {
 		return nil, err
+	}
+	if n > limit {
+		return nil, ErrScanSizeLimit
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -79,6 +111,15 @@ func (s *ScanningStorage) Put(ctx context.Context, logicalPath string, src io.Re
 	meta.ClamAVDBVersion = result.DBVersion
 	meta.ClamAVSHA256 = result.SHA256
 	return s.inner.Put(ctx, logicalPath, tmp, meta)
+}
+
+func (s *ScanningStorage) maxScanBytes() int64 {
+	if l, ok := s.scanner.(ScanSizeLimiter); ok {
+		if n := l.MaxScanBytes(); n > 0 {
+			return n
+		}
+	}
+	return DefaultMaxScanBytes
 }
 
 func (s *ScanningStorage) UpdateMetadata(ctx context.Context, logicalPath string, meta ContentMetadata) (*CachedContent, error) {

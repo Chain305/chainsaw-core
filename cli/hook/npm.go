@@ -16,9 +16,23 @@ type npmManager struct{}
 
 func (npmManager) Name() string { return "npm" }
 
-func (npmManager) IsInstalled() bool {
-	_, err := exec.LookPath("npm")
-	return err == nil
+// IsInstalled is true when npm OR pnpm is on PATH. pnpm reads the same
+// ~/.npmrc (registry= and the //host/:_authToken line), so a standalone pnpm
+// install, with no npm binary at all, is served by this wirer too. Before
+// this, `install-hook --all` skipped the npmrc on such machines and pnpm kept
+// resolving from registry.npmjs.org.
+func (npmManager) IsInstalled() bool { return len(NPMClients()) > 0 }
+
+// NPMClients returns the .npmrc-reading clients found on PATH, in a stable
+// order, so doctor can say which tools the npm row actually covers.
+func NPMClients() []string {
+	var out []string
+	for _, bin := range []string{"npm", "pnpm"} {
+		if _, err := exec.LookPath(bin); err == nil {
+			out = append(out, bin)
+		}
+	}
+	return out
 }
 
 func (m npmManager) ConfigPath() (string, error) {

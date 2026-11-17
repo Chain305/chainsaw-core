@@ -13,6 +13,21 @@ import (
 // need to compare visible layout independent of colour.
 var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
+func TestDoctorTableNotesPnpmOnNpmRow(t *testing.T) {
+	var buf bytes.Buffer
+	printDoctorTable(newDoctorCmd(), &buf, doctorReport{Managers: []doctorManagerEntry{
+		{Name: "npm", Installed: true, Clients: []string{"pnpm"}, ConfigPath: "/h/.npmrc"},
+		{Name: "pip", Installed: true, ConfigPath: "/h/pip.conf"},
+	}})
+	out := buf.String()
+	if !strings.Contains(out, "note: the npm row also covers pnpm") {
+		t.Fatalf("pnpm not named:\n%s", out)
+	}
+	if strings.Contains(out, "pip row") {
+		t.Fatalf("note printed for a row with no other client:\n%s", out)
+	}
+}
+
 // TestDoctor_ColorDoesNotShiftColumns guards the table-alignment fix: colouring
 // "yes" must not change column widths. Previously the table went through
 // text/tabwriter, which counts ANSI escape bytes as visible width and so

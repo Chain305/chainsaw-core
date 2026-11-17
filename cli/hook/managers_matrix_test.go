@@ -37,6 +37,15 @@ const (
 var homeEnvVars = []string{
 	"NPM_CONFIG_USERCONFIG",
 	"PIP_CONFIG_FILE",
+	"UV_CONFIG_FILE",
+	"BUNDLE_CONFIG",
+	"BUNDLE_USER_CONFIG",
+	"BUNDLE_USER_HOME",
+	"BUNDLE_APP_CONFIG",
+	"BUNDLE_MIRROR__ALL",
+	"BUNDLE_IGNORE_CONFIG",
+	"GEMRC",
+	"COMPOSER_HOME",
 	"CARGO_HOME",
 	"GOENV",
 	"XDG_CONFIG_HOME",
@@ -57,6 +66,8 @@ func sandboxHome(t *testing.T) string {
 	for _, k := range homeEnvVars {
 		t.Setenv(k, "")
 	}
+	// Unset, not empty: Bundler treats BUNDLE_IGNORE_CONFIG="" as set.
+	os.Unsetenv("BUNDLE_IGNORE_CONFIG")
 	return home
 }
 
@@ -404,6 +415,13 @@ func parseCases() map[string]parseCase {
 				}
 			},
 		},
+		"uv": {
+			// The user's LAST table is [pip]. A top-level `index-url = ...`
+			// appended at EOF would land inside it; [[index]] must not.
+			seed:      "native-tls = true\n\n[pip]\ncompile-bytecode = true\n",
+			preserved: []string{"native-tls = true", "compile-bytecode = true"},
+			validate:  uvDefaultIndexIsChainsaw,
+		},
 		"cargo": {
 			// H6: the standard shape for anyone already on a corporate
 			// mirror. Appending our [source.crates-io] makes the file
@@ -455,6 +473,26 @@ func parseCases() map[string]parseCase {
 					}
 				}
 			},
+		},
+		"bundler": {
+			seed:      "---\nBUNDLE_JOBS: \"4\"\nBUNDLE_RETRY: \"3\"\n",
+			preserved: []string{`BUNDLE_JOBS: "4"`, `BUNDLE_RETRY: "3"`},
+			validate:  bundlerMirrorIsChainsaw,
+		},
+		"gem": {
+			// RubyGems' default source must be REPLACED, not joined, and put
+			// back verbatim on unwire (the CRLF table checks that).
+			seed:      "---\n:backtrace: false\n:sources:\n- https://rubygems.org/\n:verbose: true\n",
+			preserved: []string{":backtrace: false", ":verbose: true"},
+			validate:  gemSourcesAreOnlyChainsaw,
+		},
+		"composer": {
+			// The user's own repository must keep priority: Composer queries
+			// keyed repositories in order.
+			seed:          "{\n    \"config\": {\n        \"sort-packages\": true\n    },\n    \"repositories\": {\n        \"private\": {\n            \"type\": \"vcs\",\n            \"url\": \"https://git.corp/x.git\"\n        }\n    }\n}\n",
+			preserved:     []string{"sort-packages", "git.corp/x.git"},
+			validate:      composerRepoOrderAndPackagist,
+			noLineEndings: true,
 		},
 		"docker": {
 			seed:          "{\n  \"log-level\": \"warn\"\n}\n",

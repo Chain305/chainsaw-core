@@ -4,11 +4,29 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/chain305/chainsaw-core/cli/secureio"
 )
+
+// ErrRefused marks a Wire that stopped because the user's own config already
+// makes a choice chainsaw will not override (a registry, mirror or source it
+// did not write). It is an expected outcome, not a failure of the tool:
+// install-hook exits with its own code for it, so an MDM script can report it
+// apart from real errors and still attest the device's true state.
+var ErrRefused = errors.New("refused: the existing config makes a choice chainsaw will not override")
+
+type refusalError struct{ msg string }
+
+func (e *refusalError) Error() string        { return e.msg }
+func (e *refusalError) Is(target error) bool { return target == ErrRefused }
+
+// refuse is fmt.Errorf for a refusal; errors.Is(err, ErrRefused) holds.
+func refuse(format string, args ...any) error {
+	return &refusalError{msg: fmt.Sprintf(format, args...)}
+}
 
 // credentialFileMode returns the mode a NEWLY CREATED config file should get,
 // and whether an existing file should be tightened down to it.
@@ -72,6 +90,11 @@ func tightenExistingFile(path string, opts WireOpts) {
 // writeConfigFile is the single write sink for every manager. It applies the
 // credential-aware mode policy and reports the outcome through opts.Notify.
 func writeConfigFile(path string, data []byte, opts WireOpts) error {
+	if opts.Scope == ScopeSystem {
+		if err := refuseEscapingLink(path); err != nil {
+			return err
+		}
+	}
 	mode, tighten := credentialFileMode(opts)
 	if tighten {
 		tightenExistingFile(path, opts)
@@ -87,6 +110,26 @@ func writeConfigFile(path string, data []byte, opts WireOpts) error {
 		if err := secureio.RestrictToCurrentUser(path); err != nil {
 			opts.notify("warning: could not restrict %s to your user account (%v); it holds a client secret", path, err)
 		}
+	}
+	return nil
+}
+
+// refuseEscapingLink stops a system-scope write from following a symlink out
+// of the config's own directory (R2-S13). writeAtomicMode writes THROUGH a
+// link, which is right for a user's dotfiles; but a system config directory
+// is not always the writer's alone (on Windows, %ProgramData% subdirectories
+// are user-creatable and so are links in Developer Mode), and following a
+// planted link would let another account choose which file an elevated run
+// rewrites, or where it puts a client secret.
+func refuseEscapingLink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	target, terr := filepath.EvalSymlinks(path)
+	dir, derr := filepath.EvalSymlinks(filepath.Dir(path))
+	if terr != nil || derr != nil || filepath.Dir(target) != dir {
+		return fmt.Errorf("%s is a link to %s, outside its directory; chainsaw will not follow it for a system-wide config. Replace it with a regular file, then re-run", path, target)
 	}
 	return nil
 }

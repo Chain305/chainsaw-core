@@ -329,40 +329,26 @@ func parsePipIndexURL(body string) string {
 	return ""
 }
 
-// checkGemrc reads ~/.gemrc.
+// checkGemrc reports the :sources: gem actually uses: the last $GEMRC file
+// that sets them (RubyGems merges those over the user gemrc), else ~/.gemrc.
 func checkGemrc(expected string) bypassFinding {
 	home, _ := os.UserHomeDir()
 	path := filepath.Join(home, ".gemrc")
 	f := bypassFinding{Ecosystem: "gem", ConfigPath: path}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			f.Status = "n/a"
-			f.Note = "no ~/.gemrc; gem will use its built-in default"
+	src, sources, found := hook.GemSources()
+	if !found {
+		if _, err := os.Stat(path); err != nil && !os.IsNotExist(err) {
+			f.Status = "error"
+			f.Note = err.Error()
 			return f
 		}
-		f.Status = "error"
-		f.Note = err.Error()
+		f.Status = "n/a"
+		f.Note = "no gemrc sets :sources: ($GEMRC files, then ~/.gemrc); gem will use its built-in default"
 		return f
 	}
-	// .gemrc is YAML-ish; rather than pulling in a YAML parser, scan
-	// for `:sources:` and grab the first list item — sufficient for the
-	// drift signal.
-	body := string(data)
-	if i := strings.Index(body, ":sources:"); i >= 0 {
-		tail := body[i:]
-		for _, line := range strings.Split(tail, "\n")[1:] {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "-") {
-				v := strings.TrimSpace(strings.TrimPrefix(line, "-"))
-				v = strings.Trim(v, `"' `)
-				f.Configured = v
-				break
-			}
-			if line != "" && !strings.HasPrefix(line, "#") {
-				break
-			}
-		}
+	f.ConfigPath = src
+	if len(sources) > 0 {
+		f.Configured = sources[0]
 	}
 	f.Expected = expected
 	f.Status = driftCompare(f.Configured, expected)

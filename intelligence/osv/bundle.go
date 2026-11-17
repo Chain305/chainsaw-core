@@ -295,6 +295,62 @@ func (i *Index) LookupEx(ecosystem, pkg, version string) (hits, cleared, undecid
 	return hits, cleared, undecidable
 }
 
+// FixedEvents returns, keyed by advisory ID, the explicit `fixed` events of
+// the ranges that contain version. A range closed by `last_affected`, an
+// open range and an exact-version-list hit name no fixing version, so they
+// contribute nothing; neither does an advisory a reviewed override clears
+// for version. The release-age hold uses it to release only the version an
+// advisory itself names as the fix.
+func (i *Index) FixedEvents(ecosystem, pkg, version string) map[string][]string {
+	v := strings.TrimSpace(version)
+	if i == nil || v == "" {
+		return nil
+	}
+	var out map[string][]string
+	for _, a := range i.byPackage[canonicalKey(ecosystem, pkg)] {
+		if overrideFor(a, v) != nil {
+			continue
+		}
+		for _, r := range a.VulnerableRanges {
+			if strings.TrimSpace(r.Fixed) == "" {
+				continue
+			}
+			if hit, _ := rangeAffectsEx(a.Ecosystem, r, nil, v); hit {
+				if out == nil {
+					out = map[string][]string{}
+				}
+				out[a.AdvisoryID] = append(out[a.AdvisoryID], strings.TrimSpace(r.Fixed))
+			}
+		}
+	}
+	return out
+}
+
+// AdvisoryPublished returns when advisory id was published, from the
+// bundle's `published` field, across every entry with that id keyed to
+// (ecosystem, pkg): the earliest of them. Zero when no entry has the id or
+// any entry's timestamp is missing or unparseable — the release-age hold
+// releases nothing on an advisory it cannot date.
+func (i *Index) AdvisoryPublished(ecosystem, pkg, id string) time.Time {
+	if i == nil {
+		return time.Time{}
+	}
+	var out time.Time
+	for _, a := range i.byPackage[canonicalKey(ecosystem, pkg)] {
+		if a.AdvisoryID != id {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(a.Published))
+		if err != nil {
+			return time.Time{}
+		}
+		if out.IsZero() || ts.Before(out) {
+			out = ts
+		}
+	}
+	return out
+}
+
 // HasPackage reports whether the index has at least one advisory record
 // keyed by (ecosystem, pkg). Used by the provider to distinguish "the
 // package is in the index but this version is clean" from "the package

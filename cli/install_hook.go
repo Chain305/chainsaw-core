@@ -20,6 +20,7 @@ import (
 
 	"github.com/chain305/chainsaw-core/cli/hook"
 	"github.com/chain305/chainsaw-core/cli/secureio"
+	"github.com/chain305/chainsaw-core/redact"
 	"github.com/chain305/chainsaw-core/telemetry"
 )
 
@@ -38,8 +39,27 @@ func newInstallHookCmd() *cobra.Command {
 		GroupID: GrpGuard,
 		Short:   "Wire chainsaw into a package manager",
 		Long: `Insert the chainsaw-managed configuration block into a supported package
-manager's user config file. Supported clients: npm, yarn, bun, pip, cargo,
-maven, gradle, sbt, nuget, go, docker, brew.
+manager's user config file. Supported clients: npm, yarn, bun, pip,
+uv, cargo, maven, gradle, sbt, nuget, go, docker, brew, bundler, gem, composer.
+
+bundler sets mirror.https://rubygems.org (and the proxy host's credential)
+in ~/.bundle/config; Gemfile.lock keeps naming rubygems.org. gem replaces
+RubyGems' default :sources: entry in ~/.gemrc. Both tools rewrite their file
+on every ` + "`bundle config set` / `gem sources --add`" + `, so chainsaw records
+what it wrote in <file>.chainsaw and uninstall-hook removes only those values.
+Both need a server URL and support --scope user only.
+
+composer adds a "chainsaw" repository and "packagist.org": false to the
+GLOBAL $COMPOSER_HOME/config.json (Composer merges it into every project) and
+the credential to $COMPOSER_HOME/auth.json as http-basic. It refuses project
+scope, since composer.json is committed.
+
+The npm wirer writes ~/.npmrc, which pnpm reads too; it counts as installed
+for --all when either npm or pnpm is on PATH.
+
+uv does not read pip.conf, so wire it separately: install-hook uv writes a
+default [[index]] to uv.toml (~/.config/uv/uv.toml, or $UV_CONFIG_FILE). A
+project's own [[tool.uv.index]] with default = true overrides it.
 
 brew writes HOMEBREW_API_DOMAIN, HOMEBREW_ARTIFACT_DOMAIN and
 HOMEBREW_ARTIFACT_DOMAIN_NO_FALLBACK=1 (plus the credential as
@@ -62,7 +82,14 @@ proxy serves.
 The org slug is resolved from --org when set, then from your account after
 ` + "`chainsaw auth login`" + `, and finally falls back to a visible placeholder so a
 misconfigured install fails loud: the proxy rejects SLUG-less URLs with
-CHW-4314 ("legacy URLs without the org slug are disabled").
+CHW-4314 ("legacy URLs without the org slug are disabled"). An explicit --org
+is recorded as org_slug in the CLI config when none is recorded yet, so
+` + "`doctor --strict`" + ` checks the wiring against that org.
+
+Exit 13 means install-hook changed nothing because your own config already
+chooses where that manager resolves from; --json keeps every exit code.
+Registries listed in hook_trusted_sources (or CHAINSAW_HOOK_TRUSTED_SOURCES)
+are kept beside chainsaw instead of refused.
 
 Examples:
   chainsaw install-hook npm
@@ -233,6 +260,10 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 		Credentials:    creds,
 		OrgSlug:        orgSlug,
 		Scope:          scope,
+		// hook_trusted_sources (config.yaml list, or CHAINSAW_HOOK_TRUSTED_SOURCES
+		// space-separated): registries to keep beside chainsaw instead of
+		// refusing (a private gem server, a Private Packagist repository).
+		TrustedSources: viper.GetStringSlice("hook_trusted_sources"),
 		// Managers report backups they wrote, file modes they tightened and
 		// GOFLAGS tokens they dropped. All advisory, so it goes to stderr
 		// and leaves --json's stdout clean.
@@ -266,10 +297,14 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 
 	results := make([]hookActionResult, 0, len(managers))
 	var firstErr error
+	onlyRefusals := true
 	for _, m := range managers {
 		res := hookActionResult{Manager: m.Name(), NotOnPath: notOnPath[m.Name()]}
 		if err := m.Wire(opts); err != nil {
 			res.Reason = err.Error()
+			if !errors.Is(err, hook.ErrRefused) {
+				onlyRefusals = false
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("wire %s: %w", m.Name(), err)
 			}
@@ -312,12 +347,44 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 		}
 		results = append(results, res)
 	}
+	rememberHookOrg(cmd, orgFlag, orgSlug, results)
+
+	// The exit code says what happened whatever the output format: --json
+	// used to return before it, so a refusal or a failed wire exited 0.
+	var exitErr error
+	if firstErr != nil {
+		// Reasons can quote a config value; never print a secret in one
+		// (MDM scripts copy this output into Jamf and Intune logs).
+		firstErr = errors.New(redact.Text(firstErr.Error()))
+		if onlyRefusals {
+			// The user's own config already decides where this manager
+			// resolves from, and chainsaw left it alone. A distinct code so
+			// an MDM script can carry on and attest instead of failing.
+			exitErr = &ExitCodeError{Code: ExitHookRefused, Err: firstErr}
+		} else {
+			exitErr = firstErr
+		}
+	}
+	for i := range results {
+		results[i].Reason = redact.Text(results[i].Reason)
+	}
 
 	if useJSON(cmd) {
+		var werr error
 		if !allFlag && len(results) == 1 {
-			return writeJSON(cmd, results[0])
+			werr = writeJSON(cmd, results[0])
+		} else {
+			werr = writeJSON(cmd, map[string]any{"results": results})
 		}
-		return writeJSON(cmd, map[string]any{"results": results})
+		if werr != nil || exitErr == nil {
+			return werr
+		}
+		// The reason is in the JSON; exit with the code and print nothing.
+		code := ExitHookRefused
+		if !onlyRefusals {
+			code = exitCodeForClass(classifyCLIError(firstErr))
+		}
+		return &ExitCodeError{Code: code}
 	}
 
 	wroteAny := false
@@ -351,10 +418,34 @@ func runInstallHook(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "  • Route through a server:  chainsaw auth login   (then re-run install-hook)")
 	}
 
-	if firstErr != nil {
-		return firstErr
+	return exitErr
+}
+
+// rememberHookOrg records an explicit --org in config.yaml once something was
+// wired with it, so `doctor --strict` can check every registry against that
+// org's repository: without it doctor accepted any org's on the same server.
+// An org already recorded (a login) is never overwritten; when it differs
+// from --org the user is told which one doctor will judge against.
+func rememberHookOrg(cmd *cobra.Command, orgFlag, orgSlug string, results []hookActionResult) {
+	orgFlag = strings.TrimSpace(orgFlag)
+	if orgFlag == "" || orgFlag != orgSlug {
+		return
 	}
-	return nil
+	wired := false
+	for _, r := range results {
+		wired = wired || (r.Wired != nil && *r.Wired)
+	}
+	if !wired {
+		return
+	}
+	switch cur := configuredOrgSlug(); {
+	case cur == "":
+		if err := recordOrgSlugOnly(orgFlag); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not record org %q in config.yaml (%v); doctor --strict needs CHAINSAW_ORG_SLUG=%s to check this wiring\n", orgFlag, err, orgFlag)
+		}
+	case cur != orgFlag:
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: config.yaml records org %q, but this wiring uses %q; doctor --strict judges against %q unless CHAINSAW_ORG_SLUG says otherwise\n", cur, orgFlag, cur)
+	}
 }
 
 // normalizeHookServerURL canonicalises the configured server URL into the base

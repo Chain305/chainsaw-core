@@ -45,8 +45,11 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
+	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"github.com/chain305/chainsaw-core/cli/hook"
 	"github.com/chain305/chainsaw-core/httpclient"
@@ -93,6 +96,9 @@ type doctorStrictReport struct {
 	// strict-only — not in the server payload but printed by the CLI.
 	EnvOverrides map[string]string `json:"env_overrides,omitempty"`
 	LockfileHits []string          `json:"lockfile_hits,omitempty"`
+	// Notes are findings worth a look that do not fail the run: a project
+	// pinning a package to a non-Chainsaw uv index, for one.
+	Notes []string `json:"notes,omitempty"`
 }
 
 type ecosystemState struct {
@@ -130,6 +136,20 @@ const (
 	// selectors, or credentials — values no URL heuristic can classify,
 	// so any verdict derived from one is a coin flip dressed as a finding.
 	envInfo
+	// envURLList holds one or more uv index URLs (whitespace- or
+	// comma-separated, each optionally `name=URL` as UV_INDEX takes them).
+	// Every one must be this server's PyPI repository for the configured org
+	// (registryRoutes): uv queries all of them before the default index, and
+	// a "contains chainsaw" heuristic passed http://chainsaw.attacker.test/.
+	// Only uv's variables use it.
+	envURLList
+	// envFlag is drift whenever it is switched on: setting it at all routes
+	// around the wired config (UV_NO_CONFIG, UV_NO_INDEX, BUNDLE_MIRROR__ALL,
+	// BUNDLE_IGNORE_CONFIG). "0"/"false"/"no"/"off" count as off.
+	envFlag
+	// envGemrc names gemrc files RubyGems merges OVER ~/.gemrc; drift when
+	// one of them sets :sources: to anything but Chainsaw.
+	envGemrc
 )
 
 type envWatch struct {
@@ -162,6 +182,34 @@ var envOverrides = map[string][]envWatch{
 		{"PIP_INDEX_URL", envURL},
 		{"PIP_EXTRA_INDEX_URL", envURL},
 		{"PIP_CONFIG_FILE", envConfigPath},
+	},
+	// uv ignores every PIP_* variable above; these are its own. UV_INDEX
+	// and UV_FIND_LINKS are queried BEFORE the default index; UV_NO_CONFIG
+	// skips every uv.toml (uv then goes straight to pypi.org) and
+	// UV_NO_INDEX drops the default index (probed with uv 0.9).
+	"uv": {
+		{"UV_DEFAULT_INDEX", envURLList},
+		{"UV_INDEX_URL", envURLList},
+		{"UV_INDEX", envURLList},
+		{"UV_EXTRA_INDEX_URL", envURLList},
+		{"UV_FIND_LINKS", envURLList},
+		{"UV_NO_INDEX", envFlag},
+		{"UV_NO_CONFIG", envFlag},
+		{"UV_CONFIG_FILE", envConfigPath},
+		// Where uv looks for its system-level uv.toml; the file itself is
+		// judged by the uv manager's Status.
+		{"XDG_CONFIG_DIRS", envInfo},
+	},
+	// bundler's own Status already resolves BUNDLE_CONFIG and refuses to
+	// call the mirror wired under mirror.all / BUNDLE_IGNORE_CONFIG; these
+	// rows put the reason in the report.
+	"bundler": {
+		{"BUNDLE_MIRROR__ALL", envFlag},
+		{"BUNDLE_IGNORE_CONFIG", envFlag},
+		{"BUNDLE_CONFIG", envInfo},
+	},
+	"gem": {
+		{"GEMRC", envGemrc},
 	},
 	"cargo": {
 		{"CARGO_HOME", envInfo},
@@ -304,6 +352,7 @@ func buildStrictReport(ctx context.Context, cmd *cobra.Command) (doctorStrictRep
 	}
 
 	report.LockfileHits = scanLockfilesForPublicSources()
+	report.Notes = projectPinnedIndexNotes()
 	if len(report.LockfileHits) > 0 && exit < doctorExitDrift {
 		exit = doctorExitDrift
 	}
@@ -387,6 +436,9 @@ func evaluateManager(m hook.Manager, envOut, envRaw map[string]string) ecosystem
 		// Chainsaw. Judge the setting, not the comment. Reason stays empty
 		// so the config hash matches the marked-block state exactly.
 		state.Status = "compliant"
+	case st.Bypassed != "":
+		state.Status = "drifted"
+		state.Reason = redactAll([]string{st.Bypassed})[0]
 	default:
 		state.Status = "drifted"
 		state.Reason = "no chainsaw-managed block in " + st.ConfigPath
@@ -400,6 +452,26 @@ func evaluateManager(m hook.Manager, envOut, envRaw map[string]string) ecosystem
 				state.Reason = "project-scope override detected at " + projPath
 			}
 		}
+	}
+	// Project files the generic check above cannot see: uv's
+	// pyproject.toml [tool.uv] and Composer's composer.json, both queried
+	// before the user-level wiring.
+	if reason := projectIndexOverride(m.Name()); reason != "" {
+		state.Status = "drifted"
+		if state.Reason == "" {
+			state.Reason = reason
+		} else {
+			state.Reason += "; " + reason
+		}
+	}
+
+	// Any org can create a repository on a shared server, so a registry on
+	// the right host proves nothing until it is THIS org's. With no org slug
+	// configured nothing can say which org a wired config routes to, so no
+	// manager is compliant (R2-S5).
+	if state.Status == "compliant" && configuredOrgSlug() == "" {
+		state.Status = "drifted"
+		state.Reason = "no org slug configured (org_slug in config.yaml or CHAINSAW_ORG_SLUG), so which org's policy this config routes through cannot be checked"
 	}
 
 	for _, w := range envOverrides[m.Name()] {
@@ -453,10 +525,56 @@ func envDriftReason(w envWatch, val string) string {
 			// env overrides and move on.
 			return ""
 		}
+	case envURLList:
+		for _, part := range strings.FieldsFunc(val, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+			// UV_INDEX entries may be `name=URL`; a URL itself has no '='
+			// before its scheme.
+			if name, u, ok := strings.Cut(part, "="); ok && !strings.Contains(name, "/") && !strings.Contains(name, ":") {
+				part = u
+			}
+			if doctorServerURL() == "" {
+				return w.Key + " is set and no Chainsaw server is configured, so " + registryWithoutCredentials(part) + " cannot be checked"
+			}
+			if !registryRoutes(part, "pypi") {
+				return w.Key + " env var adds " + registryWithoutCredentials(part) + ", which is not this org's Chainsaw PyPI repository and is queried before the wired default index"
+			}
+		}
+		return ""
+	case envFlag:
+		switch strings.ToLower(val) {
+		case "0", "false", "no", "off":
+			return ""
+		}
+		return w.Key + " is set, which routes around the wired config"
+	case envGemrc:
+		path, srcs, found := hook.GemSources()
+		var userGemrc string
+		if gm, err := hook.ByName("gem"); err == nil {
+			userGemrc, _ = gm.ConfigPath()
+		}
+		if !found || path == userGemrc {
+			return "" // no $GEMRC file sets :sources:, so ~/.gemrc still decides
+		}
+		for _, s := range srcs {
+			if !registryRoutes(s, "rubygems") {
+				return w.Key + " names " + path + ", whose :sources: (" + registryWithoutCredentials(s) + ") overrides ~/.gemrc"
+			}
+		}
+		return ""
 	default: // envInfo
 		// Reported, never graded. See envKind.
 		return ""
 	}
+}
+
+// registryRoutes reports whether raw is this Chainsaw server's org-scoped
+// repo for ecosystem repo; without a configured server it falls back to the
+// valPointsAtChainsaw heuristic the env checks use.
+func registryRoutes(raw, repo string) bool {
+	if s := doctorServerURL(); s != "" {
+		return registryPointsAtServer(raw, s, repo)
+	}
+	return valPointsAtChainsaw(raw)
 }
 
 // doctorServerURL is the Chainsaw server doctor compares configs against:
@@ -632,9 +750,18 @@ func isIndented(line string) bool {
 // registryPointsAtServer reports whether raw names the proxy repository
 // install-hook writes: same scheme and host as server (parseCompareTarget,
 // the rule driftCompare uses) and a path of
-// <server base path>/repository/@<org>/<repo>/... The org slug is not
-// known offline, so any non-empty slug segment is accepted.
+// <server base path>/repository/@<org>/<repo>/... When the configured org
+// slug is known (org_slug / CHAINSAW_ORG_SLUG) the segment must be exactly
+// that org: another org's repository on the same server applies another
+// org's policy. Unknown, any non-empty slug is accepted.
 func registryPointsAtServer(raw, server, repo string) bool {
+	return registryPointsAtOrg(raw, server, configuredOrgSlug(), repo)
+}
+
+// configuredOrgSlug is the org slug this CLI is configured for, "" unknown.
+func configuredOrgSlug() string { return strings.TrimSpace(viper.GetString("org_slug")) }
+
+func registryPointsAtOrg(raw, server, org, repo string) bool {
 	rs, rh, ok := parseCompareTarget(raw)
 	ss, sh, ok2 := parseCompareTarget(server)
 	if !ok || !ok2 || rs != ss || rh != sh {
@@ -651,7 +778,132 @@ func registryPointsAtServer(raw, server, repo string) bool {
 	}
 	slug, after, _ := strings.Cut(rest, "/")
 	r, _, _ := strings.Cut(after, "/")
+	if org != "" && slug != org {
+		return false
+	}
 	return slug != "" && r == repo
+}
+
+// projectIndexOverride returns why the current directory's project config
+// routes the manager around its user-level wiring, or "". It covers the files
+// ConfigPathForScope(project) does not name.
+//
+//   - uv: ./uv.toml, else ./pyproject.toml's [tool.uv] (uv reads uv.toml
+//     INSTEAD of [tool.uv] when both exist). Any index, extra-index-url,
+//     find-links or no-index there is queried before the user's default
+//     (probed with uv 0.9: `uv lock` asked a project [[tool.uv.index]]
+//     first).
+//   - composer: ./composer.json "repositories", keyed or list. Project
+//     repositories are queried before global ones (probed with Composer
+//     2.10: an anonymous repo.packagist.org entry was asked first and the
+//     global chainsaw repository never), so any composer-type repository
+//     that is not Chainsaw is reported.
+func projectIndexOverride(manager string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	switch manager {
+	case "uv":
+		ours := func(u string) bool { return registryRoutes(u, "pypi") }
+		for _, f := range []struct{ name, table string }{{"uv.toml", ""}, {"pyproject.toml", "[tool.uv] "}} {
+			path := filepath.Join(cwd, f.name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var doc map[string]any
+			if _, err := toml.Decode(string(data), &doc); err != nil {
+				return "project " + path + " is not valid TOML, so where uv resolves from cannot be judged"
+			}
+			if f.table != "" {
+				tool, _ := doc["tool"].(map[string]any)
+				doc, _ = tool["uv"].(map[string]any)
+			}
+			if found := hook.UVForeignIndexSettings(doc, ours); len(found) > 0 {
+				return "project " + path + " sets " + f.table + strings.Join(redactAll(found), "; ")
+			}
+			return "" // uv reads only the first of the two that exists
+		}
+	case "composer":
+		path := filepath.Join(cwd, "composer.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		var doc struct {
+			Repositories json.RawMessage `json:"repositories"`
+		}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			return "project " + path + " is not valid JSON, so where Composer resolves from cannot be judged"
+		}
+		if len(doc.Repositories) == 0 {
+			return ""
+		}
+		repos, _, err := hook.ComposerRepos(doc.Repositories)
+		if err != nil {
+			return "project " + path + ` has a "repositories" value that cannot be read`
+		}
+		var found []string
+		for _, r := range repos {
+			if r.Disabled || r.Type != "composer" || registryRoutes(r.URL, "packagist") {
+				continue
+			}
+			what := registryWithoutCredentials(r.URL)
+			if hook.IsPackagistMirror(r.URL) {
+				what += " (the public Packagist catalogue)"
+			}
+			found = append(found, what)
+		}
+		if len(found) > 0 {
+			return "project " + path + " adds composer repositories queried before the global chainsaw one: " + strings.Join(found, ", ")
+		}
+	}
+	return ""
+}
+
+// projectPinnedIndexNotes lists the packages the current directory's
+// pyproject.toml pins to a uv index that is not Chainsaw (R2-S8). uv fetches
+// such a package from that index only, never asking Chainsaw: legitimate for
+// a private index, and also how a repository change quietly moves a public
+// name somewhere else. explicit = true keeps the index out of every other
+// resolution, so it is reported, not graded.
+func projectPinnedIndexNotes() []string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	path := filepath.Join(cwd, "pyproject.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var doc map[string]any
+	if _, err := toml.Decode(string(data), &doc); err != nil {
+		return nil
+	}
+	tool, _ := doc["tool"].(map[string]any)
+	uv, _ := tool["uv"].(map[string]any)
+	var out []string
+	for _, p := range hook.UVPinnedForeignIndexes(uv, func(u string) bool { return registryRoutes(u, "pypi") }) {
+		out = append(out, path+": "+redact.Text(p))
+	}
+	return out
+}
+
+// redactAll strips credentials from any URL inside each finding string.
+func redactAll(found []string) []string {
+	out := make([]string, len(found))
+	for i, f := range found {
+		words := strings.Fields(f)
+		for j, w := range words {
+			if strings.Contains(w, "://") {
+				words[j] = registryWithoutCredentials(strings.Trim(w, "()[],"))
+			}
+		}
+		out[i] = strings.Join(words, " ")
+	}
+	return out
 }
 
 // hasChainsawSentinel inlines a dependency-light sentinel check so
@@ -674,6 +926,9 @@ func looksLikeOverride(manager string, data []byte) bool {
 		return strings.Contains(text, "[install.registry]") || strings.Contains(text, "registry =")
 	case "pip":
 		return strings.Contains(text, "index-url") || strings.Contains(text, "extra-index-url")
+	case "uv":
+		// Judged precisely by projectIndexOverride (uv.toml and pyproject.toml).
+		return false
 	case "cargo":
 		return strings.Contains(text, "[source.") || strings.Contains(text, "replace-with") || strings.Contains(text, "[registries")
 	case "maven":
@@ -743,7 +998,11 @@ func scanLockfilesForPublicSources() []string {
 		{"Pipfile.lock", []string{"pypi.org/"}},
 		{"uv.lock", []string{"pypi.org/"}},
 		{"Cargo.lock", []string{"registry+https://github.com/rust-lang/crates.io-index", "sparse+https://index.crates.io/"}},
-		{"Gemfile.lock", []string{"remote: https://rubygems.org/"}},
+		// The mirror install-hook writes is keyed on https://rubygems.org
+		// exactly, so `source "http://rubygems.org"` and gem.coop bypass it.
+		// www.rubygems.org serves the same gems under another name, so the
+		// rubygems.org mirror does not apply to it either.
+		{"Gemfile.lock", []string{gemfileLockRubygems, "remote: http://rubygems.org/", "remote: https://www.rubygems.org/", "remote: http://www.rubygems.org/", "remote: https://gem.coop/", "remote: http://gem.coop/"}},
 		{"composer.lock", []string{"packagist.org"}},
 	}
 	for _, c := range candidates {
@@ -753,6 +1012,13 @@ func scanLockfilesForPublicSources() []string {
 			continue
 		}
 		for _, p := range c.patterns {
+			// `install-hook bundler` sets mirror.https://rubygems.org, which
+			// swaps the fetch URL but deliberately leaves Gemfile.lock naming
+			// rubygems.org. That one remote is only a bypass when the mirror
+			// in effect is not this Chainsaw server's.
+			if p == gemfileLockRubygems && bundlerMirrorRoutesThroughServer() {
+				continue
+			}
 			if strings.Contains(string(data), p) {
 				hits = append(hits, c.name+" references "+p)
 				break
@@ -761,6 +1027,22 @@ func scanLockfilesForPublicSources() []string {
 	}
 	sort.Strings(hits)
 	return hits
+}
+
+const gemfileLockRubygems = "remote: https://rubygems.org/"
+
+// bundlerMirrorRoutesThroughServer reports whether the mirror Bundler uses
+// for https://rubygems.org here (Bundler's order: ./.bundle/config, then the
+// environment, then the global config) is this Chainsaw server's repository
+// for the configured org, with nothing routing around it: no mirror.all, no
+// fallback_timeout (Bundler falls back to rubygems.org when the mirror is slow
+// or down) and no BUNDLE_IGNORE_CONFIG, anywhere. An unknown server or org
+// means unknown, which keeps the lockfile finding.
+func bundlerMirrorRoutesThroughServer() bool {
+	r := hook.BundlerRubygemsRoute()
+	org := configuredOrgSlug()
+	return r.Mirror != "" && len(r.Bypass) == 0 && org != "" &&
+		registryPointsAtOrg(r.Mirror, doctorServerURL(), org, "rubygems")
 }
 
 // probeDirectEgress fires a short HEAD probe at each public registry.
@@ -1001,6 +1283,12 @@ func printStrictReport(cmd *cobra.Command, r doctorStrictReport, exit int) {
 		fmt.Fprintln(out, "\nlockfile drift:")
 		for _, h := range r.LockfileHits {
 			fmt.Fprintf(out, "  %s\n", h)
+		}
+	}
+	if len(r.Notes) > 0 {
+		fmt.Fprintln(out, "\nnotes (not drift):")
+		for _, n := range r.Notes {
+			fmt.Fprintf(out, "  %s\n", n)
 		}
 	}
 	if b := r.BundleAttestation; b != nil {

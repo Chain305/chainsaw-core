@@ -109,6 +109,60 @@ func TestScanningStoragePutBlocksScanFailure(t *testing.T) {
 	}
 }
 
+type limitedScanner struct {
+	testContentScanner
+	max int64
+}
+
+func (s *limitedScanner) MaxScanBytes() int64 { return s.max }
+
+// endlessReader stands in for an upstream body far larger than the cap; it
+// fails the test if the spool reads past cap+1.
+type endlessReader struct {
+	t     *testing.T
+	read  int64
+	limit int64
+}
+
+func (r *endlessReader) Read(p []byte) (int, error) {
+	r.read += int64(len(p))
+	if r.read > r.limit {
+		r.t.Fatalf("spool read %d bytes, past the cap", r.read)
+	}
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
+// M13 (adversarial review 2026-11-17): every scanned artifact was copied to
+// /tmp in full, with no cap, before clamd refused it at its stream limit.
+func TestScanningStoragePutCapsSpoolAtScannerLimit(t *testing.T) {
+	inner := &testStorageFacet{}
+	scanner := &limitedScanner{testContentScanner: testContentScanner{enabled: true}, max: 7}
+	facet := NewScanningStorage(inner, nil, scanner)
+	meta := ContentMetadata{PackageName: "pkg", PackageVersion: "1.0.0"}
+
+	// Exactly at the limit is scanned and stored.
+	if _, err := facet.Put(context.Background(), "pkg-1.0.0.tgz", strings.NewReader("package"), meta); err != nil {
+		t.Fatalf("artifact at the limit refused: %v", err)
+	}
+	// One byte over is refused with the size-limit error, unscanned, unstored.
+	_, err := facet.Put(context.Background(), "pkg-1.0.0.tgz", strings.NewReader("package!"), meta)
+	if !errors.Is(err, ErrScanSizeLimit) {
+		t.Fatalf("err = %v, want ErrScanSizeLimit", err)
+	}
+	if scanner.scans != 1 || inner.puts != 1 {
+		t.Fatalf("oversized artifact was scanned or stored: scans=%d puts=%d", scanner.scans, inner.puts)
+	}
+	// A huge body stops at the cap rather than filling /tmp.
+	scanner.max = 1 << 20
+	big := &endlessReader{t: t, limit: 2 << 20}
+	if _, err := facet.Put(context.Background(), "pkg-1.0.0.tgz", big, meta); !errors.Is(err, ErrScanSizeLimit) {
+		t.Fatalf("huge body: err = %v, want ErrScanSizeLimit", err)
+	}
+}
+
 func TestScanningStoragePutBypassesWhenDisabled(t *testing.T) {
 	inner := &testStorageFacet{}
 	scanner := &testContentScanner{enabled: false}

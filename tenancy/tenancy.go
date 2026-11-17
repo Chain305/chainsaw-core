@@ -33,9 +33,16 @@ const (
 	PermPoliciesManage   = "policies:manage"
 	PermExceptionsRead   = "exceptions:read"
 	PermExceptionsManage = "exceptions:manage"
-	PermMetricsRead      = "metrics:read"
-	PermMetricsManage    = "metrics:manage"
-	PermAuditRead        = "audit:read"
+	// PermExceptionsRequest lets a caller ask for an exception: POST
+	// /api/exceptions with it alone always writes the row as
+	// pending_approval, whatever the org's approval setting, so it can never
+	// open a block on its own. Approving still needs exceptions:manage.
+	// Held by every role (member upward) so the role ladder stays a chain of
+	// subsets for CanAssignRole.
+	PermExceptionsRequest = "exceptions:request"
+	PermMetricsRead       = "metrics:read"
+	PermMetricsManage     = "metrics:manage"
+	PermAuditRead         = "audit:read"
 	// PermAuditWrite gates POST /api/dashboard/audit-events. Sole
 	// production callsite as of W-W9 audit:
 	// internal/server/dashboard.go:handleAuditEvents (one
@@ -152,6 +159,7 @@ var rolePermissions = map[string][]string{
 		PermPoliciesRead,
 		PermPoliciesManage,
 		PermExceptionsRead,
+		PermExceptionsRequest,
 		PermExceptionsManage,
 		PermMetricsRead,
 		PermMetricsManage,
@@ -190,6 +198,7 @@ var rolePermissions = map[string][]string{
 		PermPoliciesRead,
 		PermPoliciesManage,
 		PermExceptionsRead,
+		PermExceptionsRequest,
 		PermExceptionsManage,
 		PermMetricsRead,
 		PermMetricsManage,
@@ -228,6 +237,7 @@ var rolePermissions = map[string][]string{
 		PermPoliciesRead,
 		PermPoliciesManage,
 		PermExceptionsRead,
+		PermExceptionsRequest,
 		PermExceptionsManage,
 		PermMetricsRead,
 		PermMetricsManage,
@@ -285,6 +295,7 @@ var rolePermissions = map[string][]string{
 		PermPoliciesRead,
 		PermPoliciesManage,
 		PermExceptionsRead,
+		PermExceptionsRequest,
 		PermExceptionsManage,
 		PermMetricsRead,
 		PermMetricsManage,
@@ -308,6 +319,7 @@ var rolePermissions = map[string][]string{
 		PermReposRead,
 		PermPoliciesRead,
 		PermExceptionsRead,
+		PermExceptionsRequest,
 		PermMetricsRead,
 		PermAuditRead,
 		PermPackagesRead,

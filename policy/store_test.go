@@ -334,6 +334,7 @@ func TestExceptionDecisionFieldsRoundTrip(t *testing.T) {
 	created, err := orgStore.Create(Policy{
 		Name:       "Exception: lodash@4.17.20",
 		Precedence: 10,
+		Kind:       KindException,
 		Mode:       ModeAllow,
 		Status:     StatusEnabled,
 		Identifier: Identifier{
@@ -390,6 +391,7 @@ func TestExceptionDecisionFieldsRoundTrip(t *testing.T) {
 	updateReq := Policy{
 		Name:       found.Name,
 		Precedence: found.Precedence,
+		Kind:       KindException,
 		Mode:       ModeAllow,
 		Status:     StatusEnabled,
 		Identifier: found.Identifier,

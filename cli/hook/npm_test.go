@@ -5,9 +5,32 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// A standalone pnpm install (no npm binary) must still count: pnpm reads the
+// same ~/.npmrc, and `install-hook --all` filters on IsInstalled.
+func TestNPMWirerCountsStandalonePnpm(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable bit")
+	}
+	bin := t.TempDir()
+	t.Setenv("PATH", bin)
+	if (npmManager{}).IsInstalled() {
+		t.Fatal("IsInstalled = true with neither npm nor pnpm on PATH")
+	}
+	if err := os.WriteFile(filepath.Join(bin, "pnpm"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !(npmManager{}).IsInstalled() {
+		t.Fatal("pnpm alone on PATH: IsInstalled = false, so --all skips the .npmrc pnpm reads")
+	}
+	if got := NPMClients(); len(got) != 1 || got[0] != "pnpm" {
+		t.Fatalf("NPMClients = %v, want [pnpm]", got)
+	}
+}
 
 func setupNpm(t *testing.T) (npmManager, string) {
 	t.Helper()

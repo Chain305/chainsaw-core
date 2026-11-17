@@ -215,9 +215,13 @@ type doctorManagerEntry struct {
 	// ShimSkipped is true when the shell guard is active for the current
 	// shell but leaves this manager out (CHAINSAW_GUARD_SKIP / --skip), so its
 	// installs are NOT checked unless the config file is wired.
-	ShimSkipped bool   `json:"shim_skipped,omitempty"`
-	ConfigPath  string `json:"config_path"`
-	Error       string `json:"error,omitempty"`
+	ShimSkipped bool `json:"shim_skipped,omitempty"`
+	// Clients names the binaries on PATH this row's config serves, when that
+	// is not just the manager itself: the npm row also covers pnpm, which
+	// reads the same ~/.npmrc.
+	Clients    []string `json:"clients,omitempty"`
+	ConfigPath string   `json:"config_path"`
+	Error      string   `json:"error,omitempty"`
 }
 
 type doctorReport struct {
@@ -256,6 +260,9 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		entry.ConfigPath = st.ConfigPath
 		entry.Installed = st.Installed
 		entry.Wired = st.Wired
+		if m.Name() == "npm" {
+			entry.Clients = hook.NPMClients()
+		}
 		// Status may return a zero-value ConfigPath if it errored early;
 		// fall back to asking the manager directly so doctor always prints
 		// a useful path.
@@ -562,6 +569,25 @@ func printDoctorTable(cmd *cobra.Command, out io.Writer, report doctorReport) {
 				colorWired(e, colorize)+padTo(wired, wWired)+gap+
 				e.ConfigPath+"\n")
 	}
+	// The MANAGER column stays the bare name (scripts and tests key on it);
+	// say here which other clients a row's config serves.
+	for _, e := range report.Managers {
+		if others := doctorOtherClients(e); len(others) > 0 {
+			fmt.Fprintf(out, "note: the %s row also covers %s, which reads the same config\n", e.Name, strings.Join(others, ", "))
+		}
+	}
+}
+
+// doctorOtherClients returns the clients on PATH that a row's config serves
+// besides the manager itself (pnpm, for the npm row).
+func doctorOtherClients(e doctorManagerEntry) []string {
+	var others []string
+	for _, c := range e.Clients {
+		if c != e.Name {
+			others = append(others, c)
+		}
+	}
+	return others
 }
 
 // plainWired is the uncoloured WIRED cell text. "yes" = config-file wired,

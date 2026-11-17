@@ -781,7 +781,12 @@ func runPolicySimulate(cmd *cobra.Command, args []string) error {
 		if len(p.Identifier) > 0 {
 			_ = json.Unmarshal(p.Identifier, &ident)
 		}
-		matched, unevaluated := simulateIdentifierMatch(ident, repository, pkg, version)
+		var conds policy.Conditions
+		if len(p.Conditions) > 0 {
+			_ = json.Unmarshal(p.Conditions, &conds)
+		}
+		exception := policy.IsException(policy.Policy{Kind: policy.Kind(p.Kind), Mode: policy.Mode(p.Mode), Conditions: conds})
+		matched, unevaluated := simulateIdentifierMatch(ident, repository, pkg, version, exception)
 		if !matched {
 			continue
 		}
@@ -1030,7 +1035,10 @@ func renderPolicyJSONValue(v any) (string, bool) {
 // Rather than pick a wrong answer in either direction, wildcard the
 // missing dimension (so the rule is still surfaced) and return its name
 // so the caller can downgrade the verdict to `conditional`.
-func simulateIdentifierMatch(ident policy.Identifier, repository, pkg, version string) (bool, []string) {
+//
+// exception marks an exception row, whose version leg is one exact version
+// (policy.MatchesPolicyIdentifier), never a constraint.
+func simulateIdentifierMatch(ident policy.Identifier, repository, pkg, version string, exception bool) (bool, []string) {
 	var unevaluated []string
 	if repository == "" && narrowsOn(ident.TargetPackageRepo) {
 		unevaluated = append(unevaluated,
@@ -1046,6 +1054,9 @@ func simulateIdentifierMatch(ident policy.Identifier, repository, pkg, version s
 		Repository:     repository,
 		PackageName:    pkg,
 		PackageVersion: version,
+	}
+	if exception {
+		return policy.MatchesPolicyIdentifier(ctx, policy.Policy{Kind: policy.KindException, Identifier: ident}), unevaluated
 	}
 	return policy.MatchesIdentifier(ctx, ident), unevaluated
 }

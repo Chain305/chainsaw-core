@@ -63,6 +63,14 @@ const (
 	// package with a server/IO failure (invariant B). Weaker Warn/UpgradeAvailable
 	// trees still map to ExitBlocked(1); the ladder stays 0 < 1 < 11.
 	ExitIntelBlock = 11
+	// ExitHookRefused — `install-hook` changed nothing for at least one
+	// manager because the user's own config already chooses a registry,
+	// mirror or source there (a uv index-url, a private gem source, a Bundler
+	// mirror chainsaw did not write, a Packagist mirror in Composer), and it
+	// had no other kind of failure. An expected outcome, not a tool error:
+	// the MDM scripts report these managers and still attest, so the server
+	// sees them as drifted instead of seeing nothing from the device.
+	ExitHookRefused = 13
 	// ExitManifestParseError — one or more manifests/lockfiles that the command
 	// was asked to read failed to parse, so DEPENDENCIES WERE DROPPED and the
 	// result set is incomplete. The command still reports everything that did
@@ -221,6 +229,13 @@ var exitCodeAllocations = []exitCodeAllocation{
 		Owner:  "intel scan",
 		Kind:   "command",
 		Desc:   "`intel scan` found at least one Quarantine or Replace node — the strongest block the command emits. Weaker Warn/UpgradeAvailable trees still exit 1.",
+	},
+	{
+		Code:   ExitHookRefused,
+		Consts: []string{"ExitHookRefused"},
+		Owner:  "install-hook",
+		Kind:   "command",
+		Desc:   "`install-hook` left at least one manager unwired because your own config already chooses a registry, mirror or source there (the message names the file and setting), and nothing else failed. Remove or repoint that setting and re-run. The MDM scripts report these managers separately and still attest.",
 	},
 	{
 		Code:   policyScanIncompleteExitCode,

@@ -99,6 +99,17 @@ func writeAtomic(path string, data []byte) error {
 // machine-wide. Only the secret-bearing, non-system writes pass 0o600; see
 // credentialFileMode.
 func writeAtomicMode(path string, data []byte, newFileMode os.FileMode) error {
+	// A config that is a symlink (a dotfiles repo, ~/.gemrc -> dotfiles/gemrc)
+	// is written THROUGH: renaming a temp file over the link would replace it
+	// with a regular file and silently fork the user's config from the one
+	// they maintain. A dangling link is refused rather than guessed at.
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		target, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("%s is a symlink chainsaw cannot follow (%v); point it at an existing file or replace it with one, then re-run", path, err)
+		}
+		path = target
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create parent: %w", err)

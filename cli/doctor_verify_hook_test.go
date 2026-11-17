@@ -32,14 +32,18 @@ func TestVerifyHookKnowsAllInstallHookManagers(t *testing.T) {
 	// Adding one here is a conscious decision — file a follow-up
 	// before removing the entry.
 	deferred := map[string]string{
-		"swift":  "swiftpm reverse-lookup + git clone interaction needs a separate driver — Wave AG showed swift falls back to direct GitHub clone on 404",
-		"yarn":   "yarn uses the same .npmrc as npm; verify via npm for now",
-		"maven":  "maven settings.xml drive needs profile injection",
-		"gradle": "gradle init-script driver pending",
-		"sbt":    "sbt resolvers drive pending",
-		"nuget":  "nuget.config drive pending",
-		"go":     "GOPROXY drive pending — well-tested elsewhere",
-		"brew":   "needs a real brew install against a bottle repo; doctor reports routing (ARTIFACT_DOMAIN + NO_FALLBACK)",
+		"swift":    "swiftpm reverse-lookup + git clone interaction needs a separate driver — Wave AG showed swift falls back to direct GitHub clone on 404",
+		"yarn":     "yarn uses the same .npmrc as npm; verify via npm for now",
+		"maven":    "maven settings.xml drive needs profile injection",
+		"gradle":   "gradle init-script driver pending",
+		"sbt":      "sbt resolvers drive pending",
+		"nuget":    "nuget.config drive pending",
+		"go":       "GOPROXY drive pending — well-tested elsewhere",
+		"brew":     "needs a real brew install against a bottle repo; doctor reports routing (ARTIFACT_DOMAIN + NO_FALLBACK)",
+		"uv":       "uv driver pending — the pip driver does not exercise uv.toml",
+		"bundler":  "bundler driver pending — needs a Gemfile and a mirror-aware bundle install",
+		"gem":      "gem driver pending",
+		"composer": "composer driver pending",
 	}
 
 	drivers := verifyDrivers()

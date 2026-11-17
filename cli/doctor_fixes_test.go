@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"github.com/chain305/chainsaw-core/cli/hook"
 )
@@ -199,6 +200,10 @@ func clearWatchedEnv(t *testing.T) {
 			os.Unsetenv(w.Key)
 		}
 	}
+	// With no org slug every manager is drift (R2-S5); these tests are about
+	// something else, so they run as the org their fixtures name.
+	viper.Set("org_slug", "acme")
+	t.Cleanup(func() { viper.Set("org_slug", "") })
 }
 
 // --- D3: egress probe classification -------------------------------------

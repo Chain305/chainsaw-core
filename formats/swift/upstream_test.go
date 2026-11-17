@@ -62,7 +62,7 @@ func TestCompositeRoundTripperRegistry404FallsBackToGit(t *testing.T) {
 	rt := &CompositeRoundTripper{
 		Registry:     &stubRT{status: 404, body: `{"detail":"missing"}`},
 		RegistryBase: mustURL("https://example.com/"),
-		Git:          NewGitUpstream(m, t.TempDir()),
+		Git:          newLocalGitUpstream(m, t.TempDir()),
 	}
 	req, _ := http.NewRequest("GET", "https://example.com/apple/swift-nio", nil)
 	resp, err := rt.RoundTrip(req)
@@ -84,7 +84,7 @@ func TestCompositeRoundTripperIdentifiersReverseLookup(t *testing.T) {
 	})
 	rt := &CompositeRoundTripper{
 		Registry: nil, // force fallback
-		Git:      NewGitUpstream(m, t.TempDir()),
+		Git:      newLocalGitUpstream(m, t.TempDir()),
 	}
 	req, _ := http.NewRequest("GET", "https://example.com/identifiers?url=https%3A%2F%2Fgithub.com%2Fapple%2Fswift-nio.git", nil)
 	resp, err := rt.RoundTrip(req)

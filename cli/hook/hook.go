@@ -78,6 +78,12 @@ type WireOpts struct {
 	// the block now carries a secret, a GOFLAGS token that was dropped.
 	// Nil discards them, so library callers and tests need not set it.
 	Notify func(msg string)
+	// TrustedSources are registry URLs (credentials ignored) the user has
+	// said to keep beside chainsaw: a private gem server in :sources:, a
+	// Private Packagist or Satis repository ahead of chainsaw. Wire leaves
+	// them in place instead of refusing. Status still reports them, because
+	// the tool still asks them for packages without chainsaw.
+	TrustedSources []string
 }
 
 // notify sends a formatted advisory to opts.Notify when one is configured.
@@ -101,6 +107,11 @@ type Status struct {
 	Stale bool
 	// StaleReason explains a Stale=true result in one line.
 	StaleReason string
+	// Bypassed explains a Wired=false result where chainsaw's entry IS
+	// present but another setting makes the tool resolve around it (a
+	// Bundler mirror.all, a uv extra-index-url, a $GEMRC :sources:, a
+	// Packagist mirror in Composer). Empty otherwise.
+	Bypassed string
 }
 
 // Common errors returned by Manager implementations.
@@ -117,6 +128,7 @@ func All() []Manager {
 		yarnManager{},
 		bunManager{},
 		pipManager{},
+		uvManager{},
 		cargoManager{},
 		mavenManager{},
 		gradleManager{},
@@ -125,6 +137,9 @@ func All() []Manager {
 		goModManager{},
 		dockerManager{},
 		brewManager{},
+		bundlerManager{},
+		gemManager{},
+		composerManager{},
 	}
 }
 
@@ -144,7 +159,17 @@ func ConfigPathsForScope(m Manager, scope Scope) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{p}, nil
+	paths := []string{p}
+	if x, ok := m.(interface {
+		extraPaths(Scope) ([]string, error)
+	}); ok {
+		more, err := x.extraPaths(scope)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, more...)
+	}
+	return paths, nil
 }
 
 // ByName looks up a manager by its short name. Returns an error if the name
