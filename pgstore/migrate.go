@@ -2437,6 +2437,11 @@ func (s *Store) migrateSchema() error {
 		// flipped at /settings/flywheel by a settings:update-gated admin.
 		// Read fail-closed (default FALSE) by isFlywheelSharingEnabledForOrg.
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS flywheel_sharing_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+		// Owner ruling 2026-11-17: sharing is ON by default for orgs created
+		// from now on. Only the column DEFAULT changes; no existing row is
+		// updated, so orgs that signed up under "opt-in" keep their value.
+		// An admin can still turn it off at /settings/flywheel.
+		`ALTER TABLE orgs ALTER COLUMN flywheel_sharing_enabled SET DEFAULT TRUE`,
 
 		// Intelligence-flywheel capture store (T1). One row per
 		// (ecosystem, package, version) blocked-as-malicious across ALL
