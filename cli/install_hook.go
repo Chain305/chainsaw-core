@@ -980,10 +980,17 @@ func resolveCredentials(cmd *cobra.Command, serverURL, flagValue string, noCreds
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not generate a default client_id (%v); enter one manually\n", err)
 	}
-	clientID = PromptString("client_id to create", clientID)
-	clientID = strings.TrimSpace(clientID)
+	suggested := clientID
+	clientID = strings.ToLower(strings.TrimSpace(PromptString("client_id to create", clientID)))
 	if clientID == "" {
 		return "", false, fmt.Errorf("client_id is required to mint credentials")
+	}
+	if !validClientCredentialID(clientID) {
+		if !validClientCredentialID(suggested) {
+			return "", false, fmt.Errorf("client_id %q is not valid: use 3-32 characters of lowercase letters, numbers, dash or underscore", clientID)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: client_id %q is not valid (3-32 characters: lowercase letters, numbers, dash or underscore); using %q\n", clientID, suggested)
+		clientID = suggested
 	}
 	creds, err := mintClientCredentials(clientID)
 	if err != nil {
@@ -1005,7 +1012,34 @@ func defaultClientCredentialID() (string, error) {
 		return "", err
 	}
 	// Keep the suffix short; client_id is a visible identifier in the UI.
-	return fmt.Sprintf("cli-%s-%s", sanitizeClientIDPart(host), hex.EncodeToString(buf)), nil
+	// The server caps client_id at 32 characters: "cli-" + host + "-" + six
+	// hex characters leaves 21 for the host. Uncapped, a 24-character
+	// hostname produced a 35-character default the server refused, so the
+	// recommended "just press Enter" path minted nothing.
+	part := sanitizeClientIDPart(host)
+	if len(part) > maxClientIDHostPart {
+		part = strings.TrimRight(part[:maxClientIDHostPart], "-_")
+	}
+	return fmt.Sprintf("cli-%s-%s", part, hex.EncodeToString(buf)), nil
+}
+
+// maxClientIDHostPart is the hostname budget inside a 32-character
+// client_id ("cli-" + host + "-" + 6 hex).
+const maxClientIDHostPart = 32 - len("cli-") - 1 - 6
+
+// validClientCredentialID mirrors the server's client_id rule (CHW-4803,
+// core/config/clients.go clientIDPattern): 3-32 characters of lowercase
+// letters, digits, dash or underscore, starting with a letter.
+func validClientCredentialID(id string) bool {
+	if len(id) < 3 || len(id) > 32 || id[0] < 'a' || id[0] > 'z' {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // sanitizeClientIDPart strips characters that would be noisy in a client_id.
