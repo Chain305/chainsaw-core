@@ -891,7 +891,10 @@ func (f *facet) fetchFromRemote(ctx context.Context, remote RemoteDefinition, lo
 		if forceHTML && strings.EqualFold(k, "Accept") {
 			continue
 		}
-		if needsTransform && strings.EqualFold(k, "Accept-Encoding") {
+		// Never the client's Accept-Encoding: one fill serves every client and
+		// the checksum gate, so what is cached must not be a transfer coding
+		// the first client happened to accept (it is set below).
+		if strings.EqualFold(k, "Accept-Encoding") {
 			continue
 		}
 		for _, v := range values {
@@ -903,6 +906,14 @@ func (f *facet) fetchFromRemote(ctx context.Context, remote RemoteDefinition, lo
 	}
 	if needsTransform {
 		req.Header.Set("Accept-Encoding", "gzip, zstd, identity")
+	} else {
+		// The file itself. Not left unset: Go would then ask for gzip and
+		// transparently gunzip, turning an Apache mirror's `.tgz` (served
+		// as Content-Encoding: gzip) into a .tar. Forwarding the client's
+		// header made Maven Central answer Brotli, which Go never decodes,
+		// so the facet cached the br body as the .pom and the checksum gate
+		// refused it (CHW-2305 on genuine poms, prod 2026-11-23/24).
+		req.Header.Set("Accept-Encoding", "identity")
 	}
 	// One fetch fills the cache for every client, so the variant asked for
 	// must not be whichever client came first.

@@ -333,3 +333,64 @@ func readResp(t *testing.T, resp *Response) string {
 	}
 	return readAll(t, resp.Content)
 }
+
+// TestUpstreamAcceptEncodingIsNotTheClients — one fill serves every client
+// AND the checksum gate, so the cached bytes must be the file itself, not a
+// transfer encoding the first client happened to accept. Forwarding a
+// client's "gzip, deflate, br" made Maven Central answer Brotli; Go's
+// transport only decodes what it asked for itself, so the facet cached the
+// Brotli body as the .pom, and the checksum gate refused every such pom
+// (registry sha1 of the file vs our sha1 of its br encoding; prod
+// 2026-11-23/24, CHW-2305 on log4j-core, junit and maven-*-plugin poms).
+func TestUpstreamAcceptEncodingIsNotTheClients(t *testing.T) {
+	const plain = "<project><artifactId>x</artifactId></project>"
+	for _, tc := range []struct {
+		name      string
+		format    string
+		path      string
+		rewrite   ResponseTransformer
+		wantAE    string
+		wantBytes string
+	}{
+		// No rewriter: ask for the file itself.
+		{"maven pom", "maven", "org/x/x/1.0/x-1.0.pom", nil, "identity", plain},
+		// Positive control: a rewriting facet still negotiates the codings
+		// it can decode before rewriting (unchanged behaviour).
+		{"rewriting facet", "npm", "x", upperTransformer{}, "gzip, zstd, identity", ""},
+	} {
+		var gotAE string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAE = r.Header.Get("Accept-Encoding")
+			if strings.Contains(gotAE, "br") {
+				w.Header().Set("Content-Encoding", "br")
+				_, _ = io.WriteString(w, "\x03>\x06\x00BROTLI-BYTES-NOT-THE-FILE")
+				return
+			}
+			_, _ = io.WriteString(w, plain)
+		}))
+		base, _ := url.Parse(srv.URL + "/")
+		f := NewFacet(FacetConfig{RepoName: "r", Format: tc.format, Storage: newFileStorage(t), Rewrite: tc.rewrite,
+			Remote: RemoteDefinition{BaseURL: base, Client: srv.Client()}, Logger: discardLogger()})
+		resp, err := f.Get(context.Background(), &Request{LogicalPath: tc.path, Method: http.MethodGet,
+			Header: http.Header{"Accept-Encoding": {"gzip, deflate, br"}}})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if gotAE != tc.wantAE {
+			t.Errorf("%s: upstream Accept-Encoding = %q, want %q (the client's must never reach a shared fill)", tc.name, gotAE, tc.wantAE)
+		}
+		if tc.wantBytes == "" {
+			continue
+		}
+		body, err := resp.Content.Open()
+		if err != nil {
+			t.Fatalf("%s: open cached content: %v", tc.name, err)
+		}
+		got, _ := io.ReadAll(body)
+		_ = body.Close()
+		if string(got) != tc.wantBytes {
+			t.Errorf("%s: cached bytes = %q, want the file itself %q", tc.name, got, tc.wantBytes)
+		}
+	}
+}
