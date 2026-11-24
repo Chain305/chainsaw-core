@@ -71,6 +71,13 @@ func OpenWithConfig(dsn, readDSN string, writePool, readPool PoolConfig) (*Store
 	return store, nil
 }
 
+// NewFromDB wraps an already-open pool without pinging or migrating it, for
+// callers that own the schema: tests that swap in a recording driver to
+// prove which statements a code path issues.
+func NewFromDB(db *sql.DB) *Store {
+	return &Store{db: db}
+}
+
 func (s *Store) DB() *sql.DB {
 	return s.db
 }

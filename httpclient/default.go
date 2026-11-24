@@ -3,6 +3,7 @@ package httpclient
 import (
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type defaultClientConfig struct {
 	idleConnTimeout     time.Duration
 	transportFn         func(*http.Transport) http.RoundTripper
 	ssrfGuard           bool
+	unguardedReason     string
 }
 
 // DefaultOption configures an HTTP client built by New. The name is
@@ -96,6 +98,24 @@ func WithSSRFGuard() DefaultOption {
 	return func(c *defaultClientConfig) { c.ssrfGuard = true }
 }
 
+// WithoutSSRFGuard turns off the dial-time SSRF guard that New installs by
+// default (N-10). reason is required and is the audit trail: say why no
+// tenant can influence the destination, or why it must reach a private
+// address (an operator-configured feed mirror, the CLI on a developer
+// machine, a self-hosted LLM gateway). The source guard
+// TestSecurityGuard_NoRawHTTPClients refuses an empty reason.
+//
+// Prefer this narrow opt-out to CHAINSAW_ALLOW_PRIVATE_UPSTREAMS, which
+// opens every guarded client at once.
+func WithoutSSRFGuard(reason string) DefaultOption {
+	return func(c *defaultClientConfig) {
+		if strings.TrimSpace(reason) == "" {
+			return // no reason, no opt-out: stays guarded
+		}
+		c.unguardedReason = reason
+	}
+}
+
 // AllowPrivateUpstreams reports whether the operator has opted out of the
 // SafeDialer SSRF block via CHAINSAW_ALLOW_PRIVATE_UPSTREAMS=1.
 //
@@ -127,25 +147,14 @@ func defaultConfig() defaultClientConfig {
 // every concurrent request beyond the second, which adds 100-300ms of
 // latency per cold call against a distant registry.
 //
-// SECURITY — New is NOT SSRF-safe on its own. The transport it returns
-// dials with a plain net.Dialer, so any egress path whose target URL is
-// attacker- or tenant-influenced (an org admin's OIDC issuer, a SAML
-// metadata URL, a webhook target, a Jira base_url, a SIEM endpoint) can
-// be pointed at RFC1918 / loopback / link-local space. On a typical
-// Kubernetes deployment that reaches the API server, the database, and
-// the proxy itself — all of which sit on addresses the guard blocks.
-//
-// Any NEW egress path must install the SSRF guard, one of two ways:
-//
-//   - Factory.NewClient with NewFactory(cfg, WithSafeDialer(true)) — for
-//     repository-remote style clients; or
-//   - New(WithSSRFGuard()) — for one-off clients (internal/webhook's
-//     dispatcher, internal/server/authapi's ssoSafeHTTPClient). Do NOT
-//     swap base.DialContext for a SafeDialer via WithTransport instead:
-//     that misses the forward-proxy target check (see WithSSRFGuard).
-//
-// Bare New (no safe dialer) is only appropriate for a pinned,
-// compile-time-constant host that no tenant can influence.
+// SECURITY — New is SSRF-guarded by default (N-10): the dial refuses
+// RFC1918 / loopback / link-local / metadata addresses, and a forward
+// proxy's targets are checked by the Proxy hook. Redirects are followed,
+// and each hop is dialled through the same guard. WithSSRFGuard()
+// additionally refuses redirects, for callers that want no chain off a
+// tenant URL. WithoutSSRFGuard(reason) is the only way to an unguarded
+// client. Do NOT swap base.DialContext for a SafeDialer via WithTransport:
+// that misses the forward-proxy target check (see WithSSRFGuard).
 func New(opts ...DefaultOption) *http.Client {
 	cfg := defaultConfig()
 	for _, o := range opts {
@@ -164,7 +173,7 @@ func New(opts ...DefaultOption) *http.Client {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
-	if cfg.ssrfGuard {
+	if cfg.ssrfGuard || cfg.unguardedReason == "" {
 		d := NewSafeDialer(nil)
 		d.exemptEnvProxy = true
 		base.DialContext = d.DialContext

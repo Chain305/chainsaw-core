@@ -94,7 +94,7 @@ type cacheEntry struct {
 // layer policy on top of the SignerID returned in Result.
 func NewVerifier(client *http.Client, keyserver string) *Verifier {
 	if client == nil {
-		client = httpclient.New(httpclient.WithTimeout(8 * time.Second))
+		client = httpclient.New(httpclient.WithTimeout(8*time.Second), httpclient.WithoutSSRFGuard("keyserver is a fixed default or operator env (KeyserverEnvVar); no tenant input"))
 	}
 	if keyserver == "" {
 		keyserver = strings.TrimSpace(os.Getenv(KeyserverEnvVar))

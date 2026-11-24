@@ -46,7 +46,7 @@ func (p artifactAnalysisPlan) enabled() bool {
 
 // planArtifactAnalyses resolves the cache plan for one scan.
 //
-// THE DIGEST IS ALWAYS COMPUTED, NEVER TAKEN FROM ArtifactHandle.SHA256.
+// THE DIGEST IS ALWAYS COMPUTED, NEVER TAKEN FROM ArtifactHandle.ComputedSHA256.
 // That field is caller-declared — it is the value provider_checksum exists to
 // CHECK — so trusting it here would let a caller that declares someone else's
 // digest read someone else's analysis, or file its own analysis under a

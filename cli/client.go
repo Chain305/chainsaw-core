@@ -49,7 +49,7 @@ func NewAPIClient(baseURL, token string) *APIClient {
 	return &APIClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		http:    httpclient.New(httpclient.WithTimeout(30 * time.Second)),
+		http:    httpclient.New(httpclient.WithTimeout(30*time.Second), httpclient.WithoutSSRFGuard("CLI on a developer machine; must reach private registries and VPC installs")),
 	}
 }
 
@@ -61,7 +61,7 @@ func NewAPIClient(baseURL, token string) *APIClient {
 func newAPIClientWithTimeout(baseURL, token string, timeout time.Duration) *APIClient {
 	c := NewAPIClient(baseURL, token)
 	if timeout > 0 {
-		c.http = httpclient.New(httpclient.WithTimeout(timeout))
+		c.http = httpclient.New(httpclient.WithTimeout(timeout), httpclient.WithoutSSRFGuard("CLI on a developer machine; must reach private registries and VPC installs"))
 	}
 	return c
 }

@@ -72,8 +72,18 @@ const (
 	// a dashboard publish handler or org-level usage-mutation endpoint,
 	// reintroduce the constants alongside the requirePermission gate.
 	PermSSOGroupMappings = "sso:group-mappings:manage"
-	PermSCIMManage       = "scim:manage"
-	PermUsageRead        = "usage:read"
+	// PermSSOManage gates every write that changes which identity provider
+	// the org trusts: SSO config PUT/DELETE/test, domain claim/verify/delete
+	// and group-mapping writes. Held ONLY by global-admin, org-admin and
+	// org-owner. It is deliberately NOT implied by settings:update: pointing
+	// the org at an IdP decides who can sign in as which member, so a
+	// delegated settings role (org-manager, the manage-orgadmin API-key
+	// preset) holding it was an owner-takeover primitive (pentest
+	// #11/#12/#35/#37). No API-key preset grants it, and the SSO handlers
+	// refuse API-key callers outright.
+	PermSSOManage  = "sso:manage"
+	PermSCIMManage = "scim:manage"
+	PermUsageRead  = "usage:read"
 	// PermAPIKeysManage gates CRUD on the api_keys table — minting,
 	// listing, narrowing, and revoking management-API keys (PATs and
 	// AI-agent credentials). Distinct from PermClientsCreate, which
@@ -170,6 +180,7 @@ var rolePermissions = map[string][]string{
 		PermPackagesRead,
 		PermPackagesManage,
 		PermSSOGroupMappings,
+		PermSSOManage,
 		PermSCIMManage,
 		PermUsageRead,
 		PermAPIKeysManage,
@@ -207,6 +218,7 @@ var rolePermissions = map[string][]string{
 		PermWebhooksManage,
 		PermCacheManage,
 		PermSSOGroupMappings,
+		PermSSOManage,
 		PermSCIMManage,
 		PermPackagesRead,
 		PermPackagesManage,
@@ -248,6 +260,7 @@ var rolePermissions = map[string][]string{
 		PermPackagesRead,
 		PermPackagesManage,
 		PermSSOGroupMappings,
+		PermSSOManage,
 		PermSCIMManage,
 		PermUsageRead,
 		PermAPIKeysManage,

@@ -41,7 +41,6 @@ package httpclient
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -88,10 +87,8 @@ func envProxy(req *http.Request) (*url.URL, error) {
 	return httpproxy.FromEnvironment().ProxyFunc()(req.URL)
 }
 
-func proxiedRefusal(host, reason, hint string) error {
-	return fmt.Errorf(
-		"httpclient: refusing to dial private/link-local/loopback address via forward proxy (host %s; %s)%s",
-		host, reason, hint)
+func proxiedRefusal(host, reason, _ string) error {
+	return nameRefusal(host, reason+" (forward-proxied target)")
 }
 
 // CheckProxiedTarget applies the SSRF rules to a host that a forward proxy
@@ -110,7 +107,7 @@ func CheckProxiedTarget(ctx context.Context, host string) error {
 	private, cgnat := allowPrivateUpstreams(), allowCGNATUpstreams()
 	if ip := net.ParseIP(h); ip != nil {
 		if rule := classifyIP(ip); !rule.allowedGiven(private, cgnat) {
-			return fmt.Errorf("%w (forward-proxied target)", dialRefusal(ip, host, rule))
+			return dialRefusal(ip, host, rule)
 		}
 		return nil
 	}
@@ -118,7 +115,7 @@ func CheckProxiedTarget(ctx context.Context, host string) error {
 		return proxiedRefusal(host, "cloud instance-metadata name", "; no environment variable overrides it")
 	}
 	if !private && IsReservedHostname(h) {
-		return proxiedRefusal(host, "reserved internal name", fmt.Sprintf("; set %s=1 to override", AllowPrivateUpstreamsEnv))
+		return proxiedRefusal(host, "reserved internal name", "")
 	}
 	// 2130706433, 0x7f000001, 010.0.0.1: an IP address to many proxies and
 	// resolvers, never a DNS name. No override: no real upstream is spelt so.
@@ -139,7 +136,7 @@ func CheckProxiedTarget(ctx context.Context, host string) error {
 	}
 	for _, ia := range ips {
 		if rule := classifyIP(ia.IP); !rule.allowedGiven(private, cgnat) {
-			return fmt.Errorf("%w (forward-proxied target)", dialRefusal(ia.IP, host, rule))
+			return dialRefusal(ia.IP, host, rule)
 		}
 	}
 	return nil

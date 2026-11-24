@@ -451,6 +451,13 @@ func (f *facet) fetchAndStore(fetchCtx context.Context, req *Request, remote Rem
 		return cached, nil
 	}
 
+	// A non-literal path is refused before the breaker and the retry loop:
+	// it is the client's fault, not the upstream's, and must not trip the
+	// breaker for everyone else.
+	if _, err := f.remoteURL(remote, logicalPath); err != nil {
+		return nil, err
+	}
+
 	// Circuit breaker: fail fast when upstream is known to be down.
 	if f.circuitBreaker != nil && !f.circuitBreaker.Allow() {
 		if stale := f.tryStaleCache(fetchCtx, logicalPath); stale != nil {
@@ -620,11 +627,12 @@ func (f *facet) handleUpstreamStatus(fetchCtx context.Context, logicalPath, cach
 // internal-package override, prepares the body reader (decoding /
 // rewriting when a transformer is installed), and writes the cache.
 func (f *facet) storeUpstream(fetchCtx context.Context, remote RemoteDefinition, logicalPath string, remoteResp *http.Response) (*Response, error) {
+	originURL, _ := f.remoteURL(remote, logicalPath) // the fetch already proved it literal
 	meta := storage.ContentMetadata{
 		ContentType:     remoteResp.Header.Get("Content-Type"),
 		ContentEncoding: recordedContentEncoding(remoteResp.Header.Get("Content-Encoding")),
 		ETag:            remoteResp.Header.Get("ETag"),
-		OriginURL:       f.remoteURL(remote, logicalPath),
+		OriginURL:       originURL,
 		ReleasedAt:      releaseTimestamp(remoteResp),
 		CachedAt:        time.Now().UTC(),
 		ExtraHeaders:    captureExtraHeaders(remoteResp.Header),
@@ -856,7 +864,10 @@ func isRetryableStatus(status int) bool {
 }
 
 func (f *facet) fetchFromRemote(ctx context.Context, remote RemoteDefinition, logicalPath string, header http.Header) (*http.Response, error) {
-	remoteURL := f.remoteURL(remote, logicalPath)
+	remoteURL, err := f.remoteURL(remote, logicalPath)
+	if err != nil {
+		return nil, err
+	}
 	if q, _ := ctx.Value(upstreamQueryKey{}).(string); q != "" {
 		remoteURL += "?" + q
 	}
@@ -919,7 +930,7 @@ var upstreamCharger func(host string)
 // Pass nil to disable.
 func SetUpstreamCharger(f func(host string)) { upstreamCharger = f }
 
-func (f *facet) remoteURL(remote RemoteDefinition, logicalPath string) string {
+func (f *facet) remoteURL(remote RemoteDefinition, logicalPath string) (string, error) {
 	base := remote.BaseURL
 	query := ""
 	if f.mapper != nil {
@@ -935,13 +946,33 @@ func (f *facet) remoteURL(remote RemoteDefinition, logicalPath string) string {
 			}
 		}
 	}
-	ref := &url.URL{
-		Path: strings.TrimPrefix(logicalPath, "/"),
+	return LiteralRemoteURL(base, logicalPath, query)
+}
+
+// ErrNonLiteralUpstreamPath: resolving the logical path against the base would
+// fetch a different path than the one the policy judged.
+var ErrNonLiteralUpstreamPath = errors.New("proxy: logical path does not resolve literally under the upstream base")
+
+// LiteralRemoteURL resolves logicalPath against base (RFC 3986, as
+// ResolveReference does) and refuses when the result is not exactly the
+// base's directory plus logicalPath — a dot segment removed, or a leading
+// slash that replaced the base path. The decision judges logicalPath as
+// written, so the fetch may only go there (pentest #9/#23/#29). base is the
+// post-mapper base: a mapper's own rewrite is not a mismatch.
+func LiteralRemoteURL(base *url.URL, logicalPath, rawQuery string) (string, error) {
+	ref := &url.URL{Path: strings.TrimPrefix(logicalPath, "/"), RawQuery: rawQuery}
+	u := base.ResolveReference(ref)
+	if ref.Path != "" {
+		bp := base.EscapedPath()
+		want := bp[:strings.LastIndex(bp, "/")+1] + ref.EscapedPath()
+		if !strings.HasPrefix(want, "/") {
+			want = "/" + want
+		}
+		if u.EscapedPath() != want {
+			return "", ErrNonLiteralUpstreamPath
+		}
 	}
-	if query != "" {
-		ref.RawQuery = query
-	}
-	return base.ResolveReference(ref).String()
+	return u.String(), nil
 }
 
 // encodingIdentity marks "upstream sent no Content-Encoding", as distinct
@@ -1230,6 +1261,20 @@ func (f *facet) UpdateNegative(cache *cache.NegativeCache) {
 
 func (f *facet) RemoteDefinition() RemoteDefinition {
 	return f.currentRemote()
+}
+
+// RemoteURL is the upstream URL a fill of logicalPath fetches, after the
+// format's URL mapper; "" when no upstream is configured. The publish gate
+// probes upstream name existence through it, so the probe asks the host and
+// path a client fill would (a hand-built URL missed the nuget flat container
+// and the crates.io sparse index). It errors, like a fill would, when the
+// resolved URL is not literal (pentest #9/#23/#29).
+func (f *facet) RemoteURL(logicalPath string) (string, error) {
+	remote := f.currentRemote()
+	if remote.BaseURL == nil {
+		return "", nil
+	}
+	return f.remoteURL(remote, logicalPath)
 }
 
 func (f *facet) currentRemote() RemoteDefinition {

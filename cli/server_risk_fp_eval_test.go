@@ -1195,8 +1195,9 @@ func TestBuildServerRiskCorpus(t *testing.T) {
 			}); res == acquireOK && len(raw) > 0 {
 				sum := sha256.Sum256(raw)
 				req.Artifact = &intelligence.ArtifactHandle{
-					Bytes:  raw,
-					SHA256: hex.EncodeToString(sum[:]),
+					Bytes:          raw,
+					ComputedSHA256: hex.EncodeToString(sum[:]),
+					Source:         intelligence.ArtifactSourcePublicRegistry,
 				}
 			}
 		}

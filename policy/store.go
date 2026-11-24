@@ -1205,6 +1205,14 @@ func validatePolicy(policy Policy) error {
 	if policy.Status != StatusEnabled && policy.Status != StatusDisabled && policy.Status != StatusPendingApproval {
 		return errors.New("invalid policy status: must be 'enabled', 'disabled', or 'pending_approval'")
 	}
+	// Pentest #59: nothing populates EvaluationContext.ClientGroups, so a
+	// targetGroup scope can never match and the rule enforces nothing. Refused
+	// unless disabled until the dimension is wired; existing rows are not
+	// re-validated and stay inert. When wiring it, re-confirm existing
+	// targetGroup ALLOW rules before they go live.
+	if policy.Status != StatusDisabled && hasMeaningfulValues(policy.Scope.TargetGroup) {
+		return errors.New("scope.targetGroup is not enforced yet: client groups are not resolved at request time, so this rule would never match; use scope.targetClient, or save it disabled")
+	}
 	if !hasPolicyConstraint(policy) {
 		return errors.New("policy must include at least one condition or scoped target")
 	}

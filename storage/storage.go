@@ -62,6 +62,11 @@ type ContentMetadata struct {
 	// the format's default upstream, and its public namesake must never
 	// replace an internal document.
 	Uploaded bool `json:"uploaded,omitempty"`
+
+	// ClamAVIncomplete is the ScanIncompleteError reason when the scan that
+	// admitted these bytes could not inspect all of them (a limit, or
+	// encryption). Empty for a complete scan.
+	ClamAVIncomplete string `json:"clamav_incomplete,omitempty"`
 }
 
 // CachedContent wraps a blob and its metadata.

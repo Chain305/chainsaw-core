@@ -405,7 +405,9 @@ func (s *DefaultService) tryFetchArtifact(ctx context.Context, eco, name, versio
 	if int64(len(body)) > autoDepArtifactCap {
 		return nil
 	}
-	return &ArtifactHandle{Bytes: body, MediaType: mediaType}
+	// artifactURLFor names only the canonical public registries, never an
+	// org's remote.
+	return &ArtifactHandle{Bytes: body, MediaType: mediaType, Source: ArtifactSourcePublicRegistry}
 }
 
 // autoDepHTTPClient carries WithSSRFGuard.

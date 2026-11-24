@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -129,8 +130,13 @@ func readFileAbove(t *testing.T, rel string) string {
 // "isVulnerable" elsewhere in the file can't satisfy the test.
 func extractToolRegistration(t *testing.T, src, toolName string) string {
 	t.Helper()
-	marker := `Name: "` + toolName + `"`
-	idx := strings.Index(src, marker)
+	// gofmt re-aligns struct fields (e.g. `Name:   "x"` once an Effect
+	// field joins the literal), so match the key/value with any spacing.
+	loc := regexp.MustCompile(`Name:\s+"` + regexp.QuoteMeta(toolName) + `"`).FindStringIndex(src)
+	idx := -1
+	if loc != nil {
+		idx = loc[0]
+	}
 	if idx < 0 {
 		t.Fatalf("could not find tool registration for %q in server_mcp.go", toolName)
 	}

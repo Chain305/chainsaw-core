@@ -262,7 +262,7 @@ func TestStaleReportSweepAttachesArtifactBytes(t *testing.T) {
 			if eco == "" || pkg == "" || version == "" {
 				t.Errorf("fetcher called with an incomplete coordinate: %q %q %q", eco, pkg, version)
 			}
-			return &ArtifactHandle{Bytes: []byte("artifact"), SHA256: "abc"}, nil
+			return &ArtifactHandle{Bytes: []byte("artifact"), ComputedSHA256: "abc"}, nil
 		},
 	})
 	ref.now = func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) }
@@ -451,7 +451,7 @@ func artifactBackfillRefresher(src StaleReportSource, fetcher StaleReportArtifac
 }
 
 func okFetcher(context.Context, string, string, string) (*ArtifactHandle, error) {
-	return &ArtifactHandle{Bytes: []byte("artifact"), SHA256: "abc"}, nil
+	return &ArtifactHandle{Bytes: []byte("artifact"), ComputedSHA256: "abc"}, nil
 }
 
 // Reports refreshed without bytes (cache-warm, new-version detection) are

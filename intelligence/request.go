@@ -197,6 +197,27 @@ var ErrArtifactTooLarge = errors.New("artifact exceeds the fetch size cap")
 // that broke.
 var ErrArtifactUpstreamRefused = errors.New("registry refused the artifact")
 
+// ArtifactSource says where an ArtifactHandle's bytes came from. Scan reads
+// it to decide whether the result may reach shared, cross-tenant state.
+type ArtifactSource string
+
+const (
+	// ArtifactSourceUnknown is the zero value. Scan treats it as tenant
+	// bytes: a handle nobody classified never writes shared state.
+	ArtifactSourceUnknown ArtifactSource = ""
+	// ArtifactSourcePublicRegistry is bytes fetched from the deployment's
+	// CANONICAL public registry host for the ecosystem. It is the only
+	// source whose scan may be persisted to intelligence_reports and its
+	// side tables. "Came from an upstream" is not enough: an org can point
+	// its remote at any host it likes.
+	ArtifactSourcePublicRegistry ArtifactSource = "public_registry"
+	// ArtifactSourceTenantUpload is bytes an org published into its repo.
+	ArtifactSourceTenantUpload ArtifactSource = "tenant_upload"
+	// ArtifactSourceTenantRemote is bytes filled from an org-configured
+	// upstream that is not the canonical registry host.
+	ArtifactSourceTenantRemote ArtifactSource = "tenant_remote"
+)
+
 // ArtifactHandle gives Tier 2 providers (install scripts, hidden unicode,
 // checksum extraction) access to the bytes without pulling them into the
 // Request value directly for small artifacts.
@@ -207,10 +228,15 @@ type ArtifactHandle struct {
 	// Path is set when the caller has already spooled the artifact to
 	// disk (blobstore cache) and wants to avoid copying.
 	Path string
-	// SHA256 is the caller-declared hash. Providers compare this to
-	// prior-persisted scans to decide whether a cached Tier-2 section is
-	// still valid.
-	SHA256 string
+	// ComputedSHA256 is OUR OWN sha256 of Bytes, filled by the caller so
+	// it is not computed twice. It is never a registry declaration: a
+	// checksum "verified" against it compares our hash with our hash
+	// (pentest #13), so the checksum provider does not read it.
+	ComputedSHA256 string
+	// Source is where Bytes came from. Every construction site sets it
+	// explicitly (TestSecurityGuard_ArtifactHandleLiteralsSetSource); Scan
+	// forces Options.Ephemeral for anything but ArtifactSourcePublicRegistry.
+	Source ArtifactSource
 	// MediaType is the registry-advertised content type ("application/zip"
 	// / "application/x-tar" / etc.) used by the extractor to pick the
 	// right archive reader.
@@ -249,9 +275,10 @@ func (h *ArtifactHandle) SharedArtifactMap() artifactmap.Result {
 // NewArtifactHandleWithMap returns a handle whose SharedArtifactMap is m,
 // for a caller that already built the map from b in its own walk (see
 // artifactmap.BuildGzipTarVisit). m must be what artifactmap.Build(b,
-// artifactmap.Options{}) returns.
+// artifactmap.Options{}) returns. The handle's Source is unknown; a caller
+// that knows better sets it on the new handle before sharing it.
 func NewArtifactHandleWithMap(b []byte, sha256 string, m artifactmap.Result) *ArtifactHandle {
-	h := &ArtifactHandle{Bytes: b, SHA256: sha256}
+	h := &ArtifactHandle{Bytes: b, ComputedSHA256: sha256, Source: ArtifactSourceUnknown}
 	h.mapOnce.Do(func() { h.mapResult = m })
 	return h
 }
@@ -293,6 +320,9 @@ type Options struct {
 	// the system reads. Cross-tenant cache poisoning is the threat; Ephemeral
 	// closes it by making the artifact scan a pure read of the uploaded bytes
 	// with no shared-state side effect.
+	//
+	// Scan also forces it on for any Artifact whose Source is not
+	// ArtifactSourcePublicRegistry, so a caller cannot forget it.
 	Ephemeral bool
 
 	// MaxTier caps how far the tiered fan-out runs. 0 (the default)

@@ -324,12 +324,16 @@ type MetadataSection struct {
 // the policy engine's job (see internal/policy.Conditions matchers like
 // RequireSLSALevel, RequireBuilderID, ForbidCacheStale).
 type ProvenanceSection struct {
-	Kind            string   `json:"kind,omitempty"`   // none|sigstore|x509|sumdb|swift-signature|oci-referrer|gpg-commit|other
-	Status          string   `json:"status,omitempty"` // verified|unverified|unavailable|missing|failed
-	Available       bool     `json:"available"`
-	Verified        bool     `json:"verified"`
-	Endpoint        string   `json:"endpoint,omitempty"`
-	SubjectDigest   string   `json:"subjectDigest,omitempty"`
+	Kind          string `json:"kind,omitempty"`   // none|sigstore|x509|sumdb|swift-signature|oci-referrer|gpg-commit|other
+	Status        string `json:"status,omitempty"` // verified|unverified|unavailable|missing|failed
+	Available     bool   `json:"available"`
+	Verified      bool   `json:"verified"`
+	Endpoint      string `json:"endpoint,omitempty"`
+	SubjectDigest string `json:"subjectDigest,omitempty"`
+	// VerifiedSHA256 is provenance.Result.VerifiedSHA256: the bytes a
+	// verified status is about. Empty on rows written before it existed and
+	// for checkers that record no binding; readers treat empty as unknown.
+	VerifiedSHA256  string   `json:"verifiedSha256,omitempty"`
 	BundleURL       string   `json:"bundleUrl,omitempty"`
 	BundleFormat    string   `json:"bundleFormat,omitempty"` // sigstore-bundle|in-toto|cms|gpg-detached|sumdb-note
 	SignerID        string   `json:"signerId,omitempty"`

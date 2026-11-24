@@ -118,12 +118,20 @@ func (c *mavenChecker) CheckWithSource(ctx context.Context, packageName, version
 		// and read as unsigned (232 rows on 2026-11-03), while
 		// activity-1.9.0.aar.asc is there. Some of it is a .jar
 		// (annotation-jvm, the Android Gradle plugin), so both are tried.
+		// Held bytes are verified against each signature in turn: a held
+		// .jar is "unverified" by the .aar.asc and must still reach the
+		// .jar.asc, so the first verified result wins over the first answer.
+		first := Result{Status: StatusMissing, Ecosystem: c.ecosystem}
 		for _, ext := range []string{"aar", "jar"} {
-			if res := c.tryPGP(ctx, fileURL(ext)); res.Status != StatusMissing {
+			res := c.tryPGP(ctx, fileURL(ext))
+			if res.Status == StatusVerified {
 				return res
 			}
+			if first.Status == StatusMissing {
+				first = res
+			}
 		}
-		return Result{Status: StatusMissing, Ecosystem: c.ecosystem}
+		return first
 	}
 	jarURL := fileURL("jar")
 
@@ -244,6 +252,9 @@ func (c *mavenChecker) trySigstore(ctx context.Context, jarURL string) Result {
 		AttestationType: "sigstore",
 		SourceRepo:      id.SourceRepo,
 		BuilderID:       id.BuilderID,
+		// The bundle was checked against this digest of the upstream jar,
+		// not against whatever a proxy later serves under the coordinate.
+		VerifiedSHA256: hex.EncodeToString(digest[:]),
 	}
 }
 
@@ -281,17 +292,20 @@ func (c *mavenChecker) tryPGP(ctx context.Context, jarURL string) Result {
 		return Result{Status: StatusFailed, Ecosystem: c.ecosystem, Error: err.Error()}
 	}
 
-	// The scanner usually holds this artifact already, and the jar was the
-	// heaviest Central request per gradle row (2026-11-03 trace). A signature
-	// that verifies over the held bytes proves they are the jar; a signing
-	// key that cannot be found is the same answer for any bytes. Any other
-	// failure may only mean the held file is the .aar or .pom, so it falls
-	// through to the jar itself.
+	// When the scanner holds the bytes, the verdict is about THOSE bytes and
+	// nothing else (pentest #13). This used to fall back to downloading the
+	// upstream jar whenever the held bytes failed, so an unsigned jar an org
+	// uploaded under a signed coordinate read as `verified`. Held bytes the
+	// signature does not cover may be tampered, or may be another file of the
+	// coordinate (an .aar, a .pom); either way they are not verified, and
+	// "unverified" says so without calling them tampered.
 	if held := artifactBytesFrom(ctx); len(held) > 0 {
 		res := c.pgpResult(ctx, ascURL, bytes.NewReader(held), sigBytes)
-		if res.Status == StatusVerified || res.Status == StatusUnavailable {
-			return res
+		if res.Status == StatusFailed {
+			res.Status = StatusUnverified
+			res.Error = "signature does not cover the held artifact bytes: " + res.Error
 		}
+		return res
 	}
 
 	jarStream, closeJar, err := fetchStream(ctx, c.client, jarURL)
@@ -311,7 +325,14 @@ func (c *mavenChecker) tryPGP(ctx context.Context, jarURL string) Result {
 // pgpResult verifies sigBytes over artifact and maps the outcome. Only a
 // missing signing key reads as StatusUnavailable.
 func (c *mavenChecker) pgpResult(ctx context.Context, ascURL string, artifact io.Reader, sigBytes []byte) Result {
-	uid, err := c.pgp.Verify(ctx, artifact, sigBytes)
+	// Hash exactly what the signature check reads, so a verified result can
+	// name the bytes it is about (Result.VerifiedSHA256).
+	hasher := sha256.New()
+	tee := io.TeeReader(artifact, hasher)
+	uid, err := c.pgp.Verify(ctx, tee, sigBytes)
+	if err == nil {
+		_, err = io.Copy(io.Discard, tee)
+	}
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Debug(c.ecosystem+" pgp verification failed",
@@ -360,6 +381,7 @@ func (c *mavenChecker) pgpResult(ctx context.Context, ascURL string, artifact io
 		BundleFormat:    "gpg-detached",
 		BuilderID:       builderID,
 		Warnings:        warnings,
+		VerifiedSHA256:  hex.EncodeToString(hasher.Sum(nil)),
 	}
 }
 

@@ -6,10 +6,14 @@
 // admin could point the proxy at 169.254.169.254 (cloud metadata) and
 // exfiltrate credentials via the cache endpoint.
 //
-// The dialer defaults to OFF so test-suite mockservers on 127.0.0.1
-// continue to work. Server startup opts in by constructing the Factory
-// with WithSafeDialer(true). Operators who genuinely need to proxy an
+// The guard is ON by default for New and NewFactory (N-10); a client that
+// must reach a private address opts out with WithoutSSRFGuard(reason) or
+// WithSafeDialer(false). Operators who genuinely need to proxy an
 // internal registry can set CHAINSAW_ALLOW_PRIVATE_UPSTREAMS=1.
+//
+// Every refusal is a *BlockedError whose text is constant, and a name
+// that does not resolve reads the same, so tenants cannot use the guard
+// to map the cluster. Details are logged.
 //
 // Anti-rebinding: after the per-name DNS resolution, the actual Dial
 // targets the resolved IP (not the hostname) so the kernel cannot
@@ -32,7 +36,8 @@ package httpclient
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -155,7 +160,22 @@ var (
 		{cidr: "fc00::/7", reason: "unique-local address (RFC 4193)", class: blockReserved},
 		{cidr: "fe80::/10", reason: "link-local address", class: blockReserved},
 		{cidr: "ff00::/8", reason: "multicast address", class: blockReserved},
+		// IPv4-compatible (deprecated, RFC 4291) and local-use NAT64
+		// (RFC 8215): nothing public lives there. ::/128 and ::1/128 above
+		// sit inside ::/96 and keep their own reasons.
+		{cidr: "::/96", reason: "IPv4-compatible address (deprecated)", class: blockReserved},
+		{cidr: "64:ff9b:1::/48", reason: "local-use NAT64 address", class: blockReserved},
+		// Teredo embeds an obfuscated IPv4 client; no upstream is reached
+		// over it.
+		{cidr: "2001::/32", reason: "Teredo address", class: blockReserved},
 	})
+
+	// IPv6 forms that carry an IPv4 address the network will deliver to.
+	// The embedded address is what the packet reaches, so it is what gets
+	// classified: 64:ff9b::7f00:1 is 127.0.0.1 behind DNS64/NAT64, and
+	// 2002:7f00:1:: is 127.0.0.1 behind a 6to4 relay.
+	nat64WellKnown = mustRules([]cidrRule{{cidr: "64:ff9b::/96"}})[0].net
+	sixToFour      = mustRules([]cidrRule{{cidr: "2002::/16"}})[0].net
 )
 
 // metadataLiterals are instance-metadata endpoints that are refused
@@ -202,6 +222,9 @@ var reservedSuffixes = []string{
 	".internal",
 	".localhost",
 	".localdomain",
+	// Kubernetes service names (name.namespace.svc[.cluster.local]); the
+	// .cluster.local form is already covered by .local.
+	".svc",
 }
 
 func mustRules(rules []cidrRule) []cidrRule {
@@ -295,6 +318,10 @@ func classifyIP(ip net.IP) cidrRule {
 	probe, table := ip, blockedV6
 	if v4 := ip.To4(); v4 != nil {
 		probe, table = v4, blockedV4
+	} else if len(ip) == net.IPv6len && nat64WellKnown.Contains(ip) {
+		probe, table = net.IP(ip[12:16]), blockedV4
+	} else if len(ip) == net.IPv6len && sixToFour.Contains(ip) {
+		probe, table = net.IP(ip[2:6]), blockedV4
 	}
 	if reason, ok := metadataLiterals[probe.String()]; ok {
 		return cidrRule{reason: reason, class: blockMetadata}
@@ -337,28 +364,171 @@ func envTruthy(name string) bool {
 	}
 }
 
-// dialRefusal builds the refusal error. The leading phrase is matched by
-// IsSSRFBlocked, so it must not change. The trailing hint names the
-// exact knob for the class that tripped — an operator whose tailnet
-// webhook stopped working should not have to read the source to find out
-// which variable to set.
-func dialRefusal(ip net.IP, host string, rule cidrRule) error {
-	var hint string
-	switch rule.class {
+// destinationNotPermitted is the whole public text of every egress refusal
+// AND of every failure to resolve a name. Tenants read these errors (SSO
+// test, provenance warnings, webhook and SIEM saves), so the text must not
+// say which of "internal", "metadata" or "does not exist" applied, or the
+// guard becomes a map of the cluster (#36 #62 #63 #64). The detail goes to
+// the server log and the BlockedError fields.
+const destinationNotPermitted = "httpclient: destination not permitted"
+
+// BlockedError is every refusal this package makes, and every resolver
+// failure of a guarded dial. Error() is constant; the fields are for logs
+// and tests, never for a response body.
+type BlockedError struct {
+	Host string
+	IP   net.IP // nil when refused on the name or unresolved
+	// Reason is the class that tripped ("loopback address", ...).
+	Reason string
+	// Hint names the operator override for this class, or says there is
+	// none. Log it; do not return it.
+	Hint string
+	// Unresolved marks a name that did not resolve. It reads exactly like
+	// a refusal, but IsSSRFBlocked is false for it so the SSRF metric
+	// counts only real refusals.
+	Unresolved bool
+	// Err is the resolver error behind Unresolved. Unwrap returns it so
+	// classification keeps working (the proxy circuit breaker does not trip
+	// on DNS, retries see net.Error.Timeout). It names the cluster
+	// resolver: never format an unwrapped *net.DNSError for a tenant.
+	Err error
+}
+
+func (e *BlockedError) Error() string { return destinationNotPermitted }
+
+func (e *BlockedError) Unwrap() error { return e.Err }
+
+// IsDestinationRefused reports whether err is a refusal or an unresolved
+// name from this package: the one case a caller may describe to a tenant,
+// and only as "destination not permitted".
+func IsDestinationRefused(err error) bool {
+	var be *BlockedError
+	return errors.As(err, &be)
+}
+
+func overrideHint(class blockClass) string {
+	switch class {
 	case blockMetadata:
-		hint = "; this address is never dialable and no environment variable overrides it"
+		return "never dialable; no environment variable overrides it"
 	case blockCGNAT:
-		hint = fmt.Sprintf(
-			"; set %s=1 to allow tailnet/CGNAT destinations, or %s=1 to allow all internal addresses",
-			AllowCGNATUpstreamsEnv, AllowPrivateUpstreamsEnv,
-		)
+		return "set " + AllowCGNATUpstreamsEnv + "=1 for tailnet/CGNAT destinations, or " + AllowPrivateUpstreamsEnv + "=1 for all internal addresses"
 	default:
-		hint = fmt.Sprintf("; set %s=1 to override", AllowPrivateUpstreamsEnv)
+		return "set " + AllowPrivateUpstreamsEnv + "=1 to override"
 	}
-	return fmt.Errorf(
-		"httpclient: refusing to dial private/link-local/loopback address %s (host %s; %s)%s",
-		ip, host, rule.reason, hint,
-	)
+}
+
+// dialRefusal builds the refusal error and logs what it withholds, so an
+// operator whose tailnet webhook stopped working still finds the knob.
+func dialRefusal(ip net.IP, host string, rule cidrRule) error {
+	e := &BlockedError{Host: host, IP: ip, Reason: rule.reason, Hint: overrideHint(rule.class)}
+	slog.Warn("httpclient: egress destination refused", "host", host, "ip", ip.String(), "reason", e.Reason, "override", e.Hint)
+	return e
+}
+
+// nameRefusal refuses a host on its spelling, before any lookup.
+func nameRefusal(host, reason string) error {
+	e := &BlockedError{Host: host, Reason: reason, Hint: overrideHint(blockReserved)}
+	slog.Warn("httpclient: egress destination refused", "host", host, "reason", reason, "override", e.Hint)
+	return e
+}
+
+// unresolved wraps a resolver failure so it reads like a refusal.
+func unresolved(host string, err error) error {
+	slog.Debug("httpclient: egress destination did not resolve", "host", host, "error", err)
+	return &BlockedError{Host: host, Unresolved: true, Err: err, Reason: "did not resolve"}
+}
+
+// rootedName returns host with a trailing dot, so the resolver asks for
+// exactly that name and never walks the pod's search path (ndots:5). A
+// walk answers fast for an in-cluster name and slowly for a missing one,
+// which is a timing oracle the opaque text cannot close.
+func rootedName(host string) string {
+	if strings.HasSuffix(host, ".") {
+		return host
+	}
+	return host + "."
+}
+
+// nameShapeRefusal refuses names that only ever mean something inside a
+// cluster or are an IP address in disguise: single-label names (resolved
+// via the search path), and a numeric last label (2130706433, 0x7f.0.0.1,
+// 0177.0.0.1 are addresses to inet_aton resolvers, never DNS names). ""
+// means the name may be looked up.
+func nameShapeRefusal(host string) string {
+	h := strings.TrimSuffix(strings.ToLower(host), ".")
+	if h == "" {
+		return "empty host"
+	}
+	labels := strings.Split(h, ".")
+	if isNumericLabel(labels[len(labels)-1]) {
+		return "non-canonical IP address"
+	}
+	if len(labels) == 1 {
+		return "single-label name"
+	}
+	return ""
+}
+
+// CheckTenantHostName is CheckTenantHost without DNS: internal literals,
+// reserved and cluster-shaped names, disguised IPs. For save paths whose
+// real control is the dial-time guard (repository remote_url, #57), where
+// a lookup at save time would only add a timing oracle.
+func CheckTenantHostName(host string) error {
+	h := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(host), "["), "]")
+	if ip := net.ParseIP(h); ip != nil {
+		if v := ClassifyOutboundIP(ip); v.Blocked {
+			return dialRefusal(ip, host, cidrRule{reason: v.Reason, class: blockReserved})
+		}
+		return nil
+	}
+	if IsReservedHostname(h) {
+		return nameRefusal(host, "reserved internal name")
+	}
+	if reason := nameShapeRefusal(h); reason != "" {
+		return nameRefusal(host, reason)
+	}
+	return nil
+}
+
+// tenantLookup resolves a tenant-chosen name, bounded, as given (rooted).
+var tenantLookup = func(ctx context.Context, name string) ([]net.IP, error) {
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return net.DefaultResolver.LookupIP(lctx, "ip", name)
+}
+
+// CheckTenantHost is the save-time check for a destination a tenant chose
+// (webhook, SIEM, Jira, repository remote). It refuses reserved names,
+// cluster-shaped names (single-label, .svc, .cluster.local, .internal),
+// disguised IPs, internal literals, names that resolve to any internal
+// address, and names that do not resolve — all with the same opaque
+// *BlockedError, so the answer is not an existence oracle. lookup may be
+// nil (system resolver, asked for the rooted name).
+//
+// It honours CHAINSAW_ALLOW_CGNAT_UPSTREAMS but never
+// CHAINSAW_ALLOW_PRIVATE_UPSTREAMS (see ClassifyOutboundIP). The dial-time
+// guard still runs; this only stops a bad destination being stored.
+func CheckTenantHost(ctx context.Context, host string, lookup func(string) ([]net.IP, error)) error {
+	h := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(host), "["), "]")
+	if err := CheckTenantHostName(host); err != nil || net.ParseIP(h) != nil {
+		return err
+	}
+	var ips []net.IP
+	var err error
+	if lookup != nil {
+		ips, err = lookup(h) // test seam: the stub is keyed on the name
+	} else {
+		ips, err = tenantLookup(ctx, rootedName(h))
+	}
+	if err != nil || len(ips) == 0 {
+		return unresolved(host, err)
+	}
+	for _, ip := range ips {
+		if v := ClassifyOutboundIP(ip); v.Blocked {
+			return dialRefusal(ip, host, cidrRule{reason: v.Reason, class: blockReserved})
+		}
+	}
+	return nil
 }
 
 // allowedGiven reports whether an operator's env settings release this
@@ -393,14 +563,20 @@ type SafeDialer struct {
 	// hook (raw transports, SafeNetDial) must not exempt it: a direct
 	// request to the proxy's address would then reach it unchecked.
 	exemptEnvProxy bool
+
+	// lookup replaces the resolver in tests, so a name can be made to
+	// resolve to an internal address without a stub DNS server.
+	lookup func(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
-// newSafeDialer builds a SafeDialer whose Inner dialer mirrors the
-// timeouts used by the pre-guard transport (30s/30s).
+// newSafeDialer builds a SafeDialer with a 10s connect timeout (the
+// unguarded New transport's) and 30s keep-alive. It was 30s, which let one
+// unroutable tenant remote hold a request for over a minute across retries
+// (#57).
 func newSafeDialer() *SafeDialer {
 	return &SafeDialer{
 		Inner: &net.Dialer{
-			Timeout:   30 * time.Second,
+			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		},
 	}
@@ -439,10 +615,8 @@ func SafeNetDial(ctx context.Context, network, addr string, timeout time.Duratio
 // metrics + structured warn logs without false-positiving on plain
 // connection refusals.
 func IsSSRFBlocked(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "refusing to dial private/link-local/loopback")
+	var be *BlockedError
+	return errors.As(err, &be) && !be.Unresolved
 }
 
 // CheckDialHost applies the dial-time rules to a host that something other
@@ -472,12 +646,15 @@ func ResolveDialHost(ctx context.Context, host string) ([]net.IP, error) {
 		}
 		return []net.IP{ip}, nil
 	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
+	if !private {
+		if reason := nameShapeRefusal(host); reason != "" {
+			return nil, nameRefusal(host, reason)
+		}
+		host = rootedName(host)
 	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("httpclient: no addresses resolved for %s", host)
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return nil, unresolved(host, err)
 	}
 	out := make([]net.IP, 0, len(ips))
 	for _, ia := range ips {
@@ -532,12 +709,26 @@ func (d *SafeDialer) DialContext(ctx context.Context, network, addr string) (net
 	}
 
 	// Resolve with the context-aware resolver so cancellation propagates.
-	ips, err := resolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
+	name := host
+	if !private {
+		// With the override off nothing internal is dialable, so a
+		// cluster-shaped or disguised name is refused unasked, and the
+		// rest are looked up rooted (no search-path walk to time).
+		if reason := nameShapeRefusal(host); reason != "" {
+			return nil, nameRefusal(host, reason)
+		}
+		name = rootedName(host)
 	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("httpclient: no addresses resolved for %s", host)
+	lookup := resolver.LookupIPAddr
+	if d.lookup != nil {
+		lookup = d.lookup
+	}
+	ips, err := lookup(ctx, name)
+	if err != nil || len(ips) == 0 {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, unresolved(host, err)
 	}
 
 	// Filter IPs compatible with the requested network family. For
@@ -584,5 +775,5 @@ func (d *SafeDialer) DialContext(ctx context.Context, network, addr string) (net
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	return nil, fmt.Errorf("httpclient: no dialable addresses for %s", host)
+	return nil, unresolved(host, nil)
 }

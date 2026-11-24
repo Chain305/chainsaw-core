@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chain305/chainsaw-core/formats/common"
@@ -30,6 +31,61 @@ type ContentScanner interface {
 // handling (refuse with 503: an artifact too large to scan is not served)
 // covers both the spool cap below and clamd's own stream cap.
 var ErrScanSizeLimit = errors.New("clamav scan stream exceeds configured limit")
+
+// ScanIncompleteError means the scanner finished but could not inspect all
+// of the artifact: a limit was reached (clamd Heuristics.Limits.Exceeded.*),
+// the content is encrypted (Heuristics.Encrypted.*), or Chainsaw's own
+// unpacker could not open a container clamd cannot read (Chainsaw.Unpack.*).
+// It is never a malware verdict: before clamd was asked to report these they
+// came back as a plain OK, and reported as FOUND they would have been a false
+// 403 MALWARE on the proxy path (pentest #49, #53). The ScanResult returned
+// alongside it is valid.
+type ScanIncompleteError struct {
+	Reason string
+}
+
+func (e *ScanIncompleteError) Error() string {
+	return "malware scan incomplete: " + e.Reason
+}
+
+// RefusedOnUpload reports incompleteness an upload or push is refused for:
+// an encrypted archive, nesting past the recursion limit, and a container our
+// unpacker could not open. Those are evasion shapes a publisher controls.
+// Size, file-count and scan-time limits are not refused: ordinary image
+// layers (node_modules, site-packages) exceed MaxFiles, and refusing them
+// would break hosted docker. Nor is an encrypted document (PDF, Office): it is
+// inert without a reader holding the password, and test fixtures carry them.
+// Those are stored and flagged instead (ContentMetadata.ClamAVIncomplete).
+func (e *ScanIncompleteError) RefusedOnUpload() bool {
+	r := e.Reason
+	if kind, ok := strings.CutPrefix(r, "Heuristics.Encrypted."); ok {
+		kind = strings.ToLower(kind)
+		return !strings.HasPrefix(kind, "pdf") && !strings.HasPrefix(kind, "doc") && !strings.HasPrefix(kind, "ole2")
+	}
+	return r == "Heuristics.Limits.Exceeded.MaxRecursion" ||
+		strings.HasPrefix(r, "Chainsaw.Unpack.Failed.")
+}
+
+var scanIncompleteTotal atomic.Uint64
+
+// ScanIncompleteCount is the process-wide number of incomplete scans
+// accepted (stored or served, flagged), exported as
+// chainsaw_clamav_scan_incomplete_total.
+func ScanIncompleteCount() uint64 { return scanIncompleteTotal.Load() }
+
+// AcceptIncompleteScan reports whether a scan error is an incomplete scan the
+// artifact may be stored or served under, returning its reason. uploaded is
+// ContentMetadata.Uploaded: an upload is refused for RefusedOnUpload reasons,
+// a proxied fill never is (refusing would block large legitimate artifacts;
+// the bytes WERE scanned). Any other error is not accepted.
+func AcceptIncompleteScan(err error, uploaded bool) (string, bool) {
+	var inc *ScanIncompleteError
+	if !errors.As(err, &inc) || (uploaded && inc.RefusedOnUpload()) {
+		return "", false
+	}
+	scanIncompleteTotal.Add(1)
+	return inc.Reason, true
+}
 
 // DefaultMaxScanBytes caps the scan spool when the scanner does not state its
 // own limit. It matches ClamAV's default max_stream_bytes and clamd.conf's
@@ -101,6 +157,10 @@ func (s *ScanningStorage) Put(ctx context.Context, logicalPath string, src io.Re
 		return nil, err
 	}
 	result, err := s.scanner.Scan(ctx, logicalPath, tmp)
+	if reason, ok := AcceptIncompleteScan(err, meta.Uploaded); ok {
+		meta.ClamAVIncomplete = reason
+		err = nil
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -21,10 +21,8 @@ type Factory struct {
 	insecureWarnOnce sync.Map // host -> struct{}; tracks single-shot WARN logs
 }
 
-// Option configures a Factory at construction time. Options are
-// additive — the zero-option call preserves pre-guard behaviour so
-// existing callers (and every test using httptest.NewServer on
-// 127.0.0.1) keep working unchanged.
+// Option configures a Factory at construction time. The zero-option
+// factory is SSRF-guarded (N-10); WithSafeDialer(false) is the opt-out.
 type Option func(*Factory)
 
 // WithAllowInsecureTLS is the global opt-in gate for honoring per-remote
@@ -48,20 +46,18 @@ func WithLogger(logger *slog.Logger) Option {
 // WithSafeDialer toggles the SSRF guard. When enabled, every outbound
 // dial resolves the hostname and refuses IPs in RFC1918, link-local,
 // loopback, IPv6 unique-local, IPv6 link-local, or the IPv4-mapped IPv6
-// equivalents, unless CHAINSAW_ALLOW_PRIVATE_UPSTREAMS=1. Server
-// startup opts in; tests leave it off so mockservers on 127.0.0.1
-// remain reachable.
+// equivalents, unless CHAINSAW_ALLOW_PRIVATE_UPSTREAMS=1. It is on by
+// default; tests that need a mockserver on 127.0.0.1 pass false.
 func WithSafeDialer(enable bool) Option {
 	return func(f *Factory) {
 		f.safeDialer = enable
 	}
 }
 
-// NewFactory returns a client factory. Accepting variadic options keeps
-// the signature backwards-compatible: existing callers continue to pass
-// just a config and get the pre-guard behaviour.
+// NewFactory returns a client factory, SSRF-guarded unless
+// WithSafeDialer(false) is passed.
 func NewFactory(cfg config.HTTPClientConfig, opts ...Option) *Factory {
-	f := &Factory{base: cfg}
+	f := &Factory{base: cfg, safeDialer: true}
 	for _, opt := range opts {
 		opt(f)
 	}

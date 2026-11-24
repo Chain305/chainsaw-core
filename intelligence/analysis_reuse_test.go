@@ -123,7 +123,7 @@ func (f *analysisFixture) scan(t *testing.T, ephemeral bool) *Report {
 	t.Helper()
 	rep, err := f.svc.Scan(context.Background(), Request{
 		Key:      f.key,
-		Artifact: &ArtifactHandle{Bytes: f.bytes},
+		Artifact: &ArtifactHandle{Bytes: f.bytes, Source: ArtifactSourcePublicRegistry},
 		Options: Options{
 			AllowStale:   false,
 			MaxStaleness: time.Nanosecond,
@@ -151,7 +151,7 @@ func (f *analysisFixture) scanAs(t *testing.T, ecosystem string) *Report {
 	})
 	rep, err := f.svc.Scan(context.Background(), Request{
 		Key:      key,
-		Artifact: &ArtifactHandle{Bytes: f.bytes},
+		Artifact: &ArtifactHandle{Bytes: f.bytes, Source: ArtifactSourcePublicRegistry},
 		Options:  Options{AllowStale: false, MaxStaleness: time.Nanosecond},
 	})
 	if err != nil {

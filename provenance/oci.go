@@ -9,10 +9,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
 
+	"github.com/chain305/chainsaw-core/httpclient"
 	"github.com/chain305/chainsaw-core/provenance/sigstoreverify"
 )
 
@@ -103,11 +105,65 @@ func isSigstoreArtifactType(t string) bool {
 	return false
 }
 
+// publicOCIRegistries are the registry hosts a docker coordinate may name
+// without being the repository's own configured remote (#44). The host of
+// an image ref is user input; without this list any authenticated user
+// could make the egress IP send HEAD/GET to a host of their choosing.
+var publicOCIRegistries = map[string]bool{
+	"registry-1.docker.io": true, "docker.io": true, "index.docker.io": true,
+	"ghcr.io": true, "quay.io": true, "gcr.io": true, "mcr.microsoft.com": true,
+	"public.ecr.aws": true, "registry.k8s.io": true, "k8s.gcr.io": true,
+	"registry.gitlab.com": true, "docker.elastic.co": true, "nvcr.io": true, "cgr.dev": true,
+}
+
+// publicOCIRegistrySuffixes are Google's regional registry families.
+var publicOCIRegistrySuffixes = []string{".gcr.io", ".pkg.dev"}
+
+// ociRegistryAllowed reports whether registry may be contacted: a known
+// public registry, or exactly the host (and port) of the repository remote
+// the coordinate was served through.
+func ociRegistryAllowed(registry, sourceURL string) bool {
+	h := strings.ToLower(registry)
+	if publicOCIRegistries[h] {
+		return true
+	}
+	for _, suf := range publicOCIRegistrySuffixes {
+		if strings.HasSuffix(h, suf) {
+			return true
+		}
+	}
+	if u, err := url.Parse(sourceURL); err == nil && u.Host != "" && strings.EqualFold(u.Host, registry) {
+		return true
+	}
+	return false
+}
+
+// ociFailure renders a fetch error for Result.Error, which is persisted as
+// a report warning and served to tenants (#62). A refused or unresolved
+// destination reads as one constant; other errors (HTTP status, decode)
+// are kept for operators.
+func ociFailure(step string, err error) string {
+	if httpclient.IsDestinationRefused(err) {
+		return step + ": registry unreachable or not an allowed destination"
+	}
+	return fmt.Sprintf("%s: %v", step, err)
+}
+
 func (c *ociChecker) Check(ctx context.Context, packageName, version string) Result {
+	return c.CheckWithSource(ctx, packageName, version, "")
+}
+
+// CheckWithSource is Check with the repository remote the coordinate came
+// through; that remote's host is the one non-public registry allowed.
+func (c *ociChecker) CheckWithSource(ctx context.Context, packageName, version, sourceURL string) Result {
 	registry, repo := splitOCIName(packageName)
+	if !ociRegistryAllowed(registry, sourceURL) {
+		return Result{Status: StatusUnavailable, Ecosystem: "docker", Reason: ReasonNotConfigured,
+			Error: fmt.Sprintf("registry %q is neither a known public registry nor this repository's configured remote; not assessed", registry)}
+	}
 	digest, err := c.resolveDigest(ctx, registry, repo, version)
 	if err != nil {
-		return Result{Status: StatusFailed, Ecosystem: "docker", Error: fmt.Sprintf("resolve digest: %v", err)}
+		return Result{Status: StatusFailed, Ecosystem: "docker", Error: ociFailure("resolve digest", err)}
 	}
 
 	// Fetch referrers filtered by Sigstore bundle artifact type.
@@ -123,7 +179,7 @@ func (c *ociChecker) Check(ctx context.Context, packageName, version string) Res
 			}
 			return Result{Status: StatusMissing, Ecosystem: "docker"}
 		}
-		return Result{Status: StatusFailed, Ecosystem: "docker", Error: err.Error()}
+		return Result{Status: StatusFailed, Ecosystem: "docker", Error: ociFailure("fetch", err)}
 	}
 
 	// Response is an OCI image index with a `manifests` array. Each entry
@@ -288,7 +344,7 @@ func (c *ociChecker) checkGitHubAttestation(ctx context.Context, repo, digest st
 		if isNotFound(status) {
 			return Result{Status: StatusMissing, Ecosystem: "docker"}
 		}
-		return Result{Status: StatusFailed, Ecosystem: "docker", Error: err.Error()}
+		return Result{Status: StatusFailed, Ecosystem: "docker", Error: ociFailure("fetch", err)}
 	}
 	var wrap struct {
 		Attestations []struct {

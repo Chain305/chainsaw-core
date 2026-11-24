@@ -126,7 +126,7 @@ func New(cfg Config) *Client {
 		cfg.MaxBatch = defaultMaxBatch
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = httpclient.New(httpclient.WithTimeout(defaultHTTPTimeout))
+		cfg.HTTPClient = httpclient.New(httpclient.WithTimeout(defaultHTTPTimeout), httpclient.WithoutSSRFGuard("telemetry endpoint is fixed or operator-configured; no tenant input"))
 	}
 	c := &Client{
 		cfg:       cfg,

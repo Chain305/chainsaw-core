@@ -31,11 +31,10 @@ func TestChecksumProvider_VerifiesMatchingDeclaredHash(t *testing.T) {
 	req := Request{
 		Key: Key{Ecosystem: "npm", Package: "x", Version: "1.0.0"},
 		Artifact: &ArtifactHandle{
-			Bytes:  payload,
-			SHA256: declared,
+			Bytes: payload,
 		},
 	}
-	partial, err := p.Run(context.Background(), req, &Report{})
+	partial, err := p.Run(context.Background(), req, registryDeclared(declared))
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
@@ -63,11 +62,10 @@ func TestChecksumProvider_MismatchEmitsWarning(t *testing.T) {
 	req := Request{
 		Key: Key{Ecosystem: "pypi", Package: "x", Version: "1.0.0"},
 		Artifact: &ArtifactHandle{
-			Bytes:  payload,
-			SHA256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			Bytes: payload,
 		},
 	}
-	partial, err := p.Run(context.Background(), req, &Report{})
+	partial, err := p.Run(context.Background(), req, registryDeclared("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"))
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
@@ -136,11 +134,10 @@ func TestChecksumProvider_HashesFromFilePath(t *testing.T) {
 	req := Request{
 		Key: Key{Ecosystem: "maven", Package: "x", Version: "1.0.0"},
 		Artifact: &ArtifactHandle{
-			Path:   path,
-			SHA256: declared,
+			Path: path,
 		},
 	}
-	partial, err := p.Run(context.Background(), req, &Report{})
+	partial, err := p.Run(context.Background(), req, registryDeclared(declared))
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
@@ -409,11 +406,10 @@ func TestChecksumProvider_SwiftHappyPath(t *testing.T) {
 	req := Request{
 		Key: Key{Ecosystem: "swift", Package: "x", Version: "1.0.0"},
 		Artifact: &ArtifactHandle{
-			Bytes:  payload,
-			SHA256: "sha-256=" + declared,
+			Bytes: payload,
 		},
 	}
-	partial, err := p.Run(context.Background(), req, &Report{})
+	partial, err := p.Run(context.Background(), req, registryDeclared("sha-256="+declared))
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
@@ -458,11 +454,10 @@ func TestChecksumProvider_SwiftMismatchEmitsWarning(t *testing.T) {
 	req := Request{
 		Key: Key{Ecosystem: "swift", Package: "x", Version: "1.0.0"},
 		Artifact: &ArtifactHandle{
-			Bytes:  payload,
-			SHA256: "sha-256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			Bytes: payload,
 		},
 	}
-	partial, err := p.Run(context.Background(), req, &Report{})
+	partial, err := p.Run(context.Background(), req, registryDeclared("sha-256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"))
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
@@ -478,4 +473,10 @@ func TestChecksumProvider_SwiftMismatchEmitsWarning(t *testing.T) {
 	if partial.Warnings[0].Code != WarnChecksumMismatch {
 		t.Fatalf("swift mismatch: warning code: got %q want %q", partial.Warnings[0].Code, WarnChecksumMismatch)
 	}
+}
+
+// registryDeclared is a prior report carrying a digest the REGISTRY declared,
+// the only declaration the checksum provider accepts (pentest #13).
+func registryDeclared(sha string) *Report {
+	return &Report{Artifact: ArtifactSection{Digests: ArtifactDigest{SHA256: sha}}}
 }

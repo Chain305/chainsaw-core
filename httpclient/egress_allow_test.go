@@ -158,8 +158,8 @@ func TestPlainClientsEnforceAllowlistIncludingRedirects(t *testing.T) {
 
 	t.Setenv(EgressAllowEnv, "127.0.0.1")
 	clients := map[string]*http.Client{
-		"New":     New(),
-		"Factory": NewFactory(config.HTTPClientConfig{}).NewClient(config.RemoteConfig{}),
+		"New":     New(WithoutSSRFGuard("test: loopback fixture")),
+		"Factory": NewFactory(config.HTTPClientConfig{}, WithSafeDialer(false)).NewClient(config.RemoteConfig{}),
 	}
 	for name, c := range clients {
 		resp, err := c.Get(target.URL)
@@ -172,7 +172,7 @@ func TestPlainClientsEnforceAllowlistIncludingRedirects(t *testing.T) {
 		}
 	}
 	t.Setenv(EgressAllowEnv, "example.com")
-	if _, err := New().Get(target.URL); !errors.Is(err, ErrEgressNotAllowed) {
+	if _, err := New(WithoutSSRFGuard("test: loopback fixture")).Get(target.URL); !errors.Is(err, ErrEgressNotAllowed) {
 		t.Fatalf("unlisted host: err = %v, want an allowlist refusal", err)
 	}
 }
@@ -215,7 +215,7 @@ func TestAllowlistChecksTargetThroughForwardProxy(t *testing.T) {
 	defer proxy.Close()
 
 	t.Setenv(EgressAllowEnv, "127.0.0.1")
-	c := NewFactory(config.HTTPClientConfig{}).NewClient(config.RemoteConfig{ProxyURL: proxy.URL})
+	c := NewFactory(config.HTTPClientConfig{}, WithSafeDialer(false)).NewClient(config.RemoteConfig{ProxyURL: proxy.URL})
 
 	// A listed target still goes through the proxy.
 	resp, err := c.Get("http://127.0.0.1:9/ok")
@@ -263,7 +263,7 @@ func TestAllowlistProxyHookOnNewAndDefaultTransport(t *testing.T) {
 	t.Setenv(EgressAllowEnv, "registry.npmjs.org")
 	req, _ := http.NewRequest(http.MethodGet, "https://evil.example.invalid/steal", nil)
 
-	tr := New().Transport.(countingTransport).next.(*http.Transport)
+	tr := New(WithoutSSRFGuard("test: loopback fixture")).Transport.(countingTransport).next.(*http.Transport)
 	if _, err := tr.Proxy(req); !errors.Is(err, ErrEgressNotAllowed) {
 		t.Fatalf("New(): proxy hook err = %v, want an allowlist refusal", err)
 	}

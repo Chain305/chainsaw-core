@@ -39,7 +39,7 @@ func TestNewClientCountsEgress(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New()
+	c := New(WithoutSSRFGuard("test: loopback fixture"))
 	for i := 0; i < 3; i++ {
 		resp, err := c.Get(srv.URL)
 		if err != nil {
@@ -64,7 +64,7 @@ func TestFactoryClientCountsEgress(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewFactory(config.HTTPClientConfig{}).NewClient(config.RemoteConfig{})
+	c := NewFactory(config.HTTPClientConfig{}, WithSafeDialer(false)).NewClient(config.RemoteConfig{})
 	resp, err := c.Get(srv.URL)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -104,7 +104,7 @@ func TestTransportErrorCounted(t *testing.T) {
 	url := srv.URL
 	srv.Close() // nothing is listening now
 
-	resp, err := New().Get(url)
+	resp, err := New(WithoutSSRFGuard("test: loopback fixture")).Get(url)
 	if err == nil {
 		resp.Body.Close()
 		t.Skip("the port was reused by something else; cannot exercise the transport path")
@@ -133,7 +133,7 @@ func TestNilRecorderSafe(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	resp, err := New().Get(srv.URL)
+	resp, err := New(WithoutSSRFGuard("test: loopback fixture")).Get(srv.URL)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestFollowedRedirectIsCountedOnBothHosts(t *testing.T) {
 
 	// Two distinct hostnames for one logical fetch, so the per-host series
 	// are separable the way they are in production.
-	c := New()
+	c := New(WithoutSSRFGuard("test: loopback fixture"))
 	originURL := "http://localhost:" + httptestPort(t, origin.URL)
 	resp, err := c.Get(originURL)
 	if err != nil {
@@ -467,7 +467,7 @@ func TestRefinedCallerReachesTheCounter(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New()
+	c := New(WithoutSSRFGuard("test: loopback fixture"))
 	ctx := RefineEgressCaller(
 		WithEgressCaller(context.Background(), EgressCallerRefresh),
 		EgressCallerRefreshArtifact)

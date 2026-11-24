@@ -31,7 +31,7 @@ func TestWithSSRFGuardBlocksLoopback(t *testing.T) {
 
 	// Negative control: without the option the same request succeeds, so
 	// a failure above is attributable to the guard and not to the server.
-	bare := New(WithTimeout(5 * time.Second))
+	bare := New(WithTimeout(5*time.Second), WithoutSSRFGuard("test: loopback fixture"))
 	resp, err := bare.Get(srv.URL)
 	if err != nil {
 		t.Fatalf("unguarded client could not reach test server: %v", err)

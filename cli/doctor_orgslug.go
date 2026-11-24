@@ -248,7 +248,7 @@ func probeOrgSlug(ctx context.Context, server, token, slug string) orgSlugResult
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	client := httpclient.New(httpclient.WithTimeout(orgSlugProbeTimeout))
+	client := httpclient.New(httpclient.WithTimeout(orgSlugProbeTimeout), httpclient.WithoutSSRFGuard("CLI on a developer machine; must reach private registries and VPC installs"))
 	resp, err := client.Do(req)
 	if err != nil {
 		// Transport failure — DNS, connect refused, TLS, or the context

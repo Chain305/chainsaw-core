@@ -302,7 +302,7 @@ func TestRefresher_ArtifactFetcherGatedOnFlag(t *testing.T) {
 	fetchCalls := atomic.Int64{}
 	fetcher := func(ctx context.Context, row metadata.PackageMetadataRow) (*ArtifactHandle, error) {
 		fetchCalls.Add(1)
-		return &ArtifactHandle{Bytes: []byte("test-bytes"), SHA256: "sha"}, nil
+		return &ArtifactHandle{Bytes: []byte("test-bytes"), ComputedSHA256: "sha"}, nil
 	}
 
 	// ArtifactEnabled=false — fetcher must not be called even if set.

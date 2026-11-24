@@ -156,7 +156,8 @@ func WithAPIBaseOverride(provider, baseURL string) RepoLivenessOption {
 // caller.
 func NewRepoLivenessChecker(httpClient *http.Client, logger *slog.Logger, opts ...RepoLivenessOption) *RepoLivenessChecker {
 	if httpClient == nil {
-		httpClient = httpclient.New(httpclient.WithTimeout(10 * time.Second))
+		httpClient = httpclient.New(httpclient.WithTimeout(10*time.Second),
+			httpclient.WithoutSSRFGuard("pinned forge API hosts; the repository URL only selects the path"))
 	}
 	if logger == nil {
 		logger = slog.Default()

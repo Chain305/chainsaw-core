@@ -74,8 +74,8 @@ func TestScan_Ephemeral_DoesNotPersistSharedReport(t *testing.T) {
 			Key:   poisonKey, // attacker-declared coordinate for a real package
 			OrgID: "org-attacker",
 			Artifact: &ArtifactHandle{
-				Bytes:  []byte("crafted artifact bytes"),
-				SHA256: "deadbeef",
+				Bytes:          []byte("crafted artifact bytes"),
+				ComputedSHA256: "deadbeef",
 			},
 			Options: Options{Ephemeral: true},
 		})

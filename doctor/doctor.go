@@ -685,7 +685,7 @@ func checkUpstreamRegistries(ctx context.Context, client *http.Client, registrie
 		registries = DefaultUpstreamRegistries
 	}
 	if client == nil {
-		client = httpclient.New(httpclient.WithTimeout(5 * time.Second))
+		client = httpclient.New(httpclient.WithTimeout(5*time.Second), httpclient.WithoutSSRFGuard("operator diagnostic; probes the operator's own upstreams, which may be private"))
 	}
 	var unreachable []string
 	for _, url := range registries {

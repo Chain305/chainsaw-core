@@ -160,6 +160,17 @@ func (s *DefaultService) scanFederated(ctx context.Context, req Request) (*Repor
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
+	// RC3, the single choke point for "tenant data written into shared
+	// state". The row this scan would write is keyed (eco, pkg, version) and
+	// read by every org, and so are its side tables (verdict_history,
+	// artifact analyses, the package_metadata projection, sticky facts). Only
+	// bytes from the canonical public registry may author them. Uploads,
+	// org-configured remotes and unclassified handles still get a full scan
+	// for the caller, compute-only. Never the other way round: an Ephemeral
+	// request stays Ephemeral whatever its source.
+	if req.Artifact != nil && req.Artifact.Source != ArtifactSourcePublicRegistry {
+		req.Options.Ephemeral = true
+	}
 	deadline := req.Options.Deadline
 	if deadline <= 0 {
 		deadline = DefaultDeadline
@@ -1331,6 +1342,9 @@ func mergeProvenance(dst *ProvenanceSection, src ProvenanceSection) {
 	}
 	if src.SubjectDigest != "" {
 		dst.SubjectDigest = src.SubjectDigest
+	}
+	if src.VerifiedSHA256 != "" {
+		dst.VerifiedSHA256 = src.VerifiedSHA256
 	}
 	if src.BundleURL != "" {
 		dst.BundleURL = src.BundleURL

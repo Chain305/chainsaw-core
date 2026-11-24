@@ -63,7 +63,7 @@ func TestOCICheckFetchesFullReferrerChain(t *testing.T) {
 	c := newOCIChecker(srv.Client(), nil)
 	c.scheme = "http"
 
-	got := c.Check(context.Background(), registry+"/acme/app", "latest")
+	got := c.CheckWithSource(context.Background(), registry+"/acme/app", "latest", "http://"+registry)
 
 	// Each step must have been exercised at least once.
 	if headCalls.Load() != 1 || referrersCalls.Load() != 1 || manifestCalls.Load() != 1 || blobCalls.Load() != 1 {
@@ -109,7 +109,7 @@ func TestOCICheckBlob404IsStatusFailed(t *testing.T) {
 	c := newOCIChecker(srv.Client(), nil)
 	c.scheme = "http"
 
-	got := c.Check(context.Background(), stripScheme(srv.URL)+"/acme/app", "latest")
+	got := c.CheckWithSource(context.Background(), stripScheme(srv.URL)+"/acme/app", "latest", srv.URL)
 	if got.Status != StatusFailed {
 		t.Errorf("blob 404 mid-chain: want StatusFailed, got %+v", got)
 	}
@@ -180,7 +180,7 @@ func TestOCICheckAuthFailureIsStatusFailedNotMissing(t *testing.T) {
 	c := newOCIChecker(srv.Client(), nil)
 	c.scheme = "http"
 
-	got := c.Check(context.Background(), stripScheme(srv.URL)+"/acme/app", "latest")
+	got := c.CheckWithSource(context.Background(), stripScheme(srv.URL)+"/acme/app", "latest", srv.URL)
 	if got.Status == StatusMissing {
 		t.Fatalf("final 401 must not collapse to StatusMissing: %+v", got)
 	}
@@ -281,7 +281,7 @@ func TestOCICheckVerifiesSigstoreReferrer(t *testing.T) {
 
 	c := newOCIChecker(srv.Client(), nil)
 	c.scheme = "http"
-	got := c.Check(context.Background(), stripScheme(srv.URL)+"/acme/app", "latest")
+	got := c.CheckWithSource(context.Background(), stripScheme(srv.URL)+"/acme/app", "latest", srv.URL)
 
 	if got.Status != StatusVerified {
 		t.Fatalf("want StatusVerified, got %+v", got)
@@ -343,7 +343,7 @@ func TestOCICheckUnverifiedBundleIsStatusUnverified(t *testing.T) {
 
 	c := newOCIChecker(srv.Client(), nil)
 	c.scheme = "http"
-	got := c.Check(context.Background(), stripScheme(srv.URL)+"/acme/app", "latest")
+	got := c.CheckWithSource(context.Background(), stripScheme(srv.URL)+"/acme/app", "latest", srv.URL)
 
 	if got.Status != StatusUnverified {
 		t.Fatalf("located-but-failed-crypto bundle must be StatusUnverified, got %+v", got)

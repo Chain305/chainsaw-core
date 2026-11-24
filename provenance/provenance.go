@@ -174,6 +174,13 @@ type Result struct {
 	// doesn't carry one.
 	SubjectDigest string `json:"subjectDigest,omitempty"`
 
+	// VerifiedSHA256 is the lowercase hex sha256 of the exact bytes a
+	// StatusVerified result was verified over. A verdict is about bytes, not
+	// a coordinate (pentest #13): a consumer serving other bytes under the
+	// same coordinate must not inherit it. Empty when the checker records no
+	// binding, which consumers read as "unknown", never as a match.
+	VerifiedSHA256 string `json:"verifiedSha256,omitempty"`
+
 	// AttestationBundle is the raw bytes of the verified attestation
 	// (in-toto envelope, Sigstore bundle, CMS blob, or GPG signature).
 	// Stored verbatim so downstream code can re-verify or surface the

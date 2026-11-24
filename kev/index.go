@@ -145,7 +145,7 @@ func (i *Index) Load(ctx context.Context) error {
 	}
 	client := i.HTTPClient
 	if client == nil {
-		client = httpclient.New(httpclient.WithTimeout(timeout))
+		client = httpclient.New(httpclient.WithTimeout(timeout), httpclient.WithoutSSRFGuard("pinned public feed host or operator-set mirror; no tenant input"))
 	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, timeout)

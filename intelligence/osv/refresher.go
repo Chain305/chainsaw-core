@@ -294,7 +294,7 @@ func NewRefresher(cfg RefresherConfig) *Refresher {
 		// Each all.zip is 20-80 MB across slow links; bound the per-tick
 		// HTTP call generously. The outer context is the real cancellation
 		// signal.
-		client = httpclient.New(httpclient.WithTimeout(10 * time.Minute))
+		client = httpclient.New(httpclient.WithTimeout(10*time.Minute), httpclient.WithoutSSRFGuard("pinned public feed host or operator-set mirror; no tenant input"))
 		// formulae.brew.sh is a registry host other Chainsaw surfaces
 		// also call, so its 75 MB feed is charged to the shared budget.
 		homebrewClient = upstreamhttp.New(upstreamhttp.FromEnv(),

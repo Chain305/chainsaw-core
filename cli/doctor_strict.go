@@ -1070,7 +1070,7 @@ func probeDirectEgressImpl(ctx context.Context, stderr io.Writer, quiet bool) st
 	if !quiet {
 		fmt.Fprintf(stderr, "probing direct egress to %d registries%s\n", len(publicRegistryProbes), glyphs().ellipsis)
 	}
-	client := httpclient.New(httpclient.WithTimeout(3 * time.Second))
+	client := httpclient.New(httpclient.WithTimeout(3*time.Second), httpclient.WithoutSSRFGuard("CLI on a developer machine; must reach private registries and VPC installs"))
 	reachable := 0
 	blocked := 0
 	unknown := 0
@@ -1329,7 +1329,7 @@ func postAttestation(ctx context.Context, cmd *cobra.Command, r doctorStrictRepo
 	if tok := strings.TrimSpace(os.Getenv("CHAINSAW_TOKEN")); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	resp, err := httpclient.New().Do(req)
+	resp, err := httpclient.New(httpclient.WithoutSSRFGuard("CLI on a developer machine; must reach private registries and VPC installs")).Do(req)
 	if err != nil {
 		return out, err
 	}

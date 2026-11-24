@@ -691,6 +691,13 @@ func (s *Store) migrateSchema() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_package_slugs_org_repo ON package_slugs(org_id, repository)`,
 		`CREATE INDEX IF NOT EXISTS idx_package_slugs_org_name ON package_slugs(org_id, package_name)`,
+		// What the upstream said about the name when the slug was claimed:
+		// 'absent' (a definite 404/410) or 'hosted' (a hosted repo for a
+		// format with no existence API). NULL is a slug claimed before the
+		// gate failed closed; the publish gate re-checks those once and
+		// records the answer. Never re-checked after that: a later upstream
+		// registration of the name must not evict the internal package.
+		`ALTER TABLE package_slugs ADD COLUMN IF NOT EXISTS upstream_state_at_claim TEXT`,
 		`CREATE TABLE IF NOT EXISTS package_versions (
 			id TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL,
@@ -1273,6 +1280,12 @@ func (s *Store) migrateSchema() error {
 		// parseCLIKeyTTL). Operators who want the old rows bounded do it
 		// themselves; see docs/plan_qa_remediation.md L-10.
 		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expiry_window_seconds BIGINT`,
+		// The key that minted this one, when an API key (not a session)
+		// did. apikeys.Revoke cascades down it so a child never survives
+		// its parent's revocation. NULL on every session-minted key and on
+		// every row that predates the column.
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS parent_key_id TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_parent ON api_keys(parent_key_id) WHERE parent_key_id IS NOT NULL`,
 
 		// Per-day request counter for API keys. UX_AUDIT.md §8.6 (P0):
 		// the api-keys list view shows `request_count_7d` so operators
@@ -1898,6 +1911,10 @@ func (s *Store) migrateSchema() error {
 			consumed_at TIMESTAMPTZ
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_expires_at ON oauth_auth_codes(expires_at)`,
+		// The scope the user consented to ("mcp:read" mints a key without
+		// allow_mutations). Empty on codes issued before the column; empty
+		// keeps the original read-write grant.
+		`ALTER TABLE oauth_auth_codes ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT ''`,
 		// oauth_refresh_tokens: rotated on every use. api_key_id is the
 		// grant (token family): presenting a used token revokes that key.
 		`CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (

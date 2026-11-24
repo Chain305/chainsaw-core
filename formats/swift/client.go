@@ -37,7 +37,7 @@ func WrapClient(client *http.Client, registryBase *url.URL, git *GitUpstream) *h
 	}
 	base := client.Transport
 	if base == nil {
-		base = http.DefaultTransport
+		base = httpclient.New().Transport // guarded, never DefaultTransport
 	}
 	wrapped := *client
 	wrapped.Transport = &CompositeRoundTripper{

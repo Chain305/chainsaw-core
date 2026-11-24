@@ -321,11 +321,11 @@ func TestDefaultCheckRemoteRefusesBeforeGitRuns(t *testing.T) {
 		"file://host/etc":                  {"", "only https"},
 		"ssh://git@github.com/a/b.git":     {"", "only https"},
 		"git@github.com:a/b.git":           {"", "want an https:// URL"},
-		"https://169.254.169.254/a.git":    {"", "refusing to dial"},
-		"https://127.0.0.1/a.git":          {"", "refusing to dial"},
-		"https://[::1]/a.git":              {"", "refusing to dial"},
+		"https://169.254.169.254/a.git":    {"", "destination not permitted"},
+		"https://127.0.0.1/a.git":          {"", "destination not permitted"},
+		"https://[::1]/a.git":              {"", "destination not permitted"},
 		"https://registry.npmjs.org/a.git": {"github.com", "egress allowlist"},
-		"https://[::1]:8443/a.git":         {"::1", "refusing to dial"}, // listed, still IP-checked
+		"https://[::1]:8443/a.git":         {"::1", "destination not permitted"}, // listed, still IP-checked
 	}
 	t.Setenv("CHAINSAW_ALLOW_PRIVATE_UPSTREAMS", "")
 	for u, c := range cases {

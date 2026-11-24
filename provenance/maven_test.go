@@ -411,8 +411,9 @@ func TestMavenCheckerRateLimitedIsUnavailableNotFailed(t *testing.T) {
 // The provenance provider hands the checker the bytes the scanner already
 // fetched. A signature that verifies over them must not cost a second jar
 // download; held bytes that are some other file of the coordinate (the .pom
-// the proxy served, an .aar) must still reach the jar rather than read as a
-// tampered artifact; and a missing signing key is decided without the jar.
+// the proxy served, an .aar) read as unverified, not tampered, and never
+// borrow the upstream jar's verdict (pentest #13); and a missing signing key
+// is decided without the jar.
 func TestMavenCheckerPGPVerifiesHeldBytesWithoutRefetchingJar(t *testing.T) {
 	signer, err := openpgp.NewEntity("Maven Signer", "", "maven@example.com", nil)
 	if err != nil {
@@ -441,7 +442,9 @@ func TestMavenCheckerPGPVerifiesHeldBytesWithoutRefetchingJar(t *testing.T) {
 		wantJarFetch int
 	}{
 		{"held bytes are the jar", jarBytes, true, StatusVerified, 0},
-		{"held bytes are the pom", []byte("<project/>"), true, StatusVerified, 1},
+		// Pentest #13: no upstream fallback. The held bytes are what is
+		// served, and the jar's signature does not cover them.
+		{"held bytes are the pom", []byte("<project/>"), true, StatusUnverified, 0},
 		{"no held bytes", nil, true, StatusVerified, 1},
 		{"signing key missing", []byte("<project/>"), false, StatusUnavailable, 0},
 	}

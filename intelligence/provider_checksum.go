@@ -5,8 +5,9 @@ package intelligence
 // algorithm the upstream sidecar declared). The declared-hash side is
 // best-effort: the intelligence fan-out does not fetch registry metadata
 // bytes itself (that's the registry-metadata provider's job), so unless
-// the caller populated Artifact.Digests.Declared / Artifact.SHA256 / a
-// sidecar via prior, we simply emit Actual and leave Declared empty.
+// a registry declaration reaches it via prior, we simply emit Actual and
+// leave Declared empty. ArtifactHandle.ComputedSHA256 is never a
+// declaration (see pickDeclared).
 // Verified stays false in that case — matching the PR brief: "If declared
 // is empty (ecosystem without sidecar hash): set Verified=false with no
 // warning; it's normal."
@@ -76,7 +77,7 @@ func (p *checksumProvider) NeedsArtifact() bool { return true }
 //
 // This provider's output is (bytes x DECLARED digest), not bytes alone. It
 // compares the digest it computes against whatever the registry declared,
-// reached through prior.Artifact.Digests / ArtifactHandle.SHA256 (pickDeclared
+// reached through prior.Artifact.Digests (pickDeclared
 // below). The declared value lives in registry metadata and can change while
 // the bytes do not — a re-published .metadata, a corrected integrity field —
 // and verified/mismatch must change with it. Caching the result under the
@@ -287,7 +288,7 @@ func (p *checksumProvider) runDefault(ctx context.Context, req Request, prior *R
 // runSwift is the per-ecosystem branch for Swift Package Registry
 // artifacts. The Swift registry does not ship sidecar hash files; it
 // returns a `Digest: sha-256=…` proxy header which the caller threads
-// through ArtifactHandle.SHA256 (or, equivalently, via prior.Digests).
+// through prior.Digests (never the handle: see pickDeclared).
 // When no declared digest reaches us, we return an empty PartialReport
 // — the matrix calls this graceful (Verified=false, no warning), since
 // header-based coverage is best-effort. When a digest is available,
@@ -371,23 +372,21 @@ func mismatchWarning(declared, actual string) Warning {
 	}
 }
 
-// pickDeclared returns the strongest declared digest available on the
-// handle / prior report, plus the algorithm it represents. Priority:
+// pickDeclared returns the strongest REGISTRY-declared digest on the prior
+// report, plus the algorithm it represents. Priority:
 //
-//  1. handle's typed SHA256 field (legacy proxy header path).
-//  2. prior.Digests.Integrity (parsed as SRI — multi-algo capable).
-//  3. typed prior.Digests fields (strongest-first: SHA-512 > SHA-256 >
+//  1. prior.Digests.Integrity (parsed as SRI — multi-algo capable).
+//  2. typed prior.Digests fields (strongest-first: SHA-512 > SHA-256 >
 //     Blake2b-256 > SHA-1 > MD5).
-//  4. free-form Declared field — try SRI first, fall back to raw hex
+//  3. free-form Declared field — try SRI first, fall back to raw hex
 //     with algoUnknown.
 //
+// The handle is deliberately not consulted. ArtifactHandle.ComputedSHA256
+// is our own hash of the same bytes (pentest #13): reading it as the
+// declaration made Verified true for any bytes whatsoever.
+//
 // Returns ("", algoUnknown) when nothing usable is available.
-func pickDeclared(handle *ArtifactHandle, prior *Report) (string, hashAlgo) {
-	if handle != nil {
-		if h := normaliseHex(handle.SHA256); h != "" {
-			return h, algoSHA256
-		}
-	}
+func pickDeclared(_ *ArtifactHandle, prior *Report) (string, hashAlgo) {
 	if prior != nil {
 		// SRI integrity field is the canonical multi-algo carrier.
 		if integ := strings.TrimSpace(prior.Artifact.Digests.Integrity); integ != "" {

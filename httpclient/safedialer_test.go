@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -71,10 +72,10 @@ func TestSafeDialerBlocksLoopback(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected SafeDialer to refuse 127.0.0.1, got nil error")
 	}
-	if !strings.Contains(err.Error(), "refusing to dial") {
+	if !IsSSRFBlocked(err) {
 		t.Fatalf("error %q missing refusal phrase", err.Error())
 	}
-	if !strings.Contains(err.Error(), AllowPrivateUpstreamsEnv) {
+	if !strings.Contains(blockedDetail(err), AllowPrivateUpstreamsEnv) {
 		t.Fatalf("error %q should mention the env var override", err.Error())
 	}
 }
@@ -91,7 +92,7 @@ func TestSafeDialerBlocksCloudMetadata(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected cloud-metadata dial to be refused")
 	}
-	if !strings.Contains(err.Error(), "169.254.169.254") {
+	if !strings.Contains(blockedDetail(err), "169.254.169.254") {
 		t.Fatalf("error %q should include the blocked IP", err.Error())
 	}
 }
@@ -106,7 +107,7 @@ func TestSafeDialerBlocksRFC1918(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected 10/8 dial to be refused")
 	}
-	if !strings.Contains(err.Error(), "refusing to dial") {
+	if !IsSSRFBlocked(err) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -121,7 +122,7 @@ func TestSafeDialerBlocksIPv6LinkLocal(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected fe80:: dial to be refused")
 	}
-	if !strings.Contains(err.Error(), "refusing to dial") {
+	if !IsSSRFBlocked(err) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -195,21 +196,22 @@ func TestSafeDialerErrorMessageMentionsEnvVar(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected block")
 	}
-	if !strings.Contains(err.Error(), AllowPrivateUpstreamsEnv) {
+	if !strings.Contains(blockedDetail(err), AllowPrivateUpstreamsEnv) {
 		t.Fatalf("error %q must mention %s", err.Error(), AllowPrivateUpstreamsEnv)
 	}
-	if !strings.Contains(err.Error(), "override") {
+	if !strings.Contains(blockedDetail(err), "override") {
 		t.Fatalf("error %q must mention 'override'", err.Error())
 	}
 }
 
-// TestFactoryDefaultOff — factory built with zero options must not
-// enable the guard. This is the invariant that keeps the existing test
-// suite green.
-func TestFactoryDefaultOff(t *testing.T) {
-	f := NewFactory(config.HTTPClientConfig{})
-	if f.SafeDialerEnabled() {
-		t.Fatal("default factory must not enable SafeDialer")
+// TestFactoryDefaultOn — a factory built with zero options is guarded
+// (N-10): forgetting an option must not open SSRF.
+func TestFactoryDefaultOn(t *testing.T) {
+	if !NewFactory(config.HTTPClientConfig{}).SafeDialerEnabled() {
+		t.Fatal("default factory must enable SafeDialer")
+	}
+	if NewFactory(config.HTTPClientConfig{}, WithSafeDialer(false)).SafeDialerEnabled() {
+		t.Fatal("WithSafeDialer(false) must opt out")
 	}
 }
 
@@ -230,7 +232,7 @@ func TestFactoryClientPlainWorksWithLoopback(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := NewFactory(config.HTTPClientConfig{TimeoutSeconds: 5})
+	f := NewFactory(config.HTTPClientConfig{TimeoutSeconds: 5}, WithSafeDialer(false))
 	client := f.NewClient(config.RemoteConfig{})
 	resp, err := client.Get(srv.URL)
 	if err != nil {
@@ -257,7 +259,7 @@ func TestFactoryClientSafeDialerBlocksLoopback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected guard to refuse loopback")
 	}
-	if !strings.Contains(err.Error(), "refusing to dial") {
+	if !IsSSRFBlocked(err) {
 		t.Fatalf("error %q missing refusal phrase", err.Error())
 	}
 }
@@ -481,7 +483,7 @@ func TestMetadataLiteralsAreNeverOverridable(t *testing.T) {
 			if !IsSSRFBlocked(err) {
 				t.Fatalf("error %q should be recognised as an SSRF block", err)
 			}
-			if !strings.Contains(err.Error(), "no environment variable overrides it") {
+			if !strings.Contains(blockedDetail(err), "no environment variable overrides it") {
 				t.Fatalf("error %q should tell the operator no override exists", err)
 			}
 		})
@@ -504,7 +506,7 @@ func TestSafeDialerCGNATErrorNamesTheKnob(t *testing.T) {
 	if !IsSSRFBlocked(err) {
 		t.Fatalf("error %q should be recognised as an SSRF block", err)
 	}
-	msg := err.Error()
+	msg := blockedDetail(err)
 	for _, want := range []string{"carrier-grade NAT", AllowCGNATUpstreamsEnv, AllowPrivateUpstreamsEnv, "tailnet"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q missing %q", msg, want)
@@ -566,4 +568,14 @@ func TestIsReservedHostname(t *testing.T) {
 			t.Errorf("IsReservedHostname(%q) = true, want false", h)
 		}
 	}
+}
+
+// blockedDetail is what a refusal withholds from its text: the fields an
+// operator reads in the log.
+func blockedDetail(err error) string {
+	var be *BlockedError
+	if !errors.As(err, &be) {
+		return ""
+	}
+	return be.IP.String() + " " + be.Reason + " " + be.Hint
 }

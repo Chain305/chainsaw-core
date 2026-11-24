@@ -11,7 +11,7 @@ import (
 func TestNew_DefaultsApplied(t *testing.T) {
 	t.Parallel()
 
-	c := New()
+	c := New(WithoutSSRFGuard("test: loopback fixture"))
 	if c == nil {
 		t.Fatal("New returned nil client")
 	}
@@ -51,7 +51,7 @@ func TestNew_DefaultsApplied(t *testing.T) {
 func TestNew_OptionsOverride(t *testing.T) {
 	t.Parallel()
 
-	c := New(
+	c := New(WithoutSSRFGuard("test: loopback fixture"),
 		WithTimeout(7*time.Second),
 		WithMaxIdleConnsPerHost(4),
 		WithMaxIdleConns(16),
@@ -98,7 +98,7 @@ func TestNew_TransportWrapping(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	var counter *countingRoundTripper
-	c := New(WithTransport(func(base *http.Transport) http.RoundTripper {
+	c := New(WithoutSSRFGuard("test: loopback fixture"), WithTransport(func(base *http.Transport) http.RoundTripper {
 		if base == nil {
 			t.Fatal("WithTransport invoked with nil base transport")
 		}

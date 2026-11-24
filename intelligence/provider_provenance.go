@@ -136,6 +136,7 @@ func (p *provenanceProvider) Run(ctx context.Context, req Request, prior *Report
 		BuilderID:       result.BuilderID,
 		SignerID:        result.SignerID,
 		SubjectDigest:   result.SubjectDigest,
+		VerifiedSHA256:  result.VerifiedSHA256,
 		BundleFormat:    result.BundleFormat,
 		SourceCommit:    result.SourceCommit,
 		TransparencyLog: result.TransparencyLogURL,
