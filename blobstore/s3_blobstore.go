@@ -467,6 +467,9 @@ func (s *S3BlobStore) ListCtx(ctx context.Context, prefix string, fn func(BlobIn
 			if obj.Size != nil {
 				info.Size = *obj.Size
 			}
+			if obj.LastModified != nil {
+				info.ModTime = *obj.LastModified
+			}
 			if err := fn(info); err != nil {
 				return err
 			}

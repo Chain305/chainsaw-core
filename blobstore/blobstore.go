@@ -13,6 +13,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"time"
 )
 
 // BlobStore is the abstraction over physical blob storage. Every
@@ -86,6 +87,10 @@ type BlobInfo struct {
 	Key string
 	// Size is the object size in bytes.
 	Size int64
+	// ModTime is when the object was last written, as the listing reports
+	// it (S3 LastModified, file mtime). Zero when the backend does not
+	// report it; callers then fall back to Stat.
+	ModTime time.Time
 }
 
 // Observer receives per-operation telemetry from blob-store backends

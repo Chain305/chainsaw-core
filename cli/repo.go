@@ -104,7 +104,7 @@ var repoCreateCmd = &cobra.Command{
 // --format; old scripts then fail loudly at rc=4. Never silently remap.
 func init() {
 	repoCreateCmd.Flags().String("name", "", "Repository name (required)")
-	repoCreateCmd.Flags().String("type", "proxy", "Repository type: proxy|hosted|group")
+	repoCreateCmd.Flags().String("type", "proxy", "Repository type: proxy|hosted")
 	repoCreateCmd.Flags().String("ecosystem", "", "Package ecosystem: npm|pypi|maven|cargo|gem|nuget|go|docker (required)")
 	repoCreateCmd.Flags().String("format", "", "Deprecated alias for --ecosystem")
 	_ = repoCreateCmd.Flags().MarkDeprecated("format", "use --ecosystem")

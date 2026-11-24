@@ -1042,6 +1042,10 @@ func (s *Store) migrateSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_client_credentials_org_created_by ON client_credentials(org_id, created_by_user_id)`,
 		// Performance indexes: usage analytics package uploads by user (usage.go)
 		`CREATE INDEX IF NOT EXISTS idx_package_versions_org_uploaded_by ON package_versions(org_id, uploaded_by_user_id)`,
+		// Every artifact GET/HEAD asks whether its path is an internal upload
+		// (localNameState, internal/server/local_first_metadata.go); without
+		// this the probe scans the repository's rows on each download.
+		`CREATE INDEX IF NOT EXISTS idx_package_versions_org_repo_path ON package_versions(org_id, repository, logical_path)`,
 
 		// Onboarding redesign — see /ONBOARDING_REDESIGN_BACKEND.md §2.
 		// Persona is UX tailoring only; never used for permission decisions.

@@ -219,7 +219,7 @@ func (b *FileBlobStore) ListCtx(ctx context.Context, prefix string, fn func(Blob
 			}
 			return err
 		}
-		return fn(BlobInfo{Key: path, Size: info.Size()})
+		return fn(BlobInfo{Key: path, Size: info.Size(), ModTime: info.ModTime()})
 	})
 }
 
