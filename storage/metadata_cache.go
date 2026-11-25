@@ -113,6 +113,20 @@ func (c *MetadataCache) Invalidate(blobPath string) {
 	publishMetadataInvalidation(blobPath)
 }
 
+// InvalidateBlobMetadata drops blobPath from every metadata cache in the
+// process and tells peers to do the same. For a blob removed underneath
+// its repository's storage (the orphan reaper), whose cache entry would
+// otherwise keep answering for bytes that are gone.
+func InvalidateBlobMetadata(blobPath string) {
+	metadataBus.mu.RLock()
+	caches := append([]*MetadataCache(nil), metadataBus.caches...)
+	metadataBus.mu.RUnlock()
+	for _, c := range caches {
+		c.invalidateLocal(blobPath)
+	}
+	publishMetadataInvalidation(blobPath)
+}
+
 // invalidateLocal drops the entry without publishing. Used by the
 // subscriber goroutine to apply remote invalidations without echoing
 // them back into a loop.

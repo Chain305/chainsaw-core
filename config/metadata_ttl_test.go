@@ -138,6 +138,19 @@ func TestMetadataTTLSurvivesFormatOptionsRoundTrip(t *testing.T) {
 	}
 }
 
+// B7: raw_overwrite has no column either; it must survive a DB round trip.
+func TestRawOverwriteSurvivesFormatOptionsRoundTrip(t *testing.T) {
+	encoded, err := encodeRepoFormatOptions(RepositoryConfig{Name: "files", Format: "raw", RawOverwrite: true})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var restored RepositoryConfig
+	decodeRepoFormatOptions(encoded, &restored)
+	if !restored.RawOverwrite {
+		t.Fatalf("raw_overwrite dropped on save: format_options = %q", encoded)
+	}
+}
+
 // TestUnsetMetadataTTLStillEncodesEmpty is the regression control: a
 // repository with no APT/Yum block and no TTL override must keep
 // encoding to "" so existing rows are not needlessly rewritten.

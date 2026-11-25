@@ -82,8 +82,16 @@ func runRepoList(cmd *cobra.Command, _ []string) error {
 // ── create ────────────────────────────────────────────────────────────────────
 
 var repoCreateCmd = &cobra.Command{
-	Use:          "create",
-	Short:        "Create a new upstream proxy",
+	Use:   "create",
+	Short: "Create a proxy or hosted repository",
+	Long: `Create a repository.
+
+  proxy   packages fetched from a public registry and judged on install;
+          --upstream is required.
+  hosted  packages your org publishes. Without --upstream it is private:
+          a name nobody published is 404, never fetched. With --upstream it
+          is a "repository with upstream": published names win, every
+          other name is proxied from the upstream.`,
 	SilenceUsage: true,
 	RunE:         runRepoCreate,
 }
@@ -104,11 +112,12 @@ var repoCreateCmd = &cobra.Command{
 // --format; old scripts then fail loudly at rc=4. Never silently remap.
 func init() {
 	repoCreateCmd.Flags().String("name", "", "Repository name (required)")
-	repoCreateCmd.Flags().String("type", "proxy", "Repository type: proxy|hosted")
+	repoCreateCmd.Flags().String("type", "proxy", "Repository type: proxy|hosted|group (group: pip and maven/gradle only)")
+	repoCreateCmd.Flags().StringSlice("members", nil, "Group members in priority order, comma-separated (type group only)")
 	repoCreateCmd.Flags().String("ecosystem", "", "Package ecosystem: npm|pypi|maven|cargo|gem|nuget|go|docker (required)")
 	repoCreateCmd.Flags().String("format", "", "Deprecated alias for --ecosystem")
 	_ = repoCreateCmd.Flags().MarkDeprecated("format", "use --ecosystem")
-	repoCreateCmd.Flags().String("upstream", "", "Upstream registry URL (required for proxy type)")
+	repoCreateCmd.Flags().String("upstream", "", "Upstream registry URL (required for proxy; optional for hosted, omit for a private repository)")
 	repoCreateCmd.Flags().Bool("json", false, "Output created repository as JSON")
 	_ = repoCreateCmd.MarkFlagRequired("name")
 	// MarkFlagRequired("format") is deliberately GONE: with two accepted
@@ -162,6 +171,9 @@ func runRepoCreate(cmd *cobra.Command, _ []string) error {
 	}
 	if upstream != "" {
 		body["remote_url"] = upstream
+	}
+	if members, _ := cmd.Flags().GetStringSlice("members"); len(members) > 0 {
+		body["members"] = members
 	}
 
 	var resp map[string]any

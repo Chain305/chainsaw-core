@@ -9,10 +9,31 @@ import (
 type contextKey string
 
 const (
-	baseURLContextKey contextKey = "proxy-base-url"
-	orgIDContextKey   contextKey = "proxy-org-id"
-	orgSlugContextKey contextKey = "proxy-org-slug"
+	baseURLContextKey  contextKey = "proxy-base-url"
+	orgIDContextKey    contextKey = "proxy-org-id"
+	orgSlugContextKey  contextKey = "proxy-org-slug"
+	linkRepoContextKey contextKey = "proxy-link-repo"
 )
+
+// WithLinkRepoName stores the repository name clients address when it differs
+// from the one serving: a group repository routes a request to a member, and
+// the links that member's documents emit must keep pointing at the group.
+func WithLinkRepoName(ctx context.Context, name string) context.Context {
+	if ctx == nil || name == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, linkRepoContextKey, name)
+}
+
+// LinkRepoName returns the name stored with WithLinkRepoName, or fallback.
+func LinkRepoName(ctx context.Context, fallback string) string {
+	if ctx != nil {
+		if name, _ := ctx.Value(linkRepoContextKey).(string); name != "" {
+			return name
+		}
+	}
+	return fallback
+}
 
 // WithBaseURL stores the externally reachable base URL (scheme://host[:port][/prefix])
 // for the current HTTP request so response transformers can emit absolute URLs.
@@ -91,6 +112,22 @@ func OrgSlugFromContext(ctx context.Context) string {
 	}
 	slug, _ := ctx.Value(orgSlugContextKey).(string)
 	return slug
+}
+
+type localOnlyKey struct{}
+
+// WithLocalOnly marks a read the caller has already decided is a local
+// upload: Get serves the stored copy or answers 404, and never fetches
+// upstream. Without it, a copy removed between the caller's check and the
+// facet's read (a concurrent delete) was filled from the public namesake.
+func WithLocalOnly(ctx context.Context) context.Context {
+	return context.WithValue(ctx, localOnlyKey{}, true)
+}
+
+// LocalOnlyFromContext reports whether ctx carries WithLocalOnly.
+func LocalOnlyFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(localOnlyKey{}).(bool)
+	return v
 }
 
 // OrgScopedRepoPrefix returns the repository path prefix with org slug scoping.

@@ -181,6 +181,23 @@ repositories:
 	}
 }
 
+// B0.3: a hosted repository may have no upstream (purely private).
+func TestLoadAcceptsHostedRepositoryWithoutRemoteURL(t *testing.T) {
+	path := writeTempConfig(t, `
+repositories:
+  - name: pub-private
+    format: pub
+    type: hosted
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("hosted repository without remote.url refused: %v", err)
+	}
+	if got := cfg.Repositories[0].Remote.URL; got != "" {
+		t.Fatalf("private hosted repository got an upstream %q", got)
+	}
+}
+
 func TestLoadValidatesRawRepositoryAllowedWithoutRemoteURL(t *testing.T) {
 	// Raw repos are storage-only — they legitimately have no upstream.
 	body := `

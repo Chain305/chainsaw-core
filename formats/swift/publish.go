@@ -81,7 +81,13 @@ const maxManifestBytes = 1 << 20
 // We require Package.swift to exist; version-specific overrides matching
 // `Package@swift-X.Y.swift` are returned alongside if present.
 func ParseManifest(zipBytes []byte) (map[string][]byte, error) {
-	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	return ParseManifestAt(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+}
+
+// ParseManifestAt is ParseManifest over an archive that is not in memory
+// (a spooled upload).
+func ParseManifestAt(archive io.ReaderAt, size int64) (map[string][]byte, error) {
+	zr, err := zip.NewReader(archive, size)
 	if err != nil {
 		return nil, fmt.Errorf("open source archive: %w", err)
 	}

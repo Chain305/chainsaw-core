@@ -2669,6 +2669,67 @@ func (s *Store) migrateSchema() error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pending_2fa_expires_at ON pending_2fa(expires_at)`,
+		// Keyless CI OIDC (D4). A trust rule maps one GitHub repository, by
+		// its immutable numeric id, to a template client whose grants bound
+		// every credential minted from it. allowed_refs/allowed_environments
+		// are JSON arrays of anchored path.Match patterns; [] means any.
+		`CREATE TABLE IF NOT EXISTS ci_trust_rules (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL,
+			issuer TEXT NOT NULL,
+			repository_id TEXT NOT NULL,
+			repository_owner_id TEXT NOT NULL DEFAULT '',
+			allowed_refs TEXT NOT NULL DEFAULT '[]',
+			allowed_environments TEXT NOT NULL DEFAULT '[]',
+			template_client_id TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ci_trust_rules_lookup ON ci_trust_rules(org_id, issuer, repository_id)`,
+		// Each OIDC jti is single-use until its exp (Postgres, not Redis:
+		// prod has none). Expired rows are swept on the exchange path.
+		`CREATE TABLE IF NOT EXISTS ci_oidc_jti (
+			issuer TEXT NOT NULL,
+			jti TEXT NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (issuer, jti)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ci_oidc_jti_expires_at ON ci_oidc_jti(expires_at)`,
+		// Hosted delete and name release (artifact-repo gap B0.4). A client
+		// credential deletes only under an explicit allow_delete grant. A
+		// released name is no longer claimed: its slug and its (all
+		// soft-deleted) version rows carry released_at and stop counting as
+		// a claim, while the rows and their blobs stay as evidence.
+		// release_requested_* is the first half of a two-person release.
+		`ALTER TABLE package_permissions ADD COLUMN IF NOT EXISTS allow_delete INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE package_slugs ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ`,
+		`ALTER TABLE package_slugs ADD COLUMN IF NOT EXISTS released_by TEXT`,
+		`ALTER TABLE package_slugs ADD COLUMN IF NOT EXISTS release_requested_by TEXT`,
+		`ALTER TABLE package_slugs ADD COLUMN IF NOT EXISTS release_requested_at TIMESTAMPTZ`,
+		`ALTER TABLE package_versions ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ`,
+		// Cleanup (retention) rules of a hosted repository and the last
+		// sweep's report, both JSON (artifact-repo gap E2). No FK, like
+		// repositories.
+		`CREATE TABLE IF NOT EXISTS repository_cleanup (
+			org_id TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			policy TEXT NOT NULL DEFAULT '{}',
+			last_report TEXT,
+			updated_by TEXT,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (org_id, repository)
+		)`,
+		// A released name can be claimed again: one live claim per name,
+		// the released slugs stay as evidence. The index is built first, so
+		// the name is never unguarded; existing rows already satisfy it (the
+		// old key covered all of them).
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_package_slugs_unreleased_name ON package_slugs(org_id, repository, package_name) WHERE released_at IS NULL`,
+		`ALTER TABLE package_slugs DROP CONSTRAINT IF EXISTS package_slugs_org_id_repository_package_name_key`,
+		// CI trust rules can also bind the calling workflow file
+		// (job_workflow_ref) and the triggering events; '[]' is any, as for
+		// allowed_refs.
+		`ALTER TABLE ci_trust_rules ADD COLUMN IF NOT EXISTS allowed_job_workflow_refs TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE ci_trust_rules ADD COLUMN IF NOT EXISTS allowed_events TEXT NOT NULL DEFAULT '[]'`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.migExec(stmt); err != nil {

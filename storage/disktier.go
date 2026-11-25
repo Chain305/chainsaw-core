@@ -28,7 +28,8 @@ import (
 // org-scoped: no content is shared across tenants) and only while the
 // metadata row still names the same bytes. Writes land in tmp/ and are
 // renamed into place only after the bytes hashed to the expected digest;
-// reads verify the digest again while streaming and drop a file that fails.
+// reads verify the digest again while streaming, fail the read and drop a
+// file that fails.
 //
 // It is a cache: losing it costs S3 reads, never correctness. Eviction is
 // least-recently-used, bounded by maxBytes and by a free-space floor on the
@@ -55,7 +56,7 @@ type tierEntry struct {
 }
 
 // errTierDigest is a tier file whose bytes no longer hash to its name.
-var errTierDigest = errors.New("disk tier: content digest mismatch")
+var errTierDigest = fmt.Errorf("disk tier: %w", ErrDigestMismatch)
 
 // DefaultDiskTierMinFree is the share of the filesystem the tier leaves free.
 const DefaultDiskTierMinFree = 0.20
@@ -121,10 +122,10 @@ func tierNames(blobKey, sha string) (keyHash, name string) {
 	return keyHash, keyHash + "-" + strings.ToLower(sha)
 }
 
-// open returns a reader over the tier copy of blobKey with digest sha, or
-// false on a miss. The reader fails with errTierDigest, and removes the
-// file, if the bytes do not hash to sha.
-func (t *DiskTier) open(blobKey, sha string) (io.ReadCloser, bool) {
+// open returns a reader over the tier copy of blobKey with digest sha and
+// length size (0: unknown), or false on a miss. The reader fails with
+// errTierDigest, and removes the file, if the bytes do not hash to sha.
+func (t *DiskTier) open(blobKey, sha string, size int64) (io.ReadCloser, bool) {
 	keyHash, name := tierNames(blobKey, sha)
 	f, err := os.Open(filepath.Join(t.dir, name))
 	if err != nil {
@@ -144,7 +145,10 @@ func (t *DiskTier) open(blobKey, sha string) (io.ReadCloser, bool) {
 	}
 	t.mu.Unlock()
 	t.hits.Add(1)
-	return &verifyingReader{f: f, h: sha256.New(), want: strings.ToLower(sha), bad: func() { t.remove(name) }}, true
+	return &verifyingReader{src: f, h: sha256.New(), want: strings.ToLower(sha), size: size, mismatch: errTierDigest, bad: func() {
+		slog.Error("disk tier: local copy failed its sha256; read aborted and copy dropped", "file", name)
+		t.remove(name)
+	}}, true
 }
 
 // openAt returns the tier copy positioned at offset, unverified (see
@@ -165,22 +169,18 @@ func (t *DiskTier) openAt(blobKey, sha string, offset int64) (io.ReadCloser, boo
 	return rc, true
 }
 
-// fill wraps a blob-store reader so that, once it has been read to EOF and
-// the bytes hashed to sha, they are kept in the tier. A partial read, a
-// mismatch or a local write failure keeps nothing; the caller's read is
-// unaffected either way.
-func (t *DiskTier) fill(blobKey, sha string, src io.ReadCloser) io.ReadCloser {
-	w := t.newWriter()
-	if w == nil {
-		return src
+// fill wraps a blob-store reader so that its bytes are verified against
+// sha (a mismatch fails the read with ErrDigestMismatch and runs bad; see
+// verifyingReader) and, once read to EOF and verified, kept in the tier. A
+// partial read, a mismatch or a local write failure keeps nothing. t may be
+// nil: the read is then verified and nothing is kept.
+func (t *DiskTier) fill(blobKey, sha string, size int64, src io.ReadCloser, bad func()) io.ReadCloser {
+	v := &verifyingReader{src: src, h: sha256.New(), want: strings.ToLower(sha), size: size, mismatch: ErrDigestMismatch, bad: bad}
+	if w := t.newWriter(); w != nil {
+		v.tee, v.abort = w, w.abort
+		v.commit = func() { w.commit(blobKey, sha) }
 	}
-	return &fillingReader{src: src, w: w, h: sha256.New(), commit: func(got string, _ int64) {
-		if strings.EqualFold(got, sha) {
-			w.commit(blobKey, sha)
-			return
-		}
-		w.abort()
-	}}
+	return v
 }
 
 // learn is fill for an entry stored before Put recorded a digest: there is
@@ -301,6 +301,9 @@ type tierWriter struct {
 }
 
 func (t *DiskTier) newWriter() *tierWriter {
+	if t == nil {
+		return nil
+	}
 	f, err := os.CreateTemp(filepath.Join(t.dir, "tmp"), "fill-*")
 	if err != nil {
 		return nil
@@ -359,8 +362,9 @@ func (w *tierWriter) discard() {
 	_ = os.Remove(w.f.Name())
 }
 
-// fillingReader tees a blob-store read into a tierWriter and settles it at
-// EOF (commit on a matching digest) or Close (abort if EOF never came).
+// fillingReader tees a read of a legacy blob (no recorded digest, see learn)
+// into a tierWriter and settles it at EOF (commit) or Close (abort if EOF
+// never came).
 type fillingReader struct {
 	src    io.ReadCloser
 	w      *tierWriter
@@ -392,31 +396,92 @@ func (r *fillingReader) Close() error {
 	return r.src.Close()
 }
 
-// verifyingReader streams a tier file and checks its digest at EOF.
+// verifyingReader streams src while hashing it, and holds back the final
+// byte until EOF has been seen and the digest checked. On a mismatch that
+// byte is never released and Read fails with mismatch, so no consumer, and
+// no response that declared a Content-Length, completes from bytes that
+// failed (FINDINGS E4). A read running past size (the recorded length, 0
+// when unknown) fails at once, so an appended tail cannot complete a
+// response either. tee, commit and abort, when set, keep a verified copy
+// (the tier fill); abort also runs on a Close before the verdict.
 type verifyingReader struct {
-	f    *os.File
-	h    hash.Hash
-	want string
-	bad  func()
-	done bool
+	src      io.ReadCloser
+	h        hash.Hash
+	want     string
+	size     int64
+	n        int64
+	mismatch error
+	bad      func()
+	tee      io.Writer
+	commit   func()
+	abort    func()
+
+	buf  []byte
+	held []byte // read and hashed, not yet returned
+	ok   bool   // verified: held may be released in full
+	err  error  // terminal: io.EOF once verified, or the failure
 }
 
 func (r *verifyingReader) Read(p []byte) (int, error) {
-	n, err := r.f.Read(p)
-	if n > 0 {
-		r.h.Write(p[:n])
-	}
-	if errors.Is(err, io.EOF) && !r.done {
-		r.done = true
-		if hex.EncodeToString(r.h.Sum(nil)) != r.want {
-			r.bad()
-			return n, errTierDigest
+	for len(p) > 0 {
+		keep := 1
+		if r.ok {
+			keep = 0
+		}
+		if len(r.held) > keep {
+			n := copy(p, r.held[:len(r.held)-keep])
+			r.held = r.held[n:]
+			return n, nil
+		}
+		if r.err != nil {
+			return 0, r.err
+		}
+		if r.buf == nil {
+			r.buf = make([]byte, 32<<10)
+		}
+		k := copy(r.buf, r.held) // the held byte, if any, goes first
+		n, err := r.src.Read(r.buf[k:])
+		r.h.Write(r.buf[k : k+n])
+		if r.tee != nil {
+			_, _ = r.tee.Write(r.buf[k : k+n])
+		}
+		r.held = r.buf[:k+n]
+		r.n += int64(n)
+		switch {
+		case r.size > 0 && r.n > r.size:
+			r.fail()
+		case errors.Is(err, io.EOF):
+			if hex.EncodeToString(r.h.Sum(nil)) != r.want {
+				r.fail()
+				break
+			}
+			r.ok, r.err = true, io.EOF
+			if r.commit != nil {
+				r.commit()
+			}
+		case err != nil:
+			r.held, r.err = nil, err
 		}
 	}
-	return n, err
+	return 0, nil
 }
 
-func (r *verifyingReader) Close() error { return r.f.Close() }
+func (r *verifyingReader) fail() {
+	r.held, r.err = nil, r.mismatch
+	if r.abort != nil {
+		r.abort()
+	}
+	if r.bad != nil {
+		r.bad()
+	}
+}
+
+func (r *verifyingReader) Close() error {
+	if r.abort != nil {
+		r.abort() // a no-op once committed
+	}
+	return r.src.Close()
+}
 
 // DefaultDiskTierMaxMB is the tier's size when CHAINSAW_DISK_TIER_MAX_MB is
 // unset.

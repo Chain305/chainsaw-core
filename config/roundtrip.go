@@ -151,6 +151,7 @@ var settingsBackedFields = map[string]string{
 	"Repositories[].Remote.Headers":           "repositories.remote_headers",
 	"Repositories[].Cache.NegativeTTLSeconds": "repositories.cache_negative_ttl_seconds",
 	"Repositories[].Cache.MetadataTTLSeconds": "repositories.format_options",
+	"Repositories[].RawOverwrite":             "repositories.format_options",
 	"Repositories[].ClientConfigurationGuide": "repositories.client_configuration_guide_template",
 	"Repositories[].PublicBaseURL":            "repositories.public_base_url",
 	"Repositories[].APT.Suites":               "repositories.format_options",
@@ -166,6 +167,8 @@ var settingsBackedFields = map[string]string{
 	"Repositories[].Yum.Description":          "repositories.format_options",
 	"Repositories[].Yum.Revision":             "repositories.format_options",
 	"Repositories[].Yum.SigningKey":           "repositories.format_options",
+	"Repositories[].ProtectedTags":            "repositories.format_options",
+	"Repositories[].Members":                  "repositories.format_options",
 }
 
 // ephemeralFields names the Config leaves that deliberately do NOT

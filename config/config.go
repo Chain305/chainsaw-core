@@ -661,6 +661,18 @@ type RepositoryConfig struct {
 	// nil (the default) allows uploads on every repository type: Chainsaw
 	// can stand in for an artifact repository by design.
 	UploadsEnabled *bool `yaml:"uploads_enabled,omitempty"`
+	// ProtectedTags are glob patterns (path.Match syntax, e.g. "v*") on a
+	// hosted docker repository: a tag that matches one is never re-pointed
+	// to a different manifest digest once pushed. Empty protects nothing.
+	ProtectedTags []string `yaml:"protected_tags,omitempty"`
+	// RawOverwrite lets a raw-format repository replace the file at an
+	// existing path. Off (the default), each path is immutable (409).
+	RawOverwrite bool `yaml:"raw_overwrite,omitempty"`
+	// Members are the ordered repository names a type=group repository
+	// routes to (pip, maven and gradle only). A name a hosted member
+	// claims is served by that member alone; any other name by the proxy
+	// members in order. Empty on every other type.
+	Members []string `yaml:"members,omitempty"`
 }
 
 // APTRepoConfig is the YAML schema for a hosted-apt repository's
@@ -998,7 +1010,10 @@ func (c *Config) validate() error {
 	for _, repo := range c.Repositories {
 		remoteURL := strings.TrimSpace(repo.Remote.URL)
 		if remoteURL == "" {
-			if strings.EqualFold(repo.Type, "raw") {
+			// raw, and hosted with no upstream (purely private, B0.3).
+			// normalize gives a YAML hosted repo its format's default
+			// remote, so this is reached only for formats without one.
+			if strings.EqualFold(repo.Type, "raw") || strings.EqualFold(repo.Type, "hosted") {
 				continue
 			}
 			return fmt.Errorf("repository %q missing remote.url", repo.Name)

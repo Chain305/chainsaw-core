@@ -905,49 +905,58 @@ func UpdateRepositoryForOrg(store *pgstore.Store, orgID, name string, update Rep
 		return RepositoryConfig{}, errors.New("repository name is required")
 	}
 	err := store.WithTx(context.Background(), func(tx *sql.Tx) error {
-		var exists bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM repositories WHERE org_id=? AND name=?)`, orgID, name).Scan(&exists); err != nil {
-			return err
-		}
-		if !exists {
-			return fmt.Errorf("repository %q not found", name)
-		}
-		setParts := make([]string, 0, 4)
-		args := make([]any, 0, 5)
-		if update.Enabled != nil {
-			setParts = append(setParts, "enabled=?")
-			args = append(args, boolInt(*update.Enabled))
-		}
-		if update.AnonymousAccess != nil {
-			setParts = append(setParts, "anonymous_access=?")
-			args = append(args, boolInt(*update.AnonymousAccess))
-		}
-		if update.UploadsEnabled != nil {
-			setParts = append(setParts, "uploads_enabled=?")
-			args = append(args, boolInt(*update.UploadsEnabled))
-		}
-		if strings.TrimSpace(update.RemoteURL) != "" {
-			setParts = append(setParts, "remote_url=?")
-			args = append(args, strings.TrimSpace(update.RemoteURL))
-		}
-		if update.CacheNegativeTTLSeconds != nil {
-			setParts = append(setParts, "cache_negative_ttl_seconds=?")
-			args = append(args, *update.CacheNegativeTTLSeconds)
-		}
-		if len(setParts) == 0 {
-			return errors.New("no mutable fields provided")
-		}
-		setParts = append(setParts, "updated_at=current_timestamp")
-		args = append(args, orgID, name)
-		stmt := fmt.Sprintf("UPDATE repositories SET %s WHERE org_id=? AND name=?", strings.Join(setParts, ","))
-		_, err := tx.Exec(stmt, args...)
-		return err
+		return UpdateRepositoryTx(tx, orgID, name, update)
 	})
 	if err != nil {
 		return RepositoryConfig{}, err
 	}
 	repo, err := fetchRepository(store.DB(), orgID, name)
 	return repo, err
+}
+
+// UpdateRepositoryTx is UpdateRepositoryForOrg's write inside the caller's
+// transaction, so a caller can commit it together with other writes (and
+// their audit row) or not at all.
+func UpdateRepositoryTx(tx *sql.Tx, orgID, name string, update RepositoryUpdate) error {
+	orgID = tenancy.NormalizeOrgID(orgID)
+	name = strings.TrimSpace(name)
+	var exists bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM repositories WHERE org_id=? AND name=?)`, orgID, name).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("repository %q not found", name)
+	}
+	setParts := make([]string, 0, 4)
+	args := make([]any, 0, 5)
+	if update.Enabled != nil {
+		setParts = append(setParts, "enabled=?")
+		args = append(args, boolInt(*update.Enabled))
+	}
+	if update.AnonymousAccess != nil {
+		setParts = append(setParts, "anonymous_access=?")
+		args = append(args, boolInt(*update.AnonymousAccess))
+	}
+	if update.UploadsEnabled != nil {
+		setParts = append(setParts, "uploads_enabled=?")
+		args = append(args, boolInt(*update.UploadsEnabled))
+	}
+	if strings.TrimSpace(update.RemoteURL) != "" {
+		setParts = append(setParts, "remote_url=?")
+		args = append(args, strings.TrimSpace(update.RemoteURL))
+	}
+	if update.CacheNegativeTTLSeconds != nil {
+		setParts = append(setParts, "cache_negative_ttl_seconds=?")
+		args = append(args, *update.CacheNegativeTTLSeconds)
+	}
+	if len(setParts) == 0 {
+		return errors.New("no mutable fields provided")
+	}
+	setParts = append(setParts, "updated_at=current_timestamp")
+	args = append(args, orgID, name)
+	stmt := fmt.Sprintf("UPDATE repositories SET %s WHERE org_id=? AND name=?", strings.Join(setParts, ","))
+	_, err := tx.Exec(stmt, args...)
+	return err
 }
 
 // UpdateRepository applies runtime updates to a repository record for the default org.
@@ -1643,17 +1652,27 @@ type repoFormatOptions struct {
 	// to the per-format builtin (RepositoryConfig.MetadataTTL resolves
 	// it), so the failure would have been silent rather than loud, which
 	// is worse.
-	MetadataTTLSeconds int `json:"metadata_ttl_seconds,omitempty"`
+	MetadataTTLSeconds int  `json:"metadata_ttl_seconds,omitempty"`
+	RawOverwrite       bool `json:"raw_overwrite,omitempty"`
+	// ProtectedTags: hosted docker tag-immutability globs. The push path
+	// reads this key straight from the column (internal/server
+	// dockerProtectedTags); it is here so a config save keeps it.
+	ProtectedTags []string `json:"protected_tags,omitempty"`
+	// Members: a group repository's ordered member names.
+	Members []string `json:"members,omitempty"`
 }
 
 func encodeRepoFormatOptions(repo RepositoryConfig) (string, error) {
-	if repo.APT == nil && repo.Yum == nil && repo.Cache.MetadataTTLSeconds == 0 {
+	if repo.APT == nil && repo.Yum == nil && repo.Cache.MetadataTTLSeconds == 0 && len(repo.ProtectedTags) == 0 && !repo.RawOverwrite && len(repo.Members) == 0 {
 		return "", nil
 	}
 	encoded, err := json.Marshal(repoFormatOptions{
 		APT:                repo.APT,
 		Yum:                repo.Yum,
 		MetadataTTLSeconds: repo.Cache.MetadataTTLSeconds,
+		ProtectedTags:      repo.ProtectedTags,
+		RawOverwrite:       repo.RawOverwrite,
+		Members:            repo.Members,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode repository %q format options: %w", repo.Name, err)
@@ -1676,6 +1695,9 @@ func decodeRepoFormatOptions(raw string, repo *RepositoryConfig) {
 	repo.APT = decoded.APT
 	repo.Yum = decoded.Yum
 	repo.Cache.MetadataTTLSeconds = decoded.MetadataTTLSeconds
+	repo.ProtectedTags = decoded.ProtectedTags
+	repo.RawOverwrite = decoded.RawOverwrite
+	repo.Members = decoded.Members
 }
 
 func setSettingForOrg(store *pgstore.Store, orgID, key, value string) error {

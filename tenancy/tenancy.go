@@ -62,6 +62,11 @@ const (
 	PermCacheManage        = "cache:manage"
 	PermPackagesRead       = "packages:read"
 	PermPackagesManage     = "packages:manage"
+	// PermPackagesDelete gates deleting a hosted package version
+	// (artifact-repo gap B0.4): the admin API, and granting a repository
+	// credential allow_delete. Owner and admin roles only; a client
+	// credential deletes only under an explicit allow_delete grant.
+	PermPackagesDelete = "packages:delete"
 	// PermPackagesPublish and PermUsageManage were declared and granted to
 	// roles but never enforced server-side. They were removed (W-W2 audit
 	// finding) rather than wired in because no dashboard publish flow or
@@ -179,6 +184,7 @@ var rolePermissions = map[string][]string{
 		PermCacheManage,
 		PermPackagesRead,
 		PermPackagesManage,
+		PermPackagesDelete,
 		PermSSOGroupMappings,
 		PermSSOManage,
 		PermSCIMManage,
@@ -222,6 +228,7 @@ var rolePermissions = map[string][]string{
 		PermSCIMManage,
 		PermPackagesRead,
 		PermPackagesManage,
+		PermPackagesDelete,
 		PermUsageRead,
 		PermAPIKeysManage,
 		PermComplianceRead,
@@ -259,6 +266,7 @@ var rolePermissions = map[string][]string{
 		PermCacheManage,
 		PermPackagesRead,
 		PermPackagesManage,
+		PermPackagesDelete,
 		PermSSOGroupMappings,
 		PermSSOManage,
 		PermSCIMManage,

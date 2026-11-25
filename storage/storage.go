@@ -12,9 +12,11 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chain305/chainsaw-core/blobstore"
@@ -67,6 +69,31 @@ type ContentMetadata struct {
 	// admitted these bytes could not inspect all of them (a limit, or
 	// encryption). Empty for a complete scan.
 	ClamAVIncomplete string `json:"clamav_incomplete,omitempty"`
+
+	// IntegrityFailed marks uploaded bytes that failed their SHA256 on a
+	// full read. There is no upstream to refetch a hosted artifact from, so
+	// every later read is refused (ErrDigestMismatch) until it is removed
+	// or re-published. Only Put clears it; UpdateMetadata keeps it.
+	IntegrityFailed bool `json:"integrity_failed,omitempty"`
+}
+
+// ErrDigestMismatch is a read of stored bytes that do not hash to the
+// SHA256 recorded when they were written (bit-rot, or tampering in the blob
+// store), or of content quarantined after such a read.
+var ErrDigestMismatch = errors.New("stored bytes do not match their recorded sha256")
+
+// digestMismatches counts ErrDigestMismatch reads by repo type:
+// [0] hosted (uploaded bytes), [1] proxy (fetched from upstream).
+var digestMismatches [2]atomic.Uint64
+
+// DigestMismatches is the cumulative count of full reads that failed their
+// SHA256, for repoType "hosted" or "proxy"
+// (chainsaw_storage_digest_mismatch_total).
+func DigestMismatches(repoType string) uint64 {
+	if repoType == "hosted" {
+		return digestMismatches[0].Load()
+	}
+	return digestMismatches[1].Load()
 }
 
 // CachedContent wraps a blob and its metadata.
@@ -90,6 +117,9 @@ type CachedContent struct {
 	// learnSHA, when set, records the digest of a legacy entry (no
 	// Metadata.SHA256) after its first full read, so the tier can hold it.
 	learnSHA func(sha string)
+	// onDigestMismatch, when set, acts on a full blob-store read that
+	// failed Metadata.SHA256 (LocalStorage.digestMismatch).
+	onDigestMismatch func(sha string)
 }
 
 // NewInMemoryContent returns content served from data rather than a stored
@@ -100,8 +130,13 @@ func NewInMemoryContent(meta ContentMetadata, data []byte) *CachedContent {
 	return &CachedContent{Metadata: meta, data: data}
 }
 
-// Open opens the underlying blob for reading.
+// Open opens the underlying blob for reading. A blob with a recorded
+// SHA256 is verified as it streams: bytes that do not match fail the read
+// with ErrDigestMismatch before its last byte is returned.
 func (c *CachedContent) Open() (io.ReadCloser, error) {
+	if c.Metadata.IntegrityFailed {
+		return nil, fmt.Errorf("%w: quarantined after a failed read; remove and re-publish it", ErrDigestMismatch)
+	}
 	if c.data != nil {
 		return io.NopCloser(bytes.NewReader(c.data)), nil
 	}
@@ -110,7 +145,7 @@ func (c *CachedContent) Open() (io.ReadCloser, error) {
 	}
 	sha := c.Metadata.SHA256
 	if c.tier != nil && sha != "" {
-		if rc, ok := c.tier.open(c.path, sha); ok {
+		if rc, ok := c.tier.open(c.path, sha, c.Metadata.Size); ok {
 			return rc, nil
 		}
 	}
@@ -119,12 +154,55 @@ func (c *CachedContent) Open() (io.ReadCloser, error) {
 	if err != nil && c.onMissing != nil && (errors.Is(err, blobstore.ErrBlobNotFound) || errors.Is(err, os.ErrNotExist)) {
 		c.onMissing()
 	}
-	if err == nil && c.tier != nil && sha != "" {
-		rc = c.tier.fill(c.path, sha, rc)
+	if err == nil && sha != "" {
+		rc = c.tier.fill(c.path, sha, c.Metadata.Size, rc, func() { c.digestMismatch(sha) })
 	} else if err == nil && c.tier != nil && c.learnSHA != nil {
 		rc = c.tier.learn(c.path, c.Metadata.Size, rc, c.learnSHA)
 	}
 	return rc, err
+}
+
+// Exists asks the blob store whether the bytes behind c are still there,
+// for an answer otherwise taken from the metadata alone: a hosted Docker
+// blob HEAD, which a client trusts to skip re-uploading a layer. A blob
+// found gone drops the metadata row, as Open does, so the next lookup
+// misses too. Content not backed by the blob store (in memory, a spool)
+// exists.
+func (c *CachedContent) Exists() (bool, error) {
+	if c.data != nil || c.file != "" || c.store == nil {
+		return true, nil
+	}
+	_, err := c.store.Stat(c.path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, blobstore.ErrBlobNotFound) || errors.Is(err, os.ErrNotExist):
+		if c.onMissing != nil {
+			c.onMissing()
+		}
+		return false, nil
+	}
+	return false, err
+}
+
+// digestMismatch counts, logs and hands on a full read whose bytes failed
+// their recorded SHA256. The read itself has already failed.
+func (c *CachedContent) digestMismatch(sha string) {
+	kind, action := "proxy", "evict; the next request refills from upstream"
+	if c.Metadata.Uploaded {
+		kind, action = "hosted", "quarantine; never refetched, refused until removed and re-published"
+	}
+	if kind == "hosted" {
+		digestMismatches[0].Add(1)
+	} else {
+		digestMismatches[1].Add(1)
+	}
+	slog.Error("storage: stored bytes failed their sha256 on a full read; response aborted",
+		"blob", c.path, "logical_path", c.Metadata.LogicalPath, "repo_type", kind,
+		"want_sha256", sha, "action", action)
+	if c.onDigestMismatch != nil {
+		c.onDigestMismatch(sha)
+	}
 }
 
 // OpenAt opens the content positioned at offset, for serving a client Range.
@@ -132,12 +210,12 @@ func (c *CachedContent) Open() (io.ReadCloser, error) {
 // asked for the range directly (an S3 ranged GET), so the bytes before
 // offset are not transferred. Otherwise the prefix is read and discarded.
 //
-// A ranged read of a tier copy is not digest-checked: only a full read can
-// be. The copy was checked when it was written, and a full read checks it
-// again.
+// A ranged read (offset > 0) is not digest-checked: only a full read can
+// be. A tier copy was checked when it was written; a blob-store range is
+// served unverified, and the next full read of the object checks it.
 func (c *CachedContent) OpenAt(offset int64) (io.ReadCloser, error) {
 	switch {
-	case offset <= 0:
+	case offset <= 0 || c.Metadata.IntegrityFailed:
 		return c.Open()
 	case c.data != nil:
 		return io.NopCloser(bytes.NewReader(c.data[min(offset, int64(len(c.data))):])), nil
@@ -345,6 +423,42 @@ func (s *LocalStorage) content(ctx context.Context, blobPath string, meta Conten
 			defer cancel()
 			s.recordSHA(ctx, blobPath, sha)
 		},
+		onDigestMismatch: func(sha string) {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			s.digestMismatch(ctx, blobPath, sha)
+		},
+	}
+}
+
+// digestMismatch acts on a full read of blobPath that failed sha. Uploaded
+// bytes have no upstream truth, so the row is marked IntegrityFailed and
+// every later read refuses it (never refetched: that would put the public
+// namesake under an internal name). Proxied bytes are evicted (row, cache
+// on every replica, tier copy) so the next request refills from upstream
+// through the checksum gate. Nothing is done if the row no longer names sha:
+// a refill landed meanwhile. If the row cannot be read or written, every
+// later full read still verifies and fails, so the cost is another aborted
+// download, never a served one.
+func (s *LocalStorage) digestMismatch(ctx context.Context, blobPath, sha string) {
+	meta, ok, err := s.metaStore.Get(ctx, blobPath)
+	if err != nil || !ok || !strings.EqualFold(meta.SHA256, sha) {
+		if err != nil {
+			slog.Error("storage: could not record a digest mismatch; reads keep failing verification", "blob", blobPath, "error", err)
+		}
+		return
+	}
+	if !meta.Uploaded {
+		s.dropMeta(ctx, blobPath)
+		return
+	}
+	meta.IntegrityFailed = true
+	if err := s.metaStore.Put(ctx, blobPath, OrgFromContext(ctx), s.repo, meta); err != nil {
+		slog.Error("storage: could not quarantine a hosted blob that failed its sha256; reads keep failing verification", "blob", blobPath, "error", err)
+		return
+	}
+	if s.metaCache != nil {
+		s.metaCache.Put(blobPath, meta) // publishes the invalidation to peers
 	}
 }
 
@@ -406,6 +520,7 @@ func (s *LocalStorage) put(ctx context.Context, logicalPath string, src io.Reade
 	meta.LogicalPath = logicalPath
 	meta.Size = blob.Size
 	meta.SHA256 = hex.EncodeToString(hash.Sum(nil))
+	meta.IntegrityFailed = false // new bytes, new digest
 	if meta.CachedAt.IsZero() {
 		meta.CachedAt = time.Now()
 	}
@@ -468,6 +583,13 @@ func (s *LocalStorage) UpdateMetadata(ctx context.Context, logicalPath string, m
 	if meta.SHA256 == "" {
 		meta.SHA256 = prev.SHA256
 	}
+	// Nor did their length, which bounds the verified read (Open).
+	if prev.Size > 0 {
+		meta.Size = prev.Size
+	}
+	// A quarantine is cleared only by new bytes (Put), never by a caller
+	// writing back a copy of the metadata it read before the quarantine.
+	meta.IntegrityFailed = meta.IntegrityFailed || prev.IntegrityFailed
 	meta.LogicalPath = logicalPath
 	if meta.CachedAt.IsZero() {
 		meta.CachedAt = time.Now()

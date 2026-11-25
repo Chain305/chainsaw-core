@@ -99,6 +99,11 @@ func (s *Store) ensureEnhancedColumns() error {
 	if _, err := s.stampLapsingLegacyExceptions(); err != nil {
 		return err
 	}
+	// One claim per folded name (migrate_slug_folded_name.go). Logs and
+	// skips, never fails boot, when existing rows already collide.
+	if err := s.ensureSlugFoldedNameIndex(); err != nil {
+		return err
+	}
 	return nil
 }
 

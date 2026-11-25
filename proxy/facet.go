@@ -277,6 +277,9 @@ func (f *facet) Get(ctx context.Context, req *Request) (*Response, error) {
 	if cacheResp != nil {
 		return cacheResp, nil
 	}
+	if LocalOnlyFromContext(ctx) {
+		return &Response{StatusCode: http.StatusNotFound, Headers: make(http.Header)}, nil
+	}
 
 	remote := f.currentRemote()
 	if remote.BaseURL == nil || remote.Client == nil {
@@ -417,7 +420,25 @@ func (f *facet) awaitFetch(ctx context.Context, req *Request, remote RemoteDefin
 		// hold). Shared, that map took concurrent writes from two installs of
 		// the same package and the runtime killed the whole process ("fatal
 		// error: concurrent map writes", 2026-10-21, 8 parallel npm packs).
-		return ownCopy(result.Val.(*Response)), nil
+		resp := ownCopy(result.Val.(*Response))
+		// A shared body was rewritten for the leader's request (its base
+		// URL, org slug, link repository): rewrite it for this one, as a
+		// cache hit would. A group and its member fetched at once used to
+		// both get the leader's links.
+		if result.Shared && resp != nil && resp.StatusCode == http.StatusOK && resp.Content != nil {
+			rewritten, err := f.rewriteCachedContent(ctx, logicalPath, resp.Content)
+			if err != nil {
+				return nil, err
+			}
+			if rewritten != nil {
+				warning := resp.Headers.Get("Warning")
+				resp.Content, resp.Headers = rewritten, headersFromMetadata(rewritten.Metadata)
+				if warning != "" {
+					resp.Headers.Set("Warning", warning)
+				}
+			}
+		}
+		return resp, nil
 	}
 }
 
@@ -1435,7 +1456,7 @@ func (f *facet) rewriteCachedContent(ctx context.Context, logicalPath string, co
 		f.repoName, storage.OrgFromContext(ctx), logicalPath,
 		strconv.FormatInt(content.Metadata.CachedAt.UnixNano(), 10), content.Metadata.ETag,
 		strconv.FormatInt(content.Metadata.Size, 10),
-		BaseURLFromContext(ctx), OrgSlugFromContext(ctx),
+		BaseURLFromContext(ctx), OrgSlugFromContext(ctx), LinkRepoName(ctx, ""),
 	}, "\x00")
 	if e, ok := memo.get(key); ok {
 		if e.unchanged {
