@@ -1236,6 +1236,10 @@ func (s *Store) migrateSchema() error {
 			updated_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cached_content_meta_org_repo ON cached_content_meta(org_id, repository)`,
+		// Hosted storage quota (OD-5): orgHostedStorageBytes sums the
+		// uploaded rows of one org on every publish; proxy fills are the
+		// bulk of the table and never match.
+		`CREATE INDEX IF NOT EXISTS idx_cached_content_meta_org_uploaded ON cached_content_meta(org_id) WHERE metadata->>'uploaded' = 'true'`,
 
 		// API keys for management-API access (PATs and AI agent credentials).
 		// Distinct from client_credentials, which is registry-side proxy auth.
